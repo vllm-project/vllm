@@ -8,6 +8,54 @@
     "cutlass_dsl_version": "cpython-312;cpython-312-aarch64-linux-gnu;apache-tvm-ffi==0.1.11:027baa9e61f53181d3b8e75e166ad4dfdac61d350da68f8f7c9af40094ea75dd;nvidia-cutlass-dsl-libs-base==4.8.0:9ef93e8b6209bd650d4958f0968a5414544cc9dbf37ae3919dfd903929873445;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:1d75ea8a5f9153a406a94f2bfe6daee45658bc77e3bf0b4fff336046bac3253d;nvidia-cutlass-dsl-libs-cu13==4.8.0:1dfe589b8e28b77000d88f4db1dcefb3bba623e2fa5ad49fd75ca07406abbe00;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.0+cu130:0c3d4cc53be7e627848eb8526fca1a66af6d9515667ca26c2e0edf76d4c40673",
     "gpu": "NVIDIA GB200"
   },
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1000, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.048578,
+      "runner_up_ms": 0.04992,
+      "margin": 0.027626,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1008, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.013348,
+      "runner_up_ms": 0.013372,
+      "margin": 0.001798,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1008, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    6,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.047478,
+      "runner_up_ms": 0.049732,
+      "margin": 0.047475,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((1024, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -200,6 +248,38 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((168, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.055758,
+      "runner_up_ms": 0.0559,
+      "margin": 0.002547,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((168, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.018544,
+      "runner_up_ms": 0.01861,
+      "margin": 0.003559,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((176, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     4,
@@ -280,6 +360,22 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((200, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.019004,
+      "runner_up_ms": 0.019776,
+      "margin": 0.040623,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((2048, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -357,6 +453,54 @@
       "time_ms": 0.057664,
       "runner_up_ms": 0.057668,
       "margin": 6.9e-05,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.068096,
+      "runner_up_ms": 0.068196,
+      "margin": 0.001469,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.05723,
+      "runner_up_ms": 0.05736,
+      "margin": 0.002272,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((216, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.019008,
+      "runner_up_ms": 0.019772,
+      "margin": 0.040194,
       "candidates": 80
     }
   ],
@@ -536,6 +680,38 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((264, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.065162,
+      "runner_up_ms": 0.065592,
+      "margin": 0.006599,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((264, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.021926,
+      "runner_up_ms": 0.022076,
+      "margin": 0.006841,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((272, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     4,
@@ -565,6 +741,38 @@
       "time_ms": 0.067138,
       "runner_up_ms": 0.068174,
       "margin": 0.015431,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((280, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.072036,
+      "runner_up_ms": 0.075134,
+      "margin": 0.043006,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((280, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.022076,
+      "runner_up_ms": 0.02208,
+      "margin": 0.000181,
       "candidates": 80
     }
   ],
@@ -661,6 +869,38 @@
       "time_ms": 0.12938,
       "runner_up_ms": 0.131672,
       "margin": 0.017715,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((312, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.07464,
+      "runner_up_ms": 0.076252,
+      "margin": 0.021597,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((312, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.069978,
+      "runner_up_ms": 0.070112,
+      "margin": 0.001915,
       "candidates": 80
     }
   ],
@@ -824,6 +1064,54 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((360, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.085856,
+      "runner_up_ms": 0.08586,
+      "margin": 4.7e-05,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((360, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.024894,
+      "runner_up_ms": 0.02492,
+      "margin": 0.001044,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((368, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.02502,
+      "runner_up_ms": 0.025152,
+      "margin": 0.005276,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((384, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     2,
@@ -840,6 +1128,38 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((392, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.092222,
+      "runner_up_ms": 0.09226,
+      "margin": 0.000412,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((392, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.083802,
+      "runner_up_ms": 0.087706,
+      "margin": 0.046586,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((40, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     3,
@@ -853,6 +1173,86 @@
       "time_ms": 0.047168,
       "runner_up_ms": 0.04742,
       "margin": 0.005343,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((400, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.092534,
+      "runner_up_ms": 0.094304,
+      "margin": 0.019128,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((400, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.08458,
+      "runner_up_ms": 0.085922,
+      "margin": 0.015867,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.092946,
+      "runner_up_ms": 0.093026,
+      "margin": 0.000861,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.086544,
+      "runner_up_ms": 0.08931,
+      "margin": 0.031961,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((408, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.025764,
+      "runner_up_ms": 0.025916,
+      "margin": 0.0059,
       "candidates": 80
     }
   ],
@@ -936,6 +1336,22 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((432, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.089688,
+      "runner_up_ms": 0.095146,
+      "margin": 0.060855,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4352, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     4,
@@ -952,6 +1368,54 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((440, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.092578,
+      "runner_up_ms": 0.097804,
+      "margin": 0.05645,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((456, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.09725,
+      "runner_up_ms": 0.09783,
+      "margin": 0.005964,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((456, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.027396,
+      "runner_up_ms": 0.027456,
+      "margin": 0.00219,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((4608, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -965,6 +1429,38 @@
       "time_ms": 0.748728,
       "runner_up_ms": 0.757052,
       "margin": 0.011118,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((464, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.095586,
+      "runner_up_ms": 0.098684,
+      "margin": 0.032411,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((464, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.027712,
+      "runner_up_ms": 0.027956,
+      "margin": 0.008805,
       "candidates": 80
     }
   ],
@@ -1016,6 +1512,70 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((496, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008484,
+      "runner_up_ms": 0.008508,
+      "margin": 0.002829,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((496, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.09966,
+      "runner_up_ms": 0.100636,
+      "margin": 0.009793,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((504, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.10263,
+      "runner_up_ms": 0.102938,
+      "margin": 0.003001,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((504, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.027904,
+      "runner_up_ms": 0.027966,
+      "margin": 0.002222,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((512, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -1048,6 +1608,70 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((520, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008252,
+      "runner_up_ms": 0.008508,
+      "margin": 0.031023,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((520, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.110736,
+      "runner_up_ms": 0.112038,
+      "margin": 0.011758,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((520, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.105694,
+      "runner_up_ms": 0.1076,
+      "margin": 0.018033,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((528, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008508,
+      "runner_up_ms": 0.008508,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((5376, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     4,
@@ -1062,6 +1686,54 @@
       "runner_up_ms": 0.052572,
       "margin": 0.002402,
       "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((552, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.1135,
+      "runner_up_ms": 0.114684,
+      "margin": 0.010432,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((552, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.111634,
+      "runner_up_ms": 0.113754,
+      "margin": 0.018991,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((560, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.114644,
+      "runner_up_ms": 0.115434,
+      "margin": 0.006891,
+      "candidates": 79
     }
   ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((576, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
@@ -1112,6 +1784,38 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((600, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.00915,
+      "runner_up_ms": 0.009152,
+      "margin": 0.000219,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((600, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.120652,
+      "runner_up_ms": 0.122848,
+      "margin": 0.018201,
+      "candidates": 79
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6144, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -1141,6 +1845,38 @@
       "time_ms": 1.084612,
       "runner_up_ms": 1.086528,
       "margin": 0.001766,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((624, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.119914,
+      "runner_up_ms": 0.121824,
+      "margin": 0.015928,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((624, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.119654,
+      "runner_up_ms": 0.12298,
+      "margin": 0.027797,
       "candidates": 79
     }
   ],
@@ -1176,6 +1912,38 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((648, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.00981,
+      "runner_up_ms": 0.010042,
+      "margin": 0.023649,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((648, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.125796,
+      "runner_up_ms": 0.128708,
+      "margin": 0.023149,
+      "candidates": 79
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((6656, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     2,
@@ -1205,6 +1973,134 @@
       "time_ms": 0.133572,
       "runner_up_ms": 0.13382,
       "margin": 0.001857,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((680, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.010298,
+      "runner_up_ms": 0.0103,
+      "margin": 0.000194,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((680, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.136926,
+      "runner_up_ms": 0.138046,
+      "margin": 0.00818,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((680, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.135008,
+      "runner_up_ms": 0.135714,
+      "margin": 0.005229,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((680, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.037568,
+      "runner_up_ms": 0.037592,
+      "margin": 0.000639,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((696, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.010044,
+      "runner_up_ms": 0.010048,
+      "margin": 0.000398,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((696, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.137756,
+      "runner_up_ms": 0.138336,
+      "margin": 0.00421,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((696, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.133216,
+      "runner_up_ms": 0.137056,
+      "margin": 0.028825,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((696, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.037444,
+      "runner_up_ms": 0.037948,
+      "margin": 0.01346,
       "candidates": 80
     }
   ],
@@ -1304,6 +2200,86 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((720, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.010554,
+      "runner_up_ms": 0.01056,
+      "margin": 0.000569,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((720, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.137828,
+      "runner_up_ms": 0.13898,
+      "margin": 0.008358,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((720, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.038332,
+      "runner_up_ms": 0.038462,
+      "margin": 0.003391,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((728, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.01056,
+      "runner_up_ms": 0.010624,
+      "margin": 0.006061,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((728, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    3,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.038458,
+      "runner_up_ms": 0.038466,
+      "margin": 0.000208,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((736, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -1368,6 +2344,86 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((744, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.010556,
+      "runner_up_ms": 0.010736,
+      "margin": 0.017052,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((744, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.138852,
+      "runner_up_ms": 0.13935,
+      "margin": 0.003587,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((744, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.038646,
+      "runner_up_ms": 0.038716,
+      "margin": 0.001811,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((760, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.13917,
+      "runner_up_ms": 0.140384,
+      "margin": 0.008723,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((760, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.03872,
+      "runner_up_ms": 0.03883,
+      "margin": 0.002841,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((768, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     0,
@@ -1416,6 +2472,102 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((784, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.15011,
+      "runner_up_ms": 0.151712,
+      "margin": 0.010672,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((784, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.039796,
+      "runner_up_ms": 0.04128,
+      "margin": 0.03729,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((792, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.011326,
+      "runner_up_ms": 0.011328,
+      "margin": 0.000177,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((792, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.150778,
+      "runner_up_ms": 0.152096,
+      "margin": 0.008741,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((792, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.159964,
+      "runner_up_ms": 0.161624,
+      "margin": 0.010377,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((792, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.04128,
+      "runner_up_ms": 0.041284,
+      "margin": 9.7e-05,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((800, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     1,
@@ -1429,6 +2581,54 @@
       "time_ms": 0.01174,
       "runner_up_ms": 0.011866,
       "margin": 0.010733,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((816, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.01132,
+      "runner_up_ms": 0.011328,
+      "margin": 0.000707,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((816, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.150946,
+      "runner_up_ms": 0.152672,
+      "margin": 0.011435,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((816, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.041076,
+      "runner_up_ms": 0.041218,
+      "margin": 0.003457,
       "candidates": 80
     }
   ],
@@ -1464,6 +2664,54 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.011614,
+      "runner_up_ms": 0.011718,
+      "margin": 0.008955,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.15242,
+      "runner_up_ms": 0.152576,
+      "margin": 0.001023,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((840, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.04154,
+      "runner_up_ms": 0.042556,
+      "margin": 0.024458,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((864, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
     "CublasltBf16GemmRunner",
     2,
@@ -1477,6 +2725,38 @@
       "time_ms": 0.170048,
       "runner_up_ms": 0.171836,
       "margin": 0.010515,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((880, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.164708,
+      "runner_up_ms": 0.165856,
+      "margin": 0.00697,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((880, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    2,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.169692,
+      "runner_up_ms": 0.183408,
+      "margin": 0.080829,
       "candidates": 80
     }
   ],
@@ -1509,6 +2789,102 @@
       "time_ms": 0.044384,
       "runner_up_ms": 0.045656,
       "margin": 0.028659,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((912, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.012348,
+      "runner_up_ms": 0.012356,
+      "margin": 0.000648,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((912, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.181794,
+      "runner_up_ms": 0.18464,
+      "margin": 0.015655,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((912, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.046066,
+      "runner_up_ms": 0.0462,
+      "margin": 0.002909,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((920, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.164968,
+      "runner_up_ms": 0.16714,
+      "margin": 0.013166,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((920, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.186892,
+      "runner_up_ms": 0.187802,
+      "margin": 0.004869,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((920, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.046528,
+      "runner_up_ms": 0.046884,
+      "margin": 0.007651,
       "candidates": 80
     }
   ],
@@ -1557,6 +2933,38 @@
       "time_ms": 0.044888,
       "runner_up_ms": 0.044892,
       "margin": 8.9e-05,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((936, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    4,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.175786,
+      "runner_up_ms": 0.177846,
+      "margin": 0.011719,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CublasltBf16GemmRunner', ((952, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True))": [
+    "CublasltBf16GemmRunner",
+    0,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.1819,
+      "runner_up_ms": 0.183644,
+      "margin": 0.009588,
       "candidates": 80
     }
   ],
@@ -1621,6 +3029,116 @@
       "time_ms": 0.048474,
       "runner_up_ms": 0.048988,
       "margin": 0.010604,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1000, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.01312,
+      "runner_up_ms": 0.01312,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1000, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.181982,
+      "runner_up_ms": 0.184036,
+      "margin": 0.011287,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1000, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.192522,
+      "runner_up_ms": 0.196126,
+      "margin": 0.01872,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1008, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.182496,
+      "runner_up_ms": 0.184736,
+      "margin": 0.012274,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((1008, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.188602,
+      "runner_up_ms": 0.191704,
+      "margin": 0.016447,
       "candidates": 80
     }
   ],
@@ -2170,6 +3688,30 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((168, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.005948,
+      "runner_up_ms": 0.00595,
+      "margin": 0.000336,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((176, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -2270,6 +3812,68 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((200, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.006204,
+      "runner_up_ms": 0.006204,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((200, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.068024,
+      "runner_up_ms": 0.068068,
+      "margin": 0.000647,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((200, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.059104,
+      "runner_up_ms": 0.05917,
+      "margin": 0.001117,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((2048, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -2334,6 +3938,30 @@
       "time_ms": 0.018778,
       "runner_up_ms": 0.019036,
       "margin": 0.01374,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((216, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.006202,
+      "runner_up_ms": 0.006204,
+      "margin": 0.000322,
       "candidates": 80
     }
   ],
@@ -2528,6 +4156,54 @@
       "candidates": 79
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((264, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.006716,
+      "runner_up_ms": 0.006716,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((264, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.076174,
+      "runner_up_ms": 0.07657,
+      "margin": 0.005199,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((272, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -2563,6 +4239,44 @@
       "time_ms": 0.021942,
       "runner_up_ms": 0.022104,
       "margin": 0.007383,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((280, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.006716,
+      "runner_up_ms": 0.006716,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((280, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.0657,
+      "runner_up_ms": 0.066072,
+      "margin": 0.005662,
       "candidates": 80
     }
   ],
@@ -2779,6 +4493,49 @@
       "runner_up_ms": 0.536446,
       "margin": 0.008046,
       "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((312, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.006712,
+      "runner_up_ms": 0.006712,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((312, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.022588,
+      "runner_up_ms": 0.022688,
+      "margin": 0.004427,
+      "candidates": 80
     }
   ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((320, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
@@ -3015,6 +4772,68 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((360, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007484,
+      "runner_up_ms": 0.007486,
+      "margin": 0.000267,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((368, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007484,
+      "runner_up_ms": 0.007484,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((368, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.077922,
+      "runner_up_ms": 0.078048,
+      "margin": 0.001617,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((384, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -3168,6 +4987,116 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((392, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007484,
+      "runner_up_ms": 0.007484,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((392, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.025662,
+      "runner_up_ms": 0.025788,
+      "margin": 0.00491,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((400, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007514,
+      "runner_up_ms": 0.007614,
+      "margin": 0.013308,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((400, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.026172,
+      "runner_up_ms": 0.026176,
+      "margin": 0.000153,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((408, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007484,
+      "runner_up_ms": 0.007484,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4096, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -3222,6 +5151,73 @@
       "time_ms": 0.008282,
       "runner_up_ms": 0.008284,
       "margin": 0.000241,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((432, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007482,
+      "runner_up_ms": 0.007508,
+      "margin": 0.003475,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((432, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.095586,
+      "runner_up_ms": 0.095876,
+      "margin": 0.003034,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((432, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.026306,
+      "runner_up_ms": 0.026422,
+      "margin": 0.00441,
       "candidates": 80
     }
   ],
@@ -3316,6 +5312,68 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((440, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.00787,
+      "runner_up_ms": 0.007898,
+      "margin": 0.003558,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((440, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.09757,
+      "runner_up_ms": 0.09813,
+      "margin": 0.00574,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((440, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.027004,
+      "runner_up_ms": 0.02738,
+      "margin": 0.013924,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((448, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -3407,6 +5465,44 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((456, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.007992,
+      "runner_up_ms": 0.007996,
+      "margin": 0.000501,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((456, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.096034,
+      "runner_up_ms": 0.096874,
+      "margin": 0.008747,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((4608, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -3466,6 +5562,49 @@
       "time_ms": 0.195814,
       "runner_up_ms": 0.19792,
       "margin": 0.010755,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((464, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008252,
+      "runner_up_ms": 0.008252,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((464, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.095698,
+      "runner_up_ms": 0.09648,
+      "margin": 0.008172,
       "candidates": 80
     }
   ],
@@ -3591,6 +5730,92 @@
       "runner_up_ms": 0.86828,
       "margin": 0.007903,
       "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((496, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.098842,
+      "runner_up_ms": 0.099724,
+      "margin": 0.008923,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((496, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.027706,
+      "runner_up_ms": 0.027772,
+      "margin": 0.002382,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((504, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008508,
+      "runner_up_ms": 0.008508,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((504, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.100472,
+      "runner_up_ms": 0.101092,
+      "margin": 0.006171,
+      "candidates": 80
     }
   ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((512, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
@@ -3734,6 +5959,87 @@
       "time_ms": 0.227036,
       "runner_up_ms": 0.22746,
       "margin": 0.001868,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((520, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.030524,
+      "runner_up_ms": 0.030528,
+      "margin": 0.000131,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.111696,
+      "runner_up_ms": 0.11222,
+      "margin": 0.004691,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.109152,
+      "runner_up_ms": 0.110406,
+      "margin": 0.011489,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((528, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.030656,
+      "runner_up_ms": 0.030718,
+      "margin": 0.002022,
       "candidates": 80
     }
   ],
@@ -3890,6 +6196,49 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008764,
+      "runner_up_ms": 0.008766,
+      "margin": 0.000228,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((552, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.031558,
+      "runner_up_ms": 0.031604,
+      "margin": 0.001458,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((56, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -3911,6 +6260,68 @@
       "time_ms": 0.047164,
       "runner_up_ms": 0.047166,
       "margin": 4.2e-05,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.008764,
+      "runner_up_ms": 0.008766,
+      "margin": 0.000228,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.11594,
+      "runner_up_ms": 0.116768,
+      "margin": 0.007142,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((560, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.031682,
+      "runner_up_ms": 0.031808,
+      "margin": 0.003977,
       "candidates": 80
     }
   ],
@@ -4100,6 +6511,49 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((600, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.118246,
+      "runner_up_ms": 0.12086,
+      "margin": 0.022106,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((600, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.032624,
+      "runner_up_ms": 0.032702,
+      "margin": 0.002391,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((608, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -4236,6 +6690,130 @@
       "time_ms": 0.265808,
       "runner_up_ms": 0.266652,
       "margin": 0.003175,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.009274,
+      "runner_up_ms": 0.009274,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.120672,
+      "runner_up_ms": 0.121692,
+      "margin": 0.008453,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.12374,
+      "runner_up_ms": 0.123748,
+      "margin": 6.5e-05,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((616, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.03335,
+      "runner_up_ms": 0.0336,
+      "margin": 0.007496,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.009278,
+      "runner_up_ms": 0.009404,
+      "margin": 0.013581,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((624, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.03335,
+      "runner_up_ms": 0.03341,
+      "margin": 0.001799,
       "candidates": 80
     }
   ],
@@ -4390,6 +6968,54 @@
       "runner_up_ms": 1.144896,
       "margin": 4e-06,
       "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((648, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.127584,
+      "runner_up_ms": 0.12784,
+      "margin": 0.002007,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((648, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.03514,
+      "runner_up_ms": 0.035392,
+      "margin": 0.007171,
+      "candidates": 80
     }
   ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((6656, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
@@ -4684,6 +7310,63 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((720, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.142494,
+      "runner_up_ms": 0.142496,
+      "margin": 1.4e-05,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((728, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.142296,
+      "runner_up_ms": 0.142688,
+      "margin": 0.002755,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((728, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.13929,
+      "runner_up_ms": 0.142622,
+      "margin": 0.023921,
+      "candidates": 79
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((736, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -4767,6 +7450,68 @@
       "time_ms": 1.387084,
       "runner_up_ms": 1.389504,
       "margin": 0.001745,
+      "candidates": 79
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((744, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.140764,
+      "runner_up_ms": 0.140832,
+      "margin": 0.000483,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.010812,
+      "runner_up_ms": 0.010812,
+      "margin": 0.0,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((760, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      9,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.143132,
+      "runner_up_ms": 0.143754,
+      "margin": 0.004346,
       "candidates": 79
     }
   ],
@@ -4890,6 +7635,49 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((784, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.011192,
+      "runner_up_ms": 0.011218,
+      "margin": 0.002323,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((784, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.158176,
+      "runner_up_ms": 0.177624,
+      "margin": 0.122952,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((80, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -4978,6 +7766,25 @@
       "time_ms": 0.040156,
       "runner_up_ms": 0.040206,
       "margin": 0.001245,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((816, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.166028,
+      "runner_up_ms": 0.16726,
+      "margin": 0.007421,
       "candidates": 80
     }
   ],
@@ -5115,6 +7922,30 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((840, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          2
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.175196,
+      "runner_up_ms": 0.184932,
+      "margin": 0.055572,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((864, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -5206,6 +8037,49 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((880, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.01184,
+      "runner_up_ms": 0.012344,
+      "margin": 0.042568,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((880, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.045698,
+      "runner_up_ms": 0.046558,
+      "margin": 0.018819,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((896, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -5249,6 +8123,49 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((912, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          0
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.168544,
+      "runner_up_ms": 0.170464,
+      "margin": 0.011392,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((920, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.012348,
+      "runner_up_ms": 0.012352,
+      "margin": 0.000324,
+      "candidates": 80
+    }
+  ],
   "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((928, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
     "CudnnBf16GemmRunner",
     [
@@ -5265,6 +8182,130 @@
       "time_ms": 0.012386,
       "runner_up_ms": 0.012508,
       "margin": 0.00985,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((936, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.012346,
+      "runner_up_ms": 0.012348,
+      "margin": 0.000162,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((936, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.16982,
+      "runner_up_ms": 0.172344,
+      "margin": 0.014863,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((936, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.046146,
+      "runner_up_ms": 0.046398,
+      "margin": 0.005461,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((952, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.012372,
+      "runner_up_ms": 0.012378,
+      "margin": 0.000485,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((952, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      []
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.168932,
+      "runner_up_ms": 0.170204,
+      "margin": 0.00753,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'CudnnBf16GemmRunner', ((952, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), (torch.bfloat16, False, True, True))": [
+    "CudnnBf16GemmRunner",
+    [
+      0,
+      [
+        [
+          12,
+          1
+        ]
+      ]
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.046272,
+      "runner_up_ms": 0.046776,
+      "margin": 0.010892,
       "candidates": 80
     }
   ],
@@ -5867,6 +8908,72 @@
       "candidates": 108
     }
   ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      32,
+      8,
+      256,
+      5,
+      2
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.003648,
+      "runner_up_ms": 0.003772,
+      "margin": 0.033991,
+      "candidates": 104
+    }
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      8,
+      256,
+      9,
+      2
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.0432,
+      "runner_up_ms": 0.04336,
+      "margin": 0.003704,
+      "candidates": 88
+    }
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((7, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      32,
+      8,
+      128,
+      10,
+      1
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.012352,
+      "runner_up_ms": 0.012602,
+      "margin": 0.02024,
+      "candidates": 108
+    }
+  ],
   "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((8, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
     "CuteDSLWarpSplitKBf16Runner",
     [
@@ -5931,6 +9038,28 @@
       "runner_up_ms": 0.012632,
       "margin": 0.0,
       "candidates": 108
+    }
+  ],
+  "('bf16_gemm_pdl', 'CuteDSLWarpSplitKBf16Runner', ((9, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ('torch.bfloat16', 'torch.bfloat16', False, True, 100))": [
+    "CuteDSLWarpSplitKBf16Runner",
+    [
+      16,
+      16,
+      256,
+      4,
+      2
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.013112,
+      "runner_up_ms": 0.013118,
+      "margin": 0.000458,
+      "candidates": 122
     }
   ],
   "('bf16_gemm_pdl', 'CutlassBf16GemmRunner', ((176, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ())": [
@@ -6269,6 +9398,86 @@
       "candidates": 92
     }
   ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((168, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    27,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.064878,
+      "runner_up_ms": 0.06512,
+      "margin": 0.00373,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.004156,
+      "runner_up_ms": 0.004412,
+      "margin": 0.061598,
+      "candidates": 108
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.044124,
+      "runner_up_ms": 0.045216,
+      "margin": 0.024748,
+      "candidates": 87
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    21,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.045914,
+      "runner_up_ms": 0.04643,
+      "margin": 0.011238,
+      "candidates": 96
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((18, 6144), (6144, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    8,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.013372,
+      "runner_up_ms": 0.013372,
+      "margin": 0.0,
+      "candidates": 113
+    }
+  ],
   "('bf16_gemm_pdl', 'TGVRunner', ((2, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
     "TGVRunner",
     18,
@@ -6554,6 +9763,38 @@
       "time_ms": 0.01366,
       "runner_up_ms": 0.014238,
       "margin": 0.042313,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((360, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    28,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.087946,
+      "runner_up_ms": 0.08808,
+      "margin": 0.001524,
+      "candidates": 80
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((368, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    28,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.087302,
+      "runner_up_ms": 0.087644,
+      "margin": 0.003917,
       "candidates": 80
     }
   ],
@@ -6845,6 +10086,22 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((7, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.043356,
+      "runner_up_ms": 0.043612,
+      "margin": 0.005905,
+      "candidates": 87
+    }
+  ],
   "('bf16_gemm_pdl', 'TGVRunner', ((72, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
     "TGVRunner",
     24,
@@ -7005,6 +10262,54 @@
       "candidates": 80
     }
   ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.0039,
+      "runner_up_ms": 0.004156,
+      "margin": 0.065641,
+      "candidates": 118
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 24576), (24576, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.043552,
+      "runner_up_ms": 0.043794,
+      "margin": 0.005557,
+      "candidates": 88
+    }
+  ],
+  "('bf16_gemm_pdl', 'TGVRunner', ((9, 6144), (6144, 25008), (0,), (0,), (-1, 25008), (-1,)), ((10, 0),))": [
+    "TGVRunner",
+    18,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold-chain:8"
+    ],
+    {
+      "time_ms": 0.044638,
+      "runner_up_ms": 0.045406,
+      "margin": 0.017205,
+      "candidates": 92
+    }
+  ],
   "('bf16_gemm_pdl', 'TGVRunner', ((96, 1280), (1280, 6144), (0,), (0,), (-1, 6144), (-1,)), ((10, 0),))": [
     "TGVRunner",
     24,
@@ -7053,5 +10358,5 @@
       "candidates": 80
     }
   ],
-  "_generation": "86a0e61486f578581aa840562b10ebffa5f9e8f37a62a7447ce4b6156288ef24"
+  "_generation": "e9f015da7bdc58567f4f1000fab86fef3a46ca9b2dbaa4dcd6edd0b156b3e70e"
 }
