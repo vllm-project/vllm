@@ -754,7 +754,7 @@ def _write_minimal_llama_config(
 
 
 @pytest.mark.parametrize(
-    "checkpoint_config_factory,raises_requantization_error,weight_updates",
+    "checkpoint_config_factory,raises_requantization_error,with_updates",
     [
         pytest.param(_fully_quantized_quark_config, True, False, id="quark"),
         pytest.param(
@@ -791,13 +791,13 @@ def _write_minimal_llama_config(
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
     raises_requantization_error: bool,
-    weight_updates: bool,
+    with_updates: bool,
     default_vllm_config,
     dist_init,
 ) -> None:
     """Online weights replace only layers left unquantized by a checkpoint."""
     default_vllm_config.model_config = ModelConfig()
-    if weight_updates:
+    if with_updates:
         default_vllm_config.weight_transfer_config = WeightTransferConfig()
     checkpoint_config = checkpoint_config_factory()
 

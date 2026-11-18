@@ -698,16 +698,10 @@ _LORA = {"lora_config": object()}
 @pytest.mark.parametrize(
     "mode,overrides,match",
     [
-        ("direct", {}, None),
         ("direct", _LORA, "LoRA"),
         ("layerwise", _LORA, "layerwise"),
-        # without weight updates, and with sharded_rdt, reloads are layerwise
+        # without weight updates, reloads are layerwise
         ("direct", _LORA | {"weight_transfer_config": None}, "layerwise"),
-        (
-            "direct",
-            _LORA | {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
-            "layerwise",
-        ),
         (
             "direct",
             {
@@ -729,59 +723,39 @@ _LORA = {"lora_config": object()}
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
         ),
+        ("direct", {}, "pre-processed"),
     ],
     ids=[
-        "defaults",
         "lora",
-        "layerwise-lora",
-        "no-updates-lora",
-        "sharded-rdt-lora",
+        "layerwise",
+        "no-updates",
         "offload",
         "torchao",
-        "draft-lm-head-quant",
+        "draft-lm-head",
+        "pre-processed",
     ],
 )
 def test_config_refusals(monkeypatch, mode, overrides, match):
-    # checked when an update starts or an engine is set up, never at cold start
+    # recorded at cold start, raised when an update starts
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-    model = _cold_start(_checkpoint())  # records the reasons, never raises
+    pre_processed = match == "pre-processed"
+    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: pre_processed)
+    model = _cold_start(_checkpoint())
     if match == "layerwise":
         assert not direct_reload_enabled()
         assert not hasattr(model, "_direct_reload_refusals")
-    elif match is None:
+        return
+    assert not hasattr(model, "_ckpt_param_names")
+    with pytest.raises(RuntimeError, match=match) as err:
         start_reload(model)
-        model.load_weights(_checkpoint().items())
-        finish_reload(model, _MODEL_CONFIG, _DEVICE)
-    else:
-        # a refused model records no layout
-        assert not hasattr(model, "_ckpt_param_names")
-        with pytest.raises(RuntimeError, match=match) as err:
-            start_reload(model)
-        assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
-
-
-def test_refused_target_refuses_a_draft_sharing_its_tensors(monkeypatch):
-    lora = _config(**_LORA)
-    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: lora)
-    target = _cold_start(_checkpoint())
+    assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
+    # a draft sharing its tensors (e.g. the lm_head) is refused too
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", _config)
     with _DEVICE:
         draft = _ToyModel()
-    draft.proj = target.proj  # e.g. a shared lm_head
+    draft.proj = model.proj
     record_checkpoint_layout(draft)
     with pytest.raises(RuntimeError, match="shared with a model"):
-        begin_direct_reload(draft)
-
-
-def test_refusals_recorded_for_pre_processed_weights(monkeypatch):
-    # the weight cache's pre-processed weights record no layout
-    lora = _config(**_LORA)
-    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: lora)
-    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: True)
-    with _DEVICE:
-        model = _ToyModel()
-    record_checkpoint_layout(model)
-    with pytest.raises(RuntimeError, match="LoRA"):
-        check_direct_reload(model)
+        check_direct_reload(draft)

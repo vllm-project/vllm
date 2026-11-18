@@ -63,4 +63,5 @@ an error. Use `VLLM_RELOAD_MODE=layerwise` to update them:
   quantization.
 - `torchao` quantization, Humming kernels, LoRA, weight offloading, and
   `draft_lm_head_quantization`.
+- Weights loaded pre-processed from the weight cache.
 - A draft model sharing tensors with a refused target model.

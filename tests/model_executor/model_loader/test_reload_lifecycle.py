@@ -23,6 +23,9 @@ _MODEL_CONFIG = SimpleNamespace(
 )
 _DEVICE = torch.device("cpu")
 
+# with weight updates enabled, VLLM_RELOAD_MODE picks the mode
+pytestmark = pytest.mark.usefixtures("weight_updates")
+
 
 class _TinyModel(torch.nn.Module):
     """Records `weight_update_active` at every weight it loads."""
@@ -51,7 +54,7 @@ def _checkpoint(scale: float = 1.0) -> dict[str, torch.Tensor]:
 
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
-def test_active_only_between_start_and_finish(monkeypatch, mode, weight_updates):
+def test_active_only_between_start_and_finish(monkeypatch, mode):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     model = _TinyModel()
     record_metadata_for_reloading(model)  # as the loader does at cold start
@@ -85,7 +88,7 @@ class _Outer(torch.nn.Module):
 
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
-def test_nested_module_sees_the_update(monkeypatch, mode, weight_updates):
+def test_nested_module_sees_the_update(monkeypatch, mode):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     model = _Outer()
     record_metadata_for_reloading(model)

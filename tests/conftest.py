@@ -264,9 +264,8 @@ def default_vllm_config():
 
 @pytest.fixture
 def weight_updates(monkeypatch) -> dict[str, Any]:
-    """Enable runtime weight updates, which selects direct reload by default:
-    in-process for the current config (a default one if unset), and through
-    the returned engine kwargs for `vllm_runner`/`LLM`."""
+    """Enable runtime weight updates (so direct reload by default) in-process;
+    returns the matching engine kwargs for `vllm_runner`/`LLM`."""
     import copy
 
     from vllm.config import VllmConfig, WeightTransferConfig

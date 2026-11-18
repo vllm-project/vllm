@@ -86,7 +86,8 @@ class _RecordingModelRunner:
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
-    worker.vllm_config = VllmConfig()
+    transfer = WeightTransferConfig() if engine is not None else None
+    worker.vllm_config = VllmConfig(weight_transfer_config=transfer)
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._incomplete_weight_updates = set()
@@ -311,9 +312,7 @@ def test_update_resets_active_on_error():
 
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_failed_finish_ends_session_only_in_direct_mode(
-    mode, monkeypatch, weight_updates
-):
+def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     engine = _RecordingEngine(raise_on_finish=True)
     worker = _make_worker(engine)
@@ -337,24 +336,26 @@ def test_missing_engine_raises():
 
 @pytest.mark.parametrize("reloads", [True, False], ids=["nccl", "sparse_nccl"])
 def test_init_engine_refuses_an_unsupported_model(monkeypatch, reloads):
-    # refused before a trainer sends anything, in the default mode with weight
-    # updates; an engine that never reloads through `start_reload` is not
-    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
+    # refused before a trainer sends anything; an engine that never reloads
+    # through `start_reload` is not, and inits under the worker's config
     engine = _RecordingEngine()
     engine.reloads_through_start_reload = reloads
-    initialized: list[object] = []
+    seen: list[VllmConfig] = []
     monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
     monkeypatch.setattr(
-        engine, "init_transfer_engine", initialized.append, raising=False
+        engine,
+        "init_transfer_engine",
+        lambda info: seen.append(get_current_vllm_config()),
+        raising=False,
     )
     worker = _make_worker(engine)
-    worker.vllm_config.weight_transfer_config = WeightTransferConfig()
     model = nn.Module()
     model._direct_reload_refusals = ["LoRA"]  # as cold start records
     monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
     if reloads:
         with pytest.raises(RuntimeError, match="LoRA"):
             Worker.init_weight_transfer_engine(worker, {})
+        assert not seen
     else:
         Worker.init_weight_transfer_engine(worker, {})
-    assert bool(initialized) is not reloads
+        assert [c is worker.vllm_config for c in seen] == [True]

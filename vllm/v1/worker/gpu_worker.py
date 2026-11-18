@@ -1704,13 +1704,13 @@ class Worker(WorkerBase):
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
         # refuse before the trainer sends anything
-        if self.weight_transfer_engine.reloads_through_start_reload and (
-            direct_reload_enabled(self.vllm_config)
-        ):
+        if self.weight_transfer_engine.reloads_through_start_reload:
             check_direct_reload(self.model_runner.get_model())
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+        # init checks the reload mode (e.g. for a load plan)
+        with set_current_vllm_config(self.vllm_config):
+            self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def shutdown_weight_transfer_engine(self) -> None:
         """Release a trainer connection without shutting down inference."""
@@ -1857,7 +1857,7 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if direct_reload_enabled():
+                if direct_reload_enabled(self.vllm_config):
                     # a failed direct finish cannot be retried: end the
                     # session so that a new full update can start
                     self._end_weight_update(refresh=False)

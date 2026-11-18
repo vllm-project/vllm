@@ -520,9 +520,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 direct_reload_enabled,
             )
 
-            # requantization dequantizes the checkpoint method: stay online
+            # direct reload quantizes on load through the matching checkpoint
+            # method, if any; requantization keeps the online method
             if not requantize and direct_reload_enabled():
-                # Use the matching checkpoint method if any, else stay online.
                 method = checkpoint_method(layer, quant_spec, default)
                 if method is not None:
                     return method
