@@ -387,7 +387,7 @@ def render_with_media(request, monkeypatch):
         is_multimodal_model=True,
         hf_config=SimpleNamespace(),
     )
-    renderer.tokenizer = get_deepseek_v41_tokenizer(FakeHfTokenizer())
+    renderer.tokenizer = _TOK
     renderer._apply_chat_template_async = make_async(renderer._apply_chat_template)
 
     def run(messages, **kwargs):
@@ -399,9 +399,12 @@ def render_with_media(request, monkeypatch):
             _, prompt = renderer.render_messages(messages, params)
         # The renderer returns token ids: the engine would otherwise tokenize
         # the text again and match reserved tokens in client text.
-        assert prompt.get("prompt_token_ids") == [len(expected)]
-        # Expose the rendered text for ordering assertions.
-        cast(dict[str, Any], prompt)["prompt"] = expected
+        ids = cast(dict[str, Any], prompt)["prompt_token_ids"]
+        # The ids spell the text of the tokenizer's own text rendering, so the
+        # assertions below are made on what the renderer returned.
+        text = "".join(_TOK.convert_ids_to_tokens(ids))
+        assert text == expected
+        cast(dict[str, Any], prompt)["prompt"] = text
         return prompt
 
     return run
@@ -575,16 +578,23 @@ def test_deepseek_v41_unknown_role_raises_value_error():
 _TINY_CHARS = sorted(
     set(string.ascii_letters + string.digits + " \n\"'`\\(){}[]:,.-_=*#!?/<>|｜▁")
 )
-_RESERVED_TOKENS = [
+REF = "<｜ref｜>"
+# The reserved tokens under test.
+RESERVED = [
     IMAGE_PLACEHOLDER,
     "<think>",
     "</think>",
     "<｜User｜>",
+    "<｜end▁of▁sentence｜>",
+]
+# The added tokens of the tiny tokenizer: the ones under test and the ones the
+# chat template adds.
+_ADDED_TOKENS = [
+    *RESERVED,
+    REF,
     "<｜Assistant｜>",
     "<｜begin▁of▁sentence｜>",
-    "<｜end▁of▁sentence｜>",
     "｜DSML｜",
-    "<｜ref｜>",
 ]
 
 
@@ -601,7 +611,7 @@ def _tiny_tokenizer(with_added: bool = True) -> TokenizersBackend:
     tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=merges, unk_token="<unk>"))
     if with_added:
         tokenizer.add_tokens(
-            [AddedToken(t, special=False, normalized=False) for t in _RESERVED_TOKENS]
+            [AddedToken(t, special=False, normalized=False) for t in _ADDED_TOKENS]
         )
     return TokenizersBackend(tokenizer_object=tokenizer)
 
@@ -629,16 +639,6 @@ def test_image_part_still_encodes_special_token():
     )
     # Exactly one: the placeholder of the image part, not the text spelling it.
     assert ids.count(_ID[IMAGE_PLACEHOLDER]) == 1
-
-
-REF = "<｜ref｜>"
-RESERVED = [
-    IMAGE_PLACEHOLDER,
-    "<think>",
-    "</think>",
-    "<｜User｜>",
-    "<｜end▁of▁sentence｜>",
-]
 
 
 @pytest.mark.parametrize("token", RESERVED)
