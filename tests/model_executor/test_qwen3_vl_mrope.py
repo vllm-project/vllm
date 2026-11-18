@@ -32,12 +32,12 @@ VISION_START_TOKEN_ID = 777
 VISION_END_TOKEN_ID = 778
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyVisionConfig:
     spatial_merge_size: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyConfig:
     image_token_id: int = IMAGE_TOKEN_ID
     video_token_id: int = VIDEO_TOKEN_ID

@@ -20,7 +20,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -55,6 +54,7 @@ from vllm.sequence import IntermediateTensors
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    _use_mega_gate,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
@@ -88,9 +88,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
         self.rms_norm_eps = config.rms_norm_eps
-        self.use_native_mega_moe = (
-            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -181,7 +179,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             routing_input_ids = input_ids
             if self.mtp_block.use_sequence_parallel:
                 routing_input_ids = sp_shard(routing_input_ids)
