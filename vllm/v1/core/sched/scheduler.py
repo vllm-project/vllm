@@ -2769,7 +2769,7 @@ class Scheduler(SchedulerInterface):
         """
         if len(self.waiting) < 2:
             return
-        if self.kv_cache_manager.usage < self.cache_aware_threshold:
+        if self.get_kv_cache_usage() < self.cache_aware_threshold:
             return
 
         head = list(itertools.islice(self.waiting, self.cache_aware_window))
@@ -3395,7 +3395,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
-            kv_cache_usage=self.kv_cache_manager.usage,
+            kv_cache_usage=self.get_kv_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

@@ -40,6 +40,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 logger = init_logger(__name__)
@@ -230,7 +231,8 @@ class EngineCoreSentinel:
         """Evict KV blocks possibly contaminated by the failed step."""
         scheduler = cast(Scheduler, self.engine.scheduler)
         kv_cache_manager = scheduler.kv_cache_manager
-        dirty_block_ids: set[int] = set()
+        # Block IDs are per block pool, and the drafter's KV pool has its own.
+        dirty_block_ids: dict[BlockPool, set[int]] = {}
 
         for request in scheduler.running:
             num_written = request.num_in_flight_tokens
@@ -245,12 +247,13 @@ class EngineCoreSentinel:
                     continue
                 blk_start = start // mgr.block_size
                 blk_end = end // mgr.block_size
+                dirty = dirty_block_ids.setdefault(mgr.block_pool, set())
                 for blk in blocks[blk_start : blk_end + 1]:
                     if not blk.is_null:
-                        dirty_block_ids.add(blk.block_id)
+                        dirty.add(blk.block_id)
 
-        if dirty_block_ids:
-            kv_cache_manager.evict_blocks(dirty_block_ids)
+        for block_pool, block_ids in dirty_block_ids.items():
+            block_pool.evict_blocks(block_ids)
 
     def _install_executor_failure_callback(self) -> None:
         """Report executor failure to the sentinel as well.

@@ -66,3 +66,36 @@ def test_drain_batch_queue_drops_failures_and_empty_outputs():
 
     assert not batch_queue
     scheduler.update_from_output.assert_not_called()
+
+
+def test_clear_contaminated_blocks_evicts_from_each_managers_pool():
+    """Block IDs are per block pool, so each group's written blocks are evicted
+    from its own pool (the drafter's KV pool reuses the shared pool's IDs)."""
+
+    def blocks(*ids):
+        return [SimpleNamespace(block_id=i, is_null=i == 0) for i in ids]
+
+    shared_pool, draft_pool = MagicMock(), MagicMock()
+    managers = [
+        SimpleNamespace(
+            block_size=4,
+            block_pool=shared_pool,
+            req_to_blocks={"r": blocks(5, 6, 7)},
+        ),
+        SimpleNamespace(
+            block_size=4,
+            block_pool=draft_pool,
+            req_to_blocks={"r": blocks(0, 2, 3)},
+        ),
+    ]
+    sentinel, scheduler = _make_sentinel(deque())
+    scheduler.running = [
+        SimpleNamespace(request_id="r", num_in_flight_tokens=6, num_computed_tokens=12)
+    ]
+    scheduler.kv_cache_manager.coordinator.single_type_managers = managers
+
+    sentinel._clear_contaminated_blocks()
+
+    shared_pool.evict_blocks.assert_called_once_with({6, 7})
+    draft_pool.evict_blocks.assert_called_once_with({2, 3})
+    scheduler.kv_cache_manager.evict_blocks.assert_not_called()
