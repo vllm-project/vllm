@@ -40,7 +40,7 @@ def greedy_argmax(logits: torch.Tensor) -> torch.Tensor:
     Ties resolve to the first index.
     """
     if (
-        not logits.is_cuda
+        not (logits.is_cuda or logits.is_xpu)
         or logits.dtype not in (torch.bfloat16, torch.float32)
         or logits.ndim != 2
         or logits.stride(1) != 1
