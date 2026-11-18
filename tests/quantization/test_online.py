@@ -5,7 +5,6 @@
 import importlib
 import inspect
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -36,6 +35,7 @@ from vllm.config.quantization import (
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels import linear as linear_kernels
 from vllm.model_executor.kernels.linear import LinearKernelOracle
@@ -193,14 +193,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_trtllm_fused_moe,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
-
-
-@pytest.fixture(autouse=True)
-def _layerwise_reload_mode(monkeypatch):
-    # test the online methods, which direct reload would replace
-    if "VLLM_RELOAD_MODE" not in os.environ:
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -762,21 +754,31 @@ def _write_minimal_llama_config(
 
 
 @pytest.mark.parametrize(
-    "checkpoint_config_factory,raises_requantization_error",
+    "checkpoint_config_factory,raises_requantization_error,weight_updates",
     [
-        pytest.param(_fully_quantized_quark_config, True, id="quark"),
+        pytest.param(_fully_quantized_quark_config, True, False, id="quark"),
         pytest.param(
             _fully_quantized_modelopt_config,
             True,
+            False,
             id="modelopt",
         ),
         pytest.param(
             _fully_quantized_modelopt_mxfp8_config,
             False,
+            False,
             id="modelopt_mxfp8",
+        ),
+        # direct reload keeps the online method for requantization
+        pytest.param(
+            _fully_quantized_modelopt_mxfp8_config,
+            False,
+            True,
+            id="modelopt_mxfp8-weight-updates",
         ),
         pytest.param(
             _moe_only_compressed_tensors_config,
+            False,
             False,
             id="compressed_tensors",
         ),
@@ -789,11 +791,14 @@ def _write_minimal_llama_config(
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
     raises_requantization_error: bool,
+    weight_updates: bool,
     default_vllm_config,
     dist_init,
 ) -> None:
     """Online weights replace only layers left unquantized by a checkpoint."""
     default_vllm_config.model_config = ModelConfig()
+    if weight_updates:
+        default_vllm_config.weight_transfer_config = WeightTransferConfig()
     checkpoint_config = checkpoint_config_factory()
 
     checkpoint_config.online_quantization_config = OnlineQuantizationConfig(

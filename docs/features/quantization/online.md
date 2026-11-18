@@ -29,7 +29,7 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
 llm = LLM(
     "Qwen/Qwen3.5-35B-A3B",
     quantization="mxfp4",
-    quantization_config={"linear": {"activation": None, "weight": None}}
+    quantization_config={"linear": {"activation": None, "weight": None}},
 )
 ```
 
@@ -72,8 +72,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 
 Online-quantized models accept in-place weight updates (`reload_weights`, RL
 weight sync): the trainer sends BF16 weights under their checkpoint names.
-With direct reload (the default `VLLM_RELOAD_MODE`), each tensor is quantized
-as it is loaded, at cold start and on updates;
+With direct reload (the default when runtime weight updates are enabled),
+each tensor is quantized as it is loaded, at cold start and on updates;
 `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
 on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
 and `nvfp4_per_token` on MoE layers. See

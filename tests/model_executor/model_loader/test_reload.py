@@ -1494,7 +1494,6 @@ def _reload_with_lora_expert_names(worker) -> None:
     not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
 )
 def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")  # direct refuses LoRA
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")

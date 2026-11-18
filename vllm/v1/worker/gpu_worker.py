@@ -1704,7 +1704,10 @@ class Worker(WorkerBase):
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
         # refuse before the trainer sends anything
-        check_direct_reload(self.model_runner.get_model())
+        if self.weight_transfer_engine.reloads_through_start_reload and (
+            direct_reload_enabled(self.vllm_config)
+        ):
+            check_direct_reload(self.model_runner.get_model())
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)

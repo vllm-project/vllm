@@ -269,8 +269,6 @@ def _worker(local_rank: int, world_size: int, master_port: int, backend: str) ->
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": str(master_port),
-            # test the online method, which direct reload would replace
-            "VLLM_RELOAD_MODE": "layerwise",
         }
     )
 

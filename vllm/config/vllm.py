@@ -68,7 +68,7 @@ from .utils import (
 )
 from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig, warn_watermarking_override
-from .weight_transfer import WeightTransferConfig
+from .weight_transfer import WeightTransferConfig, uses_direct_reload
 
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
@@ -578,6 +578,9 @@ class VllmConfig:
             "ec_transfer": get_factors(self.ec_transfer_config),
             "aux_output": get_factors(self.aux_output_config),
         }
+        if uses_direct_reload(self.weight_transfer_config):
+            # direct reload swaps online methods for checkpoint methods
+            factors["direct_reload"] = True
         if include_version:
             from vllm import __version__
 

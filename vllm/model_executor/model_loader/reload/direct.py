@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (`VLLM_RELOAD_MODE=direct`).
+"""Direct weight reload: `VLLM_RELOAD_MODE=direct`, or the default `auto` with
+runtime weight updates enabled.
 
 Cold start records each tensor's checkpoint layout before post-load processing
 (PWAL). `begin` views re-laid-out tensors back to that layout on their
@@ -8,9 +9,6 @@ storage, the loaders write the checkpoint in place, and `finish` reruns PWAL,
 which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
-
-Unsupported setups are refused when an update starts (`check_direct_reload`),
-not at cold start.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
@@ -21,8 +19,8 @@ from collections.abc import Iterator
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config_or_none
+from vllm.config.weight_transfer import uses_direct_reload
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -59,9 +57,12 @@ _LOADER_ATTRS = (
 )
 
 
-def direct_reload_enabled() -> bool:
-    """Whether weight updates reload in place (`VLLM_RELOAD_MODE=direct`)."""
-    return envs.VLLM_RELOAD_MODE == "direct"
+def direct_reload_enabled(vllm_config: VllmConfig | None = None) -> bool:
+    """Whether weight updates reload in place, for `vllm_config` (default: the
+    current config); see `uses_direct_reload`."""
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+    return uses_direct_reload(getattr(vllm_config, "weight_transfer_config", None))
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -115,15 +116,11 @@ def _config_refusals(vllm_config: VllmConfig) -> list[str]:
         # after `begin` the draft's quantized lm_head is a view of the target
         # lm_head's storage: post-load processing would write it there
         reasons.append("draft_lm_head_quantization")
-    transfer = vllm_config.weight_transfer_config
-    if transfer is not None and transfer.backend == "sharded_rdt":
-        # its replay plan is baked by a layerwise (meta) dry run
-        reasons.append("the sharded_rdt weight-transfer backend")
     return reasons
 
 
-def _module_refusals(model: torch.nn.Module) -> list[str]:
-    """Reasons the model's modules cannot reload directly."""
+def _module_refusal(model: torch.nn.Module) -> str | None:
+    """Why the model's modules cannot reload directly, if they cannot."""
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
@@ -142,33 +139,37 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
             or getattr(method, "uses_meta_device", False)
             or getattr(module, "shared_expert_online_loader", None) is not None
         ):
-            return [f"online quantization ({name}: {type(method).__name__})"]
-        elif isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
+            return f"online quantization ({name}: {type(method).__name__})"
+        if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
-            return [f"humming ({name})"]
-    return []
+            return f"humming ({name})"
+    return None
 
 
 def _refusals(model: torch.nn.Module) -> list[str]:
     """Reasons direct reload cannot update `model` under the current config."""
     config = get_current_vllm_config_or_none()
     reasons = _config_refusals(config) if config is not None else []
-    return reasons + _module_refusals(model)
+    if (module_reason := _module_refusal(model)) is not None:
+        reasons.append(module_reason)
+    if any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model)):
+        # e.g. a draft sharing a refused target's lm_head: it would write there
+        reasons.append("tensors shared with a model direct reload refuses")
+    return reasons
+
+
+def _refusal_message(reasons: list[str]) -> str:
+    return (
+        f"direct reload does not support {'; '.join(reasons)}. Set "
+        "VLLM_RELOAD_MODE=layerwise to update this model's weights."
+    )
 
 
 def check_direct_reload(model: torch.nn.Module) -> None:
-    """Raise if `model` cannot reload directly; no-op in layerwise mode."""
-    if not direct_reload_enabled():
-        return
-    reasons = getattr(model, "_direct_reload_refusals", None)
-    if reasons is None:  # not recorded at cold start (pre-processed weights)
-        reasons = _refusals(model)
-    if reasons:
-        raise RuntimeError(
-            "direct reload does not support " + "; ".join(reasons) + ". Set "
-            "VLLM_RELOAD_MODE=layerwise to update this model's weights."
-        )
+    """Raise if cold start found that `model` cannot reload directly."""
+    if reasons := getattr(model, "_direct_reload_refusals", None):
+        raise RuntimeError(_refusal_message(reasons))
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
@@ -177,18 +178,17 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     no other model recorded first), and which parameter names hold checkpoint
     tensors.
     Runs once; reloads reuse the cold-start record."""
-    if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
-        return  # pre-processed weights are already in runtime layout
+    if hasattr(model, "_direct_reload_refusals"):
+        return
     # neither the configuration nor the modules change after cold start
     reasons = model._direct_reload_refusals = _refusals(model)
     if reasons:
-        logger.info(
-            "Direct reload is not supported for this model (%s); weight "
-            "updates will raise. Set VLLM_RELOAD_MODE=layerwise to update its "
-            "weights with layerwise reload.",
-            "; ".join(reasons),
-        )
-        return  # e.g. torchao tensors have no plain storage
+        logger.info("%s", _refusal_message(reasons))
+        for _, t in loadable_tensors(model):
+            t._ckpt_refused = True  # a model sharing it refuses too
+        return
+    if is_weights_pre_processed():
+        return  # already in runtime layout
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
@@ -276,6 +276,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
+    check_direct_reload(model)
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     _check_params_kept(model)

@@ -179,7 +179,9 @@ def check_plannable(model: torch.nn.Module) -> None:
 
     """
     if not direct_reload_enabled():
-        raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
+        raise RuntimeError(
+            "load plan: requires direct reload (VLLM_RELOAD_MODE=direct)"
+        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)

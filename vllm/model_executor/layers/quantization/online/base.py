@@ -8,7 +8,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     QuantizationConfigArgs,
@@ -502,7 +501,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         )
 
     def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
+        self, layer: torch.nn.Module, prefix: str, requantize: bool = False
     ) -> "QuantizeMethodBase | None":
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
@@ -517,7 +516,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
             default = getattr(quant_method_cls, "activation_quant_key", None)
-            if envs.VLLM_RELOAD_MODE == "direct":
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_enabled,
+            )
+
+            # requantization dequantizes the checkpoint method: stay online
+            if not requantize and direct_reload_enabled():
                 # Use the matching checkpoint method if any, else stay online.
                 method = checkpoint_method(layer, quant_spec, default)
                 if method is not None:

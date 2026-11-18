@@ -13,7 +13,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    WeightTransferConfig,
+    get_current_vllm_config,
+)
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker import gpu_worker
@@ -31,6 +36,7 @@ class _RecordingEngine:
         self.closed = False
         self.reset_count = 0
         self.supports_draft_weight_update = False
+        self.reloads_through_start_reload = True
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
 
@@ -327,19 +333,26 @@ def test_missing_engine_raises():
         Worker.start_weight_update(worker)
 
 
-def test_init_engine_refuses_an_unsupported_model(monkeypatch):
-    # refused before a trainer sends anything, in the default mode
+@pytest.mark.parametrize("reloads", [True, False], ids=["nccl", "sparse_nccl"])
+def test_init_engine_refuses_an_unsupported_model(monkeypatch, reloads):
+    # refused before a trainer sends anything, in the default mode with weight
+    # updates; an engine that never reloads through `start_reload` is not
     monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     engine = _RecordingEngine()
+    engine.reloads_through_start_reload = reloads
     initialized: list[object] = []
     monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
     monkeypatch.setattr(
         engine, "init_transfer_engine", initialized.append, raising=False
     )
     worker = _make_worker(engine)
+    worker.vllm_config.weight_transfer_config = WeightTransferConfig()
     model = nn.Module()
     model._direct_reload_refusals = ["LoRA"]  # as cold start records
     monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
-    with pytest.raises(RuntimeError, match="LoRA"):
+    if reloads:
+        with pytest.raises(RuntimeError, match="LoRA"):
+            Worker.init_weight_transfer_engine(worker, {})
+    else:
         Worker.init_weight_transfer_engine(worker, {})
-    assert not initialized
+    assert bool(initialized) is not reloads

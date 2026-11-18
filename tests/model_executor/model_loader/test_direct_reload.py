@@ -34,6 +34,8 @@ from vllm.model_executor.layers.quantization.online.loading import quantize_on_l
 from vllm.model_executor.model_loader.reload import direct, finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
+    check_direct_reload,
+    direct_reload_enabled,
     finish_direct_reload,
     record_checkpoint_layout,
 )
@@ -582,33 +584,23 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**(fields | overrides))
 
 
+_UPDATES = {"weight_transfer_config": SimpleNamespace(backend="nccl")}
+_LORA = {"lora_config": object()}
+
+
 @pytest.mark.parametrize(
     "mode,overrides,match",
     [
         ("direct", {}, None),
-        ("layerwise", {"lora_config": object()}, None),
-        (None, {"lora_config": object()}, "LoRA"),  # direct is the default
+        # without weight updates the default loads and reloads layerwise
+        ("auto", _LORA, "layerwise"),
+        ("auto", _LORA | _UPDATES, "LoRA"),
+        ("layerwise", _LORA | _UPDATES, "layerwise"),
+        # it always reloads layerwise
         (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="uva",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=2),
-                    uva=SimpleNamespace(cpu_offload_gb=0),
-                )
-            },
-            "weight offloading",
+            "auto",
+            _LORA | {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            "layerwise",
         ),
         (
             "direct",
@@ -626,45 +618,63 @@ def _config(**overrides) -> SimpleNamespace:
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
         ),
-        (
-            "direct",
-            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
-            "sharded_rdt",
-        ),
     ],
     ids=[
         "defaults",
-        "layerwise-lora",
-        "default-mode-lora",
-        "offload-backend",
-        "offload-prefetch",
-        "offload-uva",
+        "auto-lora",
+        "auto-updates-lora",
+        "layerwise-updates-lora",
+        "auto-sharded-rdt-lora",
+        "offload",
         "torchao",
-        "lora",
         "draft-lm-head-quant",
-        "sharded-rdt",
     ],
 )
 def test_config_refusals(monkeypatch, mode, overrides, match):
     # checked when an update starts or an engine is set up, never at cold start
-    if mode is None:
-        monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
     model = _cold_start(_checkpoint())  # records the reasons, never raises
-    if match is None:
+    if match == "layerwise":
+        assert not direct_reload_enabled()
+        assert not hasattr(model, "_direct_reload_refusals")
+    elif match is None:
         start_reload(model)
+        finish_reload(model, _MODEL_CONFIG, _DEVICE)
     else:
         # a refused model records no layout
         assert not hasattr(model, "_ckpt_param_names")
         with pytest.raises(RuntimeError, match=match) as err:
             start_reload(model)
         assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
+
+
+def test_refused_target_refuses_a_draft_sharing_its_tensors(monkeypatch):
+    lora = _config(**_LORA)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: lora)
+    target = _cold_start(_checkpoint())
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", _config)
+    with _DEVICE:
+        draft = _ToyModel()
+    draft.proj = target.proj  # e.g. a shared lm_head
+    record_checkpoint_layout(draft)
+    with pytest.raises(RuntimeError, match="shared with a model"):
+        begin_direct_reload(draft)
+
+
+def test_refusals_recorded_for_pre_processed_weights(monkeypatch):
+    # the weight cache's pre-processed weights record no layout
+    lora = _config(**_LORA)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: lora)
+    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: True)
+    with _DEVICE:
+        model = _ToyModel()
+    record_checkpoint_layout(model)
+    with pytest.raises(RuntimeError, match="LoRA"):
+        check_direct_reload(model)

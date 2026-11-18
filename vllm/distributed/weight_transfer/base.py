@@ -450,6 +450,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     supports_draft_weight_update: bool = True
 
+    reloads_through_start_reload: bool = True
+    """Whether every update reloads through `start_reload`; if so, the worker
+    checks direct reload's refusals when the engine is initialized."""
+
     defers_processing: bool = False
     """Whether `update_weights` returns before the weights are on the device.
 

@@ -4,7 +4,6 @@
 
 import json
 import logging
-import os
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,13 +180,6 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
     )
-
-
-@pytest.fixture(autouse=True)
-def _layerwise_reload_mode(monkeypatch):
-    # test the online methods, which direct reload would replace
-    if "VLLM_RELOAD_MODE" not in os.environ:
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 
 
 @pytest.fixture(autouse=True)

@@ -117,18 +117,23 @@ def tp2(monkeypatch):
     )
 
 
-def test_replicated_layer_fits_the_block_method(tp2):
-    # a replicated layer picks its method before it sets its partition sizes
-    layer = SimpleNamespace(input_size=200, output_size=300)
-    assert loading._block_shapes_fit(layer)
-
-
-def test_unaligned_tp_shard_keeps_the_online_method(tp2):
-    layer = SimpleNamespace(
-        tp_size=2,
-        input_size=256,
-        output_size=384,
-        input_size_per_partition=256,
-        output_partition_sizes=[192],  # not a multiple of 128
-    )
-    assert not loading._block_shapes_fit(layer)
+@pytest.mark.parametrize(
+    "sizes,fits",
+    [
+        # a replicated layer picks its method before it sets its partition sizes
+        ({"input_size": 200, "output_size": 300}, True),
+        (
+            {
+                "input_size": 256,
+                "output_size": 384,
+                "input_size_per_partition": 256,
+                "output_partition_sizes": [192],  # not a multiple of 128
+            },
+            False,
+        ),
+    ],
+    ids=["replicated", "unaligned-tp-shard"],
+)
+def test_block_method_fits_only_aligned_shards(tp2, sizes, fits):
+    layer = SimpleNamespace(tp_size=2, **sizes)
+    assert loading._block_shapes_fit(layer) is fits

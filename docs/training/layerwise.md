@@ -54,10 +54,10 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         layer._already_called_process_weights_after_loading = True
 ```
 
-Weight updates use [Direct Weight Reload](direct_reload.md) by default, which
-reloads in place without layerwise buffering. Set `VLLM_RELOAD_MODE=layerwise`
-to reload layerwise instead, for example for the configurations direct reload
-refuses.
+When runtime weight updates are enabled, weight updates use
+[Direct Weight Reload](direct_reload.md) by default, which reloads in place
+without layerwise buffering. Set `VLLM_RELOAD_MODE=layerwise` to reload
+layerwise instead, for example for the configurations direct reload refuses.
 
 ## Example Usages
 
@@ -121,7 +121,10 @@ You can plug into this lifecycle directly by calling the `initialize_layerwise_r
 
 ```python
 from vllm import LLM
-from vllm.model_executor.model_loader.reload import initialize_layerwise_reload, finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    initialize_layerwise_reload,
+    finalize_layerwise_processing,
+)
 
 llm = LLM("Qwen/Qwen3-0.6B")
 

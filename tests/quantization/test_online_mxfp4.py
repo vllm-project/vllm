@@ -7,8 +7,6 @@ tensor to MXFP4, the result is dequantized back to bf16/fp16, and compared
 against the pure-torch reference in `reference_mxfp4.py`.
 """
 
-import os
-
 import pytest
 import torch
 
@@ -48,13 +46,6 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
-
-
-@pytest.fixture(autouse=True)
-def _layerwise_reload_mode(monkeypatch):
-    # test the online methods, which direct reload would replace
-    if "VLLM_RELOAD_MODE" not in os.environ:
-        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 
 
 def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:

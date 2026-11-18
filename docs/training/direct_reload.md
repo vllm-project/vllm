@@ -1,9 +1,13 @@
 # Direct Weight Reload
 
 Direct reload updates a running model's weights in place. It is the default
-weight-update mode (`VLLM_RELOAD_MODE=direct`); set `VLLM_RELOAD_MODE=layerwise`
-for [Layerwise (Re)loading](layerwise.md) instead, for example for the
-configurations direct reload refuses (see below).
+when runtime weight updates are enabled (`--weight-transfer-config`, any
+backend but `sharded_rdt`). Without them, a model loads and reloads as with
+[Layerwise (Re)loading](layerwise.md).
+
+`VLLM_RELOAD_MODE` overrides the default (`auto`): `direct` always uses direct
+reload, `layerwise` never does, for example for the configurations direct
+reload refuses (see below).
 
 ## How It Works
 
@@ -26,7 +30,8 @@ matching pre-quantized checkpoint; the trainer keeps sending BF16 weights under
 their checkpoint names.
 
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block
+vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block \
+    --weight-transfer-config '{"backend": "nccl"}'
 ```
 
 | `--quantization` | Linear layers | MoE layers |
@@ -57,5 +62,6 @@ an error. Use `VLLM_RELOAD_MODE=layerwise` to update them:
   128 (they keep their online quantization at cold start).
 - The NCCL weight transfer load plan (`use_load_plan`) with online
   quantization.
-- `torchao` quantization, Humming kernels, LoRA, weight offloading,
-  `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
+- `torchao` quantization, Humming kernels, LoRA, weight offloading, and
+  `draft_lm_head_quantization`.
+- A draft model sharing tensors with a refused target model.

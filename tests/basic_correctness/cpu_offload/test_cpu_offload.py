@@ -42,15 +42,13 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
     )
 
 
-def test_cpu_offload_online_quantization(monkeypatch):
+def test_cpu_offload_online_quantization():
     """Serving with online quantization and CPU offloading must not raise.
 
     Online quantization creates its weights on the meta device, which the
     offloader leaves for the online method to materialize: online-quantized
     weights are not offloaded (see `test_uva_offloader_skips_meta_weights`).
     """
-    # test the online method's meta weights, which direct reload would replace
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     compare_two_settings(
         model="hmellor/tiny-random-LlamaForCausalLM",
         arg1=["--quantization", "fp8_per_tensor"],

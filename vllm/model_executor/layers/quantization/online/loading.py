@@ -107,9 +107,12 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     method.process_weights_after_loading = process_weights_after_loading
 
 
+_FP8_BLOCK = (128, 128)  # the block size of the block FP8 online scheme
+
+
 def _block_shapes_fit(layer: torch.nn.Module) -> bool:
-    """Whether the 128x128 block FP8 checkpoint linear method accepts this
-    layer's tensor-parallel shards."""
+    """Whether the block FP8 checkpoint linear method accepts this layer's
+    tensor-parallel shards."""
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         validate_fp8_block_shape,
     )
@@ -122,7 +125,7 @@ def _block_shapes_fit(layer: torch.nn.Module) -> bool:
             layer.output_size,
             getattr(layer, "input_size_per_partition", layer.input_size),
             getattr(layer, "output_partition_sizes", [layer.output_size]),
-            [128, 128],
+            list(_FP8_BLOCK),
         )
     except ValueError:
         return False
@@ -158,7 +161,7 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     if block and not is_moe and not _block_shapes_fit(layer):
         return None  # the block checkpoint method would refuse these shapes
     if weight in (qu.kFp8StaticTensorSym, qu.kFp8Static128BlockSym):
-        cfg = fp8.Fp8Config(weight_block_size=[128, 128] if block else None)
+        cfg = fp8.Fp8Config(weight_block_size=list(_FP8_BLOCK) if block else None)
         method = fp8.Fp8MoEMethod(cfg, layer) if is_moe else fp8.Fp8LinearMethod(cfg)
         quantize = per_block_cast_to_fp8 if block else ops.scaled_fp8_quant
     elif weight == qu.kFp8StaticChannelSym and is_moe:

@@ -411,7 +411,9 @@ def resolve_quant_method(
                 "(requantization) is not supported yet."
             )
 
-        online_quant_method = online_config.get_quant_method(layer, prefix)
+        online_quant_method = online_config.get_quant_method(
+            layer, prefix, requantize=True
+        )
 
         assert base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)

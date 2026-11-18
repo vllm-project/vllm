@@ -28,8 +28,9 @@ engine drives on your behalf:
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
 Checkpoint-format backends reload in the mode set by the `VLLM_RELOAD_MODE`
-environment variable: [direct reload](../direct_reload.md) by default, or
-[layerwise reload](../layerwise.md) with `VLLM_RELOAD_MODE=layerwise`.
+environment variable: [direct reload](../direct_reload.md) by default (except
+`sharded_rdt`, which reloads layerwise), or [layerwise reload](../layerwise.md)
+with `VLLM_RELOAD_MODE=layerwise`.
 
 ## Available Backends
 
@@ -84,8 +85,8 @@ engine = WeightTransferTrainerFactory.trainer_init(
     init_info=NCCLTrainerInitInfo(
         master_address=master_address,
         master_port=master_port,
-        world_size=world_size,   # trainer + all inference workers
-        rank=0,                  # this trainer rank; rank 0 is the sender
+        world_size=world_size,  # trainer + all inference workers
+        rank=0,  # this trainer rank; rank 0 is the sender
         packed=True,
     ),
     client=HTTPVLLMWeightSyncClient("http://localhost:8000"),

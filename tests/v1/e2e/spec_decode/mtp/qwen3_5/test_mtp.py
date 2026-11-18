@@ -255,13 +255,10 @@ def test_mtp_draft_lm_head_quantization(
 def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
     sampling_config: SamplingParams,
     vllm_runner,
-    monkeypatch,
 ):
     """The quantized draft head is derived from the target head: it must come
     back intact after a level 1 sleep and be re-derived after a target weight
     reload, so outputs and acceptance match the run before."""
-    # direct reload (the default) refuses draft_lm_head_quantization
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     prompts = get_test_prompts(mm_enabled=False)
     with vllm_runner(
         "Qwen/Qwen3.5-0.8B-Base",
