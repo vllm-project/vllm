@@ -195,7 +195,9 @@ class ModelConfig:
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
-      (GLM-5.3-Flash).
+      (GLM-5.3-Flash). GLM-5.3-Flash multimodal inputs require the Rust
+      frontend; Python supports text-only inference with image and video
+      limits set to zero.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -356,7 +358,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
