@@ -37,6 +37,7 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+    chunk_layout,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -631,6 +632,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
+                layout=self._wire_layout(meta),
             )
         else:
             stream = torch.cuda.current_stream()
@@ -642,20 +644,29 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=src, stream=stream)
 
+    def _wire_layout(self, meta: list[ParamMeta]):
+        """How `meta` travels, built once per parameter list."""
+        cache = self.__dict__.setdefault("_wire_layouts", {})
+        key = (len(meta), meta[0].name if meta else "", meta[-1].name if meta else "")
+        layout = cache.get(key)
+        if layout is None:
+            layout = cache[key] = chunk_layout(
+                ((m.shape, m.dtype) for m in meta), self.packed_buffer_size_bytes
+            )
+        return layout
+
     def _discard(self, meta: list[ParamMeta], src: int) -> None:
         """Receive another broadcaster's parameters and drop them."""
         assert self.model_update_group is not None
         device = self.model_update_group.device
         if self.packed:
-            packed_nccl_broadcast_consumer(
-                iterator=((m.name, (list(m.shape), m.dtype)) for m in meta),
-                group=self.model_update_group,
-                src=src,
-                post_unpack_func=lambda weights: None,
-                buffer_size_bytes=self.packed_buffer_size_bytes,
-                num_buffers=self.packed_num_buffers,
-                device=device,
-            )
+            # Nothing is kept: receive each chunk into one buffer, unread. A
+            # rank that lags here stalls the whole broadcast ring.
+            sizes = self._wire_layout(meta).sizes
+            buf = torch.empty(max(sizes, default=0), dtype=torch.uint8, device=device)
+            for n in sizes:  # on the current stream
+                self.model_update_group.broadcast(buf[:n], src=src)
+            torch.accelerator.current_stream().synchronize()
         else:
             stream = torch.cuda.current_stream()
             for m in meta:

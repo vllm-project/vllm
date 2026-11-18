@@ -156,13 +156,26 @@ def load_planned(
     pass fallbacks to `model.load_weights`. Call between `start_reload`
     and `finish_reload`."""
     fallbacks = []
+    dsts: list[torch.Tensor] = []
+    srcs: list[torch.Tensor] = []
+    held = 0
     for name, full in weights:
         dest = plan.get_dest(name)
         if dest is None:
             fallbacks.append((name, full))
-        for box, tensor in dest or ():
+            continue
+        for box, tensor in dest:
             part = full[tuple(slice(start, stop) for start, stop in box)]
-            tensor.copy_(part.reshape(tensor.shape))
+            dsts.append(tensor)
+            srcs.append(part.reshape(tensor.shape))
+        held += full.nbytes if dest else 0
+        # Batch copies into one dispatch per ~2 GiB instead of one per tensor;
+        # flushing bounds how many source tensors a streaming caller keeps alive.
+        if held > (2 << 30):
+            torch._foreach_copy_(dsts, srcs)
+            dsts, srcs, held = [], [], 0
+    if dsts:
+        torch._foreach_copy_(dsts, srcs)
     if fallbacks:
         model.load_weights(fallbacks)
 
@@ -219,15 +232,17 @@ def _write(
     src = copy.src
     if src._geom is None:
         raise Fallback(src._lost or "not a view of the checkpoint tensor")
-    if src.dtype != copy.dtype:
-        raise Fallback(
-            f"casts {src.dtype} to {copy.dtype} at copy_ "
-            f"(send it as {copy.dtype} to make it direct)"
-        )
+    # A cast is the loader's own elementwise copy_ conversion: replay it
+    # into a destination viewed in its dtype.
+    cast = (
+        copy.dtype
+        if src.dtype != copy.dtype and not _same_bits(src.dtype, copy.dtype)
+        else None
+    )
     target = targets.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
-    size = dtype.itemsize
+    size = (cast or dtype).itemsize
     rel = copy.byte_offset - target.byte_offset
     if rel % size or target.byte_offset % size:
         raise Fallback("copies into a destination viewed with another element size")
@@ -244,12 +259,23 @@ def _write(
     dims = list(zip(copy.shape, geom.stride(), copy.stride))
     box, dst_shape, dst_stride = box_and_region(shape, geom.storage_offset(), dims)
     return Write(
-        box, target.module, target.tensor, Region(rel // size, dst_shape, dst_stride)
+        box,
+        target.module,
+        target.tensor,
+        Region(rel // size, dst_shape, dst_stride),
+        cast,
     )
+
+
+def _same_bits(a: torch.dtype, b: torch.dtype) -> bool:
+    """Integer casts between equal widths keep every bit (two's complement)."""
+    real = (a.is_floating_point, b.is_floating_point, a.is_complex, b.is_complex)
+    return a.itemsize == b.itemsize and not any(real) and torch.bool not in (a, b)
 
 
 def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
     """The live tensor of `write`, in the checkpoint dtype."""
+    dtype = write.dtype or dtype
     target = targets.by_name[(write.module, write.tensor)]
     r = write.dst
     offset = target.byte_offset // dtype.itemsize + r.offset
@@ -260,24 +286,50 @@ def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
 def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     """Names whose writes share a byte with another write: direct writes land
     in any order, so these go through `load_weights` in arrival order."""
-    runs: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
+    # Sweep each storage by the byte span each copy covers; only copies whose
+    # spans intersect can share a byte, and only those are expanded into runs.
+    spans: dict[int, list[tuple[int, int, int, str, Copy]]] = defaultdict(list)
     for name, copies in traced.copies.items():
         for c in copies:
             if c.storage in targets.by_storage and 0 not in c.shape:
-                spans = byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize)
-                runs[c.storage] += [(a, b, name) for a, b in spans]
+                size = c.dtype.itemsize
+                end = (
+                    c.byte_offset
+                    + (sum((n - 1) * s for n, s in zip(c.shape, c.stride)) + 1) * size
+                )
+                spans[c.storage].append(
+                    (c.byte_offset, end, len(spans[c.storage]), name, c)
+                )
     reasons: dict[str, str] = {}
-    for named in runs.values():
-        named.sort()
-        active: list[tuple[int, str]] = []  # heap of (stop, name)
-        for start, stop, name in named:
+    for items in spans.values():
+        items.sort()
+        active: list[tuple[int, int, str, Copy]] = []  # heap of (stop, id, name, copy)
+        for start, stop, i, name, c in items:
             while active and active[0][0] <= start:
                 heapq.heappop(active)
-            for _, other in active:
-                reasons.setdefault(name, f"writes overlap with {other!r}")
-                reasons.setdefault(other, f"writes overlap with {name!r}")
-            heapq.heappush(active, (stop, name))
+            for _, _, other, oc in active:
+                if _runs_intersect(c, oc):
+                    reasons.setdefault(name, f"writes overlap with {other!r}")
+                    reasons.setdefault(other, f"writes overlap with {name!r}")
+            heapq.heappush(active, (stop, i, name, c))
     return reasons
+
+
+def _runs_intersect(a: Copy, b: Copy) -> bool:
+    """Whether two copies into one storage write a common byte."""
+    ra = byte_runs(a.byte_offset, a.shape, a.stride, a.dtype.itemsize)
+    rb = byte_runs(b.byte_offset, b.shape, b.stride, b.dtype.itemsize)
+    ra.sort()
+    rb.sort()
+    i = j = 0
+    while i < len(ra) and j < len(rb):
+        if ra[i][0] < rb[j][1] and rb[j][0] < ra[i][1]:
+            return True
+        if ra[i][1] <= rb[j][1]:
+            i += 1
+        else:
+            j += 1
+    return False
 
 
 def _nbytes(entry: Entry) -> int:
