@@ -43,10 +43,13 @@ def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
     assert tokenizer.chat_template == "standard"
 
 
-@pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])
-def test_cached_tokenizer(model_id: str):
+@pytest.mark.parametrize(
+    ("model_id", "trust_remote_code"),
+    [("openai-community/gpt2", False), ("zai-org/chatglm3-6b", True)],
+)
+def test_cached_tokenizer(model_id: str, trust_remote_code: bool):
     reference_tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True
+        model_id, trust_remote_code=trust_remote_code
     )
     reference_tokenizer.add_special_tokens({"cls_token": "<CLS>"})
     reference_tokenizer.add_special_tokens({"additional_special_tokens": ["<SEP>"]})
