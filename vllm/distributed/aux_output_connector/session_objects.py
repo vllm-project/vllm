@@ -246,13 +246,7 @@ class SessionObjectWriter:
     def _write(self, batch: tuple[list[str], list[bytes] | None]) -> None:
         keys, values = batch
         if values is None:
-            keys = self._unremoved + keys
-            codes = self._store.remove(keys) if keys else []
-            self._unremoved = [
-                key
-                for key, code in zip(keys, codes, strict=True)
-                if code and code != _NOT_FOUND
-            ]
+            self._remove(keys)
             if self._unremoved:
                 logger.warning(
                     "%d auxiliary output objects are not removed yet; first: %s",
@@ -261,17 +255,31 @@ class SessionObjectWriter:
                 )
             self._last_progress = time.monotonic()
             return
+        attempts = 0
         while keys:
             try:
                 self._store.put_batch(keys[:1], values[:1])
             except AuxObjectStoreFullError as error:
+                attempts += 1
+                if attempts & (attempts - 1) == 0 or attempts % 32 == 0:
+                    self._remove([])
                 if self._stalled() or self._closed.wait(_PUT_RETRY_INTERVAL_S):
                     raise BlockObjectStoreError(
                         "auxiliary output objects were not written in time"
                     ) from error
             else:
                 keys, values = keys[1:], values[1:]
+                attempts = 0
                 self._last_progress = time.monotonic()
+
+    def _remove(self, keys: list[str]) -> None:
+        keys = self._unremoved + keys
+        codes = self._store.remove(keys) if keys else []
+        self._unremoved = [
+            key
+            for key, code in zip(keys, codes, strict=True)
+            if code and code != _NOT_FOUND
+        ]
 
     def check(self) -> None:
         """Raise `BlockObjectStoreError` if a write failed, or if writes have

@@ -2963,6 +2963,108 @@ def test_session_object_writer_removes_an_object_the_store_refused_once(code):
     assert refused and not client.objects and not writer._unremoved
 
 
+def test_session_object_writer_frees_space_by_retrying_refused_removals():
+    client, store = fake_store()
+    put_batch = client.put_batch
+    batch_remove = client.batch_remove
+    removals = []
+
+    def put_one(keys, values, config):
+        return -200 if client.objects else put_batch(keys, values, config)
+
+    def refuse_twice(keys, force):
+        removals.append(list(keys))
+        return [-703] * len(keys) if len(removals) <= 2 else batch_remove(keys, force)
+
+    client.put_batch = put_one
+    client.batch_remove = refuse_twice
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=3,
+        fields=lambda rows: {"routed_experts": rows},
+        put_stall_timeout_s=2.0,
+    )
+    writer._put((["job/s/a"], [b"a"]))
+    writer.remove(["job/s/a"])
+    writer._put((["job/s/b"], [b"b"]))
+    try:
+        writer.drain(timeout_s=30)
+    finally:
+        assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/b"] and not writer._unremoved
+
+
+def test_session_object_writer_backs_off_retrying_refused_removals():
+    client, store = fake_store()
+    put_batch = client.put_batch
+    removals = []
+
+    def put_one(keys, values, config):
+        return -200 if client.objects else put_batch(keys, values, config)
+
+    def refuse(keys, force):
+        removals.append(list(keys))
+        return [-706] * len(keys)
+
+    client.put_batch = put_one
+    client.batch_remove = refuse
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=3,
+        fields=lambda rows: {"routed_experts": rows},
+        put_stall_timeout_s=2.0,
+    )
+    writer._put((["job/s/a"], [b"a"]))
+    writer.remove(["job/s/a"])
+    writer._put((["job/s/b"], [b"b"]))
+    try:
+        with pytest.raises(BlockObjectStoreError):
+            writer.drain(timeout_s=30)
+    finally:
+        assert _run_within(writer.close) is None
+    assert 1 < len(removals) <= 6
+
+
+def test_session_object_writer_retries_refused_removals_every_32_attempts(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "vllm.distributed.aux_output_connector.session_objects._PUT_RETRY_INTERVAL_S",
+        0,
+    )
+    client, store = fake_store()
+    put_batch = client.put_batch
+    attempts = []
+    removals = []
+
+    def put_late(keys, values, config):
+        attempts.append(keys)
+        return -200 if len(attempts) <= 96 else put_batch(keys, values, config)
+
+    def refuse(keys, force):
+        removals.append(len(attempts))
+        return [-706] * len(keys)
+
+    client.put_batch = put_late
+    client.batch_remove = refuse
+    writer = SessionObjectWriter(
+        store,
+        key_prefix="job",
+        max_pending_batches=3,
+        fields=lambda rows: {"routed_experts": rows},
+    )
+    writer.remove(["job/s/a"])
+    writer._put((["job/s/b"], [b"b"]))
+    try:
+        writer.drain(timeout_s=30)
+    finally:
+        assert _run_within(writer.close) is None
+    assert removals[:9] == [0, 1, 2, 4, 8, 16, 32, 64, 96]
+    assert list(client.objects) == ["job/s/b"]
+
+
 def test_session_object_writer_does_not_wait_for_an_object_that_is_not_there():
     client, store = fake_store()
     writer = SessionObjectWriter(
