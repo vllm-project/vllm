@@ -69,11 +69,22 @@ def _case(rows: int, seed: int):
 
 
 def _stock(logits, visible, positions):
-    """The stock top-k and expansion's packed rows."""
+    """The stock top-k and expansion's packed rows, with the cooperative
+    top-k (the persistent one where it does not run): the decode top-k the
+    CuTe select was written against."""
     rows = logits.shape[0]
     blocks = torch.empty(rows, TOKENS // RATIO, dtype=torch.int32, device="cuda")
     workspace = torch.empty(_TOPK_WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
-    _topk(logits, visible, TOKENS, RATIO, blocks, workspace)
+    _topk(
+        logits,
+        visible,
+        TOKENS,
+        RATIO,
+        blocks,
+        workspace,
+        topk_backend="cooperative",
+        prefill=False,
+    )
     packed = torch.empty(rows, PACKED_WIDTH, dtype=torch.int32, device="cuda")
     expand_qsa_block_indices(blocks, positions, visible, RATIO, TOKENS, packed)
     return packed
