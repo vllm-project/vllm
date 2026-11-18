@@ -180,8 +180,7 @@ def test_fp8_scaled_mm_batch_invariant_fixed_config(
 def test_online_fp8_linear_batch_invariant(
     scheme, monkeypatch, default_vllm_config, dist_init
 ):
-    # the online FP8 methods; direct reload (the default) quantizes on load
-    # into the checkpoint methods instead
+    # test the online FP8 methods, which direct reload would replace
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     from vllm.config.model import ModelConfig
     from vllm.config.quantization import resolve_quantization_config

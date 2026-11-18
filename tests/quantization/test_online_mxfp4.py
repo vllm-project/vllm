@@ -52,9 +52,7 @@ from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 @pytest.fixture(autouse=True)
 def _layerwise_reload_mode(monkeypatch):
-    # these cover the online methods, which direct reload (the default)
-    # replaces with quantize-on-load (test_online_loading.py); an explicit
-    # VLLM_RELOAD_MODE is kept
+    # test the online methods, which direct reload would replace
     if "VLLM_RELOAD_MODE" not in os.environ:
         monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 

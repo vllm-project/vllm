@@ -9,9 +9,8 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
-Unsupported configurations and modules are refused when a weight update
-starts or a weight-transfer engine is set up (`check_direct_reload`), not at
-cold start.
+Unsupported setups are refused when an update starts (`check_direct_reload`),
+not at cold start.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
@@ -136,10 +135,8 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
-        # online quantization without a checkpoint counterpart, a
-        # requantization source, experts_int8 (no online config), or one
-        # wrapped by another method; fused shared experts quantize staging
-        # parameters that post-load processing deletes
+        # online methods without a checkpoint counterpart; fused shared experts
+        # quantize staging parameters that post-load processing deletes
         if (
             isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase))
             or getattr(method, "uses_meta_device", False)
@@ -154,18 +151,14 @@ def _module_refusals(model: torch.nn.Module) -> list[str]:
 
 
 def _refusals(model: torch.nn.Module) -> list[str]:
-    """Reasons direct reload cannot update `model`. The configuration is the
-    current one: model loaders (worker and weight-cache daemon) set it."""
+    """Reasons direct reload cannot update `model` under the current config."""
     config = get_current_vllm_config_or_none()
     reasons = _config_refusals(config) if config is not None else []
     return reasons + _module_refusals(model)
 
 
 def check_direct_reload(model: torch.nn.Module) -> None:
-    """Raise if `model` cannot reload directly. Runs when a weight-transfer
-    engine is set up and before every update (`start_reload`), never at cold
-    start: a model that never reloads serves whatever it is. No-op in
-    layerwise mode."""
+    """Raise if `model` cannot reload directly; no-op in layerwise mode."""
     if not direct_reload_enabled():
         return
     reasons = getattr(model, "_direct_reload_refusals", None)
@@ -186,8 +179,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
-    # neither the configuration nor the modules change after cold start;
-    # `check_direct_reload` refuses updates of a model with reasons
+    # neither the configuration nor the modules change after cold start
     reasons = model._direct_reload_refusals = _refusals(model)
     if reasons:
         logger.info(
@@ -196,7 +188,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             "weights with layerwise reload.",
             "; ".join(reasons),
         )
-        return  # not recorded (torchao tensors have no plain storage, for one)
+        return  # e.g. torchao tensors have no plain storage
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)

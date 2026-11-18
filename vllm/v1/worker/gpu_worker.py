@@ -1700,7 +1700,7 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
-        # refuse a model direct reload cannot update before a trainer sends
+        # refuse before the trainer sends anything
         check_direct_reload(self.model_runner.get_model())
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)

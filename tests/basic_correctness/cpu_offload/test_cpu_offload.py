@@ -49,8 +49,7 @@ def test_cpu_offload_online_quantization(monkeypatch):
     offloader leaves for the online method to materialize: online-quantized
     weights are not offloaded (see `test_uva_offloader_skips_meta_weights`).
     """
-    # the online method's meta weights; direct reload (the default) quantizes
-    # on load into the checkpoint method, whose weights are offloaded
+    # test the online method's meta weights, which direct reload would replace
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     compare_two_settings(
         model="hmellor/tiny-random-LlamaForCausalLM",

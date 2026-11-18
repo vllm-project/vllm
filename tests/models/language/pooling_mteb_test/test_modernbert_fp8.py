@@ -69,8 +69,7 @@ def _assert_modernbert_online_fp8(model) -> None:
 )
 def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    # the online FP8 method; direct reload (the default) quantizes on load
-    # into the checkpoint method instead
+    # test the online FP8 method, which direct reload would replace
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
 
     def check_online_fp8(vllm_model) -> None:

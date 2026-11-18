@@ -269,8 +269,7 @@ def _worker(local_rank: int, world_size: int, master_port: int, backend: str) ->
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": str(master_port),
-            # the online MXFP8 method under test; direct reload (the default)
-            # quantizes on load into the checkpoint method instead
+            # test the online method, which direct reload would replace
             "VLLM_RELOAD_MODE": "layerwise",
         }
     )

@@ -43,11 +43,9 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-These configurations start and serve as usual, but direct reload refuses to
-update their weights: setting up a weight transfer engine, or starting a weight
-update (`reload_weights`, `start_weight_update`), raises an error that lists
-the reasons. A model loaded with one of them logs this once at startup. Use
-`VLLM_RELOAD_MODE=layerwise` to update them:
+These configurations serve as usual, but setting up a weight transfer engine
+or starting a weight update (`reload_weights`, `start_weight_update`) raises
+an error. Use `VLLM_RELOAD_MODE=layerwise` to update them:
 
 - Online quantization not in the table above: `mxfp4` and `mxfp4_hadamard32`
   linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized

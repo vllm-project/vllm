@@ -657,15 +657,13 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
         monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
     else:
         monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    # the configuration model loaders set while loading
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
     model = _cold_start(_checkpoint())  # records the reasons, never raises
     if match is None:
         start_reload(model)
     else:
-        # a refused model records no layout (torchao's tensors have no
-        # plain storage)
+        # a refused model records no layout
         assert not hasattr(model, "_ckpt_param_names")
         with pytest.raises(RuntimeError, match=match) as err:
             start_reload(model)

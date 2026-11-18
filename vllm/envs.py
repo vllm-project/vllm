@@ -2345,11 +2345,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
-    # How weight updates reload the model: "direct" (default) writes the
-    # checkpoint tensors into the live tensors and reruns post-load processing
-    # in place; "layerwise" rebuilds each layer from the checkpoint tensors.
-    # Direct reload refuses setups it cannot update when an update starts or
-    # a weight-transfer engine is set up; use "layerwise" for those.
+    # How weight updates reload the model: "direct" (default) writes into the
+    # live tensors in place; "layerwise" rebuilds each layer. Use "layerwise"
+    # for setups direct reload refuses.
     "VLLM_RELOAD_MODE": env_with_choices(
         "VLLM_RELOAD_MODE", "direct", ["layerwise", "direct"]
     ),
