@@ -807,9 +807,14 @@ def test_mnnvl_multimem_reduce_scatter_initializes_signals(monkeypatch):
 def _vllm_custom_allreduce(device: torch.device) -> car.CustomAllreduce:
     """The TP group's vLLM CustomAllreduce. When AITER's all-reduce serves the
     group on ROCm, the group has none, so build one on it directly."""
-    return get_tp_group().device_communicator.ca_comm or car.CustomAllreduce(
-        get_tp_group().cpu_group, device
-    )
+    comm = get_tp_group().device_communicator
+    if comm.ca_comm is None and comm.aiter_ar_comm is not None:
+        fa = car.CustomAllreduce(get_tp_group().cpu_group, device)
+    else:
+        assert comm.ca_comm is not None
+        fa = comm.ca_comm
+    assert not fa.disabled, "custom all-reduce is disabled"
+    return fa
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -1017,7 +1022,6 @@ def one_and_two_stage_allreduce(
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         fa = _vllm_custom_allreduce(device)
-        assert not fa.disabled, "custom all-reduce is disabled"
 
         # Sizes are counts of 16-byte packed elements. They straddle the
         # 512 KiB 1-stage/2-stage threshold, and all but one leave a remainder
