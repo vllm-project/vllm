@@ -11,16 +11,28 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.model_executor.layers.linear_attention.kernel import (
+    LinearAttnSelectorConfig,
+    select_linear_attn_kernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
+    MambaSSUKernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.cpu import CPUSSUKernel
+from vllm.model_executor.layers.linear_attention.mamba2.decode.flashinfer import (
+    FlashInferSSUKernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.selector import (
+    SSU_KERNELS,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.triton import (
+    TritonSSUKernel,
+)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    FlashInferSSUBackend,
-    TritonSSUBackend,
-    get_mamba_ssu_backend,
-    initialize_mamba_ssu_backend,
-    selective_state_update,
-)
+from vllm.model_executor.layers.mamba.ops import ssu_dispatch
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability, PlatformEnum
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -28,7 +40,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
     KVCacheGroup,
     KVCacheLayout,
     MambaSpec,
@@ -55,32 +66,10 @@ requires_gpu = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def restore_backend_state():
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    old_backend = mod._mamba_ssu_backend
-    old_replayssm_kernel = mod._flashinfer_replayssm_kernel
+def restore_replayssm_kernel():
+    old = ssu_dispatch._flashinfer_replayssm_kernel
     yield
-    mod._mamba_ssu_backend = old_backend
-    mod._flashinfer_replayssm_kernel = old_replayssm_kernel
-
-
-def _kv_cache_config_with_ssu(
-    mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2,
-) -> KVCacheConfig:
-    spec = MambaSpec(
-        block_size=16,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
-        mamba_type=mamba_type,
-    )
-    return KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroup.from_layers({"l0": MambaManager.layer_config(spec)})
-        ],
-    )
+    ssu_dispatch._flashinfer_replayssm_kernel = old
 
 
 def _device_ints(values):
@@ -413,29 +402,135 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
 
 
-def test_default_backend_is_triton():
-    initialize_mamba_ssu_backend(MambaConfig(), _kv_cache_config_with_ssu())
-    backend = get_mamba_ssu_backend()
-    assert isinstance(backend, TritonSSUBackend)
-    assert backend.name == "triton"
+SM90 = (PlatformEnum.CUDA, DeviceCapability(9, 0))
+SM100 = (PlatformEnum.CUDA, DeviceCapability(10, 0))
 
 
-def test_explicit_triton_backend():
-    initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+def _cfg(
+    platform,
+    capability,
+    state_size=128,
+    state_dtype=torch.float32,
+    stochastic_rounding=False,
+    ssu_algorithm=None,
+):
+    """A Nemotron-like Mamba2 layer."""
+    spec = MambaSpec(
+        block_size=256,
+        shapes=((3, 1024), (8, 64, state_size)),
+        dtypes=(torch.bfloat16, state_dtype),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
     )
-    backend = get_mamba_ssu_backend()
-    assert isinstance(backend, TritonSSUBackend)
+    return LinearAttnSelectorConfig(
+        platform,
+        capability,
+        spec,
+        torch.bfloat16,
+        use_stochastic_rounding=stochastic_rounding,
+        use_ssu_algorithm=ssu_algorithm is not None,
+    )
+
+
+HOPPER, BLACKWELL = _cfg(*SM90), _cfg(*SM100)
+CPU = _cfg(PlatformEnum.CPU, None)
+FP16 = dict(state_dtype=torch.float16)
+
+
+# Decode metadata for a state tensor indexed by batch row, without speculative
+# decoding.
+_NO_INDICES = SimpleNamespace(
+    state_indices_tensor_d=None, num_accepted_tokens=None, query_start_loc_d=None
+)
+
+
+def _select(cfg, requested=None):
+    return select_linear_attn_kernel("Mamba SSU", SSU_KERNELS, cfg, requested)
+
+
+@pytest.mark.parametrize(
+    ("backend", "cfg", "reason"),
+    [
+        (MambaBackendEnum.TRITON, CPU, "CPU"),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM90, stochastic_rounding=True, **FP16),
+            "capability 10",
+        ),
+        (MambaBackendEnum.TRITON, _cfg(*SM100, stochastic_rounding=True), "float16"),
+        (MambaBackendEnum.TRITON, _cfg(*SM100, ssu_algorithm="vertical"), "algorithm"),
+        (MambaBackendEnum.CPU, BLACKWELL, "platform CUDA"),
+        (MambaBackendEnum.FLASHINFER, CPU, "platform CPU"),
+        (MambaBackendEnum.FLASHINFER, _cfg(*SM100, state_size=16), "state size"),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(*SM100, stochastic_rounding=True),
+            "float16",
+        ),
+        (
+            MambaBackendEnum.CPU,
+            _cfg(PlatformEnum.CPU, None, ssu_algorithm="vertical"),
+            "algorithm",
+        ),
+        (
+            MambaBackendEnum.CPU,
+            _cfg(PlatformEnum.CPU, None, stochastic_rounding=True, **FP16),
+            "stochastic rounding",
+        ),
+    ],
+)
+def test_decode_backend_that_cannot_run_fails_at_selection(backend, cfg, reason):
+    """A requested backend fails at startup with its reason, not at the first
+    decode."""
+    with pytest.raises(ValueError, match=reason):
+        _select(cfg, backend)
+
+
+def test_kernel_rejects_features_it_does_not_declare():
+    """New features are off by default: a kernel must opt in to each."""
+
+    class BareKernel(MambaSSUKernel):
+        backend = MambaBackendEnum.TRITON
+
+        @classmethod
+        def supports_platform(cls, platform):
+            return True
+
+    cfg = _cfg(*SM100, ssu_algorithm="vertical", stochastic_rounding=True)
+    assert BareKernel.validate_configuration(cfg) == [
+        "stochastic rounding not supported",
+        "--mamba-ssu-algorithm not supported",
+    ]
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
-def test_flashinfer_backend_init():
-    initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER), _kv_cache_config_with_ssu()
-    )
-    backend = get_mamba_ssu_backend()
-    assert isinstance(backend, FlashInferSSUBackend)
-    assert backend.name == "flashinfer"
+@pytest.mark.parametrize("cfg", [HOPPER, BLACKWELL])
+def test_flashinfer_decodes_mamba2_on_hopper_and_blackwell(cfg):
+    """Unlike FlashInfer's SSD scan, its decode kernel isn't SM10x-only."""
+    assert _select(cfg, MambaBackendEnum.FLASHINFER) is FlashInferSSUKernel
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [(BLACKWELL, TritonSSUKernel), (CPU, CPUSSUKernel)],
+)
+def test_unset_backend_selects_the_platform_default(cfg, expected):
+    """CPU decode comes from selection, not a silent Triton-to-CPU swap."""
+    assert _select(cfg) is expected
+
+
+@pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        _cfg(*SM90, stochastic_rounding=True, **FP16),
+        _cfg(*SM100, ssu_algorithm="vertical"),
+    ],
+    ids=["stochastic-rounding-off-sm10x", "ssu-algorithm"],
+)
+def test_unset_backend_selects_the_kernel_that_supports_the_options(cfg):
+    """Automatic selection skips kernels that can't do what's asked (Triton off
+    SM10x can't round stochastically; only FlashInfer takes an algorithm)."""
+    assert _select(cfg) is FlashInferSSUKernel
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
@@ -454,77 +549,19 @@ def test_flashinfer_forwards_ssu_algorithm(
     expected: MambaSSUAlgorithm,
     monkeypatch,
 ):
-    import flashinfer.mamba
-
     kernel = Mock()
-    monkeypatch.setattr(flashinfer.mamba, "selective_state_update", kernel)
-    backend = FlashInferSSUBackend(
-        MambaConfig(
-            backend=MambaBackendEnum.FLASHINFER,
-            ssu_algorithm=algorithm,
-        )
+    monkeypatch.setattr(FlashInferSSUKernel, "_fn", staticmethod(lambda: kernel))
+    mamba_config = MambaConfig(
+        backend=MambaBackendEnum.FLASHINFER, ssu_algorithm=algorithm
     )
-
     tensor = torch.empty(1)
-    backend(
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-    )
-
+    FlashInferSSUKernel.forward(mamba_config, _NO_INDICES, *[tensor] * 9)
     assert kernel.call_args.kwargs["algorithm"] == expected
-
-
-def test_uninitialized_backend_raises():
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    # restore_backend_state (autouse) puts the global back afterwards.
-    mod._mamba_ssu_backend = None
-    with pytest.raises(RuntimeError, match="not been initialized"):
-        get_mamba_ssu_backend()
-
-
-@pytest.mark.parametrize(
-    "mamba_type",
-    [
-        MambaAttentionBackendEnum.LINEAR,
-        MambaAttentionBackendEnum.GDN_ATTN,
-        MambaAttentionBackendEnum.SHORT_CONV,
-    ],
-)
-def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    old = mod._mamba_ssu_backend
-    mod._mamba_ssu_backend = None
-    try:
-        initialize_mamba_ssu_backend(
-            MambaConfig(), _kv_cache_config_with_ssu(mamba_type)
-        )
-        assert mod._mamba_ssu_backend is None
-        with pytest.raises(RuntimeError, match="not been initialized"):
-            get_mamba_ssu_backend()
-    finally:
-        mod._mamba_ssu_backend = old
-
-
-@pytest.mark.skipif(HAS_FLASHINFER, reason="flashinfer is installed")
-def test_flashinfer_import_error():
-    with pytest.raises(ImportError, match="FlashInfer is required"):
-        FlashInferSSUBackend(MambaConfig())
 
 
 @requires_gpu
 def test_triton_basic_call():
     set_random_seed(0)
-    initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
-    )
     device = DEVICE
     batch_size = 2
     dim = 64
@@ -540,17 +577,8 @@ def test_triton_basic_call():
     C = torch.randn(batch_size, dstate, device=device)
     D = torch.randn(dim, device=device)
 
-    selective_state_update(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        D=D,
-        dt_bias=dt_bias,
-        dt_softplus=True,
-        out=out,
+    TritonSSUKernel.forward(
+        MambaConfig(), _NO_INDICES, state, x, dt, A, B, C, D, dt_bias, out
     )
     assert not torch.isnan(out).any()
 

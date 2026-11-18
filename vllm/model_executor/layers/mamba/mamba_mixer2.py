@@ -23,6 +23,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.decode.selector import (
+    select_mamba_ssu_kernel,
+)
 from vllm.model_executor.layers.linear_attention.mamba2.prefill.selector import (
     select_mamba2_ssd_kernel,
 )
@@ -47,7 +50,6 @@ from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec 
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     plan_replayssm_decode,
-    selective_state_update,
     selective_state_update_replayssm_flashinfer,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -58,7 +60,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -576,11 +577,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dim=-1,
         )
 
-        # Check if running on Blackwell (SM100+) for kernel tuning
-        self.is_blackwell = current_platform.is_device_capability_family(100)
-
         if model_config is None:
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, None)
+            self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, None)
         else:
             layer_config = self.get_kv_cache_config(vllm_config)
             assert layer_config is not None
@@ -588,6 +587,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert isinstance(spec, MambaSpec)
             assert isinstance(params, MambaManager.Params)
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, spec)
+            self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, spec)
             num_heads, head_dim, state_size = spec.shapes[1]
             self.ssd_kernel.register_warmup(
                 num_heads=num_heads,
@@ -987,7 +987,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         ),
                     )
             else:
-                selective_state_update(
+                self.ssu_kernel.forward(
+                    self.mamba_config,
+                    attn_metadata,
                     ssm_state,
                     hidden_states_d,
                     dt_d,
@@ -996,13 +998,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     C_d,
                     D_d,
                     dt_bias,
-                    dt_softplus=True,
-                    state_batch_indices=state_indices_tensor_d,
-                    dst_state_batch_indices=state_indices_tensor_d,
-                    out=preallocated_ssm_out_d,
-                    num_accepted_tokens=num_accepted_tokens,
-                    cu_seqlens=query_start_loc_d,
-                    is_blackwell=self.is_blackwell,
+                    preallocated_ssm_out_d,
                 )
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
