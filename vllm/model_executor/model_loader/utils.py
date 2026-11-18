@@ -407,6 +407,39 @@ def configure_quant_config(
             quant_config.packed_modules_mapping = packed_mapping
 
 
+def log_layer_backends(
+    model: nn.Module, model_config: ModelConfig, load_failed: bool = False
+) -> None:
+    """Log the backends the layers of `model` selected. The individual
+    selections are logged at DEBUG where they are made.
+
+    The model runner calls this for each model it loads; the base loader only
+    when loading fails, as the runner never receives that model."""
+    from vllm.model_inspection import collect_layer_backends, format_layer_backends
+
+    # Only a log: nothing here may fail the load, or mask a load error.
+    try:
+        backends = collect_layer_backends(model)
+        if not backends:
+            return
+        # A draft model can share its class with the target: name the model.
+        logger.info_once(
+            "Backends selected for %s (%s)%s:\n%s",
+            type(model).__name__,
+            model_config.model,
+            " before loading failed" if load_failed else "",
+            format_layer_backends(backends),
+            scope="global",
+        )
+    except Exception as e:
+        logger.warning_once(
+            "Could not summarize the backends selected for %s (%r). Set "
+            "VLLM_LOGGING_LEVEL=DEBUG to log each selection.",
+            type(model).__name__,
+            e,
+        )
+
+
 def build_model_from_processed_weights(
     vllm_config: VllmConfig,
     model_config: ModelConfig,

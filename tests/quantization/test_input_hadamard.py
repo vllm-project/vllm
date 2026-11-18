@@ -257,8 +257,8 @@ def _online_mxfp4(
 @pytest.mark.skipif(
     not current_platform.supports_mx(), reason="MXFP4 kernels need MX support."
 )
-# AITER picks its ASM GEMM for (N, K) it has tuned configs for, such as
-# (3072, 1536), and its Triton GEMM otherwise.
+# AITER picks its ASM GEMM for (N, K) it has tuned configs for and its Triton
+# GEMM otherwise. The aiter-asm case forces the ASM path.
 @pytest.mark.parametrize(
     "kernel_cls, input_size, output_size, fused",
     [
@@ -291,6 +291,13 @@ def test_online_mxfp4_hadamard(
         monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if fused and not rocm_aiter_ops.is_asm_fp4_gemm_supported():
         pytest.skip("AITER's ASM FP4 GEMM needs gfx950.")
+    if fused:
+        # AITER's tuned tables are keyed by CU count, so a GPU with fewer CUs
+        # (such as an MI355 in DPX mode) finds no rows for any shape.
+        monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: True)
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_triton_gemm_afp4wfp4_presh_ws_tuned", lambda n, k: True
+        )
     default_vllm_config.model_config = ModelConfig()
     set_random_seed(0)
     with torch.device(current_platform.device_type):
