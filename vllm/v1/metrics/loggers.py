@@ -32,6 +32,7 @@ from vllm.v1.metrics.stats import (
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
+    SchedulerIterationDetails,
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -186,21 +187,28 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        details = scheduler_stats.iteration_details
-        if details is None:
-            return
+        for record in scheduler_stats.iteration_records:
+            self._log_iteration(record, scheduler_stats, engine_idx)
 
+    def _log_iteration(
+        self,
+        details: SchedulerIterationDetails,
+        scheduler_stats: SchedulerStats,
+        engine_idx: int,
+    ) -> None:
         encoder_msg = ""
         if details.num_encoder_inputs:
             encoder_msg = (
                 f", encoder inputs: {details.num_encoder_inputs}, "
                 f"encoder output embeddings: {details.num_encoder_output_tokens}"
             )
+        elapsed_msg = ""
+        if details.elapsed_ms is not None:
+            elapsed_msg = f", iteration elapsed time: {details.elapsed_ms:.2f} ms"
 
         logger.info(
             "%sIteration(%d): %d context requests, %d context tokens, "
-            "%d generation requests, %d generation tokens, "
-            "iteration elapsed time: %.2f ms%s, "
+            "%d generation requests, %d generation tokens%s%s, "
             "%s KV cache usage: %.1f%%%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
@@ -208,7 +216,7 @@ class LoggingStatLogger(StatLoggerBase):
             details.num_ctx_tokens,
             details.num_generation_requests,
             details.num_generation_tokens,
-            details.elapsed_ms,
+            elapsed_msg,
             " (dummy)" if details.is_dummy else "",
             self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
