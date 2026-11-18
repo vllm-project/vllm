@@ -763,6 +763,7 @@ steps:
   - vllm/engine/
   - vllm/v1/executor/
   - vllm/model_executor/models/
+  - vllm/v1/kv_offload/
   - tests/distributed/
   - examples/features/data_parallel/data_parallel_offline.py
   commands:
@@ -771,7 +772,8 @@ steps:
       "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
       NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
       python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager &&
-      VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py"
+      VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py &&
+      pytest -v -s distributed/test_kv_offload_mirror.py"
       "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed' &&
       NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed' &&
       python3 ../examples/features/data_parallel/data_parallel_offline.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager"
