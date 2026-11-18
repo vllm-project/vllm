@@ -16,6 +16,9 @@ from vllm.config import (
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import PluggableLayer, op_registry_oot
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.eplb_triton import (
+    _eplb_map_and_record_i32_kernel,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -38,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 DEVICE = current_platform.device_type
@@ -911,6 +915,61 @@ def test_custom(
 # ---------------------------------------------------------------------------
 # Tests for eplb_map_to_physical_and_record
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 1025])
+@pytest.mark.parametrize("record_enabled", [False, True])
+def test_eplb_periodic_table_maps_and_records(num_tokens, record_enabled):
+    """Table lookup preserves invalid IDs, padding and gated physical counts."""
+    mapping = [[7, 0, 4, -1], [2, 9, -1, -1], [5, -1, -1, -1], [1, 3, 6, 8]]
+    replicas = [3, 2, 1, 4]
+    rows, ep_rank, topk = 1024, 2, 2
+    table = torch.tensor(
+        [
+            [mapping[e][(row + ep_rank + e) % replicas[e]] for e in range(4)]
+            for row in range(rows)
+        ],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    logical = torch.arange(num_tokens * topk).reshape(num_tokens, topk) % 6 - 1
+    expected = torch.tensor(
+        [
+            [
+                mapping[e][(t % rows + ep_rank + e) % replicas[e]] if 0 <= e < 4 else -1
+                for e in experts
+            ]
+            for t, experts in enumerate(logical.tolist())
+        ],
+        dtype=torch.int32,
+    )
+    real_tokens = num_tokens - 1
+    expected_load = torch.zeros(10, dtype=torch.int32)
+    if record_enabled:
+        valid = expected[:real_tokens].flatten()
+        expected_load += torch.bincount(valid[valid >= 0], minlength=10).int()
+    ids = logical.to(device=DEVICE, dtype=torch.int32)
+    out = torch.empty_like(ids)
+    load = torch.zeros(10, device=DEVICE, dtype=torch.int32)
+    _eplb_map_and_record_i32_kernel[(triton.cdiv(ids.numel(), 256),)](
+        ids,
+        torch.tensor(replicas, device=DEVICE, dtype=torch.int64),
+        torch.tensor(mapping, device=DEVICE, dtype=torch.int64),
+        out,
+        load,
+        torch.tensor(record_enabled, device=DEVICE),
+        torch.tensor(real_tokens, device=DEVICE, dtype=torch.int32),
+        4,
+        4,
+        10,
+        ids.numel(),
+        topk,
+        BLOCK_SIZE=256,
+        replica_routing_table=table,
+        ROUTING_TABLE_ROWS=rows,
+    )
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(load.cpu(), expected_load, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("record_enabled", [True, False])
