@@ -2612,6 +2612,7 @@ class TestTieringOffloadingManagerWithFsTier:
             parallel=OffloadingParallelConfig(
                 rank=0,
                 world_size=1,
+                local_world_size=1,
                 tp_size=1,
                 pp_size=1,
                 pcp_size=1,

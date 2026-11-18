@@ -702,7 +702,7 @@ class TestPromotionLatency:
         assert len(observations[("1:p2p", "success")]) == 1
 
 
-def test_pd_partial_promotion_does_not_refetch_tail():
+def test_pd_partial_promotion_does_not_refetch_tail(manager_lock):
     """A full primary must not turn a deferred PD tail into a second fetch."""
     from tests.v1.kv_offload.tiering.p2p.test_sessions import (
         FakeConnection,
@@ -713,13 +713,14 @@ def test_pd_partial_promotion_does_not_refetch_tail():
     from vllm.v1.kv_offload.tiering.p2p.session.protocol import FetchMsg
 
     peer = "10.0.0.1:8000"
-    p2p_tier = _make_manager()
+    p2p_tier = _make_manager(manager_lock)
     p2p_tier.locality = None
     _attach_fake_transports(p2p_tier)
     primary = CPUPrimaryTierOffloadingManager(
         num_chunks=3, mmap_region=_mock_mmap_region(3)
     )
     tiering = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary,
         secondary_tiers=[p2p_tier],
         tier_poll_interval_s=0.0,
