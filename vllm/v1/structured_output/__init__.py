@@ -315,7 +315,7 @@ class StructuredOutputManager:
             # is an independent code path, it is kept for now.
             # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
             # it can be removed.
-            if reasoner.is_reasoning_end(request.prompt_token_ids or []):
+            if reasoner.is_structured_output_start(request.prompt_token_ids or []):
                 return _CONSTRAINED_FROM_START
             structured_req.reasoning_ended = False
 
@@ -335,7 +335,7 @@ class StructuredOutputManager:
         # Fallback: the grammar starts after the end token. A view, not a copy,
         # of all_token_ids: most parsers don't read it every step.
         if spec_tokens_committed:
-            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
+            if not spec_tokens or not reasoner.is_structured_output_start_streaming(
                 request.all_token_ids, spec_tokens
             ):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
@@ -344,14 +344,16 @@ class StructuredOutputManager:
             delta_ids = list(spec_tokens)
         else:
             input_ids = TokenIdsView(request._all_token_ids, spec_tokens)
-            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
+            if not reasoner.is_structured_output_start_streaming(
+                input_ids, spec_tokens
+            ):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)
 
         for i in range(num_spec_tokens - 1, 0, -1):
             input_ids.pop()
             delta_ids.pop()
-            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+            if not reasoner.is_structured_output_start_streaming(input_ids, delta_ids):
                 return ConstraintBounds(i + 1, i + 1)
         return ConstraintBounds(1, 1)
 

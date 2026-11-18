@@ -248,6 +248,12 @@ class Parser:
 
         """
 
+    def is_structured_output_start(self, input_ids: list[int]) -> bool:
+        """Check if `input_ids` end in the output that structured outputs
+        constrain. Defaults to `is_reasoning_end`.
+        """
+        return self.is_reasoning_end(input_ids)
+
     @abstractmethod
     def parse(
         self,
@@ -777,6 +783,11 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
+
+    def is_structured_output_start(self, input_ids: list[int]) -> bool:
+        if self._reasoning_parser is None:
+            return False
+        return self._reasoning_parser.is_structured_output_start(input_ids)
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         if self._reasoning_parser is not None:

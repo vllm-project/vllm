@@ -641,7 +641,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # rule that handles both reasoning and non-reasoning outputs.
             return True
         if parser is not None and parser.reasoning_parser is not None:
-            return parser.is_reasoning_end(prompt_token_ids)
+            return parser.is_structured_output_start(prompt_token_ids)
         return None
 
     def build_chat_params(

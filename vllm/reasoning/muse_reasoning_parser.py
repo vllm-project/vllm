@@ -83,6 +83,8 @@ _MUSE_HEADER_RE = re.compile(
 _MUSE_BOUNDARY_RE = re.compile(r"<\|eom\|>|<\|eot\|>|<\|start\|>")
 _MUSE_OTHER_ROLE_RE = re.compile(r"<\|start\|>(?!assistant(?:\s|<|$))[^\s<]+")
 _MUSE_NON_TOOL_RECIPIENTS = (None, "self", "user", "commentary", "developer")
+# Tokens read before a `<|message|>` token to find its recipient.
+_MAX_HEADER_TOKENS = 32
 
 
 def _muse_messages(text: str) -> Iterator[tuple[str | None, str, bool, str]]:
@@ -194,6 +196,73 @@ class MuseReasoningParser(ReasoningParser):
     ) -> bool:
         return self.is_reasoning_end(list(input_ids))
 
+    def _framing_ids(self) -> tuple[int | None, set[int]]:
+        """Token ids of `<|message|>` and of the markers that end a message."""
+        if self._marker_ids is None:
+            vocab = self.vocab
+            boundaries = {vocab[m] for m in (_EOM, _EOT, "<|start|>") if m in vocab}
+            self._marker_ids = (vocab.get("<|message|>"), boundaries)
+        return self._marker_ids
+
+    def _opens_content_channel(
+        self, header_ids: Sequence[int], message_id: int
+    ) -> bool:
+        """Whether the header ending in the `<|message|>` token, given the tokens
+        before that token, opens a channel whose body is surfaced as content.
+        """
+        text = self.model_tokenizer.decode([*header_ids, message_id])
+        if self._glimmer_compat:
+            headers = list(_CHANNEL_HEADER_RE.finditer(text))
+            return bool(headers) and headers[-1].group("recipient") == "user"
+        headers = list(_MUSE_HEADER_RE.finditer(text))
+        return bool(headers) and headers[-1].group("recipient") in (
+            "user",
+            "commentary",
+        )
+
+    def is_structured_output_start(self, input_ids: Sequence[int]) -> bool:
+        """Whether `input_ids` end inside a `to=user` or `to=commentary` body.
+
+        `is_reasoning_end` fires only on a tool channel, so structured outputs
+        take their start from the channel header instead. The newest framing
+        token decides: a content header opens the constrained output, any
+        other header or a message end does not.
+        """
+        message_id, boundary_ids = self._framing_ids()
+        if message_id is None:
+            return self.is_reasoning_end(input_ids)
+        for i in range(len(input_ids) - 1, -1, -1):
+            token_id = input_ids[i]
+            if token_id in boundary_ids:
+                return False
+            if token_id == message_id:
+                return self._opens_content_channel(
+                    input_ids[max(0, i - _MAX_HEADER_TOKENS) : i], message_id
+                )
+        return False
+
+    def is_structured_output_start_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        """Whether a content-channel header is the newest framing in `delta_ids`.
+
+        Reads `delta_ids` and at most `_MAX_HEADER_TOKENS` tokens before them,
+        so a decode step costs the same at any prompt length.
+        """
+        message_id, boundary_ids = self._framing_ids()
+        if message_id is None:
+            return self.is_reasoning_end_streaming(input_ids, delta_ids)
+        delta = list(delta_ids)
+        for k in range(len(delta) - 1, -1, -1):
+            if delta[k] in boundary_ids:
+                return False
+            if delta[k] == message_id:
+                end = len(input_ids) - len(delta) + k
+                return self._opens_content_channel(
+                    input_ids[max(0, end - _MAX_HEADER_TOKENS) : end], message_id
+                )
+        return False
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Content-id slicing is unreliable for multi-token markers; the serving
         # path uses extract_reasoning() for the final split.
@@ -203,11 +272,7 @@ class MuseReasoningParser(ReasoningParser):
         """Count reasoning-body tokens, excluding header and marker tokens."""
         if self._glimmer_compat:
             return super().count_reasoning_tokens(token_ids)
-        if self._marker_ids is None:
-            vocab = self.vocab
-            boundaries = {vocab[m] for m in (_EOM, _EOT, "<|start|>") if m in vocab}
-            self._marker_ids = (vocab.get("<|message|>"), boundaries)
-        message_id, boundary_ids = self._marker_ids
+        message_id, boundary_ids = self._framing_ids()
 
         count = 0
         header_start = 0

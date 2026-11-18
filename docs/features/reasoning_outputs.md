@@ -567,6 +567,8 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
 The structured output engine like [xgrammar](https://github.com/mlc-ai/xgrammar) will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
+The structured output engine calls `is_structured_output_start` and `is_structured_output_start_streaming` to decide where constraints begin. Both default to the two methods above. Override them when the parser's reasoning phase also covers output that the grammar should constrain.
+
 Finally, you can enable reasoning for the model by using the `--reasoning-parser` flags.
 
 ```bash

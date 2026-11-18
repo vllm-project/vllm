@@ -75,6 +75,22 @@ class MockReasoner(ReasoningParser):
         return self.is_reasoning_end(delta_ids)
 
 
+class MockContentStartReasoner(MockReasoner):
+    """Never reports a reasoning end; structured outputs start after `marker`."""
+
+    def is_reasoning_end(self, input_ids):
+        return False
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        return False
+
+    def is_structured_output_start(self, input_ids):
+        return self.marker in list(input_ids)
+
+    def is_structured_output_start_streaming(self, input_ids, delta_ids):
+        return self.marker in list(delta_ids)
+
+
 class MockEngineReasoner(ParserEngineReasoningAdapter):
     """Ends reasoning implicitly on `marker`, which is also content, and
     explicitly on `end_marker` when one is given."""
@@ -564,6 +580,42 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
         request.append_output_token_ids([end])
         assert manager.accept_tokens(request, [end])
         assert row_pattern() == "C"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("in_prompt", [False, True])
+def test_grammar_starts_at_structured_output_start(
+    tokenizer, backend: StructuredOutputsBackend, in_prompt: bool
+):
+    """The grammar follows `is_structured_output_start*`, not the reasoning end."""
+    marker = _single_token(tokenizer, THINK_END)
+    open_brace = _single_token(tokenizer, "{")
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=None if in_prompt else False,
+        reasoning_parser_kwargs={"marker": marker},
+        num_spec_tokens=2,
+    )
+    manager.reasoner_cls = MockContentStartReasoner
+    if in_prompt:
+        request.prompt_token_ids = [marker]
+        drafts, expected = [open_brace], "CC"
+    else:
+        drafts, expected = [marker, open_brace], "UCC"
+
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+    assert bitmask is not None
+    assert _row_pattern(bitmask[: len(drafts) + 1]) == expected
+    request.append_output_token_ids(drafts)
+    assert manager.accept_tokens(request, drafts)
+    structured_req = request.structured_output_request
+    assert structured_req is not None
+    assert structured_req.reasoning_ended is True
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

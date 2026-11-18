@@ -129,6 +129,26 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def is_structured_output_start(self, input_ids: Sequence[int]) -> bool:
+        """Check if `input_ids` end in the output that structured outputs
+        constrain.
+
+        Defaults to `is_reasoning_end`. A parser whose reasoning phase also
+        covers content that it surfaces itself overrides this, so the grammar
+        starts at that content.
+        """
+        return self.is_reasoning_end(input_ids)
+
+    def is_structured_output_start_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        """Check if the output that structured outputs constrain starts in
+        `delta_ids`, the last tokens of `input_ids`, on a decode step.
+
+        Defaults to `is_reasoning_end_streaming`.
+        """
+        return self.is_reasoning_end_streaming(input_ids, delta_ids)
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """Extract content token ids from the input_ids.
