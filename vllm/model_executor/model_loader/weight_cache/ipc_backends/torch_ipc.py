@@ -8,7 +8,7 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    IPCBackend,
+    IPCBackendBase,
     StorageEntry,
     StorageRecord,
     storage_bytes,
@@ -46,6 +46,6 @@ class TensorEntry:
         return StorageRecord(owner=buffer, storage=storage)
 
 
-class CudaIpcBackend(IPCBackend):
+class TorchIPCBackend(IPCBackendBase):
     def export_storage(self, record: StorageRecord) -> StorageEntry:
         return TensorEntry.from_storage(record.storage)

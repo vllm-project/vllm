@@ -7,20 +7,21 @@ from __future__ import annotations
 import sys
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    IPCBackend,
+    IPCBackendBase,
     StorageEntry,
     StorageRecord,
     storage_bytes,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
-    TensorEntry,
-)
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     SharedFileDescriptor,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
+    TensorEntry,
 )
 from vllm.utils.vmm_driver import (
     MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
@@ -42,7 +43,6 @@ class VmmAllocation:
         self.ptr = 0
         self.handle = 0
         self.mapped = False
-        self.shared_fd = shared_fd
         self.fd: SharedFileDescriptor | None = None
         self.driver = get_vmm_driver()
         if not isinstance(self.driver, CudaVmmDriver):
@@ -136,7 +136,7 @@ class VmmStorage:
         return StorageRecord(owner=allocation, storage=storage)
 
 
-class VmmBackend(IPCBackend):
+class VmmIPCBackend(IPCBackendBase):
     """Move canonical GPU storages to exportable VMM allocations after warmup."""
 
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
@@ -163,8 +163,9 @@ class VmmBackend(IPCBackend):
         return records
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
-        owner = record.owner
-        if isinstance(owner, VmmAllocation):
-            assert owner.fd is not None
-            return VmmStorage(owner.fd, owner.size)
-        return TensorEntry.from_storage(record.storage)
+        if not record.storage.is_cuda or not record.storage.nbytes():
+            return TensorEntry.from_storage(record.storage)
+
+        owner = cast(VmmAllocation, record.owner)
+        assert owner.fd is not None
+        return VmmStorage(owner.fd, owner.size)

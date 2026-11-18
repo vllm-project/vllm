@@ -25,7 +25,7 @@ def storage_bytes(storage: torch.UntypedStorage) -> torch.Tensor:
     return torch.empty(0, dtype=torch.uint8, device=storage.device).set_(storage)
 
 
-class IPCBackend(ABC):
+class IPCBackendBase(ABC):
     """Materialize shared storage and export rebuildable entries."""
 
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:

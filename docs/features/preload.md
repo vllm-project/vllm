@@ -59,20 +59,20 @@ exports GPU weights:
 
 | Backend | Storage and sharing | Platforms |
 | --- | --- | --- |
-| `cuda_ipc` (default) | PyTorch CUDA IPC handles over the local Unix socket | CUDA and ROCm |
-| `vmm` | CUDA VMM allocations exported as POSIX file descriptors | CUDA on Linux |
+| `torch_ipc` (default) | PyTorch CUDA IPC handles over the local Unix socket | CUDA and ROCm |
+| `vmm_ipc` | CUDA VMM allocations exported as POSIX file descriptors | CUDA on Linux |
 
 For example:
 
 ```bash
-vllm preload --model /path/to/model --weight-cache-backend vmm
+vllm preload --model /path/to/model --weight-cache-backend vmm_ipc
 vllm serve /path/to/model --load-format ipc_cache
 ```
 
 The `ipc_cache` loader does not configure the backend again through
 `--model-loader-extra-config`. It negotiates with the daemon and accepts the
 backend named in its response; a response from an older daemon without that
-field defaults to `cuda_ipc`.
+field defaults to `torch_ipc`.
 
 A backend mismatch follows the ordinary cache-mismatch policy: disk fallback
 when enabled, an error otherwise. New engines can connect to existing CUDA IPC
@@ -116,8 +116,8 @@ introduce that deployment capability. The daemon still loads the model and
 initializes CUDA; this backend does not implement a separate CUDA-free FD
 holder. It also does not add EPLB or sleep-mode support.
 
-The built-in `cuda_ipc` and `vmm` backends are the only statically supported
-backends. They implement `IPCBackend`, whose `materialize(storages)` returns
+The built-in `torch_ipc` and `vmm_ipc` backends are the only statically supported
+backends. They implement `IPCBackendBase`, whose `materialize(storages)` returns
 `StorageRecord`s and whose `export_storage(record)` returns a rebuildable
 `StorageEntry`. Tensor reconstruction remains separate from the model's
 processed-weight contract and daemon-to-daemon copy movers.

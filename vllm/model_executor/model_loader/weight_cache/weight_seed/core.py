@@ -18,7 +18,7 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        IPCBackend,
+        IPCBackendBase,
         StorageRecord,
     )
 
@@ -102,7 +102,7 @@ def get_mover(
     name: SeedBackend,
     *,
     device_index: int | None = None,
-    ipc_backend: "IPCBackend | None" = None,
+    ipc_backend: "IPCBackendBase | None" = None,
 ) -> WeightMover:
     """The mover for a backend; `device_index` pins the peer_ipc device."""
     if name == PEER_IPC_BACKEND:

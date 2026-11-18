@@ -189,9 +189,9 @@ class PreloadSubcommand(CLISubcommand):
         parser.add_argument(
             "--weight-cache-backend",
             choices=IPC_BACKENDS,
-            default="cuda_ipc",
-            help="Local weight-sharing backend (default: cuda_ipc). "
-            "vmm uses CUDA VMM allocations and POSIX file descriptors on Linux.",
+            default="torch_ipc",
+            help="Local weight-sharing backend (default: torch_ipc). "
+            "vmm_ipc uses CUDA VMM allocations and POSIX file descriptors on Linux.",
         )
         parser.add_argument(
             "--weight-cache-socket-dir",

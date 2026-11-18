@@ -183,7 +183,7 @@ class WeightCacheDaemon:
         seed_config: SeedConfig | None = None,
         device_index: int | None = None,
         warmup_cache_stores: Iterable[str] = (),
-        weight_cache_backend: str = "cuda_ipc",
+        weight_cache_backend: str = "torch_ipc",
     ):
         from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
             IPC_BACKENDS,
@@ -562,11 +562,6 @@ class WeightCacheDaemon:
             state.attrs,
         )
 
-    def _seed_state(self) -> WeightCacheState:
-        """Return this rank's canonical post-warmup state."""
-        assert self.state is not None
-        return self.state
-
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
         cmd = request.get("cmd")
@@ -702,7 +697,7 @@ def _run_daemon(
     seed_config: SeedConfig | None = None,
     device_index: int | None = None,
     warmup_cache_stores: Iterable[str] = (),
-    weight_cache_backend: str = "cuda_ipc",
+    weight_cache_backend: str = "torch_ipc",
 ) -> None:
     # Spawned daemons start with logging unconfigured, like engine workers.
     if logging_config := getattr(vllm_config, "logging_config", None):

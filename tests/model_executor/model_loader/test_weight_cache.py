@@ -74,9 +74,7 @@ def _state_for_model(model, backend_name):
 
 
 def _export_vmm_test_model(connection):
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
-        send_msg,
-    )
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
 
     with connection:
         model = torch.nn.Module()
@@ -88,9 +86,9 @@ def _export_vmm_test_model(connection):
         model.register_buffer("bytes_view", storage.view(torch.uint8))
         model.register_buffer("host_table", torch.arange(3))
         model.register_buffer("empty", torch.empty(0, device="cuda:0"))
-        state, backend = _state_for_model(model, "vmm")
+        state, backend = _state_for_model(model, "vmm_ipc")
         entries = [backend.export_storage(record) for record in state.storages]
-        send_msg(
+        serial_utils.send_msg(
             connection,
             {
                 "storages": entries,
@@ -103,13 +101,13 @@ def _export_vmm_test_model(connection):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
     """The FD holder imports after the producer exits; tensor views own the mapping."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
-        recv_msg,
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        storage_bytes,
     )
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
-        storage_bytes,
     )
 
     client, server = socket.socketpair()
@@ -120,7 +118,7 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
     try:
         with client:
             client.settimeout(180)
-            payload = recv_msg(client)
+            payload = serial_utils.recv_msg(client)
         process.join(timeout=60)
         assert process.exitcode == 0
         entries = payload["storages"]
@@ -163,10 +161,7 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
 def test_vmm_peer_copy_preserves_views_and_current_device():
     """VMM sources can seed a different GPU without redirecting its stream sync."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
-        recv_msg,
-        send_msg,
-    )
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
     from vllm.model_executor.model_loader.weight_cache.weight_seed.core import get_mover
     from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
         PeerIpcMover,
@@ -175,13 +170,13 @@ def test_vmm_peer_copy_preserves_views_and_current_device():
     model = torch.nn.Module()
     model.register_buffer("weight", torch.arange(48, device="cuda:0").reshape(6, 8))
     model.register_buffer("view", model.weight[1:5, ::2])
-    state, backend = _state_for_model(model, "vmm")
+    state, backend = _state_for_model(model, "vmm_ipc")
     source = PeerIpcMover(0, backend)
     client, server = socket.socketpair()
     with client, server:
         seed = source.prepare_seed(state.storages)
-        send_msg(server, seed)
-        seed = recv_msg(client)
+        serial_utils.send_msg(server, seed)
+        seed = serial_utils.recv_msg(client)
     with torch.accelerator.device_index(1):
         copied = get_mover("peer_ipc").fill(
             state.manifest, seed, torch.device("cuda", 1)
@@ -328,9 +323,9 @@ class WeightCacheDaemon:
 @pytest.mark.parametrize(
     "backend",
     [
-        "cuda_ipc",
+        "torch_ipc",
         pytest.param(
-            "vmm",
+            "vmm_ipc",
             marks=pytest.mark.skipif(
                 not current_platform.is_cuda(), reason="VMM backend requires CUDA"
             ),
@@ -383,7 +378,7 @@ def test_weight_cache_backend_llm_restart(vllm_runner, tmp_path, monkeypatch, ba
             backend,
             "--skip-tokenizer-init",
             "--enable-flashinfer-autotune"
-            if backend == "vmm"
+            if backend == "vmm_ipc"
             else "--disable-flashinfer-autotune",
             "--dtype",
             "float16",
@@ -1379,13 +1374,15 @@ def test_ipc_rope_matching(
 
     from vllm.config import LoadConfig, ModelConfig, VllmConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        storage_bytes,
+    )
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
         hash_rope_parameters,
     )
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
-        storage_bytes,
     )
 
     is_reload, rope_type, theta, factor, max_position, rank, mismatch = case
@@ -1566,14 +1563,13 @@ def test_ipc_loader_skips_watch_on_old_daemon(monkeypatch):
     """Daemons predating the watch command reject it; loading still works."""
     from vllm.config import LoadConfig
     from vllm.model_executor.model_loader.weight_cache import ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
-        recv_msg,
-        send_msg,
-    )
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
 
     def reject(connection) -> None:
-        assert recv_msg(connection) == {"cmd": "watch"}
-        send_msg(connection, {"status": "error", "message": "Unknown command"})
+        assert serial_utils.recv_msg(connection) == {"cmd": "watch"}
+        serial_utils.send_msg(
+            connection, {"status": "error", "message": "Unknown command"}
+        )
 
     loader = ipc_loader.IpcModelLoader(
         LoadConfig(
@@ -1827,12 +1823,10 @@ def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
 
     def handle(request):
-        return SeedTransport([FlashInferWarmupCache()]).handle_request(request)
+        transport = SeedTransport([FlashInferWarmupCache()])
+        return transport.handle_request(request)
 
     assert handle("not a dict")["status"] == "error"
     assert handle(_warmup_cache_request(kind="bogus"))["status"] == "error"
@@ -1851,10 +1845,6 @@ def test_warmup_cache_metadata_gate():
     """Tables flashinfer would refuse to load are rejected before install."""
     pytest.importorskip("flashinfer")
     from flashinfer.autotuner.autotuner import _collect_metadata
-
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
 
     kind = FlashInferWarmupCache()
     filename = "autotune_configs_dp0_rank0.json"
@@ -1888,9 +1878,6 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
     )
 
     config_hash = "b" * 64
@@ -1963,10 +1950,6 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     """Install writes the fetched table to the rank's disk tier."""
     import json
 
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
-        FlashInferWarmupCache,
-    )
-
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     config_hash = "a" * 64
     kind = FlashInferWarmupCache()
@@ -2023,10 +2006,7 @@ def _exercise_lease_release(
     """Hold a real copy lease open while the source handles a real release."""
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
-        recv_msg,
-        send_msg,
-    )
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
     from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
@@ -2052,7 +2032,7 @@ def _exercise_lease_release(
         release_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         release_sock.settimeout(300)
         release_sock.connect(control_socket)
-        send_msg(release_sock, {"cmd": "release"})
+        serial_utils.send_msg(release_sock, {"cmd": "release"})
     source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
     if shutdown:
         assert source._proc is not None
@@ -2073,7 +2053,7 @@ def _exercise_lease_release(
         assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
     else:
         release_sock.settimeout(30)
-        assert recv_msg(release_sock)["status"] == "ok"
+        assert serial_utils.recv_msg(release_sock)["status"] == "ok"
         release_sock.close()
         source.wait_for_log("released cached weights")
         response = transport.request({"kind": "weights", "seed_backend": backend})

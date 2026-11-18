@@ -692,7 +692,7 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
         TensorEntry,
     )
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (

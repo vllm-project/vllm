@@ -10,8 +10,8 @@ import torch
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     storage_bytes,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
-    CudaIpcBackend,
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
+    TorchIPCBackend,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        IPCBackend,
+        IPCBackendBase,
         StorageRecord,
     )
 
@@ -34,13 +34,13 @@ class PeerIpcMover(WeightMover):
     def __init__(
         self,
         device_index: int | None = None,
-        ipc_backend: "IPCBackend | None" = None,
+        ipc_backend: "IPCBackendBase | None" = None,
     ):
         # The D2D serving thread never set a device, and an IPC handle must
         # name the daemon's device; None means the device is already current
         # (e.g. the loader's own thread).
         self._device_index = device_index
-        self._ipc_backend = ipc_backend or CudaIpcBackend()
+        self._ipc_backend = ipc_backend or TorchIPCBackend()
 
     def prepare_seed(self, storages: list["StorageRecord"]) -> dict:
         if self._device_index is not None:

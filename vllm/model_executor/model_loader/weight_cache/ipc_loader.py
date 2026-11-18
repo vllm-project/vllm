@@ -221,13 +221,7 @@ class IpcModelLoader(BaseModelLoader):
             )
         else:
             state = self._state_for_key(cache_key, device_index, is_reload=True)
-        buffers = [
-            storage_bytes(record.storage)[: storage["nbytes"]]
-            for record, storage in zip(
-                state.storages, state.manifest["storages"], strict=True
-            )
-        ]
-        tensors = rebuild_tensors(state.manifest, buffers)
+        tensors, _ = self._rebuild_storages(state, clone=False)
         params = dict(model.named_parameters())
         named_buffers = dict(model.named_buffers())
         for name, source in tensors.items():
@@ -247,8 +241,16 @@ class IpcModelLoader(BaseModelLoader):
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
         )
-        model = self._attempt_cached_model(vllm_config, model_config, prefix)
-        if model is None:
+        model, fetched = self._attempt_cached_model(vllm_config, model_config, prefix)
+        if self.mode == "copy" and fetched:
+            self._send_release()
+        if model is not None:
+            if self.mode == "zero_copy":
+                self._watch_daemon()
+            logger.info(
+                "Mapped tensors from the weight cache daemon (%s mode)", self.mode
+            )
+        else:
             torch.accelerator.empty_cache()
             model = self._fallback_load(vllm_config, model_config, prefix)
             if self.mode == "zero_copy":
@@ -259,7 +261,7 @@ class IpcModelLoader(BaseModelLoader):
 
     def _attempt_cached_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str
-    ) -> nn.Module | None:
+    ) -> tuple[nn.Module | None, bool]:
         fetched = False
         try:
             _, device_index = _load_device(self.load_config, vllm_config)
@@ -278,8 +280,6 @@ class IpcModelLoader(BaseModelLoader):
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
-            if self.mode == "copy" and fetched:
-                self._send_release()
         except UnsupportedQuantForIPCError:
             # Unsupported quantization is a permanent misconfiguration rather
             # than a transient daemon outage, so it is raised even when
@@ -291,18 +291,9 @@ class IpcModelLoader(BaseModelLoader):
             logger.exception(
                 "Weight cache loading failed; falling back to disk loading"
             )
-            if self.mode == "copy" and fetched:
-                self._send_release()
         else:
-            if self.mode == "copy":
-                self._send_release()
-            else:
-                self._watch_daemon()
-            logger.info(
-                "Mapped tensors from the weight cache daemon (%s mode)", self.mode
-            )
-            return model
-        return None
+            return model, fetched
+        return None, fetched
 
     def _build_model(
         self,
@@ -311,7 +302,7 @@ class IpcModelLoader(BaseModelLoader):
         prefix: str,
         state: WeightCacheState,
     ) -> nn.Module:
-        tensors, kinds = self._rebuild_storages(state)
+        tensors, kinds = self._rebuild_storages(state, clone=self.mode == "copy")
         model = build_model_from_processed_weights(
             vllm_config,
             model_config,
@@ -325,20 +316,22 @@ class IpcModelLoader(BaseModelLoader):
         return model
 
     def _rebuild_storages(
-        self, state: WeightCacheState
+        self, state: WeightCacheState, *, clone: bool | None = None
     ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind]]:
         """Rebuild manifest tensors from one imported buffer per storage.
 
-        In "copy" mode every whole storage is cloned into engine-owned memory
-        so the daemon can be asked to release its cache afterwards.
+        If `clone` is true, the storage prefixes are cloned into engine-owned
+        memory so the daemon can be asked to release its cache afterwards.
         """
+        if clone is None:
+            clone = self.mode == "copy"
         buffers = [
             storage_bytes(record.storage)[: storage["nbytes"]]
             for record, storage in zip(
                 state.storages, state.manifest["storages"], strict=True
             )
         ]
-        if self.mode == "copy":
+        if clone:
             buffers = [buffer.clone() for buffer in buffers]
         tensors = rebuild_tensors(state.manifest, buffers)
         kinds: dict[str, TensorKind] = {

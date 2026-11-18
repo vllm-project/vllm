@@ -11,9 +11,8 @@ import torch
 from pydantic import TypeAdapter
 
 from vllm.config import replace
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import TensorKind
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    storage_bytes as storage_bytes,
+    TensorKind,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
