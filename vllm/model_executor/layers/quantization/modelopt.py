@@ -1931,6 +1931,10 @@ class ModelOptInt8PbWoMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, group_size: int, moe: FusedMoEConfig):
         super().__init__(moe)
+        if not current_platform.is_cuda():
+            raise NotImplementedError(
+                "ModelOpt INT8_PB_WO MoE experts are validated on NVIDIA GPUs only"
+            )
         self.weight_format = WNA16WeightFormat(num_bits=8, group_size=group_size)
         self.backend, self.experts_cls = select_wna16_moe_backend(
             config=moe,
