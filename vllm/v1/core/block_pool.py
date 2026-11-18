@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -171,6 +172,47 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+
+        # Hashes evicted from the prefix cache, most recent last. None (the
+        # default) keeps eviction free of any extra work; a peer lookup turns
+        # it on to tell an evicted prefix from one it never cached.
+        self._evicted_hashes: OrderedDict[BlockHashWithGroupId, None] | None = None
+        self._max_evicted_hashes = 0
+
+    def enable_evicted_hash_tracking(self, max_entries: int) -> None:
+        """Remember up to `max_entries` of the most recently evicted hashes.
+
+        A hash leaves the record when it is cached again, when newer evictions
+        push it out, or when the prefix cache is reset.
+        """
+        assert max_entries > 0
+        self._max_evicted_hashes = max_entries
+        if self._evicted_hashes is None:
+            self._evicted_hashes = OrderedDict()
+        while len(self._evicted_hashes) > max_entries:
+            self._evicted_hashes.popitem(last=False)
+
+    def was_evicted(self, block_hash: BlockHash, kv_cache_group_id: int) -> bool:
+        """Whether `block_hash` was recently evicted from the prefix cache.
+
+        Always False unless `enable_evicted_hash_tracking` was called. A hash that
+        aged out of the record also reads False.
+        """
+        if self._evicted_hashes is None:
+            return False
+        key = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
+        return key in self._evicted_hashes
+
+    def _record_evicted_hashes(self, hashes: list[BlockHashWithGroupId]) -> None:
+        evicted = self._evicted_hashes
+        assert evicted is not None
+        for block_hash in hashes:
+            if self.cached_block_hash_to_block.get_one_block(block_hash) is not None:
+                continue  # A duplicate block still caches this hash.
+            evicted.pop(block_hash, None)
+            evicted[block_hash] = None
+        while len(evicted) > self._max_evicted_hashes:
+            evicted.popitem(last=False)
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -658,6 +700,9 @@ class BlockPool:
             self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
                 block_hash_with_group_id
             )
+        # The hash is cached again, so a peer lookup no longer reports it evicted.
+        if self._evicted_hashes is not None:
+            self._evicted_hashes.pop(block_hash_with_group_id, None)
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
 
     def move_block_hashes(
@@ -748,12 +793,16 @@ class BlockPool:
                 released.append(block)
         self.free_block_queue.append_n(released)
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self, block: KVCacheBlock, record_eviction: bool = True
+    ) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            record_eviction: Remember the hashes for `was_evicted`. False
+                when the block's contents are invalid rather than displaced.
 
         Returns:
             True if the block is evicted, False otherwise.
@@ -768,6 +817,8 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        if record_eviction and self._evicted_hashes is not None:
+            self._record_evicted_hashes(evicted_hashes)
         self._emit_block_removed_events(evicted_hashes)
         return True
 
@@ -856,7 +907,9 @@ class BlockPool:
                 f"only report block IDs that were allocated by the scheduler."
             )
             block = self.blocks[block_id]
-            self._maybe_evict_cached_block(block)
+            # Reported for invalid contents (e.g. a failed KV load): reading
+            # these hashes as evicted would blame the reader's stale index.
+            self._maybe_evict_cached_block(block, record_eviction=False)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -881,6 +934,10 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        if self._evicted_hashes is not None:
+            # Hashes from before a reset (often a weight update) name KV that
+            # no longer exists anywhere: report them as never cached.
+            self._evicted_hashes.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]

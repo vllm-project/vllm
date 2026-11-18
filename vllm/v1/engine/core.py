@@ -89,6 +89,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
+    PeerLookupInfo,
     PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -1404,6 +1405,16 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
+            # Let a connector's background threads wake this loop when idle
+            # (the in-process EngineCore has none; it serves them next step).
+            connector = getattr(self.scheduler, "connector", None)
+            if connector is not None:
+                connector.set_engine_wakeup(
+                    lambda: self.input_queue.put_nowait(
+                        (EngineCoreRequestType.WAKEUP, None)
+                    )
+                )
+
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
                 vllm_config.parallel_config.enable_fault_tolerance
@@ -2102,6 +2113,10 @@ class EngineCoreProc(EngineCore):
         except Exception:
             return None
 
+    def _get_peer_lookup_info(self) -> PeerLookupInfo | None:
+        kv_connector = self.scheduler.get_kv_connector()
+        return kv_connector.get_peer_lookup_info() if kv_connector else None
+
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
@@ -2136,6 +2151,7 @@ class EngineCoreProc(EngineCore):
                 else 0
             ),
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
+            peer_lookup=self._get_peer_lookup_info(),
             weight_transfer_backend=(
                 self.vllm_config.weight_transfer_config.backend
                 if self.vllm_config.weight_transfer_config is not None

@@ -19,7 +19,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import CheckpointState, EngineCoreRequest
+from vllm.v1.engine import CheckpointState, EngineCoreRequest, PeerLookupInfo
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -70,6 +70,10 @@ class EngineClient(ABC):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         """KV-event publisher config of each engine, keyed by DP rank."""
+        return {}
+
+    def get_peer_lookup_infos(self) -> dict[int, PeerLookupInfo]:
+        """Peer lookup record of each engine that serves one, keyed by DP rank."""
         return {}
 
     def check_admission(  # noqa: B027

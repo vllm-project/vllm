@@ -357,6 +357,19 @@ python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
 
     We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
 
+## Peer Prefix Lookup
+
+A router can send a request to a less busy engine and have it fetch the prefix KV from the engine that already caches it. The consumer asks the producer over the NIXL side channel to pin the longest cached prefix by block hash. The producer replies with the block ids without computing anything, and the consumer pulls them and computes the rest.
+
+Enable it on the producer with `peer_lookup` in `kv_connector_extra_config`. It is off by default and works in pull mode only:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"peer_lookup":true}}'
+```
+
+A producer that serves lookups reports a `peer_lookup` record (side-channel address and identity) on `GET /kv_event_sources`, which a router uses to find it. A request takes the peer path when its `kv_transfer_params` set both `peer_lookup` and `do_remote_prefill`. See [NIXL Peer Prefix Lookup and Pin](../design/nixl_peer_lookup_pin.md) for the protocol, the tuning settings and the limits.
+
 ## Multi-Instance Setup
 
 ### Multiple Prefiller Instances on Different Machines
@@ -495,6 +508,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 | `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
+| `vllm:nixl_num_declined_expired_reads` | Counter | Remote reads the consumer declined because the producer's lease had run out before the read reached it (the blocks may have been recycled); each one is a request that follows `kv_load_failure_policy`. Tracked on the reading instance; the producer-side view is `vllm:nixl_num_kv_expired_reqs`. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

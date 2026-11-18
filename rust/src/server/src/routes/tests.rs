@@ -3399,6 +3399,72 @@ async fn kv_event_sources_reports_each_ready_engine() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn kv_event_sources_adds_peer_lookup_only_where_reported() {
+    use vllm_engine_core_client::protocol::handshake::PeerLookupInfo;
+
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 2,
+        // No KV events: the rank is reported with the disabled default source.
+        kv_events_config: None,
+        peer_lookup: Some(PeerLookupInfo {
+            enabled: true,
+            engine_id: "engine-a".to_string(),
+            side_channel_host: "10.0.0.2".to_string(),
+            side_channel_port: 5602,
+            tp_size: 2,
+            dcp_size: 1,
+            pp_size: 1,
+            connector: "NixlConnector".to_string(),
+            connector_version: "17".to_string(),
+            layout_fingerprint: "abc123".to_string(),
+        }),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_event_sources")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "2": {
+                "enable_kv_cache_events": false,
+                "publisher": "null",
+                "endpoint": "tcp://*:5557",
+                "replay_endpoint": null,
+                "buffer_steps": 10000,
+                "hwm": 100000,
+                "max_queue_size": 100000,
+                "topic": "",
+                "peer_lookup": {
+                    "enabled": true,
+                    "engine_id": "engine-a",
+                    "side_channel_host": "10.0.0.2",
+                    "side_channel_port": 5602,
+                    "tp_size": 2,
+                    "dcp_size": 1,
+                    "pp_size": 1,
+                    "connector": "NixlConnector",
+                    "connector_version": "17",
+                    "layout_fingerprint": "abc123",
+                },
+            }
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
     let (mut app, _engine_task) = test_app().await;
     let response = app

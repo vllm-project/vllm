@@ -42,6 +42,81 @@ Tracking stops when either the KV transfer completes (via `update_connector_outp
 
 Heartbeat sending and processing happen **in the forward loop**, not in a background thread. This means timing is not millisecond-precise --- a long model forward pass will delay heartbeats. However, the lease durations are configured with sufficient margin: with default settings, the heartbeat interval (~5s) and lease extension (~20s) are at least an order of magnitude larger than a typical forward pass. This avoids lock complexity between threads while keeping the design simple and extensible.
 
+### Stale read protection
+
+Heartbeats only start once the request has entered D's scheduler. A request that
+a router or proxy holds *outside* D after P finished (for example while D is at
+capacity) renews nothing, so P's lease runs out and P recycles the blocks for
+new prefills. Nothing in the transport notices: a NIXL read of recycled blocks
+succeeds and loads other requests' KV cache (and, for hybrid models, their SSM
+state), which surfaces later as corrupted output or NaN logits.
+
+To close this gap, P exports the lease deadline in `kv_transfer_params`
+(`remote_blocks_expiry_time`, in P's `perf_counter` domain) together with
+`remote_lease_extension`, the number of seconds each heartbeat renews the lease
+by. Before issuing a read, D's worker rebases the deadline with the clock offset
+measured at handshake and declines the read if the deadline is within
+`_KV_BLOCKS_EXPIRY_SAFETY_MARGIN` (5s) of now.
+
+The heartbeats D itself sent for the request are taken into account with an
+exact model of P's renewal rule: D's scheduler ships the exported deadline and
+renewal amount along with each heartbeat batch (`HeartbeatInfo.leases`), and
+the worker applies every heartbeat it sends to a per-request `RemoteLeaseModel`
+the way P's `_handle_heartbeat` would. A heartbeat that goes out while the
+modelled lease is still alive renews it to `send time + extension`; one that
+goes out after the lease ran out renews nothing, and neither does anything after
+it. The send time plus the safety margin stands in for the arrival time on P, so
+the model can only lag the real lease, never run ahead of it (a pause between
+heartbeats is harmless as long as the current lease, initial or renewed, covers
+it). A heartbeat round that failed to reach one of the remote ranks is not
+counted: this avoids relying on the scheduler-side aggregation that keeps the
+blocks allocated until every rank's lease has ended (consequence: with PP > 1
+notification-only agents, a permanently unreachable rank means no round is ever
+recorded for that engine, and heartbeated waits longer than the lease are
+declined).
+
+A declined read is reported to the scheduler as `failed_recving`, counted in
+`vllm:nixl_num_declined_expired_reads` on the reading instance (the P-side
+`vllm:nixl_num_kv_expired_reqs` counts the leases that ran out), and the request
+follows `kv_load_failure_policy`: with the default `fail` it finishes with an
+error, with `recompute` D prefills it locally. Deployments whose router may hold
+requests longer than `kv_lease_duration` should raise the lease, fix the router,
+or set `"kv_load_failure_policy": "recompute"`.
+
+What this does not cover:
+
+- Peers that export no deadline or no renewal amount (older versions, fixed-TTL
+  blocks, or a router that drops the fields), or for which no clock offset is
+  known, are read as before.
+- A single heartbeat stall longer than `extension - margin` (15s with the
+  defaults) marks the modelled lease as lapsed for good, even though P may have
+  renewed it if the late heartbeat still arrived in time; the request is then
+  declined however long it is heartbeated afterwards. The shared 5s margin
+  trades this (rare, conservative) case for simplicity.
+- A heartbeat notification that takes longer than the safety margin to reach P.
+  The model credits the renewal at send time; if P only processes the heartbeat
+  after the lease ran out, the blocks are gone and the model does not know.
+  This is the assumption the heartbeat protocol itself rests on (a heartbeat
+  delayed past the lease already lets P free the blocks); a confirmation
+  round-trip from D to P before the read would remove it and is a possible
+  follow-up.
+- Request ids containing `,`: the heartbeat payload is comma-separated, so P
+  cannot match them and never renews their leases (pre-existing). The model
+  never credits a renewal for such ids, so their reads are declined once the
+  initial lease is over.
+- The clock offset is estimated once per handshake (and again whenever the
+  remote re-registers). Both hosts' monotonic clocks are assumed to be
+  rate-disciplined (NTP/chrony); an undisciplined drift that exceeds the 5s
+  margin over the lifetime of the pairing would defeat the check.
+- The check happens right before the read is posted. A lease that runs out
+  while the transfer is in flight is the existing race that
+  `vllm:nixl_num_notifications_after_expiry` surfaces on P.
+- Blocks released for other reasons: P frees them as soon as the expected
+  consumers' completion notifications arrive, so replayed or duplicated
+  `kv_transfer_params` read blocks the lease model considers live; and a P
+  restarted behind the same address and engine id holds neither the lease nor
+  the data. Both are outside the lease model.
+
 ## Happy Path
 
 ```mermaid
@@ -132,5 +207,9 @@ vllm serve <MODEL> \
     "kv_connector_extra_config": {"kv_lease_duration": 60}
   }'
 ```
+
+`kv_load_failure_policy` (top-level `--kv-transfer-config`, default `fail`) decides what
+happens to a request whose remote read was declined because the lease had run out: `fail`
+ends it with an error, `recompute` prefills it locally.
 
 For full NixlConnector configuration details, see the [NixlConnector Usage Guide](../features/nixl_connector_usage.md).

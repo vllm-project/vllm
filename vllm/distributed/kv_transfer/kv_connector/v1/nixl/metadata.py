@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
+import enum
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +20,7 @@ TransferHandle = int
 ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
+LOOKUP_PIN_MSG = b"lookup_pin"
 
 # Push-mode (WRITE-based) registration notification.
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
@@ -53,8 +55,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Export remote_blocks_expiry_time for P blocks too, plus
+#      remote_lease_extension; the consumer gates every remote read on it
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass(slots=True)
@@ -102,6 +106,53 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+
+
+class PeerMissReason(enum.StrEnum):
+    """Why a lookup-and-pin did not pin the whole prefix.
+
+    NOT_CACHED and EVICTED describe where a partial hit stopped.
+    """
+
+    NONE = "none"
+    NOT_CACHED = "not_cached"
+    EVICTED = "evicted"  # Recently evicted: the router's index was stale.
+    IDENTITY_MISMATCH = "identity_mismatch"  # The consumer must fail closed.
+    PIN_REFUSED = "pin_refused"  # Cached, but the producer cannot hold it now.
+
+
+@dataclass
+class PeerKVIdentity:
+    compatibility_hash: str  # From compute_nixl_compatibility_hash.
+    block_size: int
+    # CacheConfig.prefix_caching_hash_algo. The compatibility hash does not
+    # cover it, and peers that hash differently never share a block hash.
+    hash_algo: str
+    cache_salt: str | None = None
+
+
+@dataclass
+class LookupPinRequest:
+    # vLLM prefix-cache block hashes, in prefix order.
+    block_hashes: list[bytes]
+    identity: PeerKVIdentity
+    # Seconds; None uses the producer's kv_lease_duration.
+    lease_duration: float | None = None
+
+
+@dataclass
+class LookupPinReply:
+    hit_tokens: int
+    # Per KV cache group; empty on a miss. A list rather than BlockIds since
+    # msgspec cannot decode BlockIds' tuple | list union.
+    remote_block_ids: list[list[int]]
+    # Id of the pin, used for heartbeats and freeing like remote_request_id.
+    remote_request_id: str
+    miss_reason: PeerMissReason
+    # Match the kv_transfer_params fields of the same name: the producer's
+    # perf_counter deadline and the seconds each heartbeat renews it by.
+    remote_blocks_expiry_time: float | None = None
+    remote_lease_extension: int | None = None
 
 
 def _get_speculative_compatibility_factors(
@@ -229,6 +280,11 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
+    # Per remote request id, the lease deadline the remote exported (its
+    # perf_counter) and the seconds each heartbeat renews it by, when the
+    # remote provided both. The worker keeps an exact model of the lease it
+    # renews from these (NixlBaseConnectorWorker._record_heartbeat_sent).
+    leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

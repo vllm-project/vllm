@@ -50,6 +50,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
+    PeerLookupInfo,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -105,6 +106,10 @@ class EngineCoreClient(ABC):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         """KV-event publisher config of each ready engine, keyed by DP rank."""
+        return {}
+
+    def get_peer_lookup_infos(self) -> dict[int, PeerLookupInfo]:
+        """Peer lookup record of each ready engine that serves one, by DP rank."""
         return {}
 
     @staticmethod
@@ -652,6 +657,7 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        self._peer_lookup_infos: dict[int, PeerLookupInfo] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -939,6 +945,12 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+        # Unlike the config above, a re-added rank that no longer serves peer
+        # lookups must not keep its old record.
+        if response.peer_lookup is not None:
+            self._peer_lookup_infos[response.data_parallel_rank] = response.peer_lookup
+        else:
+            self._peer_lookup_infos.pop(response.data_parallel_rank, None)
 
         parallel_config = vllm_config.parallel_config
         if response.coord_store_port:
@@ -961,6 +973,9 @@ class MPClient(EngineCoreClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
+
+    def get_peer_lookup_infos(self) -> dict[int, PeerLookupInfo]:
+        return dict(self._peer_lookup_infos)
 
 
 def _process_utility_output(
@@ -2207,6 +2222,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         for rank in range(new_data_parallel_size, cur_data_parallel_size):
             self._kv_event_sources.pop(rank, None)
+            self._peer_lookup_infos.pop(rank, None)
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         eep_mode = self._eep_commit_pause_mode()
         pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size

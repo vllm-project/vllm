@@ -521,6 +521,20 @@ class PrefixHashConfig:
 
 
 @dataclass(slots=True)
+class PeerLookupInfo:
+    enabled: bool
+    engine_id: str
+    side_channel_host: str
+    side_channel_port: int
+    tp_size: int
+    dcp_size: int
+    pp_size: int
+    connector: str
+    connector_version: str
+    layout_fingerprint: str
+
+
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -551,6 +565,7 @@ class EngineCoreReadyResponse:
     cache_config_info: dict[str, str] | None = None
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    peer_lookup: PeerLookupInfo | None = None
     supports_prompt_logprobs: bool = True
 
 
@@ -601,6 +616,18 @@ ready_response = EngineCoreReadyResponse(
     cache_config_info={"block_size": "16", "mamba_block_size": "None"},
     config_hash="0123456789",
     enable_expert_parallel=True,
+    peer_lookup=PeerLookupInfo(
+        enabled=True,
+        engine_id="engine-a",
+        side_channel_host="10.0.0.2",
+        side_channel_port=5600,
+        tp_size=2,
+        dcp_size=1,
+        pp_size=1,
+        connector="NixlConnector",
+        connector_version="17",
+        layout_fingerprint="abc123",
+    ),
     supports_prompt_logprobs=False,
 )
 
