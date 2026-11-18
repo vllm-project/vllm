@@ -16,6 +16,7 @@ import os
 import torch
 
 from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+    pack_scale_zp_carrier,
     pack_skinny_int4,
 )
 from vllm.triton_utils import triton
@@ -54,13 +55,13 @@ WEIGHT_SHAPES = {
 # ---------------------------------------------------------------------------
 # Weight packing
 # ---------------------------------------------------------------------------
-def prepare_hybrid_weights(K, N, group_size, device="cuda"):
+def prepare_hybrid_weights(K, N, group_size, dtype=torch.float16, device="cuda"):
     """Create random weights for benchmarking.
 
     Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
     its int32 view from w_q_skinny, so no separate int32 buffer is returned.
 
-    Weights go through ``pack_skinny_int4``, the packer the layer uses, so the
+    Weights go through `pack_skinny_int4`, the packer the layer uses, so the
     benchmark sees the production row stride rather than an always-dense one.
     """
     num_groups = K // group_size
@@ -69,7 +70,7 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     unpacked = torch.randint(0, 16, (N, K), dtype=torch.int32, device=device)
     w_q_skinny = pack_skinny_int4(unpacked)
     del unpacked
-    w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
+    w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
 
     # Per-group zero-points for asymmetric benchmarks, in the packed layout the
     # kernels read: [N//8, num_groups] int32, row n's nibble at bits 4*(n%8).
@@ -80,7 +81,7 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     ).contiguous()
 
     # FP16 baseline for F.linear
-    w_fp16 = torch.randn(N, K, dtype=torch.float16, device=device) * 0.01
+    w_fp16 = torch.randn(N, K, dtype=dtype, device=device) * 0.01
 
     return w_q_skinny, w_s_skinny, w_fp16, w_zp
 
@@ -88,7 +89,7 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
 # ---------------------------------------------------------------------------
 # Benchmark
 # ---------------------------------------------------------------------------
-PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
+PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp", "hybrid-w4a16-scale-zp"]
 
 
 @triton.testing.perf_report(
@@ -104,17 +105,16 @@ PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
         args={},
     )
 )
-def benchmark(batch_size, provider, N, K, group_size, weights):
+def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
     """Time one GEMM.
 
-    ``do_bench`` rather than ``do_bench_cudagraph``: it zeroes a 256 MB buffer
+    `do_bench` rather than `do_bench_cudagraph`: it zeroes a 256 MB buffer
     between reps, so the weight is read from DRAM as it would be in a model.
     With a cudagraph replay the weight stays resident in the 32 MB MALL, which
     flatters wide-BLOCK_N tiles and hides row-stride effects entirely.
     """
     M = batch_size
     device = "cuda"
-    dtype = torch.float16
     a = torch.randn((M, K), device=device, dtype=dtype)
 
     quantiles = [0.5, 0.2, 0.8]
@@ -125,7 +125,7 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
             lambda: torch.nn.functional.linear(a, w_fp16),
             quantiles=quantiles,
         )
-    elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp"):
+    elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp", "hybrid-w4a16-scale-zp"):
         from vllm.model_executor.kernels.linear.mixed_precision import (
             rdna_hybrid_w4a16 as _k,
         )
@@ -135,7 +135,10 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
 
         w = weights
         cu_count = num_compute_units()
-        use_zp = provider == "hybrid-w4a16-zp"
+        use_zp = provider != "hybrid-w4a16"
+        use_scale_zp_carrier = provider == "hybrid-w4a16-scale-zp"
+        if use_scale_zp_carrier and w["w_scale_zp_carrier"] is None:
+            return 0.0, 0.0, 0.0
 
         def run():
             return _rdna_hybrid_w4a16_apply_impl(
@@ -146,6 +149,7 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
                 None,  # bias
                 cu_count,
                 group_size,
+                w["w_scale_zp_carrier"] if use_scale_zp_carrier else None,
             )
 
         ms, min_ms, max_ms = triton.testing.do_bench(
@@ -182,8 +186,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
     parser.add_argument("--group-size", type=int, default=128)
+    parser.add_argument(
+        "--dtype", type=str, default="float16", choices=["float16", "bfloat16"]
+    )
     parser.add_argument("--save-path", type=str, default=None)
     args = parser.parse_args()
+    dtype = getattr(torch, args.dtype)
 
     for K, N, model in prepare_shapes(args):
         group_size = args.group_size
@@ -191,13 +199,20 @@ if __name__ == "__main__":
         print(f"{model}, N={N} K={K}, group_size={group_size}")
         print(f"{'=' * 70}")
 
-        w_q_skinny, w_s_skinny, w_fp16, w_zp = prepare_hybrid_weights(K, N, group_size)
+        w_q_skinny, w_s_skinny, w_fp16, w_zp = prepare_hybrid_weights(
+            K, N, group_size, dtype
+        )
 
         weights = {
             "w_q_skinny": w_q_skinny,
             "w_s_skinny": w_s_skinny,
             "w_fp16": w_fp16,
             "w_zp": w_zp,
+            "w_scale_zp_carrier": (
+                pack_scale_zp_carrier(w_s_skinny, w_zp)
+                if dtype == torch.float16
+                else None
+            ),
         }
 
         save_path = args.save_path or f"bench_int4_res_n{N}_k{K}"
@@ -209,6 +224,7 @@ if __name__ == "__main__":
             N=N,
             K=K,
             group_size=group_size,
+            dtype=dtype,
             weights=weights,
         )
 

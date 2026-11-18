@@ -26,7 +26,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 
 # Use a tiny model for fast testing
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 # --- Mock Weight Transfer Engine ---
@@ -168,6 +168,13 @@ def test_init_weight_transfer_engine_calls_engine(vllm_runner):
         for called, param in results:
             assert called, "init_transfer_engine should have been called"
             assert param == "hello", f"Expected 'hello', got {param}"
+
+        llm.shutdown_weight_transfer_engine()
+        assert all(
+            llm.collective_rpc(
+                lambda worker: worker.weight_transfer_engine.shutdown_called
+            )
+        )
 
 
 @create_new_process_for_each_test()

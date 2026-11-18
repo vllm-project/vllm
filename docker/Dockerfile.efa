@@ -1,0 +1,89 @@
+# DeepEP for AWS EFA on top of a vllm-openai image: rebuilds DeepEP from the
+# amazon-contributing fork, whose deepep_v2 backend carries EP traffic over EFA
+# through NCCL GIN, and routes NCCL over aws-ofi-nccl. Published as *-efa.
+#
+# The base must be built with INSTALL_KV_CONNECTORS=true, which installs the
+# AWS EFA userspace (libfabric, aws-ofi-nccl):
+#   docker build -f docker/Dockerfile.efa \
+#       --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+#
+# The host still provides the EFA kernel module and memlock limits.
+ARG BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${BASE_IMAGE}
+
+# DeepEP GIN uses NCCL over EFA, so the base must already have aws-ofi-nccl.
+RUN set -eu; \
+    if ! ldconfig -p | grep -q '/opt/amazon/ofi-nccl/lib/libnccl-net-ofi\.so$'; then \
+        echo "Dockerfile.efa needs a base image built with \
+--build-arg INSTALL_KV_CONNECTORS=true (no aws-ofi-nccl found)" >&2; \
+        exit 1; \
+    fi
+
+# Route NCCL over EFA. Override with `-e NCCL_NET_PLUGIN= -e NCCL_TUNER_PLUGIN=`
+# to run this image on a non-EFA host.
+ENV NCCL_NET_PLUGIN=ofi \
+    NCCL_TUNER_PLUGIN=ofi
+
+# Replace the base image's upstream DeepEP with the amazon-contributing fork,
+# whose deepep_v2 backend carries EP traffic over EFA through NCCL GIN.
+ARG DEEPEP_REPO="https://github.com/amazon-contributing/DeepEP.git"
+ARG DEEPEP_REF="36c055c4e98e1ce5d4b0a7180ac4e852e85ce5a2"
+ARG DEEPEP_CUDA_ARCH_LIST="9.0a;10.0a;10.3a"
+
+# Headers and git for DeepEP's nvcc build. `reinstall` also installs packages
+# that are absent.
+RUN set -eux; \
+    CUDA_PKG_VERSION=$(nvcc --version \
+        | grep -oP 'release \K[0-9]+\.[0-9]+' | tr '.' '-'); \
+    DEBIAN_FRONTEND=noninteractive apt-get update -y; \
+    DEBIAN_FRONTEND=noninteractive apt-get reinstall -y --no-install-recommends \
+        git \
+        libcusparse-dev-${CUDA_PKG_VERSION} \
+        libcusolver-dev-${CUDA_PKG_VERSION} \
+        cuda-nvrtc-dev-${CUDA_PKG_VERSION}; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/opt/uv/cache \
+    set -eux; \
+    git clone "${DEEPEP_REPO}" /tmp/deepep; \
+    cd /tmp/deepep; \
+    git checkout "${DEEPEP_REF}"; \
+    git submodule update --init --recursive; \
+    uv pip uninstall --system deep_ep 2>/dev/null || true; \
+    NCCL_ROOT="$(python3 -c "import importlib.util, os; \
+s = importlib.util.find_spec('nvidia.nccl'); \
+print(os.path.dirname(s.origin or s.submodule_search_locations[0]))")/nccl"; \
+    export EP_NCCL_ROOT_DIR="${NCCL_ROOT}"; \
+    export LD_LIBRARY_PATH="${NCCL_ROOT}/lib:${LD_LIBRARY_PATH:-}"; \
+    # The CUDA driver stubs let DeepEP link libcuda in a builder with no driver.
+    export LIBRARY_PATH="${NCCL_ROOT}/lib:/usr/local/cuda/lib64/stubs:\
+/usr/local/cuda/targets/x86_64-linux/lib/stubs:${LIBRARY_PATH:-}"; \
+    export DISABLE_AGGRESSIVE_PTX_INSTRS=1; \
+    export TORCH_CUDA_ARCH_LIST="${DEEPEP_CUDA_ARCH_LIST}"; \
+    uv pip install --system --no-deps -vv --no-build-isolation .; \
+    cd /; \
+    rm -rf /tmp/deepep; \
+    # vLLM only logs when the deepep_v2 backend is unavailable, so fail here.
+    python3 -c "import deep_ep; assert hasattr(deep_ep, 'ElasticBuffer'), \
+'DeepEP built without the ElasticBuffer (v2) API'"
+
+# Provenance. Build args from docker-build-metadata-args.sh override the values
+# inherited from the base image; without them the base's values are kept.
+ARG BASE_IMAGE
+ARG VLLM_BUILD_COMMIT
+ARG VLLM_BUILD_PIPELINE
+ARG VLLM_BUILD_URL
+ARG VLLM_IMAGE_TAG
+ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT} \
+    VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE} \
+    VLLM_BUILD_URL=${VLLM_BUILD_URL} \
+    VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG}
+LABEL org.opencontainers.image.revision="${VLLM_BUILD_COMMIT}" \
+      org.opencontainers.image.version="${VLLM_IMAGE_TAG}" \
+      org.opencontainers.image.url="${VLLM_BUILD_URL}" \
+      ai.vllm.build.commit="${VLLM_BUILD_COMMIT}" \
+      ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}" \
+      ai.vllm.build.url="${VLLM_BUILD_URL}" \
+      ai.vllm.image.tag="${VLLM_IMAGE_TAG}" \
+      ai.vllm.efa.base-image="${BASE_IMAGE}" \
+      ai.vllm.efa.deepep-ref="${DEEPEP_REF}"

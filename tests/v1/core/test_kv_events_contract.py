@@ -58,6 +58,7 @@ OPTIONAL_FIELDS: dict[type[KVCacheEvent], dict[str, Any]] = {
         "locality": str | None,
         "ownership": str | None,
         "session_id": str | None,
+        "lookahead_token_ids": list[list[int]] | None,
     },
     BlockRemoved: {
         "group_idx": int | None,
@@ -112,6 +113,7 @@ def test_batch_wire_shape():
                 kv_cache_spec_kind="full_attention",
                 locality="LOCAL",
                 session_id="session",
+                lookahead_token_ids=[[3], [5]],
             ),
             BlockRemoved(
                 block_hashes=[11], medium="CPU", group_idx=0, ownership="kvcr"
@@ -138,6 +140,7 @@ def test_batch_wire_shape():
                 "kv_cache_spec_kind": "full_attention",
                 "locality": "LOCAL",
                 "session_id": "session",
+                "lookahead_token_ids": [[3], [5]],
             },
             {
                 "type": "BlockRemoved",

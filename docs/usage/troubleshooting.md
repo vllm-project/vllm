@@ -40,6 +40,39 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
 
+The DP coordinator's `Received stats for out-of-order step` diagnostic is logged at DEBUG level. Statistics from different engines can arrive in a different step order; this message alone does not indicate a failed request. Set `VLLM_LOGGING_LEVEL=DEBUG` to inspect these reports.
+
+## GPU-CPU synchronization errors
+
+Set `VLLM_GPU_SYNC_CHECK=error` before starting vLLM to check for unexpected
+GPU-CPU synchronizations during inference. The check starts after model warmup
+and reports an error such as:
+
+```text
+RuntimeError: GPU<->CPU sync detected - avoid it or wrap with gpu_sync_allowed()
+```
+
+For dots.ocr, you can check image inference at TP=1 or TP=2. For example, start
+a two-GPU server with:
+
+```bash
+VLLM_GPU_SYNC_CHECK=error vllm serve rednote-hilab/dots.ocr \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --max-model-len 4096 \
+    --limit-mm-per-prompt '{"image": 1}'
+```
+
+Send an image request after the server is ready so that the check exercises
+the vision encoder. A text-only request does not run this part of the model.
+See [online serving](../features/multimodal_inputs.md#online-serving) for image request examples.
+Set the request's `model` to `rednote-hilab/dots.ocr` when using this server.
+Use `--tensor-parallel-size 1` to check a single-GPU setup.
+
+If a request fails with this error, include the full traceback, model revision,
+GPU type, and encoder attention backend in the bug report. The backend is
+shown in the startup log as `Using ... for MMEncoderAttention`.
+
 ## Breakpoints
 
 Setting normal `pdb` breakpoints may not work in vLLM's codebase if they are executed in a subprocess. You will experience something like:

@@ -31,6 +31,8 @@ class KVEventsConfig:
     buffer_steps: int = 10_000
     """The number of event batches to keep for the replay endpoint. Only the
     last N batches can be replayed.
+
+    The replay socket's send high-water mark is 2 * (buffer_steps + 1).
     """
 
     hwm: int = 100_000

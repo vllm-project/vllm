@@ -5,16 +5,29 @@ job_dirs:
   - ".buildkite/hardware_tests"
 run_all_patterns:
   - "docker/Dockerfile"
-  - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
   - "requirements/kv_connectors.txt"
   - "requirements/build/cuda.txt"
   - "requirements/test/cuda.txt"
   - "setup.py"
-  - "csrc/"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
+# Run every AMD step (ci-selector does not pick AMD steps). csrc/ and
+# CMakeLists.txt are also built for ROCm.
+amd_run_all_patterns:
+  - "csrc/"
+  - "CMakeLists.txt"
+  - "cmake/hipify.py"
+  - "docker/Dockerfile.rocm$"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/scripts/rocm/build.sh"
+  - "requirements/rocm.txt"
+  - "requirements/test/rocm.txt"
+  - "tools/vllm-rocm/therock_wheels.py"
+# Separate from run_all_exclude_patterns, which skips AMD files like csrc/rocm/.
+amd_run_all_exclude_patterns:
+  - "csrc/cpu/"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

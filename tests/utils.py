@@ -18,6 +18,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, MutableMapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
@@ -184,8 +185,8 @@ def _run_in_new_process_group(
 class RemoteVLLMServer:
     """Base class for launching vLLM server subprocesses for testing.
 
-    Subclasses must override ``_create_cli_subcommand`` and
-    ``_start_server``.
+    Subclasses must override `_create_cli_subcommand` and
+    `_start_server`.
     """
 
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
@@ -309,7 +310,7 @@ class RemoteVLLMServer:
     def _shutdown(self) -> None:
         """Kill the server process tree and wait for GPU memory release.
 
-        Called from both ``__exit__`` (normal path) and ``__init__``
+        Called from both `__exit__` (normal path) and `__init__`
         (when the server fails to start). Must be safe to call even if
         the process is already dead.
         """
@@ -381,7 +382,7 @@ class RemoteVLLMServer:
     def _terminate_process_tree(self) -> None:
         """Kill the server process tree without waiting for GPU memory release.
 
-        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        Split out from `_shutdown` so that `shutdown_many` can run this
         phase in parallel for sibling servers and then wait for GPU memory
         release once at the end.
         """
@@ -430,10 +431,10 @@ class RemoteVLLMServer:
     def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
         """Shut down multiple sibling servers and wait for GPU memory once.
 
-        Test fixtures that hold several ``RemoteVLLMServer`` instances at
-        once must NOT shut them down by calling each server's ``__exit__``
+        Test fixtures that hold several `RemoteVLLMServer` instances at
+        once must NOT shut them down by calling each server's `__exit__`
         sequentially: every server measures total GPU memory across all
-        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        visible devices in `_wait_for_gpu_memory_release`, so the first
         server's wait blocks the full timeout because later sibling
         servers are still holding GPU memory.
 
@@ -483,14 +484,14 @@ class RemoteVLLMServer:
         """SIGKILL any processes still in the server's process group
         and wait for them to exit.
 
-        Because the server is launched with ``start_new_session=True``,
+        Because the server is launched with `start_new_session=True`,
         all its children (EngineCore, workers, etc.) share the same
         pgid. After the root process is killed, stragglers -- especially
         on ROCm where GPU contexts linger until the *process* exits --
         must be reaped explicitly.
 
-        Uses ``/proc`` to scan for pgid members so this works even after
-        the parent has been reaped (unlike ``psutil.Process.children``).
+        Uses `/proc` to scan for pgid members so this works even after
+        the parent has been reaped (unlike `psutil.Process.children`).
         """
         if pgid is None:
             return
@@ -736,7 +737,7 @@ class RemoteVLLMServer:
 
 
 class RemoteOpenAIServer(RemoteVLLMServer):
-    """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
+    """Launches `vllm serve` for testing OpenAI-compatible endpoints."""
 
     def _get_process_termination_timeout(self) -> float:
         engine_timeout = get_engine_process_shutdown_timeout(
@@ -774,7 +775,7 @@ class RemoteOpenAIServer(RemoteVLLMServer):
 
 
 class RemoteLaunchRenderServer(RemoteVLLMServer):
-    """Launches ``vllm launch render`` for GPU-less serving tests."""
+    """Launches `vllm launch render` for GPU-less serving tests."""
 
     def _create_cli_subcommand(self):
         return ServeSubcommand()
@@ -1165,7 +1166,6 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
-    force_v1_runner: bool = False,
 ) -> None:
     """Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -1178,9 +1178,6 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
-        force_v1_runner: Whether to pin all compared settings to the v1 model
-            runner to avoid mixing model runner differences into correctness
-            tests.
 
     """
     compare_all_settings(
@@ -1190,7 +1187,6 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
-        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1202,7 +1198,6 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
-    force_v1_runner: bool = False,
 ) -> None:
     """Launch API server with several different sets of arguments/environments
     and compare the results of the API calls with the first set of arguments.
@@ -1213,16 +1208,8 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
-        force_v1_runner: Whether to pin all compared settings to the v1 model
-            runner to avoid mixing model runner differences into correctness
-            tests.
 
     """
-    if force_v1_runner:
-        all_envs = [
-            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
-        ]
-
     trust_remote_code = False
     for args in all_args:
         if "--trust-remote-code" in args:
@@ -1364,6 +1351,11 @@ def ensure_current_vllm_config():
             yield
 
 
+def _test_rendezvous_path(token: int | str) -> str:
+    """File store shared by every rank of one multi_process_parallel run."""
+    return f"{tempfile.gettempdir()}/vllm_dist_test_{token}"
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -1382,8 +1374,18 @@ def init_test_distributed_environment(
         set_current_vllm_config,
     )
     from vllm.platforms import current_platform
+    from vllm.utils.network_utils import aiter_requires_tcp_store
 
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    # get_open_port() closes its probe socket before the ranks bind, leaving
+    # the port unreserved, so prefer a file store as the executors do. This
+    # runs in every Ray worker, so the path must come from the shared token
+    # rather than a per-call uuid4(), or each rank would get its own file.
+    if aiter_requires_tcp_store():
+        distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    else:
+        distributed_init_method = (
+            f"file://{_test_rendezvous_path(distributed_init_port)}"
+        )
     backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
@@ -1452,16 +1454,14 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
-    ray.init(
-        runtime_env={
-            "env_vars": env_vars,
-        }
-    )
+    world_size = data_parallel_size * tp_size * pp_size
+    # One CPU per rank: Ray prestarts a worker process per CPU, and hundreds of
+    # them starve the next test's ray.init past its 30 s GCS startup timeout.
+    ray.init(num_cpus=world_size, runtime_env={"env_vars": env_vars})
 
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
     data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
-    world_size = data_parallel_size * tp_size * pp_size
     try:
         refs = []
         for rank in range(world_size):
@@ -1490,6 +1490,8 @@ def multi_process_parallel(
         ray.get(refs)
     finally:
         ray.shutdown()
+        # All ranks are gone, so the file store has no readers left.
+        Path(_test_rendezvous_path(distributed_init_port)).unlink(missing_ok=True)
 
 
 def assert_rocm_custom_allreduce_backend_state(
@@ -1586,6 +1588,11 @@ def record_gpu_memory_usage_stats(
     return output
 
 
+# ROCm can keep a small runtime/driver footprint resident even after all model
+# allocations are gone. On MI300 this has been observed around 2.5 GiB.
+ROCM_IDLE_FOOTPRINT_BYTES = 4 * 1024**3
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
@@ -1595,8 +1602,34 @@ def wait_for_gpu_memory_to_clear(
     stable_duration_s: float = 0,
     stable_tolerance_bytes: int = 512 * 1024**2,
     poll_interval_s: float = 5,
+    idle_bytes: int | None = None,
 ) -> None:
+    """Block until every device's used memory is below the threshold.
+
+    With `stable_duration_s`, the usage must also hold steady that long,
+    unless every device is at or below `idle_bytes`.
+    """
     assert threshold_bytes is not None or threshold_ratio is not None
+    if (
+        current_platform.is_rocm()
+        and not torch.cuda.is_initialized()
+        and envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn"
+    ):
+        # HIP memory queries initialize HIP, which forces vLLM to spawn instead
+        # of fork its engine processes; poll from a forked child instead.
+        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
+            pool.submit(
+                _wait_for_gpu_memory_to_clear_with_hip,
+                devices=devices,
+                threshold_bytes=threshold_bytes,
+                threshold_ratio=threshold_ratio,
+                timeout_s=timeout_s,
+                stable_duration_s=stable_duration_s,
+                stable_tolerance_bytes=stable_tolerance_bytes,
+                poll_interval_s=poll_interval_s,
+                idle_bytes=idle_bytes,
+            ).result()
+        return
     # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
         devices = get_physical_device_indices(devices)
@@ -1609,16 +1642,14 @@ def wait_for_gpu_memory_to_clear(
     elif isinstance(threshold_ratio, dict):
         assert threshold_ratio.keys() == set(devices)
     if current_platform.is_rocm() and threshold_ratio is not None:
-        # ROCm can keep a small runtime/driver footprint resident even after
-        # all model allocations are gone. On MI300 this has been observed
-        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
-        # near the amount of free memory needed by the next vLLM runner.
-        min_threshold_b = 4 * 1024**3
+        # The ROCm idle footprint is above a strict 1% idle threshold but
+        # nowhere near the amount of free memory needed by the next vLLM runner.
         if threshold_bytes is None:
             threshold_bytes = {}
         for device, ratio in threshold_ratio.items():
             threshold_bytes[device] = max(
-                threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
+                threshold_bytes.get(device, 0),
+                ROCM_IDLE_FOOTPRINT_BYTES if ratio < 0.05 else 0,
             )
 
     start_time = time.time()
@@ -1676,7 +1707,12 @@ def wait_for_gpu_memory_to_clear(
 
         dur_s = time.time() - start_time
         if all_free:
-            if stable_duration_s <= 0:
+            # At the idle footprint nothing is left to release, so there is
+            # nothing for the stability window to wait for.
+            idle = idle_bytes is not None and all(
+                used_bytes_by_device[device] <= idle_bytes for device in devices
+            )
+            if stable_duration_s <= 0 or idle:
                 print(
                     f"Done waiting for free GPU memory on devices {devices=} "
                     f"({threshold=}) {dur_s=:.02f}"
@@ -1717,17 +1753,23 @@ def wait_for_gpu_memory_to_clear(
         time.sleep(poll_interval_s)
 
 
+def _wait_for_gpu_memory_to_clear_with_hip(**kwargs) -> None:
+    torch.cuda.init()
+    wait_for_gpu_memory_to_clear(**kwargs)
+
+
 def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below `threshold_ratio`.
 
     ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
-    even after ``cleanup_dist_env_and_memory``. This gives the driver time to
-    actually release VRAM before the next allocation. No-op off ROCm.
+    even after `cleanup_dist_env_and_memory`. This gives the driver time to
+    actually release VRAM before the next allocation. On ROCm it returns at once
+    when the devices are at their idle footprint. No-op off ROCm and XPU.
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
@@ -1744,6 +1786,7 @@ def wait_for_memory_to_settle(
         timeout_s=timeout_s,
         stable_duration_s=2.0,
         poll_interval_s=1.0,
+        idle_bytes=ROCM_IDLE_FOOTPRINT_BYTES if current_platform.is_rocm() else None,
     )
 
 
@@ -1885,16 +1928,16 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
     The child resolves the test function by importing its module and looking
     it up by qualified name, rather than reconstructing it from a cloudpickle
-    blob. Pickling the function by value would also pickle its ``__globals__``
+    blob. Pickling the function by value would also pickle its `__globals__`
     by value — turning module-level singletons (e.g.
-    ``vllm.compilation.counter.compilation_counter``) into stale clones in
+    `vllm.compilation.counter.compilation_counter`) into stale clones in
     the child, so increments performed by the production code in the child
     would never be observable to the test.
 
     The child inherits the parent's stdout/stderr so its output (engine
     cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
-    traceback or skip reason is serialized to ``tb_file`` for propagation. A
-    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    traceback or skip reason is serialized to `tb_file` for propagation. A
+    native crash leaves `tb_file` empty — the diagnostic is then only in
     the inherited subprocess output.
     """
 
@@ -2302,3 +2345,17 @@ class TestFP8Layer(torch.nn.Module):
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(self, y, bias)
+
+
+def core_dumped_bytes(start: int, end: int) -> int:
+    """Bytes of [start, end) that a core dump may include (no `dd` VmFlag)."""
+    total, overlap = 0, 0
+    with open("/proc/self/smaps") as smaps:
+        for line in smaps:
+            fields = line.split()
+            if ":" not in fields[0]:
+                lo, hi = (int(value, 16) for value in fields[0].split("-"))
+                overlap = max(0, min(hi, end) - max(lo, start))
+            elif fields[0] == "VmFlags:" and "dd" not in fields[1:]:
+                total += overlap
+    return total

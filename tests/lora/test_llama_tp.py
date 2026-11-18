@@ -63,6 +63,7 @@ def do_sample(
         generated_text = output.outputs[0].text
         # The output should include  correct lora_request info
         if lora_request is not None:
+            assert output.lora_request is not None
             assert output.lora_request.lora_name == lora_request.lora_name
             assert output.lora_request.lora_int_id == lora_request.lora_int_id
             assert output.lora_request.lora_path == lora_request.lora_path
@@ -97,6 +98,20 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=cudagraph_specialize_lora,
         ),
+    )
+    generate_and_test(llm, llama32_lora_files)
+
+
+@create_new_process_for_each_test()
+def test_llama_lora_transformers_backend(llama32_lora_files):
+    """The adapter also targets `lm_head` and `embed_tokens`."""
+    llm = vllm.LLM(
+        MODEL_PATH,
+        model_impl="transformers",
+        enable_lora=True,
+        max_num_seqs=7,
+        max_model_len=1024,
+        max_loras=4,
     )
     generate_and_test(llm, llama32_lora_files)
 
