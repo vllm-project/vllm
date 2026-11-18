@@ -22,6 +22,7 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import ACTIVE_TAIL_PAGES
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     HiSparseHotPageSpec,
     HiSparsePageSpec,
     KVCacheConfig,
@@ -33,7 +34,6 @@ from vllm.v1.kv_cache_interface import (
     ManagerConfig,
     MLAAttentionSpec,
     SparseCacheRole,
-    SparseFullAttentionSpec,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -45,8 +45,6 @@ HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 # DeepGEMM reads indexer pages through TMA.
 _INDEXER_PAGE_ALIGNMENT = 16
 
-_SourceSpec = MLAAttentionSpec | SparseFullAttentionSpec
-
 
 @dataclass(frozen=True, slots=True)
 class HiSparseLayout:
@@ -57,11 +55,24 @@ class HiSparseLayout:
     shared_host_pool: bool
 
 
-def is_hisparse_source_layer(layer_config: KVCacheLayerConfig) -> bool:
-    """Whether the layer participates in HiSparse as a sparse source or indexer."""
-    return isinstance(layer_config.spec, _SourceSpec) and issubclass(
-        layer_config.manager_cls, FullAttentionManager
-    )
+def _is_sparse_spec(spec: KVCacheSpec) -> bool:
+    return isinstance(spec, AttentionSpec) and spec.cache_role is not None
+
+
+def get_hisparse_source_layers(
+    layer_configs: dict[str, KVCacheLayerConfig],
+) -> dict[str, KVCacheLayerConfig]:
+    """The layers participating in HiSparse as a sparse source or indexer."""
+    if any(
+        isinstance(lc.spec, MLAAttentionSpec) and lc.spec.model_version == "deepseek_v4"
+        for lc in layer_configs.values()
+    ):
+        raise ValueError("HiSparse does not support DeepSeek V4.")
+    return {
+        name: lc
+        for name, lc in layer_configs.items()
+        if _is_sparse_spec(lc.spec) and issubclass(lc.manager_cls, FullAttentionManager)
+    }
 
 
 def get_hisparse_kv_cache_groups(
@@ -75,9 +86,7 @@ def get_hisparse_kv_cache_groups(
     if attention_config is None or attention_config.hisparse_config is None:
         return None
 
-    sparse_layers = {
-        name: lc for name, lc in layer_configs.items() if is_hisparse_source_layer(lc)
-    }
+    sparse_layers = get_hisparse_source_layers(layer_configs)
     other_specs = {
         name: lc
         for name, lc in layer_configs.items()
@@ -149,23 +158,14 @@ def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
 
 def _partition_hisparse_specs(
     specs: dict[str, KVCacheSpec],
-) -> tuple[dict[str, _SourceSpec], dict[str, MLAAttentionSpec]]:
-    if any(
-        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
-        for spec in specs.values()
-    ):
-        raise ValueError("HiSparse does not support DeepSeek V4.")
-    if not all(isinstance(spec, _SourceSpec) for spec in specs.values()):
+) -> tuple[dict[str, AttentionSpec], dict[str, MLAAttentionSpec]]:
+    if not all(_is_sparse_spec(spec) for spec in specs.values()):
         raise ValueError("HiSparse requires sparse attention cache specs.")
 
     source_specs = {
         name: spec
         for name, spec in specs.items()
-        if isinstance(spec, SparseFullAttentionSpec)
-        or (
-            isinstance(spec, MLAAttentionSpec)
-            and spec.cache_role is SparseCacheRole.SPARSE
-        )
+        if isinstance(spec, AttentionSpec) and spec.cache_role is SparseCacheRole.SPARSE
     }
     indexer_specs = {
         name: spec
@@ -264,7 +264,7 @@ def _fill_hisparse_groups(
     )
 
     hot_group_page_limit = max(block_bytes, indexer_group.page_size_bytes)
-    hot_units: list[list[tuple[str, _SourceSpec]]] = []
+    hot_units: list[list[tuple[str, AttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
             hot_units.append([])
@@ -273,7 +273,7 @@ def _fill_hisparse_groups(
     resident_groups: list[KVCacheGroup] = []
     hot_groups: list[KVCacheGroup] = []
 
-    def append_hot_group(layers: list[tuple[str, _SourceSpec]]) -> None:
+    def append_hot_group(layers: list[tuple[str, AttentionSpec]]) -> None:
         page_sizes = {spec.page_size_bytes for _, spec in layers}
         if len(page_sizes) != 1:
             raise ValueError(
@@ -300,7 +300,7 @@ def _fill_hisparse_groups(
                 )
             )
 
-    current: list[tuple[str, _SourceSpec]] = []
+    current: list[tuple[str, AttentionSpec]] = []
     current_page = 0
     for unit in hot_units:
         unit_page = sum(spec.page_size_bytes for _, spec in unit)
@@ -342,12 +342,12 @@ def create_hisparse_layout(
 ) -> HiSparseLayout:
     """Size the host pool for groups laid out by `get_hisparse_kv_cache_groups`."""
     (source_group,) = [group for group in groups if group.host_resident]
-    sparse_full_specs = [
+    gqa_source_specs = [
         spec
         for spec in source_group.kv_cache_specs.values()
-        if isinstance(spec, SparseFullAttentionSpec)
+        if not isinstance(spec, MLAAttentionSpec)
     ]
-    shared_host_pool = not sparse_full_specs and use_shared_hisparse_host_pool(
+    shared_host_pool = not gqa_source_specs and use_shared_hisparse_host_pool(
         vllm_config
     )
     host_block_stride = get_hisparse_host_block_stride(
@@ -355,11 +355,11 @@ def create_hisparse_layout(
         use_shared_host_pool=shared_host_pool,
     )
     logical_block_bytes = host_block_stride
-    if sparse_full_specs:
+    if gqa_source_specs:
         total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
         logical_block_bytes = sum(
             spec.num_states * total_num_kv_heads * spec.state_content_size_bytes
-            for spec in sparse_full_specs
+            for spec in gqa_source_specs
         )
     host_num_blocks = host_budget // logical_block_bytes
     if host_num_blocks <= 0:

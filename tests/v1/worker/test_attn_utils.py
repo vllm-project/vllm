@@ -62,7 +62,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
-    SparseFullAttentionSpec,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -107,16 +106,22 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
 ):
     """Resolve sparse source/indexer geometry without changing compression."""
     main_spec = (
-        SparseFullAttentionSpec(
+        AttentionSpec(
             block_size=block_size,
             num_kv_heads=2,
             head_size=32,
             dtype=torch.bfloat16,
             topk_buffer_width=35,
+            cache_role=SparseCacheRole.SPARSE,
+            is_index_group_leader=True,
         )
         if sparse_full_attention
         else MLAAttentionSpec(
-            block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.SPARSE,
         )
     )
     compress_ratio = 4 if sparse_full_attention else 1
@@ -181,7 +186,9 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     assert indexer_spec.tokens_per_state == compress_ratio
     assert indexer_spec.num_states == indexer // compress_ratio
     if sparse_full_attention:
-        assert isinstance(main, SparseFullAttentionSpec)
+        assert isinstance(main, AttentionSpec)
+        assert not isinstance(main, MLAAttentionSpec)
+        assert main.cache_role is SparseCacheRole.SPARSE
         assert main.topk_buffer_width == 35
     assert [lcs["indexer"].spec.block_size for lcs in mamba_fit_inputs] == (
         [indexer] if enabled else []
@@ -230,6 +237,7 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
                 topk_buffer_width=128,
             )
@@ -1222,12 +1230,14 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
     names = ["layer.0", "layer.1"]
     resident_names = [f"{name}.hisparse_resident" for name in names]
     hot_names = [f"{name}.hisparse_hot" for name in names]
-    spec = SparseFullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
         dtype=torch.bfloat16,
         topk_buffer_width=2,
+        cache_role=SparseCacheRole.SPARSE,
+        is_index_group_leader=True,
     )
     config = KVCacheConfig(
         num_blocks=4,

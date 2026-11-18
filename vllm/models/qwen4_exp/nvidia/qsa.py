@@ -64,7 +64,7 @@ from vllm.v1.hisparse.runtime import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
-    SparseFullAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 
@@ -705,11 +705,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            cache_role=SparseCacheRole.SPARSE,
+            topk_buffer_width=self.indexer.output_width,
+            is_index_group_leader=True,
         )
-        if self.hisparse_cache is not None:
-            spec = SparseFullAttentionSpec(
-                **vars(spec), topk_buffer_width=self.indexer.output_width
-            )
         return FullAttentionManager.layer_config(spec)
 
     @eager_break_during_capture
