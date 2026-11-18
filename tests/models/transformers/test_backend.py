@@ -273,8 +273,8 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.has_device_capability(90):
-        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+    if not (current_platform.is_xpu() or current_platform.has_device_capability(90)):
+        pytest.skip("Attention sinks need FlashAttention 3, TRTLLM or XPU attention")
 
     model = "tiny-random/gpt-oss-bf16"
     with vllm_runner(
