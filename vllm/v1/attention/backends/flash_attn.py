@@ -686,6 +686,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
         self.aot_schedule = fa_version == 3
 
+        # FA2's num_splits=0 prefill tile fits one CTA/SM on 100 KB-smem GPUs;
+        # num_splits=1 selects a smaller tile that fits two.
+        self.prefill_num_splits = 0
+        if fa_version == 2 and current_platform.is_cuda():
+            device_properties = torch.cuda.get_device_properties(device)
+            smem_per_sm = device_properties.shared_memory_per_multiprocessor
+            if smem_per_sm <= 100 * 1024:
+                self.prefill_num_splits = 1
+
         if (
             vllm_config.kernel_config.enable_jit_warmup
             and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
@@ -831,7 +840,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     self.aot_schedule = False
                     aot_schedule = False
 
-        max_num_splits = 0  # 0 means use FA3's heuristics, not CG compatible
+        # 0 means use FA3's heuristics, not CG compatible
+        max_num_splits = self.prefill_num_splits if max_query_len > 1 else 0
         if (
             self.use_full_cuda_graph
             and self.max_cudagraph_size is not None
