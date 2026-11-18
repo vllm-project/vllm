@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
@@ -123,9 +124,15 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     seq_idx_p: torch.Tensor | None = None
 
     # Internal prefill checkpoints, one entry per prefill row. The chunk
-    # index selects the varlen_states row holding the checkpoint state.
+    # index selects the row of the SSD scan's states holding the checkpoint
+    # state: a chunk for Triton, the row itself for FlashInfer.
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
+
+    # FlashInfer prefill inputs.
+    zero_initial_states_p: torch.Tensor | None = None
+    checkpoint_token_indices_p: torch.Tensor | None = None
+    checkpoint_states_p: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -156,6 +163,9 @@ class Mamba2AttentionMetadataBuilder(
         self.chunk_size: int = chunk_size
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec, self.checkpoint_alignment
+        )
+        self.use_flashinfer_prefill = (
+            vllm_config.mamba_config.prefill_backend == MambaBackendEnum.FLASHINFER
         )
 
     def build(
@@ -216,7 +226,7 @@ class Mamba2AttentionMetadataBuilder(
                 checkpoint_offsets_p,
             )
 
-        return replace(
+        metadata = replace(
             common,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
@@ -225,6 +235,44 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
             checkpoint_meta=checkpoint_meta,
+        )
+        if self.use_flashinfer_prefill and common.num_prefills > 0:
+            metadata = self._add_flashinfer_prefill_metadata(metadata)
+        return metadata
+
+    def _add_flashinfer_prefill_metadata(
+        self, metadata: Mamba2AttentionMetadata
+    ) -> Mamba2AttentionMetadata:
+        query_start_loc_p = metadata.query_start_loc_p
+        assert query_start_loc_p is not None
+        num_prefills = metadata.num_prefills
+        state_shape = (num_prefills, *self.kv_cache_spec.shapes[1])
+        state_dtype = self.kv_cache_spec.dtypes[1]
+        device = query_start_loc_p.device
+        if not metadata.prep_initial_states:
+            metadata = replace(
+                metadata,
+                zero_initial_states_p=torch.zeros(
+                    state_shape, dtype=state_dtype, device=device
+                ),
+            )
+        checkpoint = metadata.checkpoint_meta
+        if checkpoint is None:
+            return metadata
+        offsets = checkpoint.checkpoint_offsets
+        # Each row's checkpoint goes to its own row of the output; rows without
+        # one have no token to capture.
+        return replace(
+            metadata,
+            checkpoint_chunk_idx=torch.arange(
+                num_prefills, dtype=torch.int32, device=device
+            ),
+            checkpoint_token_indices_p=torch.where(
+                offsets > 0, query_start_loc_p[:-1] + offsets, -1
+            ),
+            checkpoint_states_p=torch.empty(
+                state_shape, dtype=state_dtype, device=device
+            ),
         )
 
     def update_block_table(
