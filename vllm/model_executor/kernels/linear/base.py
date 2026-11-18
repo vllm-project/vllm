@@ -142,6 +142,11 @@ class LinearKernel(ABC, Generic[_LinearConfigT]):
         raise NotImplementedError
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the batch."""
+        return False
+
+    @classmethod
     def executed_activation_key(
         cls, activation_quant_key: QuantKey | None
     ) -> QuantKey | None:

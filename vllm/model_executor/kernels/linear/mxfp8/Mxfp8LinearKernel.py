@@ -51,8 +51,3 @@ class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):
         externally quantized inputs, not the precision used inside the GEMM.
         """
         return weight_key == kMxfp8Static and activation_key == kMxfp8Dynamic
-
-    @classmethod
-    def supports_batch_invariance(cls) -> bool:
-        """Whether a row's output is independent of the other rows in the batch."""
-        return False
