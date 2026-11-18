@@ -521,6 +521,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         kv_cache = kv_cache.transpose(1, 2)
         self._store_kv(k, v, kv_cache, slot_mapping, layer)
 
+    def _decode_slice_max_query_len(self, attn_metadata, num_decodes: int) -> int:
+        """TurboQuant scores one query per request on a mixed step."""
+        del attn_metadata, num_decodes
+        return 1
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -599,13 +604,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             # --- Decode portion (first num_decodes requests) ---
             # Use full-batch max_seq_len as safe upper bound (no GPU sync).
+            # TurboQuant returns width 1. UltraQuant returns the longest
+            # verify query in this slice, read from the CPU query lengths.
             decode_meta = TurboQuantMetadata(
                 seq_lens=attn_metadata.seq_lens[:num_decodes],
                 slot_mapping=attn_metadata.slot_mapping[:num_decode_tokens],
                 block_table=attn_metadata.block_table[:num_decodes],
                 query_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
                 num_actual_tokens=num_decode_tokens,
-                max_query_len=1,
+                max_query_len=self._decode_slice_max_query_len(
+                    attn_metadata, num_decodes
+                ),
                 max_seq_len=attn_metadata.max_seq_len,
                 is_prefill=False,
             )
