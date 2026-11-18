@@ -25,7 +25,7 @@ The hash then names a computation: these tokens, after this prefix, with these w
 
 | Request field | Meaning |
 | --- | --- |
-| `aux_session` | The session. A non-empty string without `/`. |
+| `aux_session` | The session. A non-empty string without `/`, other than `tail`. |
 | `aux_version_segments` | Optional. The `aux_version_segments` of the session's previous response whose tokens this prompt extends. |
 
 Both are `SamplingParams` fields (inside `sampling_params` on `/inference/v1/generate`), accepted only by the Python API server. A session request is rejected (HTTP 400) without `object_key_prefix`, with `stop` strings (the frontend would end it before the engine returns its keys; use `stop_token_ids`), as a streaming-input request, or with malformed segments (section 4.2); segments without `aux_session` are rejected. `routed_experts_prompt_start` and `indexer_topk_prompt_start` are ignored for it.

@@ -75,8 +75,8 @@ def validate_aux_request(
         )
     if vllm_config.aux_output_config.object_key_prefix is None:
         reason = "requires AuxOutputConfig.object_key_prefix"
-    elif not session or "/" in session:
-        reason = "must be a non-empty string without '/'"
+    elif not session or "/" in session or session == "tail":
+        reason = "must be a non-empty string without '/', other than 'tail'"
     elif sampling_params.stop:
         reason = "does not support stop strings; use stop_token_ids"
     elif resumable:
