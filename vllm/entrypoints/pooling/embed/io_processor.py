@@ -350,7 +350,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         )
 
         mm_config = self.model_config.multimodal_config
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
         chat_params = request.build_chat_params(
             self.chat_template, self.chat_template_content_format
         ).with_defaults(

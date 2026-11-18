@@ -261,7 +261,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -556,7 +558,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             request=request
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
