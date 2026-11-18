@@ -629,13 +629,16 @@ class MoRIIOConnectorScheduler:
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
         # Per attention group: not prefix-cacheable, so read even on a full hit.
-        self._attn_group_is_state: list[bool] = []
+        # Mamba is not the only source of these: a circular-buffer (ring) group
+        # holds one non-prefix-cacheable block per request and must be pulled
+        # even when the attention prefix hits locally.
+        attn_groups = [
+            kv_cache_config.transfer_groups[group_id]
+            for group_id in self._attn_group_ids
+        ]
+        self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
+        self._has_state_attn_groups = any(self._attn_group_is_state)
         if self._has_mamba:
-            attn_groups = [
-                kv_cache_config.transfer_groups[group_id]
-                for group_id in self._attn_group_ids
-            ]
-            self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
             dcp_size = vllm_config.parallel_config.decode_context_parallel_size
             # The smallest attention block bounds every group's local tail.
             attn_block_size = min(
@@ -655,10 +658,13 @@ class MoRIIOConnectorScheduler:
             )
         )
         if self._is_hma_required:
-            # MoRIIO handles sliding-window and mamba/KDA groups in READ mode, and
-            # circular-buffer groups only alongside mamba/KDA in READ mode. Other
-            # hybrid cache specs still fail closed.
-            allow_circular_buffer = self._has_mamba and self.mode == MoRIIOMode.READ
+            # MoRIIO handles sliding-window, mamba/KDA and circular-buffer
+            # (ring) groups in READ mode. A ring group owns one block per
+            # request and is never prefix-cacheable, so READ pulls it like any
+            # other state group; it needs no mamba group to accompany it.
+            # WRITE has no prompt-block clamp for rings, so it still fails
+            # closed, as do other hybrid cache specs.
+            allow_circular_buffer = self.mode == MoRIIOMode.READ
             unsupported = [
                 g.manager_cls.__name__
                 for g in kv_cache_config.transfer_groups
@@ -1203,9 +1209,10 @@ class MoRIIOConnectorScheduler:
                                     adjusted_remote_block_ids.append(aligned_remote)
                                 local_block_ids = aligned_local_block_ids
                         else:
-                            if self._has_mamba:
-                                # Attention can be a complete local hit, but the
-                                # recurrent state is never prefix-cacheable.
+                            if self._has_mamba or self._has_state_attn_groups:
+                                # Attention can be a complete local hit, but
+                                # recurrent state and ring groups are never
+                                # prefix-cacheable, so they still need pulling.
                                 attn_block_groups, mamba_block_groups = (
                                     self.split_block_groups(blocks.get_block_ids())
                                 )
@@ -1576,11 +1583,14 @@ class MoRIIOConnectorScheduler:
         The wire payload stores every attention group first, followed by every
         Mamba group, each in transfer-group order. Sliding-window groups keep
         only their window; Mamba groups only their running-state slot.
+        Circular-buffer (ring) groups sit in the attention half and keep their
+        single block, which `get_exchange_clipped_blocks` leaves untouched
+        because a ring carries no sliding window.
         """
         if not block_ids:
             return [], []
-        if not self._has_mamba:
-            raise MoRIIOError("Mamba block groups requested for a non-hybrid model")
+        if not (self._has_mamba or self._has_state_attn_groups):
+            raise MoRIIOError("Hybrid block groups requested for a non-hybrid model")
         # Also window-clips sliding-window attention groups.
         transfer_block_ids = self.get_exchange_clipped_blocks(block_ids)
         attn = [list(transfer_block_ids[group_id]) for group_id in self._attn_group_ids]
