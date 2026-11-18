@@ -268,6 +268,9 @@ def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
     )
 
 
+# The tokenizer escapes the keys and strings of the arguments before they reach
+# this encoder (`_escape_arguments` in deepseek_v41.py, which parses them the
+# same way): change the two together.
 def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     """Encode tool call arguments into V4.1 DSML parameter format."""
     p_dsml_template = (

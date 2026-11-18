@@ -309,8 +309,10 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 f"{_ESCAPE_OPEN}{nonce}:(.*?){_ESCAPE_CLOSE}", re.DOTALL
             )
             if nonce in prompt and nonce in sentinel_re.sub("", prompt):
-                # e.g. the ensure_ascii fallback of to_json wrote the markers
-                # as text: the reserved token would be special again.
+                # Defensive: the escape markers must reach the rendered prompt
+                # verbatim. If rendering altered them (e.g. the ensure_ascii
+                # fallback of to_json writes them as text), the reserved token
+                # would be special again, so reject the prompt.
                 raise ValueError(
                     "DeepSeek V4.1 could not render the escaped text of a "
                     "message, tool or response format as plain text"
