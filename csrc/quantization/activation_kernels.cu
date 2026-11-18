@@ -661,6 +661,8 @@ void persistent_masked_m_silu_mul_quant(
   const auto clamp_upper = __float2bfloat162_rn(limit);
   const auto clamp_lower = __float2bfloat162_rn(-limit);
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   // TODO: Get this from cuda_arch ?
@@ -677,8 +679,6 @@ void persistent_masked_m_silu_mul_quant(
     static constexpr int max_shared_mem_bytes =                               \
         GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                              \
     dim3 grid(sms), block(THREAD_COUNT);                                      \
-    const torch::stable::accelerator::DeviceGuard device_guard(               \
-        input.get_device_index());                                            \
     VLLM_STABLE_DISPATCH_BOOL(clamp_limit.has_value(), USE_CLAMP, [&] {       \
       VLLM_STABLE_DISPATCH_FP8_TYPES(                                         \
           y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {     \
@@ -720,6 +720,12 @@ void persistent_masked_m_silu_mul_quant(
       static constexpr int THREAD_COUNT = 32;                              \
       KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,       \
              STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 4);       \
+    } else if (NUM_GROUPS == 3 && CEIL_UE8M0 && clamp_limit.has_value() && \
+               get_device_prop()->major == 10 &&                           \
+               (static_cast<int64_t>(E) + 1) * 16 + 1536 <= 48 * 1024) {   \
+      static constexpr int THREAD_COUNT = 32;                              \
+      KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,       \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 3);       \
     } else {                                                               \
       /* 1 warp config */                                                  \
       static constexpr int THREAD_COUNT = 32;                              \
