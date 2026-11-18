@@ -35,9 +35,9 @@ _SM100F_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
 
 # H20 plans for Qwen3.8-Flash-Next's replicated HC projection.
 _H20_TUNED_SPLITK: dict[int, tuple[int, int, int]] = {
-    **{m: (8, 3, 16) for m in range(5, 17)},
-    **{m: (4, 3, 16) for m in range(17, 33)},
-    **{m: (2, 5, 16) for m in range(33, MAX_FUSED_M + 1)},
+    **_SM100F_TUNED_SPLITK,
+    **{m: (6, 3, 16) for m in range(5, 17)},
+    **{m: (6, 2, 16) for m in range(17, 33)},
 }
 
 # FMA: (backend, M, K, threadblock_size); MMA: (backend, split_k, stages, tile_n).
