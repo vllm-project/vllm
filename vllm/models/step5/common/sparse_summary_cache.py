@@ -15,7 +15,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, KVCacheSpec
 
 from .csa_tail_ring import Step5CSATailRing
 
@@ -140,11 +141,11 @@ class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return Step5SparseSummaryBackend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         block_size = vllm_config.cache_config.block_size
         if block_size % 8:
             raise ValueError("Step5 KV blocks must align to eight-token regions")
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=256,
@@ -152,6 +153,7 @@ class Step5SparseSummaryCacheLayer(nn.Module, AttentionLayerBase):
             dtype=torch.uint8,
             tokens_per_state=8,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [blocks, 1, block_size // 8, 256] -> [blocks, block_size // 8, 256]

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
@@ -18,10 +19,10 @@ use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
-    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ChatLogProbs, ChatMessage, ContentPart, FunctionCallResponse, Normalizable, PromptLogprobs,
+    ReasoningEffort, StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages,
+    validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -368,6 +369,17 @@ impl Default for ChatCompletionRequest {
             return_mm_kwargs: None,
             stream_interval: None,
         }
+    }
+}
+
+impl ChatCompletionRequest {
+    /// The modality of each media part in the request's messages, in any
+    /// role.
+    pub fn media_modalities(&self) -> impl Iterator<Item = MmModality> + '_ {
+        self.messages
+            .iter()
+            .flat_map(ChatMessage::content_parts)
+            .filter_map(ContentPart::modality)
     }
 }
 
