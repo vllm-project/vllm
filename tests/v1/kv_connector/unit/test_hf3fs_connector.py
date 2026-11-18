@@ -7,7 +7,6 @@
 """
 
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -253,7 +252,8 @@ class TestHF3FSKVConnectorStats:
 
 @pytest.fixture
 def metadata_server(tmp_path):
-    with open(tmp_path / "metadata_server.log", "w") as log:
+    log_path = tmp_path / "metadata_server.log"
+    with open(log_path, "w") as log:
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -270,15 +270,17 @@ def metadata_server(tmp_path):
         try:
             deadline = time.monotonic() + 60
             while True:
-                try:
-                    socket.create_connection(
-                        ("127.0.0.1", METADATA_SERVER_PORT), timeout=1
-                    ).close()
+                assert process.poll() is None, (
+                    f"metadata server exited:\n{log_path.read_text()}"
+                )
+                # Uvicorn logs this only after successfully binding the socket.
+                if (
+                    f"Uvicorn running on http://127.0.0.1:{METADATA_SERVER_PORT}"
+                    in log_path.read_text()
+                ):
                     break
-                except OSError:
-                    assert process.poll() is None, "metadata server exited"
-                    assert time.monotonic() < deadline, "metadata server not up"
-                    time.sleep(0.5)
+                assert time.monotonic() < deadline, "metadata server not up"
+                time.sleep(0.5)
             yield
         finally:
             process.terminate()
