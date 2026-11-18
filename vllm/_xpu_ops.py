@@ -175,6 +175,10 @@ def _fused_add_nemotron_layer_norm_impl(
     torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
 
 
+# The SYCL GDN kernel processes prefills in 64-token chunks.
+SYCL_GDN_CHECKPOINT_ALIGNMENT = 64
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,

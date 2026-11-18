@@ -146,10 +146,6 @@ def xpu_gdn_kernel_available() -> bool:
     return hasattr(torch.ops._xpu_C, "gdn_attention")
 
 
-# The SYCL GDN kernel processes prefills in 64-token chunks.
-SYCL_GDN_CHECKPOINT_ALIGNMENT = 64
-
-
 def xpu_gdn_kernel_supports_checkpoints() -> bool:
     """Whether the SYCL GDN op writes internal prefill checkpoints itself."""
     return xpu_gdn_kernel_available() and any(
@@ -867,6 +863,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.gdn_prefill_backend == "sycl"
                 and xpu_gdn_kernel_supports_checkpoints()
             ):
+                from vllm._xpu_ops import SYCL_GDN_CHECKPOINT_ALIGNMENT
+
                 self._checkpoint_alignment = SYCL_GDN_CHECKPOINT_ALIGNMENT
         if (
             self._checkpoint_alignment is not None
