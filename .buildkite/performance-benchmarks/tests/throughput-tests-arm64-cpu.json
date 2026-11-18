@@ -12,7 +12,6 @@
             "dtype": "bfloat16",
             "distributed_executor_backend": "mp",
             "block_size": 128,
-            "trust_remote_code": "",
             "disable_log_stats": "",
             "enforce_eager": "",
             "max_num_batched_tokens": 2048,

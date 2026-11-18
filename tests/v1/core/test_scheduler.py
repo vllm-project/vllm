@@ -2568,6 +2568,58 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_of_aborted_request_is_counted():
+    """A request preempted and then aborted is still counted once."""
+    # 10 usable blocks: two 80-token requests fill them, so the second request
+    # is preempted when the first one needs a new block.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, block_size=16)
+    scheduler.add_request(first)
+    first_output = scheduler.schedule()
+    scheduler.add_request(second)
+    scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    preempting_output = scheduler.schedule()
+    assert second.status == RequestStatus.PREEMPTED
+    scheduler.finish_requests(
+        [first.request_id, second.request_id], RequestStatus.FINISHED_ABORTED
+    )
+    # A step with no request outputs still carries the stats.
+    engine_core_outputs = scheduler.update_from_output(
+        preempting_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    eco = next(iter(engine_core_outputs.values()))
+    assert not eco.outputs
+
+    assert eco.scheduler_stats is not None
+    assert eco.scheduler_stats.num_preempted_reqs == 1
+
+    next_stats = scheduler.make_stats()
+    assert next_stats is not None
+    assert next_stats.num_preempted_reqs == 0
+
+
 def test_preemption_processes_stale_aux_output():
     scheduler = create_scheduler(enable_prefix_caching=True)
     request = create_requests(num_requests=1)[0]
@@ -4443,12 +4495,7 @@ def create_scheduler_with_priority(
       {class}`Scheduler` instance with priority scheduling
 
     """
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="float16", seed=42)
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -5146,9 +5193,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
-    manager.backend = Mock()
-    manager.backend_name = "xgrammar"
-    manager.backend.compile_grammar.side_effect = RuntimeError(
+    manager.backends["xgrammar"] = Mock()
+    manager.backends["xgrammar"].compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
@@ -6926,12 +6972,7 @@ def _create_encoder_decoder_scheduler(
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
 
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -8300,11 +8341,7 @@ def _create_hybrid_mamba_connector_scheduler(
 ) -> Scheduler:
     """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=True,
+        model="facebook/opt-125m", dtype="float16", seed=42, skip_tokenizer_init=True
     )
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
