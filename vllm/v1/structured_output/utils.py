@@ -55,18 +55,29 @@ def strip_speculative_padding(token_ids: list[int]) -> list[int]:
     return token_ids
 
 
-def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
-    """Run a regex compilation callable with a timeout.
+def compile_with_timeout(
+    fn: Callable[..., _T],
+    *args: object,
+    what: str = "Grammar",
+    summary: str = "",
+    **kwargs: object,
+) -> _T:
+    """Run a structured-output compilation callable with a timeout.
 
-    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
-    quantifiers like `(a+)+b`) cause exponential DFA state-space explosion,
-    hanging the inference worker indefinitely.
+    Prevents ReDoS-style attacks where adversarial client-supplied grammars
+    (regexes with nested quantifiers, JSON schemas with many optional
+    properties, pathological EBNF) cause exponential state-space explosion
+    and hang the inference worker for minutes.
+
+    Note:
+        ``future.cancel()`` cannot interrupt a running C++ call, so the
+        worker thread keeps running after the timeout fires. This bounds the
+        request path; it does not reclaim the CPU already spent.
 
     Args:
-        fn: Single-argument callable that takes the pattern and performs
-            the regex compilation.
-        pattern: The regex pattern string, passed to *fn* and included in
-            timeout error messages.
+        fn: The compilation callable.
+        what: Noun used in the error message, e.g. "Regex" or "JSON schema".
+        summary: Extra context appended to the error message.
 
     Raises:
         ValueError: If compilation exceeds the configured timeout.
@@ -74,24 +85,31 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
-        return fn(pattern)
+        return fn(*args, **kwargs)
 
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn, pattern)
+    future = executor.submit(fn, *args, **kwargs)
     try:
         result = future.result(timeout=timeout)
     except TimeoutError:
         future.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         raise ValueError(
-            f"Regex compilation timed out after {timeout}s. "
+            f"{what} compilation timed out after {timeout}s. "
             "The pattern may be too complex or contain constructs that "
             "cause exponential state-space explosion (e.g. nested "
-            f"quantifiers). Pattern: {pattern[:200]}"
+            f"quantifiers). {summary}"
         ) from None
     else:
         executor.shutdown(wait=False)
         return result
+
+
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
+    """Backwards-compatible wrapper around :func:`compile_with_timeout`."""
+    return compile_with_timeout(
+        fn, pattern, what="Regex", summary=f"Pattern: {pattern[:200]}"
+    )
 
 
 class OutlinesVocabulary:

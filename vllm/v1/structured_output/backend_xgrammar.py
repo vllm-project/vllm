@@ -21,6 +21,7 @@ from vllm.v1.structured_output.backend_types import (
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
+    compile_with_timeout,
     grammar_is_likely_lark,
 )
 
@@ -133,10 +134,13 @@ class XgrammarBackend(StructuredOutputBackend):
         # This is a requirement of xgrammar's API, so we must comply with it.
         separators = (",", ":") if self.disable_any_whitespace else None
         if request_type == StructuredOutputOptions.JSON:
-            ctx = self.compiler.compile_json_schema(
+            ctx = compile_with_timeout(
+                self.compiler.compile_json_schema,
                 grammar_spec,
                 any_whitespace=not self.disable_any_whitespace,
                 separators=separators,
+                what="JSON schema",
+                summary=f"Schema length: {len(grammar_spec)} chars",
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
@@ -146,9 +150,19 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
-                ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
+                ctx = compile_with_timeout(
+                    self.full_vocab_compiler.compile_lark,
+                    grammar_spec,
+                    what="Grammar",
+                    summary=f"Length: {len(grammar_spec)} chars",
+                )
             else:
-                ctx = self.compiler.compile_grammar(grammar_spec)
+                ctx = compile_with_timeout(
+                    self.compiler.compile_grammar,
+                    grammar_spec,
+                    what="Grammar",
+                    summary=f"Length: {len(grammar_spec)} chars",
+                )
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -157,8 +171,11 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.CHOICE:
             # xgrammar has no choice type. Python request validation rewrites
             # `choice` into this grammar, but other frontends send it as is.
-            ctx = self.compiler.compile_grammar(
-                choice_as_grammar(json.loads(grammar_spec))
+            ctx = compile_with_timeout(
+                self.compiler.compile_grammar,
+                choice_as_grammar(json.loads(grammar_spec)),
+                what="Choice",
+                summary=f"Length: {len(grammar_spec)} chars",
             )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
@@ -172,11 +189,20 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.full_vocab_compiler.compile_structural_tag(
-                    tags, s_tag["triggers"]
+                ctx = compile_with_timeout(
+                    self.full_vocab_compiler.compile_structural_tag,
+                    tags,
+                    s_tag["triggers"],
+                    what="Structural tag",
+                    summary=f"Length: {len(grammar_spec)} chars",
                 )
             else:
-                ctx = self.full_vocab_compiler.compile_structural_tag(grammar_spec)
+                ctx = compile_with_timeout(
+                    self.full_vocab_compiler.compile_structural_tag,
+                    grammar_spec,
+                    what="Structural tag",
+                    summary=f"Length: {len(grammar_spec)} chars",
+                )
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
