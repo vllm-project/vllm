@@ -665,6 +665,25 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
+### Image Loading Errors
+
+For `POST /v1/chat/completions`, the Python and Rust frontends report image
+loading failures using the HTTP status and the same integer in `error.code`:
+
+| Failure | HTTP status | `error.type` |
+| --- | --- | --- |
+| Invalid or missing URL scheme, disallowed media URL or local path, invalid image content | 400 | `BadRequestError` |
+| Media server returns 4xx other than 408 or 429; HTTP client rejects the URL during download | 422 | `UnprocessableEntityError` |
+| DNS or connection failure, timeout, media server returns 408, 429 or 5xx, local file cannot be read | 500 | `InternalServerError` |
+
+These statuses apply after a structurally valid request reaches image loading
+on a model that supports images. A URL rejected during initial parsing returns
+400; rejection by the HTTP client during downloading returns 422. The media
+server's status is not passed through: for example, its 404 produces a 422
+response with `error.code=422` and `error.param="image_url"`.
+Local file reading requires `--allowed-local-media-path` in the Python frontend;
+the Rust frontend currently rejects local file URLs.
+
 ### Media Download Cache
 
 Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.

@@ -43,6 +43,11 @@ pub enum ApiError {
     },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
+    /// Media could not be fetched because of a permanent client error.
+    UnprocessableEntity {
+        message: String,
+        param: Option<&'static str>,
+    },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
     /// The engine rejected the request with a retryable error.
@@ -56,6 +61,7 @@ impl ApiError {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
@@ -93,6 +99,11 @@ impl ApiError {
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
             Self::Conflict { message } => ("Conflict", message.clone(), None),
+            Self::UnprocessableEntity { message, param } => (
+                "UnprocessableEntityError",
+                message.clone(),
+                param.map(str::to_string),
+            ),
             Self::ServerError { message } => ("InternalServerError", message.clone(), None),
             Self::ServiceUnavailable { message } => {
                 ("ServiceUnavailableError", message.clone(), None)
@@ -198,7 +209,13 @@ pub fn text_request_error(context: &'static str, error: vllm_text::Error) -> Api
 /// Like [`text_request_error`], for the chat pipeline, which wraps the text
 /// errors.
 pub fn chat_request_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    classified_error(context, error.kind(), &error)
+    let kind = error.kind();
+    if let vllm_chat::ErrorKind::InvalidRequest { param } = kind
+        && error.is_unprocessable_entity_error()
+    {
+        return unprocessable_entity!(param = param, "{}", error.as_report());
+    }
+    classified_error(context, kind, &error)
 }
 
 fn classified_error(
@@ -259,6 +276,91 @@ mod tests {
             message(format!("{kept}x")),
             format!("The model `{kept}...` does not exist. Valid aliases: base.")
         );
+    }
+
+    /// The media origin's status is classified, never passed through to the
+    /// caller. Retryable origin errors keep Python's internal-error response.
+    #[test]
+    fn media_http_errors_match_python_status_and_envelope() {
+        let mut responses = Vec::new();
+        for status in [400, 403, 404, 408, 422, 429, 500, 503] {
+            let response = axum::http::Response::builder().status(status).body("").unwrap();
+            let error = reqwest_0_13::Response::from(response).error_for_status().unwrap_err();
+            let error = vllm_chat::Error::from(llm_multimodal::MultiModalError::Media(
+                llm_multimodal::MediaConnectorError::Http(error),
+            ));
+            let error = chat_request_error("chat failed", error);
+            let body = error.to_error_response();
+            responses.push(format!(
+                "{status} -> {} {}: code={}, param={:?}",
+                error.status_code().as_u16(),
+                body.error.error_type,
+                body.error.code,
+                body.error.param,
+            ));
+        }
+        expect![[r#"
+            [
+                "400 -> 422 UnprocessableEntityError: code=422, param=Some(\"image_url\")",
+                "403 -> 422 UnprocessableEntityError: code=422, param=Some(\"image_url\")",
+                "404 -> 422 UnprocessableEntityError: code=422, param=Some(\"image_url\")",
+                "408 -> 500 InternalServerError: code=500, param=None",
+                "422 -> 422 UnprocessableEntityError: code=422, param=Some(\"image_url\")",
+                "429 -> 500 InternalServerError: code=500, param=None",
+                "500 -> 500 InternalServerError: code=500, param=None",
+                "503 -> 500 InternalServerError: code=500, param=None",
+            ]
+        "#]]
+        .assert_debug_eq(&responses);
+    }
+
+    #[test]
+    fn media_network_and_local_read_failures_stay_internal() {
+        use llm_multimodal::MediaConnectorError;
+        let errors = [
+            MediaConnectorError::UnresolvableHost {
+                host: "media.invalid".into(),
+                source: std::io::Error::other("DNS failed"),
+            },
+            MediaConnectorError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            MediaConnectorError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            MediaConnectorError::Timeout {
+                url: "https://media.invalid/image.png".into(),
+                budget: std::time::Duration::from_secs(1),
+            },
+        ];
+        for error in errors {
+            let error = chat_request_error("chat failed", error.into());
+            assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error.to_error_response().error.code, 500);
+        }
+    }
+
+    #[tokio::test]
+    async fn media_url_rejected_by_http_client_is_unprocessable() {
+        let error = reqwest_0_13::Client::new().get("http://[invalid").send().await.unwrap_err();
+        let error = vllm_chat::Error::MediaAfterPreprocessed {
+            offset: 1,
+            source: Box::new(llm_multimodal::MediaConnectorError::Http(error).into()),
+        };
+        let error = chat_request_error("chat failed", error);
+        let body = error.to_error_response();
+        expect![[r#"
+            (
+                422,
+                "UnprocessableEntityError",
+                422,
+                Some(
+                    "image_url",
+                ),
+            )
+        "#]]
+        .assert_debug_eq(&(
+            error.status_code().as_u16(),
+            body.error.error_type,
+            body.error.code,
+            body.error.param,
+        ));
     }
 
     /// Each error class serializes like Python's `ErrorInfo`: the class name

@@ -272,6 +272,17 @@ impl Error {
             }
         }
     }
+
+    /// Whether media fetching failed permanently after URL validation.
+    pub fn is_unprocessable_entity_error(&self) -> bool {
+        match self {
+            Self::Media(llm_multimodal::MultiModalError::Media(
+                llm_multimodal::MediaConnectorError::Http(error),
+            )) => http_error_is_unprocessable(error),
+            Self::MediaAfterPreprocessed { source, .. } => source.is_unprocessable_entity_error(),
+            _ => false,
+        }
+    }
 }
 
 impl From<llm_multimodal::MediaConnectorError> for Error {
@@ -287,6 +298,23 @@ impl From<llm_multimodal::MediaConnectorError> for Error {
 fn media_error_kind(error: &llm_multimodal::MultiModalError) -> ErrorKind {
     use llm_multimodal::MultiModalError;
     match error {
+        MultiModalError::Media(llm_multimodal::MediaConnectorError::Http(error)) => {
+            if http_error_is_unprocessable(error) {
+                ErrorKind::invalid_param("image_url")
+            } else if error.is_builder()
+                && error.url().is_some_and(|url| !matches!(url.scheme(), "http" | "https"))
+            {
+                ErrorKind::invalid_request()
+            } else {
+                ErrorKind::Internal
+            }
+        }
+        // Connector fault ownership charges these to the client, but Python
+        // leaves DNS and local file read failures as server errors.
+        MultiModalError::Media(
+            llm_multimodal::MediaConnectorError::UnresolvableHost { .. }
+            | llm_multimodal::MediaConnectorError::Io(_),
+        ) => ErrorKind::Internal,
         MultiModalError::Media(error) => match error.fault() {
             llm_multimodal::MediaFault::Client => ErrorKind::invalid_request(),
             llm_multimodal::MediaFault::Transient | llm_multimodal::MediaFault::Internal => {
@@ -296,6 +324,15 @@ fn media_error_kind(error: &llm_multimodal::MultiModalError) -> ErrorKind {
         MultiModalError::UnsupportedContent(_) => ErrorKind::invalid_request(),
         MultiModalError::Join(_) | MultiModalError::Validation(_) => ErrorKind::Internal,
     }
+}
+
+/// Identify permanent HTTP fetch failures, excluding unsupported schemes.
+fn http_error_is_unprocessable(error: &reqwest_0_13::Error) -> bool {
+    error
+        .status()
+        .is_some_and(|status| status.is_client_error() && !matches!(status.as_u16(), 408 | 429))
+        || (error.is_builder()
+            && error.url().is_none_or(|url| matches!(url.scheme(), "http" | "https")))
 }
 
 /// Classify a processor error on already decoded media: only a payload over

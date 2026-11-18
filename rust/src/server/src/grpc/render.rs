@@ -500,6 +500,7 @@ fn api_error_to_status(error: ApiError) -> Status {
     let message = response.error.message;
     match error {
         ApiError::InvalidRequest { .. }
+        | ApiError::UnprocessableEntity { .. }
         | ApiError::JsonParseError { .. }
         | ApiError::InvalidQuery { .. } => Status::invalid_argument(message),
         ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => Status::not_found(message),
@@ -523,18 +524,28 @@ mod tests {
     /// side's trouble.
     #[test]
     fn chat_errors_map_to_status_like_the_chat_routes() {
+        let response = axum::http::Response::builder().status(404).body("").unwrap();
+        let http_error = reqwest_0_13::Response::from(response).error_for_status().unwrap_err();
         let errors = [
             vllm_chat::Error::from(MediaConnectorError::DataUrl("missing comma".to_string())),
             vllm_chat::Error::from(MediaConnectorError::Timeout {
                 url: "https://example.com/a.png".to_string(),
                 budget: Duration::from_secs(5),
             }),
+            vllm_chat::Error::from(MediaConnectorError::Http(http_error)),
         ];
         let codes = errors
             .into_iter()
             .map(|error| chat_error_to_status(error).code())
             .collect::<Vec<_>>();
-        assert_eq!(codes, [tonic::Code::InvalidArgument, tonic::Code::Internal]);
+        assert_eq!(
+            codes,
+            [
+                tonic::Code::InvalidArgument,
+                tonic::Code::Internal,
+                tonic::Code::InvalidArgument
+            ]
+        );
     }
 
     #[test]
