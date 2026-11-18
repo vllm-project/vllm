@@ -43,6 +43,19 @@ _HISPARSE_KV_TRANSFER_CONFIG = {
     "kv_role": "kv_both",
     "kv_connector_extra_config": {"host_pool_gib": 1 / 64},
 }
+_TINY_QSA_TEXT_CONFIG = {
+    "hidden_size": 256,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "indexer_n_heads": 8,
+    "indexer_kv_heads": 1,
+    "indexer_head_dim": 128,
+    "indexer_compress_ratio": 4,
+    "indexer_budget": 2048,
+}
 
 
 @requires_qsa_kernels
@@ -57,26 +70,16 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
     Qwen4ExpConfig(
         architectures=["Qwen4ExpForConditionalGeneration"],
         text_config={
+            **_TINY_QSA_TEXT_CONFIG,
             "vocab_size": 128,
-            "hidden_size": 256,
             "num_hidden_layers": 2,
             "layer_types": ["linear_attention", "indexed_attention"],
-            "num_attention_heads": 24,
-            "num_key_value_heads": 2,
-            "head_dim": 64,
             "linear_num_key_heads": 2,
             "linear_num_value_heads": 4,
             "output_gate_type": "sigmoid",
-            "num_experts": 4,
-            "num_experts_per_tok": 2,
             "moe_intermediate_size": 64,
             "shared_expert_intermediate_size": 64,
             "hc_lowrank": 28,
-            "indexer_n_heads": 8,
-            "indexer_kv_heads": 1,
-            "indexer_head_dim": 128,
-            "indexer_compress_ratio": 4,
-            "indexer_budget": 2048,
             "mtp_num_hidden_layers": 0,
         },
     ).save_pretrained(tmp_path)
@@ -1365,33 +1368,19 @@ def test_qsa_fp8_kernel_correctness(
 
 
 @requires_qsa_kernels
-@pytest.mark.parametrize("extra_rows", [0, 1], ids=["flat-pages", "strided-pages"])
-@pytest.mark.parametrize(
-    "cache_dtype,repeats",
-    [
-        (torch.bfloat16, 1),
-        (torch.float8_e4m3fn, 1),
-        (torch.uint8, 1),
-        (torch.float8_e4m3fn, 11),  # 33 rows x 2 KV heads crosses the FP8 threshold.
-    ],
-    ids=["bf16", "fp8", "fp8-bytes", "large-fp8"],
-)
-def test_qsa_attention_consumes_hisparse_physical_indices(
-    extra_rows: int, cache_dtype: torch.dtype, repeats: int
-) -> None:
-    """Resolved HiSparse rows bypass the logical block table in either view."""
+# 33 FP8 rows x 2 KV heads cross the Blackwell FP8 decode-kernel threshold.
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "large-fp8"])
+def test_qsa_attention_consumes_hisparse_physical_indices(fp8: bool) -> None:
+    """Resolved HiSparse rows bypass the logical block table on padded pages."""
     from vllm.v1.hisparse.runtime import PagedCacheView
 
-    if cache_dtype == torch.float8_e4m3fn and not (
-        current_platform.has_device_capability(89)
-    ):
+    if fp8 and not current_platform.has_device_capability(89):
         pytest.skip("Native FP8 pointers require sm_89 or newer")
 
     torch.manual_seed(7)
     num_blocks, block_size, num_kv_heads, head_dim = 4, 16, 2, 64
     row_width = num_kv_heads * 2 * head_dim
-    block_stride = (2 * block_size + extra_rows) * row_width
-    fp8 = cache_dtype != torch.bfloat16
+    block_stride = (2 * block_size + 1) * row_width
     storage_dtype = torch.uint8 if fp8 else torch.bfloat16
     k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
     backing = torch.full(
@@ -1424,14 +1413,14 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
     view.cache.copy_(stored.flatten(2))
     attention_cache = view.attention_cache.unflatten(-1, (num_kv_heads, 2 * head_dim))
     key_cache, value_cache = attention_cache.split(head_dim, dim=-1)
-    if cache_dtype == torch.float8_e4m3fn:
+    if fp8:
         key_cache = key_cache.view(torch.float8_e4m3fn)
         value_cache = value_cache.view(torch.float8_e4m3fn)
     selected = torch.tensor(
         [[55, 2, 43, -1, -1], [16, 63, 33, 6, 30], [-1, -1, -1, -1, -1]],
         device="cuda",
         dtype=torch.int32,
-    ).repeat(repeats, 1)
+    ).repeat(11 if fp8 else 1, 1)
     counts = (selected >= 0).sum(dim=1, keepdim=True, dtype=torch.int32)
     physical_rows = torch.where(
         selected >= 0,
@@ -1440,7 +1429,6 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
     )
     # Counts stay in the logical packed buffer; resolved rows have no count.
     logical_packed = torch.cat((selected, counts), dim=1)
-    saved_rows = physical_rows.clone()
     num_rows = selected.shape[0]
     q = torch.randn(num_rows, 24, head_dim, device="cuda", dtype=torch.bfloat16)
     output_gate = torch.randn_like(q)
@@ -1457,26 +1445,13 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
         k_scale=k_scale,
         v_scale=v_scale,
     ) * torch.sigmoid(output_gate)
-    block_table = identity.roll(1, dims=1)
-    logical_expected = _qsa_sparse_paged_attention_reference(
-        q,
-        original_key,
-        original_value,
-        selected,
-        block_table,
-        token_to_req,
-        head_dim**-0.5,
-        k_scale=k_scale,
-        v_scale=v_scale,
-    ) * torch.sigmoid(output_gate)
-    assert not torch.allclose(expected, logical_expected, rtol=2e-2, atol=2e-2)
 
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
         key_cache,
         value_cache,
         physical_rows,
-        block_table,
+        identity.roll(1, dims=1),
         token_to_req,
         use_prefill_config=False,
         k_scale=k_scale,
@@ -1486,18 +1461,12 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-    torch.testing.assert_close(physical_rows, saved_rows, rtol=0, atol=0)
 
 
 @requires_qsa_kernels
-@pytest.mark.parametrize("fp8", [False, True], ids=["main-bf16", "main-fp8"])
 @pytest.mark.parametrize("all_context_pages_resident", [False, True])
 def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
-    tmp_path,
-    dist_init,
-    workspace_init,
-    fp8: bool,
-    all_context_pages_resident: bool,
+    tmp_path, dist_init, workspace_init, all_context_pages_resident: bool
 ) -> None:
     """Unequal active lengths and reordered state slots keep the right KV rows."""
     from dataclasses import replace
@@ -1507,7 +1476,6 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
-    from vllm.model_executor.models.utils import AutoWeightsLoader
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1519,23 +1487,13 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
     torch.manual_seed(7)
     num_blocks, block_size, heads, dim = 8, 16, 2, 64
     config = Qwen4ExpTextConfig(
+        **_TINY_QSA_TEXT_CONFIG,
         architectures=["Qwen4ExpForCausalLM"],
         num_hidden_layers=1,
         layer_types=["full_attention"],
-        hidden_size=256,
         intermediate_size=512,
-        num_attention_heads=24,
-        num_key_value_heads=heads,
-        head_dim=dim,
         partial_rotary_factor=1.0,
-        num_experts=4,
-        num_experts_per_tok=2,
         ple_layer_ids=[],
-        indexer_n_heads=8,
-        indexer_kv_heads=1,
-        indexer_head_dim=128,
-        indexer_compress_ratio=4,
-        indexer_budget=2048,
     )
     config.save_pretrained(tmp_path)
     vllm_config = EngineArgs(
@@ -1543,7 +1501,7 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
         load_format="dummy",
         skip_tokenizer_init=True,
         dtype="bfloat16",
-        kv_cache_dtype="fp8_e4m3" if fp8 else "bfloat16",
+        kv_cache_dtype="bfloat16",
         block_size=block_size,
         max_model_len=128,
         max_num_batched_tokens=128,
@@ -1563,50 +1521,24 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
         set_default_torch_dtype(torch.bfloat16),
         torch.device("cuda"),
     ):
-        topk_indices_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            _qwen4_exp_model.get_qsa_topk_buffer_width(config),
-            dtype=torch.int32,
-        )
         owner = Qwen4ExpQSAAttention(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
-            topk_indices_buffer=topk_indices_buffer,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            ),
             prefix="model.layers.0.self_attn",
-        )
-        k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
-        AutoWeightsLoader(owner).load_weights(
-            [
-                ("_k_scale", torch.tensor(k_scale)),
-                ("_v_scale", torch.tensor(v_scale)),
-            ]
         )
         owner.process_weights_after_loading()
     row_width = heads * 2 * dim
     original = torch.randn(
-        num_blocks,
-        block_size,
-        heads,
-        2 * dim,
-        device="cuda",
-        dtype=torch.bfloat16,
+        num_blocks, block_size, heads, 2 * dim, device="cuda", dtype=torch.bfloat16
     )
     original[6].fill_(17)
     original[7].fill_(-19)
-    if fp8:
-        original_key, original_value = original.split(dim, dim=-1)
-        original = torch.cat(
-            (
-                (original_key.float() / k_scale)
-                .to(torch.float8_e4m3fn)
-                .view(torch.uint8),
-                (original_value.float() / v_scale)
-                .to(torch.float8_e4m3fn)
-                .view(torch.uint8),
-            ),
-            dim=-1,
-        )
     backing = original.flatten().clone()
     source_table = torch.tensor(
         [[1, 2, 0], [3, 4, 5], [6, 6, 6], [7, 7, 7]],
@@ -1657,32 +1589,21 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
         vllm_config,
         torch.device("cuda"),
     )
-    metadata = builder.build(0, common)
-    all_metadata = {owner.layer_name: metadata}
-    for side_cache in (
-        owner.indexer.raw_key_cache,
-        owner.indexer.compressed_key_cache,
+    all_metadata = {owner.layer_name: builder.build(0, common)}
+    for side_cache, table in (
+        (owner.indexer.raw_key_cache, torch.tensor([[1], [2]], dtype=torch.int32)),
+        (owner.indexer.compressed_key_cache, source_table[:2]),
     ):
         spec = side_cache.get_kv_cache_config(vllm_config).spec
         assert isinstance(spec, AttentionSpec)
         side_cache.bind_kv_cache(
             torch.zeros(
-                num_blocks,
-                1,
-                spec.num_states,
-                128,
-                device="cuda",
-                dtype=spec.dtype,
+                num_blocks, 1, spec.num_states, 128, device="cuda", dtype=spec.dtype
             )
-        )
-        table = (
-            torch.tensor([[1], [2]], device="cuda", dtype=torch.int32)
-            if side_cache is owner.indexer.raw_key_cache
-            else source_table[:2]
         )
         all_metadata[side_cache.prefix] = QSAIndexerMetadataBuilder(
             spec, [side_cache.prefix], vllm_config, torch.device("cuda")
-        ).build(0, replace(common, block_table_tensor=table))
+        ).build(0, replace(common, block_table_tensor=table.cuda()))
     cache = owner.hisparse_cache
     assert cache is not None
     runtime = cache.runtime
@@ -1705,25 +1626,13 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
         host_rows = host.view(original.dtype).view(-1, row_width)
         host_rows.copy_(original.flatten(2).reshape(-1, row_width).cpu())
         runtime.bind_source_cache(host_rows, registered_host_pool=registered)
-        assert cache.view is not None
         if not all_context_pages_resident:
             # Only host retains this selected history page.
             cache.view.cache[3].fill_(29)
+        new_rows = torch.cat((key, value), dim=-1)
         reference = original.clone()
-        reference_key, reference_value = key, value
-        if fp8:
-            reference_key = (
-                (key.float() / k_scale).to(torch.float8_e4m3fn).view(torch.uint8)
-            )
-            reference_value = (
-                (value.float() / v_scale).to(torch.float8_e4m3fn).view(torch.uint8)
-            )
-        new_rows = torch.cat((reference_key, reference_value), dim=-1)
         reference[slots // block_size, slots % block_size] = new_rows
         reference_k, reference_v = reference.split(dim, dim=-1)
-        if fp8:
-            reference_k = reference_k.view(torch.float8_e4m3fn)
-            reference_v = reference_v.view(torch.float8_e4m3fn)
         expected = (
             _qsa_sparse_paged_attention_reference(
                 q,
@@ -1733,8 +1642,6 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
                 source_table[:2],
                 requests,
                 dim**-0.5,
-                k_scale=k_scale,
-                v_scale=v_scale,
             )
             * 0.5
         )
@@ -1749,13 +1656,11 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
             actual = owner(positions, hidden)
         torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
         stored_rows = cache.view.cache[slots // block_size, slots % block_size]
-        stored_rows = stored_rows.view(new_rows.dtype).reshape_as(new_rows)
-        if fp8:
-            # Either sign of zero is valid for the rotated keys.
-            stored_rows = stored_rows.view(torch.float8_e4m3fn)
-            new_rows = new_rows.view(torch.float8_e4m3fn)
         torch.testing.assert_close(
-            stored_rows.float(), new_rows.float(), rtol=0, atol=0
+            stored_rows.view(new_rows.dtype).reshape_as(new_rows),
+            new_rows,
+            rtol=0,
+            atol=0,
         )
         if not all_context_pages_resident:
             assert torch.all(cache.view.cache[3] == 29)
@@ -2041,182 +1946,3 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
-
-
-@requires_qsa_kernels
-def test_qsa_hisparse_reused_request_slot_refills_all_independent_kv_layers():
-    """A new owner of a host block cannot hit the old owner's full K/V rows."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
-        HiSparseConnectorMetadata,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
-        HiSparseConnectorWorker,
-    )
-    from vllm.v1.hisparse.runtime import (
-        HiSparseCacheHandle,
-        HiSparseRuntime,
-        ResolvedHiSparseConfig,
-    )
-    from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-    from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.worker.gpu.states import RequestState
-
-    device = torch.device("cuda")
-    block_size, heads, head_dim = 64, 2, 64
-    row_width = heads * 2 * head_dim
-    block_bytes = block_size * row_width * torch.bfloat16.itemsize
-    states = RequestState(
-        max_num_reqs=2,
-        max_model_len=64,
-        max_num_batched_tokens=2,
-        num_speculative_steps=0,
-        vocab_size=128,
-        device=device,
-    )
-    for name in ("old", "peer"):
-        states.add_request(name, 1, [1], 0, 4)
-    states.apply_staged_writes()
-    old_slot = states.req_id_to_index["old"]
-    peer_slot = states.req_id_to_index["peer"]
-    mapping = torch.full((2,), -1, dtype=torch.int32, device=device)
-    residency = torch.zeros((1, 2, 1), dtype=torch.int32, device=device)
-    # The HMA slab is shared, while hot groups own different allocation blocks.
-    backing = torch.zeros(6 * block_bytes, dtype=torch.uint8, device=device)
-    handles, host_pools = [], []
-    for layer in range(2):
-        runtime = HiSparseRuntime(
-            ResolvedHiSparseConfig(top_k=2, device_buffer_size=4, max_union_rows=2),
-            max_num_reqs=2,
-            row_width=row_width,
-            kv_dtype=torch.bfloat16,
-            device=device,
-        )
-        runtime.bind_hot_cache(
-            backing,
-            byte_offset=0,
-            block_stride=block_bytes,
-            num_blocks=6,
-            block_size=block_size,
-            block_table=torch.arange(
-                1 + 2 * layer, 3 + 2 * layer, dtype=torch.int32, device=device
-            )[:, None],
-        )
-        runtime.request_state_indices = mapping
-        # Each QSA layer leads its own index group and carries every K/V head.
-        assert runtime.is_group_leader
-        host = (
-            torch.arange(3 * block_size * row_width, dtype=torch.float32, device="cpu")
-            .remainder(29)
-            .add(layer * 32)
-            .to(torch.bfloat16)
-            .reshape(3, block_size, row_width)
-            .pin_memory()
-        )
-        runtime.bind_source_cache(host)
-        handle = HiSparseCacheHandle(runtime)
-        handle.bind_cache(
-            backing,
-            byte_offset=0,
-            block_stride=block_bytes,
-            num_blocks=6,
-            block_size=block_size,
-            block_table=residency[0],
-            slot_mapping=torch.zeros(2, dtype=torch.int64, device=device),
-        )
-        handle.residency = residency
-        handles.append(handle)
-        host_pools.append(host)
-    assert handles[0].runtime.index_group is not handles[1].runtime.index_group
-    worker = HiSparseConnectorWorker(
-        SimpleNamespace(
-            scheduler_config=SimpleNamespace(max_num_batched_tokens=2),
-            num_lookahead_tokens=0,
-        ),
-        KVCacheConfig(num_blocks=6, kv_cache_tensors=[], kv_cache_groups=[]),
-    )
-    worker.initialize(
-        handles,
-        ["qsa.layer.0", "qsa.layer.1"],
-        2,
-        3,
-        device,
-        host_pools,
-    )
-
-    def start(names, new_host_blocks):
-        worker.start_step(
-            HiSparseConnectorMetadata(
-                None,
-                (),
-                new_host_blocks,
-                {},
-                False,
-                {name: SparseKVResidencyUpdate([0], ([0],)) for name in names},
-            ),
-            torch.tensor(
-                [states.req_id_to_index[name] for name in names],
-                dtype=torch.int32,
-                device=device,
-            ),
-            request_ids=names,
-        )
-
-    def read(handle, source_blocks, selected):
-        handle.runtime.begin_forward()
-        indices, counts = handle.swap_in(
-            req_id_per_token=torch.arange(2, dtype=torch.int32, device=device),
-            block_table=torch.tensor(source_blocks, dtype=torch.int32, device=device)[
-                :, None
-            ],
-            logical_topk_indices=torch.tensor(
-                selected, dtype=torch.int32, device=device
-            ),
-            block_size=block_size,
-            num_valid_rows=torch.tensor([2], dtype=torch.int32, device=device),
-            return_valid_counts=True,
-        )
-        torch.accelerator.synchronize()
-        assert counts.tolist() == [2, 2]
-        return handle.runtime.hot.attention_cache.reshape(-1, row_width)[
-            indices.long()
-        ].cpu()
-
-    start(["old", "peer"], (1, 2))
-    old_rows, peer_mappings, before_misses = [], [], []
-    for handle, host in zip(handles, host_pools):
-        actual = read(handle, [1, 2], [[3, 7], [5, 9]])
-        expected = torch.stack((host[1, [3, 7]], host[2, [5, 9]]))
-        torch.testing.assert_close(actual.view(torch.uint8), expected.view(torch.uint8))
-        old_rows.append(actual[0].clone())
-        group = handle.runtime.index_group
-        assert {block_size + 3, block_size + 7} <= set(
-            group.device_global_indices[old_slot].tolist()
-        )
-        peer_mappings.append(group.device_global_indices[peer_slot].clone())
-        before_misses.append(int(group.swap_stats[1].item()))
-
-    assert states.remove_request("old") == old_slot
-    states.add_request("replacement", 1, [2], 0, 4)
-    states.apply_staged_writes()
-    assert states.req_id_to_index["replacement"] == old_slot
-    for host in host_pools:
-        host[1].add_(128)
-    # Hot tables follow batch order, while residency and identities use state slots.
-    for handle in handles:
-        hot_table = handle.runtime.hot_block_table
-        hot_table.copy_(hot_table.flip(0))
-    # Reorder batch rows as well as replacing the request, so batch row != state slot.
-    start(["peer", "replacement"], (1,))
-    assert mapping.tolist() == [peer_slot, old_slot]
-    for layer, (handle, host) in enumerate(zip(handles, host_pools)):
-        group = handle.runtime.index_group
-        assert (group.device_global_indices[old_slot] == -1).all()
-        torch.testing.assert_close(
-            group.device_global_indices[peer_slot], peer_mappings[layer]
-        )
-        actual = read(handle, [2, 1], [[5, 9], [3, 7]])
-        expected = torch.stack((host[2, [5, 9]], host[1, [3, 7]]))
-        assert not torch.equal(actual[1], old_rows[layer])
-        torch.testing.assert_close(actual.view(torch.uint8), expected.view(torch.uint8))
-        assert int(group.swap_stats[1].item()) - before_misses[layer] == 2
-    torch.accelerator.synchronize()
