@@ -91,3 +91,19 @@ activations). The stock W4A4 path quantizes the expert inputs and the SwiGLU
 output to MXFP4, so `--monokernel` outputs differ from the stock path (and
 prefill, which runs stock, uses W4A4). Other differences are reduction order
 (router, GEMVs, all-reduces in rank order) and the bf16 norm multipliers.
+
+## EP buddy (TP 4, `VLLM_MUSE_MONO_EP_BUDDY=1`, off by default)
+
+An HM launch lasts as long as its busiest rank's expert count. With the flag,
+rank r keeps copies of `VLLM_MUSE_MONO_EP_BUDDY_K` (default 6, at most 7)
+experts a layer of rank r + 1, about 1.6 GB a rank per K (9.6 GB at K = 6).
+Every HM launch plans, identically on every rank, how many of rank r + 1's used
+and copied experts rank r runs, minimizing the largest per-rank expert count.
+A moved expert's picks are summed into the executing rank's EP partial, so HB
+is unchanged; the outputs differ from the flag-off build in summation order
+only.
+
+The copies are the first K experts a layer and rank of a table
+(`mono/ep_buddy.py`): the built-in one lists the experts used by the most
+64-row decode launches of Muse-Spark-Open-816B-A42B at TP 4.
+`VLLM_MUSE_MONO_EP_BUDDY_TABLE` points at a file in the same format to replace it.

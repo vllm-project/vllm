@@ -393,15 +393,23 @@ def dn_loads(
     nv=None,
     nbytes=W2_BYTES,
     sbytes=W2S_BYTES,
+    rep=None,
 ):
     """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv);
-    nbytes / sbytes: the local experts' w2 / scale bytes (the buffer bounds)."""
+    nbytes / sbytes: the local experts' w2 / scale bytes (the buffer bounds);
+    rep: (w2r, w2sr, el), the replicas run as exec slots el and above."""
     r = lane % 16
     g = lane // 16
     task = ok.select(task, fx.Int32(0))
     u = task >> 8
     j = task & 255
     e = uniform(fx.ptr_load(etab + (u if nv is None else fx.min(u, nv - 1))))
+    if const_expr(rep is not None):
+        el = rep[2]
+        isr = e >= el
+        w2 = isr.select(rep[0], w2)
+        w2s = isr.select(rep[1], w2s)
+        e = isr.select(e - el, e)
     rbase = e * DM + j * 16
     ops = []
     for i in range_constexpr(2):

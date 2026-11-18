@@ -144,6 +144,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_MONO_EP_BUDDY: bool = False
+    VLLM_MUSE_MONO_EP_BUDDY_K: int = 6
+    VLLM_MUSE_MONO_EP_BUDDY_TABLE: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1370,6 +1373,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark `--monokernel` at TP 4 (EP buddy): every rank holds copies of
+    # some experts a layer of rank r + 1, and the 24-64-row decode launches move
+    # part of rank r + 1's used experts to rank r when that lowers the busiest
+    # rank's expert count. Off by default.
+    "VLLM_MUSE_MONO_EP_BUDDY": lambda: bool(
+        int(os.getenv("VLLM_MUSE_MONO_EP_BUDDY", "0"))
+    ),
+    # EP buddy: expert copies a layer and rank, 1-7 (about 1.6 GB a rank each).
+    "VLLM_MUSE_MONO_EP_BUDDY_K": lambda: int(
+        os.getenv("VLLM_MUSE_MONO_EP_BUDDY_K", "6")
+    ),
+    # EP buddy: a file listing each layer's and rank's experts in copy priority
+    # order (format in `vllm/models/muse_spark/amd/mono/ep_buddy.py`); empty =
+    # the built-in table for Muse-Spark-Open-816B-A42B.
+    "VLLM_MUSE_MONO_EP_BUDDY_TABLE": lambda: os.getenv(
+        "VLLM_MUSE_MONO_EP_BUDDY_TABLE", ""
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops

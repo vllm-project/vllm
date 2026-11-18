@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -29,6 +30,7 @@ from .decoder import (
     fused_attention_layers,
     layer_refusals,
 )
+from .ep_buddy import load_table
 
 logger = init_logger(__name__)
 
@@ -80,6 +82,18 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     return reasons or layer_refusals(
         lm.model, MonoDims.from_config(text_config, tp_size)
     )
+
+
+def _buddy_table(world_size: int) -> dict[int, list[list[int]]] | None:
+    """The EP buddy's expert table (`VLLM_MUSE_MONO_EP_BUDDY`), or None when off."""
+    if not envs.VLLM_MUSE_MONO_EP_BUDDY:
+        return None
+    if world_size != 4:
+        raise ValueError(f"VLLM_MUSE_MONO_EP_BUDDY needs TP 4, got TP {world_size}")
+    k = envs.VLLM_MUSE_MONO_EP_BUDDY_K
+    if not 1 <= k <= 7:
+        raise ValueError(f"VLLM_MUSE_MONO_EP_BUDDY_K must be 1-7, got {k}")
+    return load_table(envs.VLLM_MUSE_MONO_EP_BUDDY_TABLE, k, world_size)
 
 
 def maybe_attach_mono(lm: nn.Module) -> None:
@@ -134,6 +148,8 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         buckets=buckets,
         fused_attention=fused,
         kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
+        buddy_group=group,
+        buddy_table=_buddy_table(world_size),
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "

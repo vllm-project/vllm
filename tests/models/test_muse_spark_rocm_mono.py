@@ -356,6 +356,61 @@ def test_deployment_guard_accepts_only_tep8_or_tep4_with_dspark(checkpoints) -> 
     ]
 
 
+def test_ep_buddy_table_defaults_to_the_built_in_tep4_table(
+    monkeypatch, tmp_path
+) -> None:
+    """The flag works without a table file; a file replaces the built-in rows."""
+    from vllm.models.muse_spark.amd.mono import _buddy_table
+
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY", "0")
+    assert _buddy_table(4) is None
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY", "1")
+    table = _buddy_table(4)
+    assert sorted(table) == list(range(FIRST_LAYER, LAST_LAYER + 1))
+    for rows in table.values():
+        for rank, experts in enumerate(rows):
+            assert len(set(experts)) == 6
+            assert all(e // 64 == rank for e in experts)
+    assert table[1][0] == [58, 35, 41, 3, 61, 16]
+
+    own = "".join(
+        f"{layer} {r} " + " ".join(str(64 * r + j) for j in range(7)) + "\n"
+        for layer in range(FIRST_LAYER, LAST_LAYER + 1)
+        for r in range(4)
+    )
+    path = tmp_path / "table.tsv"
+    path.write_text("layer\trank\tids\n" + own)
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY_TABLE", str(path))
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY_K", "7")
+    assert _buddy_table(4)[60][3] == list(range(192, 199))
+
+
+def test_ep_buddy_refuses_other_tp_sizes_and_bad_tables(monkeypatch, tmp_path) -> None:
+    from vllm.models.muse_spark.amd.mono import _buddy_table
+    from vllm.models.muse_spark.amd.mono.ep_buddy import parse_table
+
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY", "1")
+    with pytest.raises(ValueError, match="needs TP 4"):
+        _buddy_table(8)
+    # The HM plan is exact for at most 7 copies a layer.
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_BUDDY_K", "8")
+    with pytest.raises(ValueError, match="1-7"):
+        _buddy_table(4)
+
+    rows = "\n".join(
+        f"{layer} {r} " + " ".join(str(64 * r + j) for j in range(6))
+        for layer in range(FIRST_LAYER, LAST_LAYER + 1)
+        for r in range(4)
+    )
+    assert parse_table(rows, 6, 4)[1][2] == list(range(128, 134))
+    with pytest.raises(ValueError, match="layer 1 rank 0 needs 6 distinct"):
+        parse_table("1 0 0 1 2 3 4 64\n" + rows, 6, 4)
+    with pytest.raises(ValueError, match="layer 1 rank 0 needs 7"):
+        parse_table(rows, 7, 4)
+    with pytest.raises(ValueError, match="layer 60 lacks ranks \\[3\\]"):
+        parse_table(rows.rsplit("\n", 1)[0], 6, 4)
+
+
 # ------------------------------------------------- the tiny model on one GPU
 
 
@@ -670,7 +725,7 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False):
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False, buddy=0):
         bnd = self.owner.bnd if self.name == "k5" else 0
         return _Key(S, W, next_rope, attn, bnd, kv_fp8)
 
