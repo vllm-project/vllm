@@ -285,6 +285,7 @@ def test_prefill_checkpoint_resumes_suffix(
     """Restoring both cached states must reproduce an uninterrupted prefill."""
     from types import SimpleNamespace
 
+    from vllm.model_executor.layers.mamba import kda_checkpoint
     from vllm.model_executor.layers.mamba.checkpoint import (
         MambaPrefillCheckpointMetadata,
     )
@@ -337,6 +338,7 @@ def test_prefill_checkpoint_resumes_suffix(
     layer._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(state_len=3)
     workspace = WorkspaceManager(device)
     monkeypatch.setattr(kda, "current_workspace_manager", lambda: workspace)
+    monkeypatch.setattr(kda_checkpoint, "current_workspace_manager", lambda: workspace)
     conv_shape = (width, state_len) if dim_first else (state_len, width)
     num_slots = 5 + (num_spec + 1 if num_spec else 0)
     conv_storage = torch.zeros(
