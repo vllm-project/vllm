@@ -98,7 +98,7 @@ pub struct LoadModelBackendsOptions {
     /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
 }
 

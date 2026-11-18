@@ -87,7 +87,7 @@ pub enum MmLimitSpec {
     /// Configurable form:
     /// `"video": {"count": 1, "num_frames": 32}`
     Options {
-        /// Absent means unlimited, matching an absent modality.
+        /// Absent means the default limit, matching an absent modality.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         count: Option<usize>,
 
@@ -100,7 +100,7 @@ pub enum MmLimitSpec {
 }
 
 impl MmLimitSpec {
-    /// The configured item count, or `None` when this modality is unlimited.
+    /// The configured item count, or `None` when the default limit applies.
     pub fn count(&self) -> Option<usize> {
         match self {
             Self::Count(count) => Some(*count),
