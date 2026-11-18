@@ -13,6 +13,10 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.direct import (
+    direct_reload_enabled,
+    track_loaded_params,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     log_layer_backends,
@@ -100,6 +104,8 @@ class BaseModelLoader(ABC):
 
             try:
                 logger.debug("Loading weights on %s ...", load_device)
+                if direct_reload_enabled():
+                    track_loaded_params(model)  # what every update must load again
                 self.load_weights(model, model_config)
 
                 # Release transient tensors held by PyTorch's caching allocator

@@ -563,9 +563,9 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe_kernel = None
     mock_kernel = MagicMock()
     monkeypatch.setattr(
-        method,
+        UnquantizedFusedMoEMethod,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", mock_kernel),
+        lambda self, _: setattr(self, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
