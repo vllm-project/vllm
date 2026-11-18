@@ -102,8 +102,6 @@ def resolve_max_model_len(args) -> int:
 
 
 def run_worker(args):
-    # Triton ReplaySSM requires V1; use the same runner for the baseline.
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     # override_ssm_config is a module global; it only reaches the model if the
     # engine runs in-process (default V1 spawns a separate EngineCore). Force it.
     if args.worker == "standard" and args.baseline_ssm_config:
