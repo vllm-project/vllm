@@ -110,16 +110,26 @@ def _vit_fp8_asm_segment(q, k, v, cu, max_seqlen, scale, h, d):
     n = q.shape[0]
     fp8_max = float(torch.finfo(dtypes.fp8).max)
     eps = torch.finfo(torch.float32).tiny
-    qp = _vit_pad_head(q, n, h, d)
-    kp = _vit_pad_head(k, n, h, d)
-    vp = _vit_pad_head(v, n, h, d)
-    qd = (qp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
-    kd = (kp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
-    vd = (vp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    # amax is taken on the UNPADDED tensor: the pad is zeros and abs().amax() is
+    # unchanged by zeros, so this is the same value from 72/128 of the memory traffic.
+    qd = (q.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    kd = (k.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    vd = (v.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+
+    def _pad_quant(x, descale):
+        # Allocate the padded buffer directly in fp8 and fill only the real lanes, so
+        # no padded bf16 tensor is materialized, the fp32 intermediate covers only the
+        # real head_dim, and the result is contiguous by construction.
+        buf = torch.zeros(
+            n, h, _VIT_ASM_PAD_HEAD_DIM, dtype=dtypes.fp8, device=x.device
+        )
+        buf[:, :, :d] = (x.float() / descale).to(dtypes.fp8)
+        return buf
+
     out = flash_attn_varlen_fp8_pertensor_func(
-        (qp.float() / qd).to(dtypes.fp8).contiguous(),
-        (kp.float() / kd).to(dtypes.fp8).contiguous(),
-        (vp.float() / vd).to(dtypes.fp8).contiguous(),
+        _pad_quant(q, qd),
+        _pad_quant(k, kd),
+        _pad_quant(v, vd),
         qd,
         kd,
         vd,
