@@ -675,6 +675,7 @@ steps:
 
 - label: ":nvidia: (B200) Mistral Large 4"
   key: mistral-large-4-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -686,6 +687,7 @@ steps:
     --ignore=models/mistral/mistral_large4/amd_specialized_decode
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Mistral Large 4"
       dind: false
       device: mi355_1

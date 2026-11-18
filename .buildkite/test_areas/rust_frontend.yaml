@@ -215,6 +215,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Chat Completions"
   key: rust-frontend-chat-completions
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   working_dir: "/vllm-workspace/tests"
@@ -230,6 +231,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat.py -k "not test_invocations"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Rust Frontend Chat Completions"
       dind: false
       device: mi355_dpx
