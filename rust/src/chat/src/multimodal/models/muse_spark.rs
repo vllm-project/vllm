@@ -294,10 +294,10 @@ impl ModelProcessorSpec for MuseSparkSpec {
         Some(processor::DEFAULT_SAMPLING_FPS)
     }
 
-    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f64> {
+    fn default_video_sample_fps_with(&self, config: &PreProcessorConfig) -> Option<f64> {
         Some(
             config
-                .and_then(|config| config.get_extra::<f64>("fps"))
+                .get_extra::<f64>("fps")
                 .filter(|fps| fps.is_finite() && *fps > 0.0)
                 .unwrap_or(processor::DEFAULT_SAMPLING_FPS),
         )
@@ -313,14 +313,14 @@ impl ModelProcessorSpec for MuseSparkSpec {
         }
     }
 
-    fn video_frame_sampling_with(&self, config: Option<&PreProcessorConfig>) -> FrameSampling {
+    fn video_frame_sampling_with(&self, config: &PreProcessorConfig) -> FrameSampling {
         FrameSampling::TemporalGroups {
             frame_factor: config
-                .and_then(|config| config.temporal_patch_size)
+                .temporal_patch_size
                 .unwrap_or(processor::DEFAULT_PATCH_TEMPORAL)
                 .max(1),
             max_frames: config
-                .and_then(|config| config.get_extra::<usize>("num_frames"))
+                .get_extra::<usize>("num_frames")
                 .filter(|frames| *frames > 0)
                 .unwrap_or(processor::DEFAULT_NUM_FRAMES_PER_VIDEO),
         }
@@ -630,11 +630,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            MuseSparkSpec.default_video_sample_fps_with(Some(&config)),
+            MuseSparkSpec.default_video_sample_fps_with(&config),
             Some(1.0)
         );
         assert_eq!(
-            MuseSparkSpec.video_frame_sampling_with(Some(&config)),
+            MuseSparkSpec.video_frame_sampling_with(&config),
             FrameSampling::TemporalGroups {
                 frame_factor: 4,
                 max_frames: 64

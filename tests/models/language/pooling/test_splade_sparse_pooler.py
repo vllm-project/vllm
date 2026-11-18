@@ -16,6 +16,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.token_buffer import TokenBuffer
+from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -179,6 +180,7 @@ def test_encoder_cache_reset_clears_late_interaction_state() -> None:
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.encoder_cache = MagicMock()
     runner.pooling_runner = MagicMock()
+    runner.ec_connector = NO_OP_EC_CONNECTOR
 
     runner.reset_mm_cache()
 
