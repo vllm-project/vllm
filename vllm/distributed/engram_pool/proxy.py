@@ -34,7 +34,6 @@ import mmap
 import os
 import signal
 import socket
-import struct
 import sys
 import threading
 import traceback
@@ -45,7 +44,8 @@ else:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import verbs  # type: ignore[no-redef]
 
-SGE_BYTES = 16
+WR_BYTES = ctypes.sizeof(verbs.ibv_send_wr)
+SGE_BYTES = ctypes.sizeof(verbs.ibv_sge)
 # WRs per posted chain; the requester's GPU signals each chain's last. Few WRs
 # take one chain: each more QP costs a post and a READ round trip.
 MIN_CHAIN, MAX_CHAIN = 16, 64
@@ -66,18 +66,17 @@ def chain_length(num_wrs: int, qps: int) -> int:
 
 def mailbox_bytes(max_wrs: int, max_items: int) -> int:
     """A requester's WRs, then their SGEs."""
-    return max_wrs * verbs.SEND_WR_BYTES + max_items * SGE_BYTES
+    return max_wrs * WR_BYTES + max_items * SGE_BYTES
 
 
 def _failed(wc: ctypes.Array, count: int, what: str) -> bool:
     """Report failed completions in `wc`; True if any."""
     failed = False
-    for i in range(count):
-        status, _, vendor = struct.unpack_from("<III", wc, i * verbs.WC_BYTES + 8)
-        if status:
+    for c in wc[:count]:
+        if c.status:
             print(
-                f"Engram pool RDMA {what} failed: ibv_wc status {status}, "
-                f"vendor error {vendor:#x}",
+                f"Engram pool RDMA {what} failed: ibv_wc status {c.status}, "
+                f"vendor error {c.vendor_err:#x}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -149,7 +148,7 @@ class Owner:
         self.loopback = [
             dev.create_qp(self.data_cq, self.recv_cq, 1) for _ in range(qps_per_peer)
         ]
-        self.data_wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
+        self.data_wc = (verbs.ibv_wc * 64)()
         # Per data QP: free send queue slots, and its posted chains' WRs. A
         # QP's last chain's READ and flag stay queued until its next completion.
         self.room = {qp: depth - 2 for qps in self.qps.values() for qp in qps}
@@ -170,7 +169,7 @@ class Owner:
             "qpns": self.qpns,
             "notices": notices,
             "max_sge": sge_cap,
-            "mtu": verbs.MTU_BYTES.get(dev.mtu, 1024),
+            "mtu": dev.mtu_bytes,
             "device": dev.describe(),
         }
 
@@ -188,12 +187,12 @@ class Owner:
         ):
             dev.connect(qp, partner_qpn, dev.address())
             dev.connect(partner, qpn, dev.address())
-        self.recv_wr = (ctypes.c_uint64 * 4)()
+        self.recv_wr = verbs.ibv_recv_wr()
         by_peer = {peer: qp for peer, qp in self.receivers.values()}
         for peer, (gid, lid), remote in requesters:
             dev.connect(by_peer[peer], remote, (bytes.fromhex(gid), lid))
             for _ in range(RECV_DEPTH):
-                dev.post_recv(by_peer[peer], ctypes.addressof(self.recv_wr))
+                dev.post_recv(by_peer[peer], self.recv_wr)
         self.box_sizes = box_sizes
         self.box_starts = [
             sum(box_sizes[:peer]) * max_tables for peer in range(self.world)
@@ -201,7 +200,7 @@ class Owner:
         boxes = mmap.mmap(-1, sum(box_sizes) * max_tables)
         self.keep.append(boxes)
         self.boxes = ctypes.addressof(ctypes.c_char.from_buffer(boxes))
-        _, lkey, rkey = dev.reg_host(self.boxes, len(boxes), verbs.FLAGS)
+        _, lkey, rkey = dev.reg_host(self.boxes, len(boxes), verbs.PEER_ORDERED)
         return [self.boxes, rkey, lkey]
 
     def map_peer(self, pid, fd, size):
@@ -212,7 +211,7 @@ class Owner:
         os.close(opened)
         self.keep.append(mapping)
         address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
-        return address, self.device.reg_host(address, size, verbs.LOCAL)[1]
+        return address, self.device.reg_host(address, size, verbs.NIC_READ)[1]
 
     def register(self, kind, size, iova, access, fds):
         """Register host memory or HBM; returns its address, lkey and rkey."""
@@ -232,8 +231,8 @@ class Owner:
         only whole chains that fit their send queue: small requests (decode)
         first, large ones (prefill) in turn, CHAINS_PER_TURN at a time and one
         queued chain per QP, so a small fetch never queues behind large ones."""
-        device, recv_wr = self.device, ctypes.addressof(self.recv_wr)
-        wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
+        device, recv_wr = self.device, self.recv_wr
+        wc = (verbs.ibv_wc * 64)()
         pending: list[_Request] = []
         device.notify_cq(self.recv_cq)
         while True:
@@ -243,21 +242,18 @@ class Owner:
                 device.notify_cq(self.recv_cq)
                 continue
             self.retire(block=False)
-            for i in range(count):
-                status, _, _, _, imm, qpn = struct.unpack_from(
-                    "<IIIIII", wc, i * verbs.WC_BYTES + 8
-                )
-                peer, qp = self.receivers[qpn]
+            for c in wc[:count]:
+                peer, qp = self.receivers[c.qp_num]
                 device.post_recv(qp, recv_wr)
-                if status:
+                if c.status:
                     print(
                         f"Engram pool RDMA request from GPU {peer} failed: "
-                        f"ibv_wc status {status}",
+                        f"ibv_wc status {c.status}",
                         file=sys.stderr,
                         flush=True,
                     )
                     continue
-                num_wrs, table = imm & 0xFFFFFF, imm >> 24
+                num_wrs, table = c.imm_data & 0xFFFFFF, c.imm_data >> 24
                 box = self.boxes + self.box_starts[peer] + table * self.box_sizes[peer]
                 pending.append(_Request(self.qps[peer], box, num_wrs))
             # With work pending, poll: its chains complete within microseconds.
@@ -307,10 +303,8 @@ class Owner:
                 return
             _failed(wc, count, "gather")
             # A QP completes its chains in order; each ends in a signaled WR.
-            for i in range(count):
-                qp = self.by_qpn[
-                    struct.unpack_from("<I", wc, i * verbs.WC_BYTES + 28)[0]
-                ]
+            for c in wc[:count]:
+                qp = self.by_qpn[c.qp_num]
                 wrs, large = self.chains[qp].popleft()
                 self.room[qp] += wrs
                 self.large[qp] -= large
@@ -334,7 +328,7 @@ class _Request:
 
     @property
     def next_wr(self) -> int:
-        return self.box + self.posted * self.chain * verbs.SEND_WR_BYTES
+        return self.box + self.posted * self.chain * WR_BYTES
 
     @property
     def next_wrs(self) -> int:

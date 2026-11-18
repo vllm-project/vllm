@@ -2,70 +2,306 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ctypes bindings to libibverbs: just enough for RC QPs and RDMA WRITEs.
 
-Offsets follow the stable LP64 ABI of rdma-core's verbs.h. `ibv_post_send` and
-`ibv_poll_cq` are inline in verbs.h, so they are called through the context's
-ops table. Only the standard library is imported: the RDMA proxy process loads
-this file without vllm or torch.
+Structs and constants mirror rdma-core's verbs.h and mlx5dv.h under their C
+names (LP64 ABI), as `pynccl_wrapper` does for NCCL. `ibv_post_send`,
+`ibv_post_recv`, `ibv_poll_cq` and `ibv_req_notify_cq` are inline in verbs.h,
+so they are called through the context's ops table. Only the standard library
+is imported: the RDMA proxy process loads this file without vllm or torch.
 """
 
 import ctypes
 import os
-import struct
+from ctypes import (
+    POINTER,
+    Structure,
+    Union,
+    c_char,
+    c_int,
+    c_int64,
+    c_size_t,
+    c_uint8,
+    c_uint16,
+    c_uint32,
+    c_uint64,
+    c_void_p,
+)
 from functools import cache
 
-SEND_WR_BYTES = 128
-WC_BYTES = 48
+IBV_ACCESS_LOCAL_WRITE = 1 << 0
+IBV_ACCESS_REMOTE_WRITE = 1 << 1
+IBV_ACCESS_REMOTE_READ = 1 << 2
+IBV_ACCESS_RELAXED_ORDERING = 1 << 20
+IBV_QPT_RC = 2
+IBV_QPS_INIT, IBV_QPS_RTR, IBV_QPS_RTS = 1, 2, 3
+IBV_QP_STATE = 1 << 0
+IBV_QP_ACCESS_FLAGS = 1 << 3
+IBV_QP_PKEY_INDEX = 1 << 4
+IBV_QP_PORT = 1 << 5
+IBV_QP_AV = 1 << 7
+IBV_QP_PATH_MTU = 1 << 8
+IBV_QP_TIMEOUT = 1 << 9
+IBV_QP_RETRY_CNT = 1 << 10
+IBV_QP_RNR_RETRY = 1 << 11
+IBV_QP_RQ_PSN = 1 << 12
+IBV_QP_MAX_QP_RD_ATOMIC = 1 << 13
+IBV_QP_MIN_RNR_TIMER = 1 << 15
+IBV_QP_SQ_PSN = 1 << 16
+IBV_QP_MAX_DEST_RD_ATOMIC = 1 << 17
+IBV_QP_DEST_QPN = 1 << 20
+IBV_WR_RDMA_WRITE, IBV_WR_RDMA_READ = 0, 4
+IBV_SEND_FENCE, IBV_SEND_SIGNALED, IBV_SEND_INLINE = 1 << 0, 1 << 1, 1 << 3
+IBV_LINK_LAYER_INFINIBAND = 1
+MLX5_OPCODE_RDMA_WRITE_IMM = 0x09
+MLX5_SEND_WQE_BB = 64
+MLX5DV_OBJ_QP = 1 << 0
 
-# enum ibv_access_flags
-_LOCAL_WRITE, _REMOTE_WRITE, _REMOTE_READ = 1, 2, 4
-_RELAXED_ORDERING = 1 << 20
-# Access of registered memory: read only by this NIC (shards, descriptors);
-# written by peers in any order (landing); written by peers in order, and read
-# back by them (flags, mailboxes).
-LOCAL = _RELAXED_ORDERING
-BULK = _LOCAL_WRITE | _REMOTE_WRITE | _RELAXED_ORDERING
-FLAGS = _LOCAL_WRITE | _REMOTE_WRITE | _REMOTE_READ
-_QPT_RC = 2
-_QPS_INIT, _QPS_RTR, _QPS_RTS = 1, 2, 3
-# Words of ibv_context (its device pointer, then struct ibv_context_ops) that
-# hold the calls verbs.h inlines.
-_OPS_POLL_CQ, _OPS_NOTIFY_CQ, _OPS_POST_SEND, _OPS_POST_RECV = 12, 13, 26, 27
-MTU_BYTES = {1: 256, 2: 512, 3: 1024, 4: 2048, 5: 4096}
+# Access of registered memory that only this NIC reads (shards, descriptors);
+# that peers write in any order (landing); that peers write in order and read
+# back (flags, mailboxes).
+NIC_READ = IBV_ACCESS_RELAXED_ORDERING
+PEER_WRITE = (
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING
+)
+PEER_ORDERED = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ
 
-_POST_SEND = ctypes.CFUNCTYPE(
-    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
+
+def _fields(ctype, names: str) -> list:
+    return [(name, ctype) for name in names.split()]
+
+
+class ibv_device_attr(Structure):
+    _fields_ = [
+        ("fw_ver", c_char * 64),
+        *_fields(c_uint64, "node_guid sys_image_guid max_mr_size page_size_cap"),
+        *_fields(
+            c_int,
+            """vendor_id vendor_part_id hw_ver max_qp max_qp_wr device_cap_flags
+            max_sge max_sge_rd max_cq max_cqe max_mr max_pd max_qp_rd_atom
+            max_ee_rd_atom max_res_rd_atom max_qp_init_rd_atom max_ee_init_rd_atom
+            atomic_cap max_ee max_rdd max_mw max_raw_ipv6_qp max_raw_ethy_qp
+            max_mcast_grp max_mcast_qp_attach max_total_mcast_qp_attach max_ah
+            max_fmr max_map_per_fmr max_srq max_srq_wr max_srq_sge""",
+        ),
+        ("max_pkeys", c_uint16),
+        *_fields(c_uint8, "local_ca_ack_delay phys_port_cnt"),
+    ]
+
+
+class ibv_port_attr(Structure):
+    _fields_ = [
+        *_fields(
+            c_int,
+            """state max_mtu active_mtu gid_tbl_len port_cap_flags max_msg_sz
+            bad_pkey_cntr qkey_viol_cntr""",
+        ),
+        *_fields(c_uint16, "pkey_tbl_len lid sm_lid"),
+        *_fields(
+            c_uint8,
+            """lmc max_vl_num sm_sl subnet_timeout init_type_reply active_width
+            active_speed phys_state link_layer flags""",
+        ),
+        ("port_cap_flags2", c_uint16),
+        ("active_speed_ex", c_uint32),
+    ]
+
+
+class ibv_qp_cap(Structure):
+    _fields_ = _fields(
+        c_uint32, "max_send_wr max_recv_wr max_send_sge max_recv_sge max_inline_data"
+    )
+
+
+class ibv_qp_init_attr(Structure):
+    _fields_ = [
+        *_fields(c_void_p, "qp_context send_cq recv_cq srq"),
+        ("cap", ibv_qp_cap),
+        *_fields(c_int, "qp_type sq_sig_all"),
+    ]
+
+
+class ibv_gid(Union):
+    _fields_ = [("raw", c_uint8 * 16), ("global_", c_uint64 * 2)]
+
+
+class ibv_global_route(Structure):
+    _fields_ = [
+        ("dgid", ibv_gid),
+        ("flow_label", c_uint32),
+        *_fields(c_uint8, "sgid_index hop_limit traffic_class"),
+    ]
+
+
+class ibv_ah_attr(Structure):
+    _fields_ = [
+        ("grh", ibv_global_route),
+        ("dlid", c_uint16),
+        *_fields(c_uint8, "sl src_path_bits static_rate is_global port_num"),
+    ]
+
+
+class ibv_qp_attr(Structure):
+    _fields_ = [
+        *_fields(c_int, "qp_state cur_qp_state path_mtu path_mig_state"),
+        *_fields(c_uint32, "qkey rq_psn sq_psn dest_qp_num qp_access_flags"),
+        ("cap", ibv_qp_cap),
+        *_fields(ibv_ah_attr, "ah_attr alt_ah_attr"),
+        *_fields(c_uint16, "pkey_index alt_pkey_index"),
+        *_fields(
+            c_uint8,
+            """en_sqd_async_notify sq_draining max_rd_atomic max_dest_rd_atomic
+            min_rnr_timer port_num timeout retry_cnt rnr_retry alt_port_num
+            alt_timeout""",
+        ),
+        ("rate_limit", c_uint32),
+    ]
+
+
+class ibv_sge(Structure):
+    _fields_ = [("addr", c_uint64), *_fields(c_uint32, "length lkey")]
+
+
+class ibv_send_wr(Structure):
+    """With `wr.rdma` of the `wr` union. RDMA WRITEs and READs leave the
+    trailing `bind_mw`/`tso` union (`spare`) unused."""
+
+    _fields_ = [
+        ("wr_id", c_uint64),
+        *_fields(c_void_p, "next sg_list"),
+        *_fields(c_int, "num_sge opcode send_flags imm_data"),
+        ("remote_addr", c_uint64),
+        ("rkey", c_uint32),
+        ("_wr", c_uint8 * 20),
+        ("remote_srqn", c_uint32),
+        ("spare", c_uint64 * 6),
+    ]
+
+
+class ibv_recv_wr(Structure):
+    _fields_ = [
+        ("wr_id", c_uint64),
+        *_fields(c_void_p, "next sg_list"),
+        ("num_sge", c_int),
+    ]
+
+
+class ibv_wc(Structure):
+    _fields_ = [
+        ("wr_id", c_uint64),
+        *_fields(
+            c_uint32,
+            "status opcode vendor_err byte_len imm_data qp_num src_qp wc_flags",
+        ),
+        *_fields(c_uint16, "pkey_index slid"),
+        *_fields(c_uint8, "sl dlid_path_bits"),
+    ]
+
+
+class ibv_mr(Structure):
+    _fields_ = [
+        *_fields(c_void_p, "context pd addr"),
+        ("length", c_size_t),
+        *_fields(c_uint32, "handle lkey rkey"),
+    ]
+
+
+class ibv_qp(Structure):
+    """Up to the fields read here."""
+
+    _fields_ = [
+        *_fields(c_void_p, "context qp_context pd send_cq recv_cq srq"),
+        *_fields(c_uint32, "handle qp_num"),
+    ]
+
+
+class ibv_context(Structure):
+    """Up to the ops called here; the skipped ops are `_compat_*` stubs or
+    unused."""
+
+    _fields_ = [
+        ("device", c_void_p),
+        ("_ops_0", c_void_p * 11),
+        *_fields(c_void_p, "poll_cq req_notify_cq"),
+        ("_ops_13", c_void_p * 12),
+        *_fields(c_void_p, "post_send post_recv"),
+    ]
+
+
+class mlx5dv_qp_queue(Structure):
+    """The `sq` and `rq` members of struct mlx5dv_qp."""
+
+    _fields_ = [("buf", c_void_p), *_fields(c_uint32, "wqe_cnt stride")]
+
+
+class mlx5dv_qp(Structure):
+    _fields_ = [
+        ("dbrec", c_void_p),
+        *_fields(mlx5dv_qp_queue, "sq rq"),
+        ("bf_reg", c_void_p),
+        ("bf_size", c_uint32),
+        ("comp_mask", c_uint64),
+        ("uar_mmap_offset", c_int64),
+        *_fields(c_uint32, "tirn tisn rqn sqn"),
+        ("tir_icm_addr", c_uint64),
+    ]
+
+
+class mlx5dv_obj(Structure):
+    """Its `qp` member's `in` and `out`; the other members stay null."""
+
+    _fields_ = [
+        ("qp_in", c_void_p),
+        ("qp_out", POINTER(mlx5dv_qp)),
+        ("_others", c_void_p * 12),
+    ]
+
+
+class mlx5_wqe_ctrl_seg(Structure):
+    _pack_ = 1
+    _fields_ = [
+        *_fields(c_uint32, "opmod_idx_opcode qpn_ds"),
+        ("signature", c_uint8),
+        ("dci_stream_channel_id", c_uint16),
+        ("fm_ce_se", c_uint8),
+        ("imm", c_uint32),
+    ]
+
+
+class mlx5_wqe_raddr_seg(Structure):
+    _fields_ = [("raddr", c_uint64), *_fields(c_uint32, "rkey reserved")]
+
+
+class mlx5_wqe_data_seg(Structure):
+    _fields_ = [*_fields(c_uint32, "byte_count lkey"), ("addr", c_uint64)]
+
+
+_post_send_t = ctypes.CFUNCTYPE(c_int, c_void_p, c_void_p, POINTER(c_void_p))
+_post_recv_t = ctypes.CFUNCTYPE(
+    c_int, c_void_p, POINTER(ibv_recv_wr), POINTER(c_void_p)
 )
-_NOTIFY_CQ = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
-_POLL_CQ = ctypes.CFUNCTYPE(
-    ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p
-)
+_poll_cq_t = ctypes.CFUNCTYPE(c_int, c_void_p, c_int, POINTER(ibv_wc))
+_req_notify_cq_t = ctypes.CFUNCTYPE(c_int, c_void_p, c_int)
 
 
 @cache
 def _lib() -> ctypes.CDLL:
     lib = ctypes.CDLL("libibverbs.so.1", use_errno=True)
-    p, i = ctypes.c_void_p, ctypes.c_int
+    p, i, context = c_void_p, c_int, POINTER(ibv_context)
     for name, res, args in (
-        ("ibv_get_device_list", p, [ctypes.POINTER(i)]),
+        ("ibv_get_device_list", POINTER(p), [POINTER(i)]),
         ("ibv_get_device_name", ctypes.c_char_p, [p]),
-        ("ibv_open_device", p, [p]),
-        ("ibv_alloc_pd", p, [p]),
-        ("ibv_query_device", i, [p, p]),
-        ("ibv_query_port", i, [p, ctypes.c_uint8, p]),
-        ("ibv_query_gid", i, [p, ctypes.c_uint8, i, p]),
-        ("ibv_create_cq", p, [p, i, p, p, i]),
-        ("ibv_create_comp_channel", p, [p]),
-        ("ibv_get_cq_event", i, [p, p, p]),
+        ("ibv_open_device", context, [p]),
+        ("ibv_alloc_pd", p, [context]),
+        ("ibv_query_device", i, [context, POINTER(ibv_device_attr)]),
+        ("ibv_query_port", i, [context, c_uint8, POINTER(ibv_port_attr)]),
+        ("ibv_query_gid", i, [context, c_uint8, i, POINTER(ibv_gid)]),
+        ("ibv_create_cq", p, [context, i, p, p, i]),
+        ("ibv_create_comp_channel", p, [context]),
+        ("ibv_get_cq_event", i, [p, POINTER(p), POINTER(p)]),
         ("ibv_ack_cq_events", None, [p, ctypes.c_uint]),
-        ("ibv_create_qp", p, [p, p]),
-        ("ibv_modify_qp", i, [p, p, i]),
-        ("ibv_reg_mr", p, [p, p, ctypes.c_size_t, i]),
-        (
-            "ibv_reg_dmabuf_mr",
-            p,
-            [p, ctypes.c_uint64, ctypes.c_size_t, ctypes.c_uint64, i, i],
-        ),
-        ("ibv_dereg_mr", i, [p]),
+        ("ibv_create_qp", POINTER(ibv_qp), [p, POINTER(ibv_qp_init_attr)]),
+        ("ibv_modify_qp", i, [p, POINTER(ibv_qp_attr), i]),
+        ("ibv_reg_mr", POINTER(ibv_mr), [p, p, c_size_t, i]),
+        ("ibv_reg_dmabuf_mr", POINTER(ibv_mr), [p, c_uint64, c_size_t, c_uint64, i, i]),
     ):
         fn = getattr(lib, name)
         fn.restype, fn.argtypes = res, args
@@ -131,14 +367,13 @@ class Device:
 
     def __init__(self, name: str) -> None:
         lib = _lib()
-        count = ctypes.c_int()
+        count = c_int()
         devices = _check(lib.ibv_get_device_list(ctypes.byref(count)), "list")
-        array = ctypes.cast(devices, ctypes.POINTER(ctypes.c_void_p))
         handle = next(
             (
-                array[i]
+                devices[i]
                 for i in range(count.value)
-                if lib.ibv_get_device_name(array[i]).decode() == name
+                if lib.ibv_get_device_name(devices[i]).decode() == name
             ),
             None,
         )
@@ -147,54 +382,53 @@ class Device:
         self.name = name
         self.context = _check(lib.ibv_open_device(handle), f"open {name}")
         self.pd = _check(lib.ibv_alloc_pd(self.context), "ibv_alloc_pd")
-        attr = ctypes.create_string_buffer(256)
+        attr = ibv_device_attr()
         if lib.ibv_query_device(self.context, attr):
             raise RuntimeError(f"ibv_query_device({name}) failed")
-        self.max_qp_wr = struct.unpack_from("<i", attr, 112)[0]
-        self.max_sge = struct.unpack_from("<i", attr, 120)[0]
-        self.max_cqe = struct.unpack_from("<i", attr, 132)[0]
+        self.max_qp_wr, self.max_sge = attr.max_qp_wr, attr.max_sge
+        self.max_cqe = attr.max_cqe
         # READs a QP may have in flight, as initiator and as target.
-        self.rd_atomic = min(
-            struct.unpack_from("<i", attr, 144)[0],
-            struct.unpack_from("<i", attr, 156)[0],
-        )
-        port = ctypes.create_string_buffer(64)
+        self.rd_atomic = min(attr.max_qp_rd_atom, attr.max_qp_init_rd_atom)
+        port = ibv_port_attr()
         if lib.ibv_query_port(self.context, 1, port):
             raise RuntimeError(f"ibv_query_port({name}) failed")
-        self.mtu = struct.unpack_from("<I", port, 8)[0]
-        self.lid = struct.unpack_from("<H", port, 34)[0]
-        self.is_ib = port.raw[46] == 1
+        self.mtu, self.lid = port.active_mtu, port.lid
+        self.is_ib = port.link_layer == IBV_LINK_LAYER_INFINIBAND
         self.gid_index = _pick_gid_index(name)
-        gid = ctypes.create_string_buffer(16)
-        if lib.ibv_query_gid(self.context, 1, self.gid_index, gid):
+        self.gid = ibv_gid()
+        if lib.ibv_query_gid(self.context, 1, self.gid_index, self.gid):
             raise RuntimeError(f"ibv_query_gid({name}) failed")
-        self.gid = gid.raw
-        ops = ctypes.cast(self.context, ctypes.POINTER(ctypes.c_void_p))
-        self._post = _POST_SEND(ops[_OPS_POST_SEND])
-        self._poll = _POLL_CQ(ops[_OPS_POLL_CQ])
-        self._post_recv = _POST_SEND(ops[_OPS_POST_RECV])
-        self._notify = _NOTIFY_CQ(ops[_OPS_NOTIFY_CQ])
-        self._bad = ctypes.c_void_p()
-        self._bad_ref = ctypes.byref(self._bad)
-        self._event = ctypes.c_void_p(), ctypes.c_void_p()
+        ops = self.context.contents
+        self._post_send = _post_send_t(ops.post_send)
+        self._post_recv = _post_recv_t(ops.post_recv)
+        self._poll_cq = _poll_cq_t(ops.poll_cq)
+        self._req_notify_cq = _req_notify_cq_t(ops.req_notify_cq)
+        self._bad = ctypes.byref(c_void_p())
+        self._event = c_void_p(), c_void_p()
         self._event_refs = tuple(ctypes.byref(p) for p in self._event)
+
+    @property
+    def mtu_bytes(self) -> int:
+        """The path MTU (enum ibv_mtu) in bytes."""
+        return 128 << self.mtu
 
     def describe(self) -> str:
         kind = "InfiniBand" if self.is_ib else f"RoCE, GID index {self.gid_index}"
-        return f"{self.name} ({kind}, MTU {MTU_BYTES.get(self.mtu, 0)})"
+        return f"{self.name} ({kind}, MTU {self.mtu_bytes})"
 
     def address(self) -> tuple[bytes, int]:
-        return self.gid, self.lid
+        return bytes(self.gid.raw), self.lid
 
     def reg_host(
         self, address: int, num_bytes: int, access: int
     ) -> tuple[int, int, int]:
-        """Register memory with `access` LOCAL, BULK or FLAGS."""
+        """Register memory with `access` NIC_READ, PEER_WRITE or PEER_ORDERED;
+        returns its MR, lkey and rkey."""
         mr = _check(
             _lib().ibv_reg_mr(self.pd, address, num_bytes, access),
             f"ibv_reg_mr({num_bytes} B)",
-        )
-        return mr, *self._keys(mr)
+        ).contents
+        return ctypes.addressof(mr), mr.lkey, mr.rkey
 
     def reg_dmabuf(
         self, fd: int, address: int, num_bytes: int, access: int
@@ -202,13 +436,8 @@ class Device:
         mr = _check(
             _lib().ibv_reg_dmabuf_mr(self.pd, 0, num_bytes, address, fd, access),
             f"ibv_reg_dmabuf_mr({num_bytes} B)",
-        )
-        return mr, *self._keys(mr)
-
-    @staticmethod
-    def _keys(mr: int) -> tuple[int, int]:
-        lkey, rkey = struct.unpack_from("<II", ctypes.string_at(mr + 36, 8))
-        return lkey, rkey
+        ).contents
+        return ctypes.addressof(mr), mr.lkey, mr.rkey
 
     def create_cq(self, depth: int, wakeable: bool = False) -> tuple[int, int]:
         """A CQ, and if `wakeable` a completion channel (else 0) whose events
@@ -224,7 +453,7 @@ class Device:
 
     def notify_cq(self, cq: int) -> None:
         """Raise one event on the CQ's channel at its next completion."""
-        if error := self._notify(cq, 0):
+        if error := self._req_notify_cq(cq, 0):
             raise RuntimeError(f"ibv_req_notify_cq failed: {os.strerror(error)}")
 
     def cq_event(self, channel: int) -> None:
@@ -233,8 +462,8 @@ class Device:
         _check(lib.ibv_get_cq_event(channel, *self._event_refs) == 0, "get_cq_event")
         lib.ibv_ack_cq_events(self._event[0], 1)
 
-    def post_recv(self, qp: int, wr: int) -> None:
-        if error := self._post_recv(qp, wr, self._bad_ref):
+    def post_recv(self, qp: int, wr: ibv_recv_wr) -> None:
+        if error := self._post_recv(qp, wr, self._bad):
             raise RuntimeError(f"ibv_post_recv failed: {os.strerror(error)}")
 
     def create_qp(
@@ -248,78 +477,86 @@ class Device:
     ) -> tuple[int, int]:
         """An RC QP; it receives only WRITE_WITH_IMM notices. Returns it and
         its number."""
-        attr = ctypes.create_string_buffer(64)
-        struct.pack_into("<QQ", attr, 8, send_cq, recv_cq)
-        struct.pack_into(
-            "<IIIII", attr, 32, max_send_wr, max_recv_wr, max_send_sge, 1, max_inline
+        cap = ibv_qp_cap(max_send_wr, max_recv_wr, max_send_sge, 1, max_inline)
+        attr = ibv_qp_init_attr(
+            send_cq=send_cq, recv_cq=recv_cq, cap=cap, qp_type=IBV_QPT_RC
         )
-        struct.pack_into("<i", attr, 52, _QPT_RC)
-        qp = _check(_lib().ibv_create_qp(self.pd, attr), "ibv_create_qp")
-        return qp, struct.unpack_from("<I", ctypes.string_at(qp + 52, 4))[0]
+        qp = _check(_lib().ibv_create_qp(self.pd, attr), "ibv_create_qp").contents
+        return ctypes.addressof(qp), qp.qp_num
 
     def connect(self, qp: int, remote_qpn: int, remote: tuple[bytes, int]) -> None:
         """Move a QP through INIT, RTR and RTS towards `remote_qpn`."""
-        lib = _lib()
-        attr = ctypes.create_string_buffer(144)
-        struct.pack_into("<I", attr, 0, _QPS_INIT)
-        struct.pack_into("<i", attr, 32, _REMOTE_WRITE | _REMOTE_READ)
-        struct.pack_into("<H", attr, 120, 0)
-        struct.pack_into("<B", attr, 129, 1)  # port
-        mask = 1 | 8 | 16 | 32  # state, access, pkey, port
-        if lib.ibv_modify_qp(qp, attr, mask):
-            raise RuntimeError("QP INIT failed")
-
-        attr = ctypes.create_string_buffer(144)
+        init = ibv_qp_attr(
+            qp_state=IBV_QPS_INIT,
+            qp_access_flags=IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ,
+            port_num=1,
+        )
+        rtr = ibv_qp_attr(
+            qp_state=IBV_QPS_RTR,
+            path_mtu=self.mtu,
+            dest_qp_num=remote_qpn,
+            max_dest_rd_atomic=self.rd_atomic,
+            min_rnr_timer=12,
+        )
+        rtr.ah_attr.port_num = 1
         gid, lid = remote
-        struct.pack_into("<IIi", attr, 0, _QPS_RTR, 0, self.mtu)
-        struct.pack_into("<II", attr, 20, 0, 0)
-        struct.pack_into("<I", attr, 28, remote_qpn)
-        ah = 56
         if self.is_ib:
-            struct.pack_into("<H", attr, ah + 24, lid)
+            rtr.ah_attr.dlid = lid
         else:
-            # dgid, sgid_index, hop_limit, then is_global.
-            struct.pack_into("<16s4xBB", attr, ah, gid, self.gid_index, 64)
-            struct.pack_into("<B", attr, ah + 29, 1)
-        struct.pack_into("<B", attr, ah + 30, 1)  # port
-        # max_dest_rd_atomic, min_rnr_timer
-        struct.pack_into("<BB", attr, 127, self.rd_atomic, 12)
-        # state, av, path_mtu, dest_qpn, rq_psn, max_dest_rd_atomic, min_rnr_timer
-        mask = 1 | 128 | 256 | (1 << 20) | (1 << 12) | (1 << 17) | (1 << 15)
-        if lib.ibv_modify_qp(qp, attr, mask):
-            raise RuntimeError(f"QP RTR failed: {os.strerror(ctypes.get_errno())}")
-
-        attr = ctypes.create_string_buffer(144)
-        struct.pack_into("<I", attr, 0, _QPS_RTS)
-        struct.pack_into("<I", attr, 24, 0)  # sq_psn
-        struct.pack_into("<B", attr, 126, self.rd_atomic)  # max_rd_atomic
-        struct.pack_into("<BBB", attr, 130, 14, 7, 7)  # timeout, retries, RNR retries
-        # state, timeout, retry, rnr_retry, sq_psn, max_qp_rd_atomic
-        mask = 1 | 512 | 1024 | 2048 | (1 << 16) | (1 << 13)
-        if lib.ibv_modify_qp(qp, attr, mask):
-            raise RuntimeError(f"QP RTS failed: {os.strerror(ctypes.get_errno())}")
+            rtr.ah_attr.is_global = 1
+            rtr.ah_attr.grh.dgid.raw[:] = gid
+            rtr.ah_attr.grh.sgid_index = self.gid_index
+            rtr.ah_attr.grh.hop_limit = 64
+        rts = ibv_qp_attr(
+            qp_state=IBV_QPS_RTS,
+            max_rd_atomic=self.rd_atomic,
+            timeout=14,
+            retry_cnt=7,
+            rnr_retry=7,
+        )
+        for name, attr, mask in (
+            ("INIT", init, IBV_QP_ACCESS_FLAGS | IBV_QP_PKEY_INDEX | IBV_QP_PORT),
+            (
+                "RTR",
+                rtr,
+                IBV_QP_AV
+                | IBV_QP_PATH_MTU
+                | IBV_QP_DEST_QPN
+                | IBV_QP_RQ_PSN
+                | IBV_QP_MAX_DEST_RD_ATOMIC
+                | IBV_QP_MIN_RNR_TIMER,
+            ),
+            (
+                "RTS",
+                rts,
+                IBV_QP_TIMEOUT
+                | IBV_QP_RETRY_CNT
+                | IBV_QP_RNR_RETRY
+                | IBV_QP_SQ_PSN
+                | IBV_QP_MAX_QP_RD_ATOMIC,
+            ),
+        ):
+            if _lib().ibv_modify_qp(qp, attr, IBV_QP_STATE | mask):
+                err = os.strerror(ctypes.get_errno())
+                raise RuntimeError(f"QP {name} failed: {err}")
 
     @staticmethod
-    def mlx5_queue(qp: int) -> tuple[int, int, int, int, int]:
-        """An mlx5 QP's send queue for posting without libibverbs: its WQE
-        buffer, WQE count, doorbell record and doorbell register (BlueFlame
-        register and size), from mlx5dv_init_obj."""
+    def mlx5_queue(qp: int) -> mlx5dv_qp:
+        """An mlx5 QP's send queue, doorbell record and BlueFlame register, for
+        posting without libibverbs."""
         mlx5 = ctypes.CDLL("libmlx5.so.1")
-        mlx5.mlx5dv_init_obj.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
-        # struct mlx5dv_qp: dbrec, sq {buf, wqe_cnt, stride}, rq {..}, bf {reg,
-        # size}; struct mlx5dv_obj starts with qp {in, out}.
-        out = (ctypes.c_uint64 * 16)()
-        obj = (ctypes.c_uint64 * 16)(qp, ctypes.addressof(out))
-        if mlx5.mlx5dv_init_obj(ctypes.addressof(obj), 1):
+        mlx5.mlx5dv_init_obj.argtypes = [POINTER(mlx5dv_obj), c_uint64]
+        out = mlx5dv_qp()
+        if mlx5.mlx5dv_init_obj(mlx5dv_obj(qp, ctypes.pointer(out)), MLX5DV_OBJ_QP):
             raise RuntimeError("mlx5dv_init_obj failed: not an mlx5 device?")
-        return out[1], out[2] & 0xFFFFFFFF, out[0], out[5], out[6] & 0xFFFFFFFF
+        return out
 
     def post_send(self, qp: int, wr: int) -> None:
-        if error := self._post(qp, wr, self._bad_ref):
+        if error := self._post_send(qp, wr, self._bad):
             raise RuntimeError(f"ibv_post_send failed: {os.strerror(error)}")
 
     def poll_cq(self, cq: int, wc: ctypes.Array, num_entries: int) -> int:
-        count = self._poll(cq, num_entries, ctypes.addressof(wc))
+        count = self._poll_cq(cq, num_entries, wc)
         if count < 0:
             raise RuntimeError("ibv_poll_cq failed")
         return count

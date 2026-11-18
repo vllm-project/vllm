@@ -24,6 +24,7 @@ table's rows says they have landed.
 Shards live in host memory, or in dmabuf-registered HBM.
 """
 
+import ctypes
 import json
 import mmap
 import os
@@ -55,6 +56,59 @@ MIN_CHAIN: tl.constexpr = tl.constexpr(proxy.MIN_CHAIN)
 TIMEOUT_NS = 60 * 10**9
 
 
+class _RequestWQE(ctypes.Structure):
+    """The mlx5 WQE of a request: an RDMA WRITE_WITH_IMM of its WRs and of
+    their SGEs (a data segment each) into a mailbox."""
+
+    _fields_ = [
+        ("ctrl", verbs.mlx5_wqe_ctrl_seg),
+        ("raddr", verbs.mlx5_wqe_raddr_seg),
+        ("wrs", verbs.mlx5_wqe_data_seg),
+        ("sges", verbs.mlx5_wqe_data_seg),
+    ]
+
+
+def _word(struct, field: str, word_bytes: int) -> tl.constexpr:
+    """The `word_bytes`-byte word of `struct` where `field` (dotted) starts."""
+    offset = 0
+    for name in field.split("."):
+        offset += getattr(struct, name).offset
+        struct = dict(struct._fields_)[name]
+    return tl.constexpr(offset // word_bytes)
+
+
+# ibv_send_wr and ibv_sge, in bytes and 8-byte words.
+WR_BYTES: tl.constexpr = tl.constexpr(proxy.WR_BYTES)
+SGE_BYTES: tl.constexpr = tl.constexpr(proxy.SGE_BYTES)
+WR_WORDS: tl.constexpr = tl.constexpr(proxy.WR_BYTES // 8)
+SGE_WORDS: tl.constexpr = tl.constexpr(proxy.SGE_BYTES // 8)
+_WR_NEXT = _word(verbs.ibv_send_wr, "next", 8)
+_WR_SG_LIST = _word(verbs.ibv_send_wr, "sg_list", 8)
+_WR_NUM_SGE = _word(verbs.ibv_send_wr, "num_sge", 8)
+_WR_SEND_FLAGS = _word(verbs.ibv_send_wr, "send_flags", 8)
+_WR_REMOTE_ADDR = _word(verbs.ibv_send_wr, "remote_addr", 8)
+_WR_RKEY = _word(verbs.ibv_send_wr, "rkey", 8)
+# A flag WR keeps its SGE, then its 8-byte payload, in its `spare` words.
+_WR_SGE = _word(verbs.ibv_send_wr, "spare", 8)
+_WR_DATA: tl.constexpr = tl.constexpr(_WR_SGE + SGE_WORDS)
+_WRITE: tl.constexpr = tl.constexpr(verbs.IBV_WR_RDMA_WRITE)
+_READ: tl.constexpr = tl.constexpr(verbs.IBV_WR_RDMA_READ)
+_SIGNALED: tl.constexpr = tl.constexpr(verbs.IBV_SEND_SIGNALED)
+_INLINE_FENCE: tl.constexpr = tl.constexpr(verbs.IBV_SEND_INLINE | verbs.IBV_SEND_FENCE)
+# The request WQE in bytes, 32-bit words and 16-byte segments.
+WQE_BYTES: tl.constexpr = tl.constexpr(verbs.MLX5_SEND_WQE_BB)
+WQE_WORDS: tl.constexpr = tl.constexpr(ctypes.sizeof(_RequestWQE) // 4)
+_WQE_SEGMENTS: tl.constexpr = tl.constexpr(ctypes.sizeof(_RequestWQE) // 16)
+_WQE_OPCODE = _word(_RequestWQE, "ctrl.opmod_idx_opcode", 4)
+_WQE_QPN_DS = _word(_RequestWQE, "ctrl.qpn_ds", 4)
+_WQE_IMM = _word(_RequestWQE, "ctrl.imm", 4)
+_WQE_RADDR = _word(_RequestWQE, "raddr.raddr", 4)
+_WQE_RKEY = _word(_RequestWQE, "raddr.rkey", 4)
+_WQE_WRS = _word(_RequestWQE, "wrs", 4)
+_WQE_SGES = _word(_RequestWQE, "sges", 4)
+_WRITE_IMM: tl.constexpr = tl.constexpr(verbs.MLX5_OPCODE_RDMA_WRITE_IMM)
+
+
 def pick_device() -> str:
     """An active RDMA device on this GPU's NUMA node; that node's GPUs take
     its devices in turn."""
@@ -68,6 +122,26 @@ def pick_device() -> str:
         i for i in range(torch.accelerator.device_count()) if gpu_numa_node(i) == node
     ]
     return near[peers.index(gpu) % len(near) if gpu in peers else 0]
+
+
+@triton.jit
+def _rdma_wr(word, wr_id, next, sg_list, num_sge, opcode, send_flags, addr, rkey):
+    """An RDMA WRITE or READ ibv_send_wr, as 8-byte words (`word`)."""
+    wr = tl.where(word == 0, wr_id, 0)
+    wr = tl.where(word == _WR_NEXT, next, wr)
+    wr = tl.where(word == _WR_SG_LIST, sg_list, wr)
+    # num_sge, then opcode.
+    wr = tl.where(word == _WR_NUM_SGE, num_sge | opcode << 32, wr)
+    wr = tl.where(word == _WR_SEND_FLAGS, send_flags, wr)
+    wr = tl.where(word == _WR_REMOTE_ADDR, addr, wr)
+    return tl.where(word == _WR_RKEY, rkey, wr)
+
+
+@triton.jit
+def _with_sge(value, word, at, addr, length, lkey):
+    """`value` (8-byte words) with an ibv_sge at word `at`."""
+    value = tl.where(word == at, addr, value)
+    return tl.where(word == at + 1, length | lkey << 32, value)
 
 
 @triton.jit
@@ -278,60 +352,53 @@ def _wr_kernel(
     row = item // (TABLES * K) * K + item % K
     at = slots + item // K % TABLES * (num_items // TABLES) + row
     tl.store(at, tl.where(remote, slot, -1).to(tl.int32), mask=item < num_items)
-    # ibv_sge: addr, length | lkey << 32.
-    pair = tl.arange(0, 2)[None, :]
     key = tl.load(keys + item, mask=remote, other=0).to(tl.int64) & 0xFFFFFFFF
-    sge = tl.where(
-        pair == 0,
-        tl.load(remote_addr + item, mask=remote, other=0)[:, None],
-        (WORDS * 8 | key << 32)[:, None],
-    )
-    tl.store(desc + MAX_WRS * 16 + slot[:, None] * 2 + pair, sge, mask=remote[:, None])
-    # ibv_send_wr words: wr_id, next, sg_list, num_sge | opcode << 32 (WRITE is
-    # 0), send_flags, rdma.remote_addr, rdma.rkey.
+    addr = tl.load(remote_addr + item, mask=remote, other=0)[:, None]
+    word = tl.arange(0, SGE_WORDS)[None, :]
+    sge = _with_sge(0, word, 0, addr, WORDS * 8, key[:, None])
+    sge_at = desc + MAX_WRS * WR_WORDS + slot[:, None] * SGE_WORDS + word
+    tl.store(sge_at, sge, mask=remote[:, None])
     first = remote & (position % ROWS_PER_WR == 0)
     index = position // ROWS_PER_WR
     last = (index % chain == chain - 1) | (index == num_wrs - 1)
     head = index // chain
-    read_at = box + (num_wrs + 2 * (head % QPS)) * 128
+    read_at = box + (num_wrs + 2 * (head % QPS)) * WR_BYTES
     tail = tl.where(head + QPS >= tl.cdiv(num_wrs, chain), read_at, 0)
-    wr_at = box + index * 128
-    sges = box + (num_wrs + 2 * num_qps) * 128
-    col = tl.arange(0, 16)[None, :]
-    wr = tl.where(col == 0, rank.to(tl.int64), 0)
-    wr = tl.where(col == 1, tl.where(last, tail, wr_at + 128)[:, None], wr)
-    wr = tl.where(col == 2, (sges + position * 16)[:, None], wr)
-    rows = tl.minimum(size - position, ROWS_PER_WR)
-    wr = tl.where(col == 3, rows[:, None], wr)
-    wr = tl.where(col == 4, tl.where(last, 2, 0).to(tl.int64)[:, None], wr)
-    wr = tl.where(col == 5, (landing + slot * (WORDS * 8))[:, None], wr)
-    wr = tl.where(col == 6, landing_rkey.to(tl.int64), wr)
-    record = desc + (wr_start + index)[:, None] * 16 + col
+    wr_at = box + index * WR_BYTES
+    sges = box + (num_wrs + 2 * num_qps) * WR_BYTES
+    wr_id = rank.to(tl.int64)
+    word = tl.arange(0, WR_WORDS)[None, :]
+    wr = _rdma_wr(
+        word,
+        wr_id,
+        tl.where(last, tail, wr_at + WR_BYTES)[:, None],
+        (sges + position * SGE_BYTES)[:, None],
+        tl.minimum(size - position, ROWS_PER_WR)[:, None],
+        _WRITE,
+        tl.where(last, _SIGNALED, 0).to(tl.int64)[:, None],
+        (landing + slot * (WORDS * 8))[:, None],
+        landing_rkey.to(tl.int64),
+    )
+    record = desc + (wr_start + index)[:, None] * WR_WORDS + word
     tl.store(record, wr, mask=first[:, None])
-    # Row q writes QP q's READ of flag (owner, q) into its own word 15, then
-    # the WRITE (IBV_SEND_INLINE | IBV_SEND_FENCE) of seq from its word 14.
-    # Each keeps its SGE in words 12-13.
+    # Row q writes QP q's READ of flag (owner, q) into the READ's data word,
+    # then the fenced inline WRITE of the next seq from the WRITE's.
     is_flag = (remote & (position < num_qps))[:, None]
-    read = (box + (num_wrs + 2 * position) * 128)[:, None]
-    write = read + 128
+    read = (box + (num_wrs + 2 * position) * WR_BYTES)[:, None]
+    write = read + WR_BYTES
     lkey = tl.load(box_keys + owner % world, mask=remote, other=0).to(tl.int64)
-    flag = tl.where(col == 0, rank.to(tl.int64), 0)
-    flag = tl.where(col == 5, (flags + (owner * QPS + position) * 8)[:, None], flag)
-    flag = tl.where(col == 6, flags_rkey.to(tl.int64), flag)
-    wr = tl.where(col == 1, write, flag)
-    wr = tl.where(col == 2, read + 96, wr)
-    wr = tl.where(col == 3, 1 | 4 << 32, wr)
-    wr = tl.where(col == 12, read + 120, wr)
-    wr = tl.where(col == 13, (8 | lkey << 32)[:, None], wr)
-    record = desc + (wr_start + num_wrs + 2 * position)[:, None] * 16 + col
+    flag = (flags + (owner * QPS + position) * 8)[:, None]
+    rkey = flags_rkey.to(tl.int64)
+    wr = _rdma_wr(word, wr_id, write, read + _WR_SGE * 8, 1, _READ, 0, flag, rkey)
+    wr = _with_sge(wr, word, _WR_SGE, read + _WR_DATA * 8, 8, lkey[:, None])
+    record = desc + (wr_start + num_wrs + 2 * position)[:, None] * WR_WORDS + word
     tl.store(record, wr, mask=is_flag)
-    wr = tl.where(col == 2, write + 96, flag)
-    wr = tl.where(col == 3, 1, wr)
-    wr = tl.where(col == 4, 8 | 1, wr)
-    wr = tl.where(col == 12, write + 112, wr)
-    wr = tl.where(col == 13, 8, wr)
-    wr = tl.where(col == 14, tl.load(seq_ptr) + 1, wr)
-    tl.store(record + 16, wr, mask=is_flag)
+    wr = _rdma_wr(
+        word, wr_id, 0, write + _WR_SGE * 8, 1, _WRITE, _INLINE_FENCE, flag, rkey
+    )
+    wr = _with_sge(wr, word, _WR_SGE, write + _WR_DATA * 8, 8, 0)
+    wr = tl.where(word == _WR_DATA, tl.load(seq_ptr) + 1, wr)
+    tl.store(record + WR_WORDS, wr, mask=is_flag)
     # The NIC reads these only after the doorbell the last program rings.
     _fence_sys()
     tl.debug_barrier()
@@ -388,6 +455,21 @@ def _be32(x):
 
 
 @triton.jit
+def _with_be64(value, word, at, x):
+    """`value` (32-bit words) with big-endian `x` at word `at`."""
+    value = tl.where(word == at, _be32(x >> 32)[:, None], value)
+    return tl.where(word == at + 1, _be32(x)[:, None], value)
+
+
+@triton.jit
+def _with_data_seg(value, word, at, length, lkey, addr):
+    """`value` (32-bit words) with an mlx5_wqe_data_seg at word `at`."""
+    value = tl.where(word == at, _be32(length)[:, None], value)
+    value = tl.where(word == at + 1, lkey, value)
+    return _with_be64(value, word, at + 2, addr)
+
+
+@triton.jit
 def _post_requests(
     vg,
     active,
@@ -405,10 +487,10 @@ def _post_requests(
     BOX_BYTES: tl.constexpr,
     MAX_WRS: tl.constexpr,
 ):
-    """Post each active group's request on the QP to its gatherer: write the
-    mlx5 WQE (ctrl, remote address and two data segments, 64 bytes), then the
-    doorbell record and register. `queues` rows: send queue, its WQE count,
-    doorbell record, doorbell register, QP number and WQEs posted."""
+    """Post each active group's request on the QP to its gatherer: write its
+    `_RequestWQE`, then the doorbell record and register. `queues` rows: send
+    queue, its WQE count, doorbell record, doorbell register, QP number and
+    WQEs posted."""
     gatherer = vg % world
     queue = queues + gatherer * 8
     # Each group's WQE index on its QP: after the active groups before it there.
@@ -419,36 +501,28 @@ def _post_requests(
     index = tl.load(queue + 5, mask=active, other=0) + before
     wqe_count = tl.load(queue + 1, mask=active, other=1)
     qpn = tl.load(queue + 4, mask=active, other=0)
-    wqe = tl.load(queue, mask=active, other=0) + index % wqe_count * 64
+    wqe = tl.load(queue, mask=active, other=0) + index % wqe_count * WQE_BYTES
     box = tl.load(boxes + gatherer, mask=active, other=0) + vg // world * BOX_BYTES
     rkey = tl.load(box_rkeys + gatherer, mask=active, other=0)
-    wrs_at = desc_at + group_first_wr * 128
-    sges_at = desc_at + MAX_WRS * 128 + group_first * 16
-    # ctrl: WQE index | RDMA_WRITE_WITH_IMM, QP | 4 segments, unsignaled, imm
-    # (raw, as the owner reads it); then remote address and rkey; then each
-    # data segment's length, lkey and address. All big-endian.
-    word = tl.arange(0, 16)[None, :]
-    ctrl0 = _be32(index << 8 & 0xFFFF00 | 0x09)[:, None]
-    ctrl1 = _be32(qpn << 8 | 4)[:, None]
-    value = tl.where(word == 0, ctrl0, ctrl1)
+    wrs_at = desc_at + group_first_wr * WR_BYTES
+    sges_at = desc_at + MAX_WRS * WR_BYTES + group_first * SGE_BYTES
+    # Big-endian 32-bit words; unsignaled, and imm raw, as the owner reads it.
+    word = tl.arange(0, WQE_WORDS)[None, :]
+    ctrl0 = _be32(index << 8 & 0xFFFF00 | _WRITE_IMM)[:, None]
+    ctrl1 = _be32(qpn << 8 | _WQE_SEGMENTS)[:, None]
     imm = (imm_wrs | vg // world << 24).to(tl.uint32)[:, None]
-    value = tl.where(word == 2, 0, value)
-    value = tl.where(word == 3, imm, value)
-    value = tl.where(word == 4, _be32(box >> 32)[:, None], value)
-    value = tl.where(word == 5, _be32(box)[:, None], value)
-    value = tl.where(word == 6, _be32(rkey)[:, None], value)
-    value = tl.where(word == 7, 0, value)
-    value = tl.where(word == 8, _be32(group_wrs * 128)[:, None], value)
-    value = tl.where((word == 9) | (word == 13), _be32(desc_lkey), value)
-    value = tl.where(word == 10, _be32(wrs_at >> 32)[:, None], value)
-    value = tl.where(word == 11, _be32(wrs_at)[:, None], value)
-    value = tl.where(word == 12, _be32(sizes * 16)[:, None], value)
-    value = tl.where(word == 14, _be32(sges_at >> 32)[:, None], value)
-    value = tl.where(word == 15, _be32(sges_at)[:, None], value)
+    value = tl.where(word == _WQE_OPCODE, ctrl0, 0)
+    value = tl.where(word == _WQE_QPN_DS, ctrl1, value)
+    value = tl.where(word == _WQE_IMM, imm, value)
+    value = _with_be64(value, word, _WQE_RADDR, box)
+    value = tl.where(word == _WQE_RKEY, _be32(rkey)[:, None], value)
+    lkey = _be32(desc_lkey)
+    value = _with_data_seg(value, word, _WQE_WRS, group_wrs * WR_BYTES, lkey, wrs_at)
+    value = _with_data_seg(value, word, _WQE_SGES, sizes * SGE_BYTES, lkey, sges_at)
     at = wqe.to(tl.pointer_type(tl.uint32))[:, None] + word
     tl.store(at, value, mask=active[:, None])
     # The NIC reads the WQEs (host memory) once the doorbell rings, and the
-    # register is rung with the last WQE's first 8 bytes.
+    # register is rung with the last WQE's first 8 bytes (its ctrl0, ctrl1).
     _fence_sys()
     tl.debug_barrier()
     record = tl.load(queue + 2, mask=last, other=0).to(tl.pointer_type(tl.uint32))
@@ -646,8 +720,10 @@ class RdmaTransport:
             self.landing, self.flags = landing.gpu, flags.gpu
         self.flags = self.flags.view(torch.int64)
         self.flags.zero_()
-        self.landing_at, _, self.landing_rkey = self._register(landing, verbs.BULK)
-        self.flags_at, _, self.flags_rkey = self._register(flags, verbs.FLAGS)
+        self.landing_at, _, self.landing_rkey = self._register(
+            landing, verbs.PEER_WRITE
+        )
+        self.flags_at, _, self.flags_rkey = self._register(flags, verbs.PEER_ORDERED)
         self.host_landing = isinstance(landing, SharedHost)
         self._keep = [landing, flags]
         boxes = self._all_gather(mailboxes)
@@ -666,12 +742,14 @@ class RdmaTransport:
         self.box_rkeys = torch.tensor(
             [rkey for _, rkey, _ in boxes], dtype=torch.int32, device=gpu
         )
-        desc_bytes = self.max_wrs * verbs.SEND_WR_BYTES + total * proxy.SGE_BYTES
+        desc_bytes = self.max_wrs * proxy.WR_BYTES + total * proxy.SGE_BYTES
         memory = CuMem(desc_bytes, rdma=True)
         address = memory.map()
         self.desc = device_view(address, desc_bytes, memory).view(torch.int64)
         fd = memory.dmabuf_fd(address)
-        self.desc_lkey = self.verbs.reg_dmabuf(fd, address, desc_bytes, verbs.LOCAL)[1]
+        _, self.desc_lkey, _ = self.verbs.reg_dmabuf(
+            fd, address, desc_bytes, verbs.NIC_READ
+        )
         os.close(fd)
         self.queues = torch.tensor(
             self._map_queues(made), dtype=torch.int64, device=gpu
@@ -715,10 +793,13 @@ class RdmaTransport:
         rows, pages = [], {}
         page = mmap.PAGESIZE
         for qp, qpn in qps:
-            sq, wqes, record, register, _ = verbs.Device.mlx5_queue(qp)
+            queue = verbs.Device.mlx5_queue(qp)
+            sq, wqes = queue.sq.buf, queue.sq.wqe_cnt
+            record, register = queue.dbrec, queue.bf_reg
             rows.append([sq, wqes, record, register, qpn, 0, 0, 0])
             # cudaHostRegisterMapped, | IoMemory for the register (MMIO).
-            for address, size, kind in ((sq, wqes * 64, 2), (record, 8, 2)):
+            wq_bytes = wqes * verbs.MLX5_SEND_WQE_BB
+            for address, size, kind in ((sq, wq_bytes, 2), (record, 8, 2)):
                 for at in range(address // page, -(-(address + size) // page)):
                     pages[at * page] = kind
             pages[register // page * page] = 6
@@ -771,7 +852,7 @@ class RdmaTransport:
         node's host shards over loopback; owners gather everything else.
         Collective: every GPU registers its shards in one order.
         """
-        address, lkey, _ = self._register(shard, verbs.LOCAL)
+        address, lkey, _ = self._register(shard, verbs.NIC_READ)
         host = isinstance(shard, SharedHost)
         # Peers on this node open the memfd through /proc.
         mine = [address, lkey, self.node, os.getpid(), shard.fd if host else -1]  # type: ignore[union-attr]
