@@ -117,10 +117,10 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
                 else add_special_tokens
             ),
             max_total_tokens_param=max_total_tokens_param,
-            **(
-                {}
+            max_output_tokens_param=(
+                default_tok_params.max_output_tokens_param
                 if max_output_tokens_param is None
-                else {"max_output_tokens_param": max_output_tokens_param}
+                else max_output_tokens_param
             ),
         )
 
@@ -287,6 +287,16 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
                 "`add_generation_prompt` to True.",
             )
         return data
+
+    @model_validator(mode="after")
+    def set_default_add_special_tokens(self):
+        # Unlike `CompletionRequestMixin` where `None` falls back to the
+        # model/tokenizer default in `default_tok_params`, chat templates
+        # generally add special tokens during rendering, so resolve `None`
+        # to `False` for the chat path.
+        if self.add_special_tokens is None:
+            self.add_special_tokens = False
+        return self
 
     def build_chat_params(
         self,
