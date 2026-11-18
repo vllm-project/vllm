@@ -128,11 +128,16 @@ class CUDAHiSparseBackend(HiSparseBackend):
         ops.swap_blocks_batch(src, dst, sizes)
 
 
+_NO_IPC_EVENTS = "HIP interprocess events do not order async copies."
+
+
 class ROCmHiSparseBackend(CUDAHiSparseBackend):
     """The CUDA backend through HIP, with one private host pool per rank.
 
-    HIP has no interprocess events, so local TP ranks cannot share one host
-    pool; each rank registers its own contiguous pool instead.
+    Local TP ranks do not share one host pool: on ROCm 10 (HIP 7.15) a wait
+    on an interprocess event returns before an earlier async device-to-host
+    copy on the recording stream completes, so readers could see partial
+    mirror writes. Each rank registers its own contiguous pool instead.
     """
 
     supports_shared_host_pool = False
@@ -147,13 +152,13 @@ class ROCmHiSparseBackend(CUDAHiSparseBackend):
                     )
 
     def create_ipc_event(self) -> Any:
-        raise NotImplementedError("HIP has no interprocess events.")
+        raise NotImplementedError(_NO_IPC_EVENTS)
 
     def export_event(self, event: Any) -> Any:
-        raise NotImplementedError("HIP has no interprocess events.")
+        raise NotImplementedError(_NO_IPC_EVENTS)
 
     def import_event(self, device: torch.device, handle: Any) -> Any:
-        raise NotImplementedError("HIP has no interprocess events.")
+        raise NotImplementedError(_NO_IPC_EVENTS)
 
 
 def get_hisparse_backend() -> HiSparseBackend:
