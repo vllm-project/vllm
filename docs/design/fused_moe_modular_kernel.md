@@ -234,23 +234,16 @@ The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`. The
 
 ### How To Unit Test
 
-We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py).
+The modular `FusedMoEKernel` combinations are tested by [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py).
 
-The unit test iterates through all combinations of `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types and if they are
-compatible, runs some correctness tests.
-If you are adding some `FusedMoEPrepareAndFinalizeModular` / `FusedMoEExpertsModular` implementations,
+The test iterates through the registered `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` combinations and runs correctness tests for compatible pairs.
 
-1. Add the implementation type to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](../../tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
-2. Update `Config::is_batched_prepare_finalize()`, `Config::is_batched_fused_experts()`, `Config::is_standard_fused_experts()`,
-`Config::is_fe_16bit_supported()`,  `Config::is_fe_fp8_supported()`, `Config::is_fe_block_fp8_supported()`
-methods in [/tests/kernels/moe/modular_kernel_tools/common.py](../../tests/kernels/moe/modular_kernel_tools/common.py)
-
-Doing this will add the new implementation to the test suite.
+When adding an implementation, register it with `register_prepare_and_finalize()` or `register_experts()` in [mk_objects.py](../../tests/kernels/moe/modular_kernel_tools/mk_objects.py). The registration records the compatibility metadata and adds the implementation to the appropriate test lists; no corresponding change to `Config` is required.
 
 ### How To Check `FusedMoEPrepareAndFinalizeModular` & `FusedMoEExpertsModular` Compatibility
 
 The unit test file [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
-Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
+Example: `.venv/bin/python -m tests.kernels.moe.test_modular_kernel_combinations --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 As a side effect, this script can be used to test `FusedMoEPrepareAndFinalizeModular` & `FusedMoEExpertsModular` compatibility. When invoked
 with incompatible types, the script will error.
 
@@ -259,12 +252,12 @@ with incompatible types, the script will error.
 Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
 The script can be used to generate Torch traces for a single `FusedMoEKernel::apply()` call for any compatible
 `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types.
-Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
+Example: `.venv/bin/python -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 
 ## FusedMoEPrepareAndFinalizeModular Implementations
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2all-backends) for a list of all the available modular prepare and finalize subclasses.
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2all-backends) for an overview of the modular prepare and finalize subclasses.
 
 ## FusedMoEExpertsModular
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#fused-experts-kernels) for a list of all the available modular experts.
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-experts-kernels) for an overview of the modular experts.

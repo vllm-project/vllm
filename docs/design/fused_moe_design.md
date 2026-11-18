@@ -96,7 +96,7 @@ The concrete classes used for `MoERunner` and `RoutedExperts` can be overridden 
 
 **Key responsibilities**:
 
-- **Gate application**: If the runner holds the gate (internal router), it applies `F.linear(hidden_states, gate_weight)` to produce `router_logits`. Supports fusing router + shared-expert gate weights.
+- **Gate application**: If the runner holds the gate (internal router), it calls `self.gate(hidden_states)` to produce `router_logits`, or uses `dispatch_unquantized_gemm()` when the router and shared-expert gate weights are fused.
 - **Input/output transforms**: Applies `routed_input_transform` (e.g., latent projection for NemotronH) before expert computation and `routed_output_transform` after.
 - **Padding**: Pads `hidden_states` to `moe_config.hidden_dim` when quantization backends require alignment.
 - **Dispatch/Combine**: For DP/EP without internal MK support, dispatches tokens across ranks before computation and combines after.
@@ -248,7 +248,7 @@ This two-level structure exists because different quantization schemes vary inde
 
 #### 6c. `FusedMoEParallelConfig`
 
-Encodes all parallelism dimensions (TP, DP, EP, PCP, SP sizes and ranks) and the all2all backend selection. Provides computed properties that check which communication backend is active (e.g., `use_deepep_ht_kernels`, `use_mori_kernels`).
+Encodes all parallelism dimensions (TP, DP, EP, PCP, SP sizes and ranks) and the all2all backend selection. Provides computed properties that check which communication backend is active (e.g., `use_deepep_ht_kernels`, `use_mori_epv1_kernels`, and `use_mori_epv2_kernels`).
 
 When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
 
@@ -276,7 +276,7 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 
 - `moe: FusedMoEConfig` — the MoE layer configuration
 - `moe_quant_config: FusedMoEQuantConfig | None` — cached quantization config built by `get_fused_moe_quant_config()`
-- `moe_kernel: FusedMoEKernel | None` — the modular kernel object constructed by the oracle (see section 9). When set, `apply()` and `apply_monolithic()` delegate to it.
+- `moe_kernel: FusedMoEKernel | None` — the unified kernel facade constructed by the oracle (see section 9). It selects either a modular or monolithic implementation; when set, `apply()` and `apply_monolithic()` delegate to it.
 
 **Key methods**:
 
@@ -287,7 +287,7 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 
 **Key properties**:
 
-- `supports_internal_mk` — `True` when `moe_kernel` is set; signals `MoERunner` to use the internal modular kernel path (dispatch/combine handled by the kernel's `FusedMoEPrepareAndFinalize`) rather than the legacy external dispatch/combine
+- `supports_internal_mk` — `True` when `moe_kernel` is set; signals `MoERunner` to use the internal kernel interface, where the kernel's `FusedMoEPrepareAndFinalize` handles preparation and finalization, rather than the legacy external dispatch/combine path
 - `mk_can_overlap_shared_experts` — `True` when the kernel's prepare/finalize supports async operation, enabling shared expert computation to overlap dispatch/combine
 - `is_monolithic` — whether the kernel handles routing internally
 
@@ -310,7 +310,7 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 
 3. **Weight post-processing** (`convert_to_kernel_format` / `convert_to_*_moe_kernel_format`): Transforms weights into the layout expected by the selected backend after loading. For example, AITER and FlashInfer require specific weight permutations. The default is a no-op pass-through.
 
-4. **Modular kernel construction** (`make_kernel` / `make_*_moe_kernel`): Constructs the `FusedMoEKernel` object by pairing the selected `FusedMoEExperts` subclass with the appropriate `FusedMoEPrepareAndFinalize` subclass (determined by the all2all backend from `FusedMoEParallelConfig`). The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`.
+4. **Kernel construction** (`make_kernel` / `make_*_moe_kernel`): Constructs the unified `FusedMoEKernel` facade by pairing the selected `FusedMoEExperts` subclass with the appropriate `FusedMoEPrepareAndFinalize` subclass. Both components must use the modular interface or both must use the monolithic interface. The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`.
 
 **Compatibility function interface during migration**:
 
