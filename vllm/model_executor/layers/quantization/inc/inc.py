@@ -36,7 +36,7 @@ class INCConfig(QuantizationConfig):
 
     SUPPORTED_BITS = {2, 3, 4, 5, 6, 7, 8}
     DEFAULT_INT_PACKING_FORMAT = "auto_round:auto_gptq"
-    SUPPORTED_DTYPES = {"int", "mx_fp", "fp"}
+    SUPPORTED_DTYPES = {"int", "mx_fp", "fp", "nv_fp"}
     SUPPORTED_FORMATS = {
         "auto_round:auto_gptq",
         "auto_round:auto_awq",
@@ -163,9 +163,11 @@ class INCConfig(QuantizationConfig):
         if self.rotation_config is not None:
             if not isinstance(self.rotation_config, dict):
                 raise ValueError("rotation_config must be an object")
-            if not (self.is_mxfp and self.weight_bits == 4):
+            if not (
+                (self.is_mxfp or self.data_type == "nv_fp") and self.weight_bits == 4
+            ):
                 raise ValueError(
-                    "AutoRound Hadamard rotation is only supported with MXFP4"
+                    "AutoRound Hadamard rotation is only supported with MXFP4 or NVFP4"
                 )
             rotation_backend = self.rotation_config.get("backend", "auto")
             if rotation_backend not in {"auto", "transform"}:
@@ -246,6 +248,19 @@ class INCConfig(QuantizationConfig):
             f"but found backend={self.backend!r}."
         )
 
+    def _validate_nvfp4_quantization(self) -> None:
+        if not (
+            self.weight_bits == 4
+            and self.group_size == 16
+            and self.sym
+            and self.packing_format == "auto_round:llm_compressor"
+            and self.backend == "auto"
+        ):
+            raise ValueError(
+                "AutoRound NVFP4 requires symmetric W4A4, group_size=16, "
+                "packing_format='auto_round:llm_compressor', backend='auto'"
+            )
+
     def _validate_supported_quantization(self) -> None:
         self._validate_rotation_config()
         if self.data_type == "int":
@@ -254,8 +269,22 @@ class INCConfig(QuantizationConfig):
             self._validate_fp8_block_quantization()
         elif self.data_type == self.MXFP8_DATA_TYPE:
             self._validate_mxfp_quantization()
+        elif self.data_type == "nv_fp":
+            self._validate_nvfp4_quantization()
 
     def _validate_raw_config(self, config: dict[str, Any]) -> None:
+        if self.data_type == "nv_fp":
+            self._check_expected(
+                config,
+                {
+                    "act_bits": 4,
+                    "act_group_size": 16,
+                    "act_data_type": "nv_fp4_with_static_gs",
+                    "act_sym": True,
+                    "act_dynamic": True,
+                },
+                "INC NVFP4",
+            )
         if self.data_type == self.FP8_BLOCK_DATA_TYPE:
             assert isinstance(self.group_size, tuple), (
                 "INC block-wise FP8 group_size must be a tuple."

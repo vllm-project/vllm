@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import (
+    LinearMethodBase,
+    register_weight_loader_v2_supported_method,
+)
 from vllm.platforms import current_platform
 
 from . import ark_ops  # noqa: F401  (registers the ARK fused rotation+quant op)
@@ -17,6 +20,7 @@ __all__ = [
 ]
 
 
+@register_weight_loader_v2_supported_method
 class INCLinearTransformMethod(LinearMethodBase):
     """Apply an input transform before a wrapped linear method."""
 
@@ -41,6 +45,8 @@ class INCLinearTransformMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         self._validate_block_size(input_size_per_partition, input_size)
+        # The consumer must rotate floating inputs before activation quantization.
+        layer.requires_unquantized_input = True
         self.quant_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,

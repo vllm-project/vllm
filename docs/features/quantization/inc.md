@@ -84,3 +84,36 @@ lm_eval --model vllm \
   --num_fewshot 5 \
   --batch_size 128
 ```
+
+## CUDA NVFP4 with Hadamard input rotation
+
+The native INC loader accepts AutoRound symmetric NVFP4 W4A4 checkpoints with
+`data_type="nv_fp"`, `group_size=16`, and
+`packing_format="auto_round:llm_compressor"`. Serialized activation metadata must
+specify 4-bit symmetric dynamic per-group quantization with group size 16 and
+`act_data_type="nv_fp4_with_static_gs"` when those fields are present.
+
+For checkpoints whose weights were rotated offline, the loader reads the
+following checkpoint metadata to rotate floating activations before NVFP4
+activation quantization:
+
+```json
+{
+  "rotation_config": {
+    "backend": "transform",
+    "block_size": 16,
+    "hadamard_type": "hadamard"
+  }
+}
+```
+
+The deterministic normalized Hadamard uses CUDA Hadacore. The rotation block
+must fit each local input shard; blocks spanning tensor-parallel shards are
+rejected at loading. Unquantized excluded layers are not rotated. Fused Q/K/V
+projections must share weight and input global scales; mismatched global scales
+are rejected rather than silently collapsed. Per-group weight scales may differ.
+No rotation is added when `rotation_config` is absent.
+
+This implementation is CUDA-only for NVFP4. The XPU ARK MXFP4 fused path does not
+implement NVFP4. Local validation covers eager single-GPU B200 inference; it does
+not establish multi-GPU, compiled, or CUDA-graph coverage.

@@ -12,6 +12,7 @@ def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
     from .inc_fp8_scheme import INCFp8Scheme
     from .inc_mxfp4_scheme import INCMxfp4Scheme
     from .inc_mxfp8_scheme import INCMxfp8Scheme
+    from .inc_nvfp4_scheme import INCNvFp4Scheme
     from .inc_wna16_scheme import INCWna16Scheme
 
     scheme_list: list[type[INCScheme]] = [
@@ -19,6 +20,7 @@ def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
         INCMxfp8Scheme,
         INCWna16Scheme,
         INCMxfp4Scheme,
+        INCNvFp4Scheme,
     ]
 
     for scheme_cls in scheme_list:

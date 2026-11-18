@@ -2950,3 +2950,116 @@ def test_e2e_selects_w4a8_for_every_linear(vllm_runner, monkeypatch) -> None:
             assert all(i % 8 == 0 and o % 8 == 0 for i, o in shapes), shapes
 
         vllm_model.apply_model(check_model)
+
+
+@pytest.mark.parametrize(
+    "invalid", [{"group_size": 32}, {"act_bits": 8}, {"sym": False}]
+)
+def test_inc_nvfp4_rejects_incompatible_checkpoint_metadata(invalid):
+    """Do not interpret non-NVFP4 activations or layouts as native NVFP4."""
+    config = dict(
+        bits=4,
+        group_size=16,
+        data_type="nv_fp",
+        packing_format="auto_round:llm_compressor",
+    )
+    config.update(invalid)
+    with pytest.raises((ValueError, AssertionError), match="NVFP4"):
+        INCConfig.from_config(config)
+
+
+@pytest.mark.parametrize("name", ["weight_global_scale", "input_global_scale"])
+def test_inc_nvfp4_rotation_rejects_nonshared_fused_scales(monkeypatch, name):
+    """Reject incompatible fused checkpoints before collapsing their scales."""
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_nvfp4_scheme import (
+        INCNvFp4LinearMethod,
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a4_nvfp4.init_nvfp4_linear_kernel",
+        lambda **kwargs: object(),
+    )
+    method = INCNvFp4LinearMethod(require_shared_scales=True)
+    layer = torch.nn.Module()
+    layer.weight_global_scale = torch.ones(3)
+    layer.input_global_scale = torch.ones(3)
+    getattr(layer, name)[1] = 2
+    with pytest.raises(ValueError, match=name):
+        method.process_weights_after_loading(layer)
+
+
+def test_inc_rotation_disables_producer_prequantization(monkeypatch):
+    """A quantization-capable producer must leave input floating for rotation."""
+    from vllm.model_executor.layers.fusion.quant_activation import get_input_quant_key
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+
+    class QuantizingMethod(LinearMethodBase):
+        def create_weights(self, layer, **kwargs):
+            layer._input_quant_key = kNvfp4Dynamic
+
+        def apply(self, layer, x, bias=None):
+            return x
+
+    method = INCLinearTransformMethod(QuantizingMethod(), block_size=16)
+    layer = _create_weights(
+        method, input_size_per_partition=64, output_partition_sizes=[64]
+    )
+    assert get_input_quant_key(layer) is None
+
+
+@pytest.mark.parametrize("rotation", [None, 16])
+def test_inc_nvfp4_loads_separate_qkv_scales(monkeypatch, single_tp_rank, rotation):
+    """Wrapped and plain NVFP4 must retain the fused QKV v2 parameter loader."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.linear import QKVParallelLinear
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_nvfp4_scheme import (
+        INCNvFp4LinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w4a4_nvfp4.init_nvfp4_linear_kernel",
+        lambda **kwargs: type("Kernel", (), {"input_quant_key": lambda self: None})(),
+    )
+    config = INCConfig.from_config(
+        dict(
+            bits=4,
+            group_size=16,
+            data_type="nv_fp",
+            packing_format="auto_round:llm_compressor",
+            rotation_config=None
+            if rotation is None
+            else dict(
+                backend="transform", block_size=rotation, hadamard_type="hadamard"
+            ),
+        )
+    )
+    with set_current_vllm_config(VllmConfig()):
+        layer = QKVParallelLinear(
+            hidden_size=32, head_size=8, total_num_heads=4, quant_config=config
+        )
+    method = layer.quant_method
+    if rotation is not None:
+        assert isinstance(method, INCLinearTransformMethod)
+        method = method.quant_method
+    assert isinstance(method, INCNvFp4LinearMethod)
+    for name in ("weight_global_scale", "input_global_scale"):
+        param = getattr(layer, name)
+        for index, shard in enumerate(("q", "k", "v")):
+            param.weight_loader(param, torch.tensor(float(index + 1)), shard)
+        torch.testing.assert_close(param, torch.tensor([1.0, 2.0, 3.0]))
