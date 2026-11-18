@@ -20,6 +20,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
@@ -138,7 +139,9 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     assert method.spec.activation is kNvfp4Dynamic
 
 
-def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(monkeypatch):
     """Standard MXFP8 checkpoints already have one scale row per weight row."""
     from vllm.model_executor.layers.linear import ReplicatedLinear
 

@@ -666,6 +666,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -687,6 +688,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/single_rank_group.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
