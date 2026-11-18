@@ -160,7 +160,7 @@ from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.repair_executor import (
     execute_repair_only,
-    verify_replay_compatibility,
+    repair_capability,
 )
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
@@ -612,8 +612,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Fail fast on architectures the replay cannot reproduce
             # faithfully (post-embed transforms, per-layer loop inputs):
             # a silently-diverging replay would write wrong KV under a
-            # green verdict.
-            verify_replay_compatibility(self.model)
+            # green verdict. The structured verdict also carries stable
+            # reason codes for the distributed TP preflight consensus.
+            capability = repair_capability(self.model)
+            if not capability["compatible"]:
+                raise RuntimeError(capability["detail"])
+            logger.info(
+                "Repair replay capability ok for %s",
+                type(self.model).__name__,
+            )
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             compile_model_with_stock_torch(self.model, self.vllm_config)

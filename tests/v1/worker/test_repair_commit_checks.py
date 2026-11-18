@@ -469,6 +469,227 @@ def test_replay_canary_refuses_per_layer_extras():
         verify_replay_compatibility(SimpleNamespace(model=_ExtraArgInner()))
 
 
+class _MistralCanaryLayer(torch.nn.Module):
+    """MistralDecoderLayer-shaped signature: an optional t_cond kwarg with a
+    None default (mistral.py:180-186)."""
+
+    def forward(self, positions, hidden_states, residual, t_cond=None):
+        return hidden_states, residual
+
+
+class _MistralCanaryLayerWithCachePath(_MistralCanaryLayer):
+    """The Mistral shape plus the executor's layer.self_attn.attn cache
+    seam, so the capability verdict can reach its ok branch."""
+
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _AttnHolder()
+
+
+class _ScalingStyleInner(_PlainInner):
+    """A post-embed transform (the muP input-scaling family) as a
+    module-level fixture for the capability verdict codes."""
+
+    def forward(self, input_ids, positions, intermediate_tensors=None):
+        hidden_states = self.embed_input_ids(input_ids) * 3.0
+        for layer in self.layers:
+            hidden_states, _residual = layer(positions, hidden_states, None)
+        return hidden_states
+
+
+class _MistralStyleInner(_PlainInner):
+    """MistralModel-style forward: t_cond=None is threaded to every layer as
+    an explicit keyword via LlamaModel.forward's **extra_layer_kwargs even
+    for plain text models (mistral.py:217-233 -> llama.py:434-435)."""
+
+    def __init__(self, _with_cache_path: bool = False):
+        super().__init__()
+        layer = (
+            _MistralCanaryLayerWithCachePath()
+            if _with_cache_path
+            else (_MistralCanaryLayer())
+        )
+        self.layers = torch.nn.ModuleList([layer, layer])
+
+    def forward(self, input_ids, positions, intermediate_tensors=None):
+        hidden_states = self.embed_input_ids(input_ids)
+        for layer in self.layers:
+            hidden_states, _residual = layer(
+                positions, hidden_states, None, t_cond=None
+            )
+        return hidden_states
+
+
+class _ValuedKwargInner(_PlainInner):
+    """A valued extra per-layer input (the Gemma4 PLE shape, or Ministral-3
+    conditioning): the replay cannot reproduce it."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_MistralCanaryLayer()])
+
+    def forward(self, input_ids, positions, intermediate_tensors=None):
+        hidden_states = self.embed_input_ids(input_ids)
+        for layer in self.layers:
+            hidden_states, _residual = layer(
+                positions,
+                hidden_states,
+                None,
+                t_cond=torch.zeros(1),
+            )
+        return hidden_states
+
+
+_NON_NONE_SENTINEL = object()  # a deliberately non-None layer default
+
+
+class _NonNoneDefaultLayer(torch.nn.Module):
+    """The extra kwarg's signature default is NOT None: the replay's
+    omitted call would bind the default, production binds None."""
+
+    def forward(self, positions, hidden_states, residual, t_cond=_NON_NONE_SENTINEL):
+        return hidden_states, residual
+
+
+class _NonNoneDefaultKwargInner(_PlainInner):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_NonNoneDefaultLayer()])
+
+    def forward(self, input_ids, positions, intermediate_tensors=None):
+        hidden_states = self.embed_input_ids(input_ids)
+        for layer in self.layers:
+            hidden_states, _residual = layer(
+                positions, hidden_states, None, t_cond=None
+            )
+        return hidden_states
+
+
+def test_replay_canary_accepts_inert_none_keyword_extras():
+    """Regression: the Mistral family threads t_cond=None to every layer
+    through LlamaModel.forward's **extra_layer_kwargs even for plain text
+    models (mistral.py:217-233). An explicit None binds identically to the
+    signature default, so the replay's 3-positional call is faithful and
+    the canary must accept it -- it refused before, locking the whole
+    plain-Mistral family out of the repair policy for no correctness
+    reason."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    verify_replay_compatibility(SimpleNamespace(model=_MistralStyleInner()))
+
+
+def test_replay_canary_refuses_valued_keyword_extras():
+    """The inert-None relaxation must not leak to valued extras: a real
+    conditioning tensor (Ministral-3 ada_rms_norm_t_cond) or a valued
+    per-layer input (Gemma4 PLE) still refuses."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    with pytest.raises(RuntimeError, match="per-layer inputs"):
+        verify_replay_compatibility(SimpleNamespace(model=_ValuedKwargInner()))
+
+
+def test_replay_canary_refuses_none_kwarg_with_mismatched_default():
+    """An explicit None is inert only when the signature default is None
+    too: a non-None default means the replay's omitted call would bind a
+    different value than production's explicit None."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    with pytest.raises(RuntimeError, match="per-layer inputs"):
+        verify_replay_compatibility(SimpleNamespace(model=_NonNoneDefaultKwargInner()))
+
+
+class _AttnHolder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = torch.nn.Identity()
+
+
+class _CanaryLayerWithCachePath(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _AttnHolder()
+
+    def forward(self, positions, hidden_states, residual):
+        return hidden_states, residual
+
+
+class _PlainInnerWithCachePath(_PlainInner):
+    """The plain native shape plus the executor's cache seam
+    (layer.self_attn.attn), which _rezero_repair_span and the fence reach
+    through."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_CanaryLayerWithCachePath()])
+
+
+def test_repair_capability_verdict_is_structured_and_stable():
+    """repair_capability returns stable machine-readable codes (designed for
+    the distributed TP preflight consensus: identical on every rank, so the
+    all-gather can fail closed on divergence): 'ok' for the plain native
+    shape, a per-family code for each refusal, and a separate code when the
+    canary-compatible model lacks the executor's cache seam."""
+    from vllm.v1.worker.gpu.repair_executor import repair_capability
+
+    ok = repair_capability(SimpleNamespace(model=_PlainInnerWithCachePath()))
+    assert ok["compatible"] is True
+    assert ok["reason_code"] == "ok"
+
+    sig = repair_capability(SimpleNamespace(model=_ValuedKwargInner()))
+    assert sig["compatible"] is False
+    assert sig["reason_code"] == "layer_signature"
+    assert sig["detail"]
+
+    scaled = repair_capability(SimpleNamespace(model=_ScalingStyleInner()))
+    assert scaled["compatible"] is False
+    assert scaled["reason_code"] == "post_embed_transform"
+
+    no_cache = repair_capability(SimpleNamespace(model=_PlainInner()))
+    assert no_cache["compatible"] is False
+    assert no_cache["reason_code"] == "no_self_attn_cache_path"
+
+
+def test_repair_capability_refuses_kv_sharing_layers():
+    """A replay-faithful shape whose layers share one physical KV cache
+    (Gemma4 YOCO cross-decoder, eagle sharing) is canary-compatible but
+    outside the executor's one-cache-per-layer write-set geometry: the
+    capability verdict must refuse it before any KV write."""
+    from vllm.v1.worker.gpu.repair_executor import repair_capability
+
+    class _SharedAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = SimpleNamespace(
+                kv_sharing_target_layer_name="model.layers.0.self_attn.attn"
+            )
+
+    class _SharedKVLayer(_CanaryLayerWithCachePath):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _SharedAttn()
+
+    class _SharedKVInner(_PlainInner):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([_SharedKVLayer()])
+
+    verdict = repair_capability(SimpleNamespace(model=_SharedKVInner()))
+    assert verdict["compatible"] is False
+    assert verdict["reason_code"] == "kv_sharing_unsupported"
+    assert verdict["detail"]
+
+
+def test_repair_capability_accepts_inert_none_mistral_shape():
+    """The capability verdict tracks the canary: the plain-Mistral shape
+    (t_cond=None threaded through extra_layer_kwargs) is compatible."""
+    from vllm.v1.worker.gpu.repair_executor import repair_capability
+
+    mistral = SimpleNamespace(model=_MistralStyleInner(_with_cache_path=True))
+    verdict = repair_capability(mistral)
+    assert verdict["compatible"] is True
+    assert verdict["reason_code"] == "ok"
+
+
 def test_replay_canary_refuses_unprobeable_forward():
     """A model whose forward cannot be driven to layer 0 (signature
     drift, required extras) is unverifiable: refuse rather than assume."""
