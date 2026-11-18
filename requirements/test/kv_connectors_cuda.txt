@@ -1677,20 +1677,20 @@ networkx==3.2.1 \
     # via
     #   -c requirements/test/cuda.txt
     #   torch
-nixl==1.5.2 \
-    --hash=sha256:e4ef5e16f60be11622030e23333387bd73101102fc9f62efa1c99021d51550a6
+nixl==1.6.0rc1.dev83241453 \
+    --hash=sha256:3d16619668f3d00fc909e8762a7b07a7f894ec697506a9d685d642e28d86f86d
     # via -r requirements/test/kv_connectors_cuda.in
-nixl-cu13==1.5.2 \
-    --hash=sha256:24a21afec3f3f85f011ed0bc4a80776fbab0bebfc18b79eea28fd74373a649b9 \
-    --hash=sha256:2a81b811c90dd2d462e49401f88ff3f4f8efff2e210fd2bcaba94b58302cd7a2 \
-    --hash=sha256:591eda3f14b72769590cd71b6b46fc5e483ef1b5a90a29a8ff464310c9cf6af2 \
-    --hash=sha256:6e40a927682b36692e1fe3954f05d57439a9ddf37c32230cee016cf2778683f4 \
-    --hash=sha256:88f36ac1047f4f10371c590fa2cf6d0bc01ae815a8f08fb4ae1fa4a9e86e628e \
-    --hash=sha256:ac83c16b59aa0027c0604ad636bd5b8a172512db09af73038be8fefdb3eca16c \
-    --hash=sha256:c7b3f604f6ace597e0a806926699de12cbc464c50610af75f696136a6fbad273 \
-    --hash=sha256:e4dc3cf35b429ab0117f1842b1cd943aacf06ff887df9ee20b97da85ef951078 \
-    --hash=sha256:f0d6abd7ebb7a48650617fa65fd02cb44bf82c5e407a731764adb754fc0d16cf \
-    --hash=sha256:f1137c583df7f98997e411f386286c045b7e5c251c08198ce4f55e3f2b464fc5
+nixl-cu13==1.6.0rc1.dev83241453 \
+    --hash=sha256:37d6430ca5a24fcf3531b4c194925e7b1d28efd4b54fca980a33a336f97b61ef \
+    --hash=sha256:562c3a8db93d89966eda5e3bc95a2aa9c3de3f88eeed64599e3bceb9eeb3ba85 \
+    --hash=sha256:7ea6ea23e3f84844e91f71fcd94481c43a38f59a786f5ddf9742607b4fb6dce8 \
+    --hash=sha256:9e30cfccb717a82eacae245adbea76d85cddff7c60067edd2edb2250d1978a96 \
+    --hash=sha256:a363976ecf116a22eda56b439d660559018540fae3d57a069bdcf18ae631f0e7 \
+    --hash=sha256:acfb8faa0927bd8104489fcdd94260b8998860720adb21a9b0705322d8b4be89 \
+    --hash=sha256:c55e72943fcb171a740dfa1f69107824e6db7b39e32ae1a67d892162055f36c5 \
+    --hash=sha256:d185365fe0a917919d5e51fce66a6ffe0541bf384fb289e0bcfeaf947bab16c1 \
+    --hash=sha256:df69a4d4a636fd1078e96db8f3f947c9a801b6467e42f09a372ab4deca1394ac \
+    --hash=sha256:f1b13b33db385348e2a8d1a8dd1a08bea9cf263f67b722d97d9282247cde15cc
     # via
     #   -r requirements/test/kv_connectors_cuda.in
     #   nixl

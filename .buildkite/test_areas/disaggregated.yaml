@@ -245,7 +245,7 @@ steps:
     # Import canary. As `python3 -m pytest` it runs as setup, in every shard,
     # so a broken NIXL install fails each job in seconds.
     - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
-    - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
+    - UCX_RNDV_FRAG_MEM_TYPES=host pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
@@ -329,7 +329,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_accuracy
+    - UCX_RNDV_FRAG_MEM_TYPES=host pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_accuracy
   mirror:
     amd:
       label: ":amd: (MI355) MultiConnector (Nixl+Offloading) PD accuracy"
