@@ -1115,12 +1115,25 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         ]
 
+    async def _mark_background_response_in_progress(self, response_id: str) -> None:
+        """Mark a queued background response as in_progress once it generates.
+
+        A cancelled response must stay cancelled, so only the queued ->
+        in_progress transition is applied. Without this, polling clients
+        cannot distinguish waiting requests from generating ones.
+        """
+        async with self.response_store_lock:
+            stored_response = self.response_store.get(response_id)
+            if stored_response is not None and stored_response.status == "queued":
+                stored_response.status = "in_progress"
+
     async def _run_background_request_stream(
         self,
         request: ResponsesRequest,
         *args,
         **kwargs,
     ):
+        await self._mark_background_response_in_progress(request.request_id)
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
@@ -1138,6 +1151,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         *args,
         **kwargs,
     ):
+        await self._mark_background_response_in_progress(request.request_id)
         response = await self.responses_full_generator(request, *args, **kwargs)
 
         if isinstance(response, ErrorResponse):
