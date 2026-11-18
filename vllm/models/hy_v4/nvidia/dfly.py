@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Iterator
 from copy import deepcopy
 from itertools import chain
+from typing import Any
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
@@ -141,13 +142,20 @@ class HYV4DFlyFeedForward(HYV4FeedForward):
     """Keep the module identity while waiting for the streamed FFN width."""
 
     def __init__(
-        self, hidden_size, intermediate_size, hidden_act, quant_config=None, prefix=""
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
+        prefix: str = "",
     ):
         nn.Module.__init__(self)
-        self._kwargs = dict(
+        self._kwargs: dict[str, Any] = dict(
             hidden_size=hidden_size,
             hidden_act=hidden_act,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=prefix,
         )
         self.register_buffer("_placement", torch.empty(0), persistent=False)

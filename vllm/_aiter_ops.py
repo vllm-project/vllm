@@ -834,26 +834,21 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
                 qo_indptr.shape[0], dtype=torch.int32, device=q.device
             )
 
-    capturing = torch.cuda.is_current_stream_capturing()
-    if q.dtype == FP8_DTYPE or capturing:
+    if q.dtype == FP8_DTYPE:
         assert kv_indices is not None
         num_kv_splits, num_kv_splits_indptr = get_meta_param(
-            kwargs.get("num_kv_splits"),
+            None,
             qo_indptr.shape[0] - 1,
             kv_indices.numel(),
             q.shape[1],
             max_seqlen_qo,
             q.dtype,
         )
-        force_split = q.dtype == FP8_DTYPE and num_kv_splits == 1
-        if force_split:
+        if num_kv_splits == 1:
             # gfx942's one-split FP8 asm writes the final output directly but
             # does not write either LSE buffer. Force the normal split reducer,
             # which produces both the same output and an accurate natural LSE.
             num_kv_splits = 2
-        if capturing or force_split:
-            # AITER's LRU can evict its tensor after capture. Generate the
-            # indices inside the graph instead of retaining that raw address.
             num_kv_splits_indptr = torch.arange(
                 0,
                 (qo_indptr.shape[0]) * num_kv_splits,

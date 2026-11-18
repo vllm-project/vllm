@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -216,7 +217,13 @@ def _k_norm_rope(
     tl.store(OUT + rows[:, None] * 128 + cols[None, :], out, rows[:, None] < M)
 
 
-def fused_indexer_k_norm_rope(k, norm, positions, cos_sin_cache, is_neox_style):
+def fused_indexer_k_norm_rope(
+    k: torch.Tensor,
+    norm: LayerNorm,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
     """Apply the indexer key LayerNorm and RoPE in one pass.
 
     Args:
