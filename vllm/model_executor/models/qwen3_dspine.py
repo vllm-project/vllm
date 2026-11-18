@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .qwen3_dspine_injection import fused_adjacent_injection
+from .qwen3_dspine_refinement import exact_features, feature_finish, feature_message
 from .utils import WeightsMapper, maybe_prefix
 
 _BRIDGE_METADATA = (
@@ -84,6 +85,8 @@ class AdjacentCausalInjection(nn.Module):
             torch.empty(message_dim, dtype=params_dtype), requires_grad=False
         )
         self._packed_gate_message: torch.Tensor | None = None
+        self._refine_sender_weight: torch.Tensor | None = None
+        self._refine_write_weight: torch.Tensor | None = None
 
     def _can_use_fused_kernels(self) -> bool:
         return (
@@ -131,6 +134,28 @@ class AdjacentCausalInjection(nn.Module):
     ) -> torch.Tensor:
         return (codebook[token_ids.long()].float() * math.sqrt(self.transfer_dim)).to(
             codebook.dtype
+        )
+
+    @torch.no_grad()
+    def prepare_refinement_weights(self) -> None:
+        sender_gate = self.predecessor_gate
+        write = self.writes[-1]
+        if not (
+            self._can_use_fused_kernels()
+            and all(
+                isinstance(layer.quant_method, UnquantizedLinearMethod)
+                for layer in (sender_gate, self.message, write)
+            )
+        ):
+            refill_derived(self, "_refine_sender_weight", None)
+            refill_derived(self, "_refine_write_weight", None)
+            return
+        sender = torch.cat((sender_gate.weight, self.message.weight))
+        refill_derived(self, "_refine_sender_weight", sender.float())
+        refill_derived(
+            self,
+            "_refine_write_weight",
+            write.weight.to(dtype=torch.float32, copy=True),
         )
 
     def write(
@@ -203,16 +228,7 @@ def _score_transitions(
     anchor_token_ids: torch.Tensor,
     final_layer_idx: int,
 ) -> torch.Tensor:
-    top_k = candidate_ids.shape[-1]
-    predecessor_ids = torch.cat(
-        (
-            anchor_token_ids[:, None, None].expand(-1, 1, top_k),
-            candidate_ids[:, :-1],
-        ),
-        dim=1,
-    )
     receiver_features = injection.project(final_layer_idx, final_pre_injection)
-    receiver_states = final_pre_injection[:, :, None, :]
     local_ids = candidate_ids.long()
     if lm_head.tp_size > 1:
         shard = lm_head.shard_indices
@@ -225,21 +241,50 @@ def _score_transitions(
             shard.added_vocab_end_index,
         )
     successor_weights = lm_head.weight[local_ids].float()
-    exact_features = transfer_codebook[predecessor_ids].float() * math.sqrt(
-        injection.transfer_dim
-    )
-    refined = injection.write(
-        final_layer_idx,
-        receiver_states,
-        receiver_features[:, :, None, :],
-        exact_features,
-        refine=True,
-    )
-    normalized = (
-        refined
-        / (refined.square().mean(-1, keepdim=True) + norm.variance_epsilon).sqrt()
-        * norm.weight.float()
-    )
+    sender_weight = getattr(injection, "_refine_sender_weight", None)
+    if (
+        sender_weight is not None
+        and sender_weight.device == final_pre_injection.device
+        and final_layer_idx == injection.num_layers - 1
+        and candidate_ids.numel() > 0
+    ):
+        features = exact_features(
+            transfer_codebook,
+            candidate_ids,
+            anchor_token_ids,
+            math.sqrt(injection.transfer_dim),
+        )
+        query = injection.receiver_gate(receiver_features)
+        sender = F.linear(features, sender_weight)
+        message = feature_message(query, sender, injection.gate_bias)
+        updates = F.linear(message, injection._refine_write_weight)
+        normalized = feature_finish(
+            final_pre_injection, updates, norm.weight, norm.variance_epsilon
+        )
+    else:
+        top_k = candidate_ids.shape[-1]
+        predecessor_ids = torch.cat(
+            (
+                anchor_token_ids[:, None, None].expand(-1, 1, top_k),
+                candidate_ids[:, :-1],
+            ),
+            dim=1,
+        )
+        features = transfer_codebook[predecessor_ids].float() * math.sqrt(
+            injection.transfer_dim
+        )
+        refined = injection.write(
+            final_layer_idx,
+            final_pre_injection[:, :, None, :],
+            receiver_features[:, :, None, :],
+            features,
+            refine=True,
+        )
+        normalized = (
+            refined
+            / (refined.square().mean(-1, keepdim=True) + norm.variance_epsilon).sqrt()
+            * norm.weight.float()
+        )
     scores = torch.einsum("bnkh,bnjh->bnkj", normalized, successor_weights)
     if lm_head.tp_size > 1:
         scores.masked_fill_(nonlocal_mask.unsqueeze(-2), 0)
@@ -399,6 +444,7 @@ class DSpineQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def process_weights_after_loading(self) -> None:
         super().process_weights_after_loading()
         self.model.injection.prepare_injection_weights()
+        self.model.injection.prepare_refinement_weights()
 
     def compute_candidates(
         self, hidden_states: torch.Tensor
