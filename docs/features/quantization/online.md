@@ -163,8 +163,9 @@ above `max_decode_tokens` run the `prefill` format. Each phase is `unquantized`
 | Weights | Linear backend | `decode` | `prefill` | `scale` |
 | ------- | -------------- | -------- | --------- | ------- |
 | NVFP4 W4A16 | b12x | `unquantized` or `nvfp4` | `unquantized` or `nvfp4` | `dynamic_tensor` (default) with `nvfp4`, else unset |
+| MXFP8, checkpoint or online | b12x | `unquantized` or `mxfp8` | `unquantized` or `mxfp8` | unset |
 
-`prefill` is required and `decode` defaults to `unquantized`. Phases need
+`prefill` is required and `decode` defaults to `unquantized`. Both rows need
 BF16 activations (`--dtype bfloat16`).
 `max_decode_tokens` is required when `decode` and `prefill` differ, and unused
 when they match. A phase applies to NVFP4 linears when it uses `nvfp4` or only `unquantized`, and to
@@ -186,9 +187,13 @@ copies use the model dtype. A checkpoint lm_head in a served format follows the
 phase like other linears, so prefill-sized lm_head calls (e.g. prompt logprobs)
 use the `prefill` format. NVFP4 linears whose per-GPU input size is not a
 multiple of 128 keep BF16 activations. `phase` cannot be combined with `activation`,
-`moe.phase` is not supported, and online-quantized linears reject it. The
-phase applies to every eligible checkpoint linear; `ignore` only affects online
-quantization.
+`moe.phase` is not supported, and online-quantized linears reject it unless
+their weights are MXFP8 (`--quantization mxfp8`). For an MXFP8 checkpoint, pass
+the phase with `--quantization-config` alone: adding `--quantization mxfp8`
+applies online MXFP8 to every linear and MoE layer, re-quantizing the
+checkpoint's MXFP8 layers and quantizing the rest. The phase applies to every eligible
+checkpoint linear; `ignore` only affects online quantization. Batched (BMM)
+MXFP8 layers keep their own activations.
 
 `dynamic_tensor` shares one NVFP4 scale, computed from the absolute maximum,
 across every request in a call, so outputs depend on batch composition. NVFP4
@@ -201,6 +206,9 @@ CUDA graphs and so needs no padding mask. NVFP4 phases do not
 support data parallelism, encoder CUDA graphs, client-supplied prompt or
 multimodal embeddings, or `VLLM_BATCH_INVARIANT`.
 Phases need `VLLM_USE_LAYERNAME=1`, the default on torch 2.11 and later.
+MXFP8 activations have per-block scales, so padding rows cannot affect other
+rows; a split still depends on the rows in a step and is not supported with
+`VLLM_BATCH_INVARIANT`.
 
 ### Re-quantizing layers to a different precision
 

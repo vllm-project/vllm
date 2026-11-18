@@ -1528,8 +1528,8 @@ def check_linear_phase_served(model: torch.nn.Module) -> None:
     if not has_phase_split_layers():
         logger.warning_once(
             "quantization_config.linear.phase (%s) is set, but no linear layer "
-            "serves it. Only NVFP4 W4A16 linears on the b12x linear backend "
-            "serve it.",
+            "serves it. Only NVFP4 W4A16 and MXFP8 linears on the b12x linear "
+            "backend serve it.",
             # warning_once caches its arguments, which must be hashable.
             str(phase),
         )
