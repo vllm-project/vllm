@@ -19,7 +19,6 @@ def qwen2_audio_model_config():
     return ModelConfig(
         QWEN2AUDIO_MODEL_ID,
         runner="generate",
-        trust_remote_code=True,
         limit_mm_per_prompt={
             "audio": 1,
         },
@@ -31,7 +30,6 @@ def audio_embeds_model_config():
     return ModelConfig(
         QWEN2AUDIO_MODEL_ID,
         runner="generate",
-        trust_remote_code=True,
         limit_mm_per_prompt={
             "audio": 2,
         },
