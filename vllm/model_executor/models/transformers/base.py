@@ -74,7 +74,7 @@ from vllm.model_executor.models.transformers.linear_attention import (
     VLLM_SSM_ATTR,
     TransformersMamba2SSM,
     attach_ssm,
-    kernelize_linear_attention,
+    kernelize_ssm,
 )
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
@@ -222,8 +222,6 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
-        if any(isinstance(f, SSDFuser) for _, f in self.attention_fusers.values()):
-            kernelize_linear_attention(self.model, current_platform.device_type)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -733,6 +731,7 @@ class Base(
                     attn_module, self.vllm_config, prefix=f"{i}.{VLLM_SSM_ATTR}"
                 )
                 attach_ssm(attn_module, ssm)
+                kernelize_ssm(attn_module, current_platform.device_type)
                 continue
 
             # `[i]` is the whole-model config unless the checkpoint is

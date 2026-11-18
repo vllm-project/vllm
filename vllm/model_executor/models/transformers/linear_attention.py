@@ -310,9 +310,9 @@ CAUSAL_CONV1D_FORWARD = "causal_conv1d_forward"
 SSD_FORWARD = "ssd_forward"
 
 
-def kernelize_linear_attention(model: nn.Module, device_type: str) -> None:
-    """Replace the conv and scan of `model`'s linear attention layers with vLLM's,
-    using the `kernels` mapping of Transformers' kernelizable functions."""
+def kernelize_ssm(mixer: nn.Module, device_type: str) -> None:
+    """Replace the conv and scan of a Transformers mixer with those of the vLLM
+    `Mamba2SSM` attached to it (see `attach_ssm`), using `kernelize`."""
     from kernels import Mode, kernelize, use_kernel_mapping
 
     mapping = {
@@ -322,7 +322,7 @@ def kernelize_linear_attention(model: nn.Module, device_type: str) -> None:
         SSD_FORWARD: {device_type: _InProcessRepository(VllmSSDForward)},
     }
     with use_kernel_mapping(mapping, inherit_mapping=False):
-        kernelize(model, mode=Mode.INFERENCE, device=device_type)
+        kernelize(mixer, mode=Mode.INFERENCE, device=device_type)
 
 
 class LinearAttentionMixin(HasInnerState, SupportsMambaPrefixCaching):

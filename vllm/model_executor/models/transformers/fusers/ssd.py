@@ -2,10 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SSD fuser: a Mamba2 mixer whose conv and scan `kernelize` can replace."""
 
-import ast
-import inspect
-import textwrap
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -13,27 +9,13 @@ from torch import fx, nn
 
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.linear_attention import (
+    CAUSAL_CONV1D_FORWARD,
     SSD_FORWARD,
     shard_mamba2_mixer,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-
-def calls_function(forward: Callable, name: str) -> bool:
-    """Whether `forward` calls the module-level function `name`."""
-    try:
-        source = inspect.getsource(inspect.unwrap(forward))
-        tree = ast.parse(textwrap.dedent(source))
-    except (AttributeError, OSError, SyntaxError, TypeError):
-        return False
-    return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == name
-        for node in ast.walk(tree)
-    )
 
 
 @dataclass
@@ -53,14 +35,14 @@ class SSDFuser(BaseFuser):
 
     @classmethod
     def match(cls, graph: fx.Graph | None, module: nn.Module) -> "SSDFuser | None":
-        if not calls_function(type(module).forward, SSD_FORWARD):
+        kernel_funcs = getattr(module, "_kernel_funcs", {}).values()
+        layer_names = {type(f).kernel_layer_name for f in kernel_funcs}
+        if not {CAUSAL_CONV1D_FORWARD, SSD_FORWARD} <= layer_names:
             return None
         return cls(source_cls=type(module).__name__)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
-        """Whether `kernelize` can replace the mixer's conv and scan, i.e. the
-        mixer is decorated with `use_kernelized_func` (needs `kernels`)."""
-        return SSD_FORWARD in getattr(module, "_kernel_funcs", {})
+        return True
 
     def fuse(
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
