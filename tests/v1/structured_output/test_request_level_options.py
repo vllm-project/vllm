@@ -83,3 +83,42 @@ def test_same_schema_different_flag_not_served_from_cache(backend: str, first: b
     second = not first
     assert _accepts_spaced(manager, backend, first, "r1") == (not first)
     assert _accepts_spaced(manager, backend, second, "r2") == (not second)
+
+
+STRUCTURAL_TAG = (
+    '{"type": "structural_tag", "format": {"type": "triggered_tags",'
+    ' "triggers": ["<tool_call>"], "tags": [{"begin": "<tool_call>",'
+    ' "content": {"type": "json_schema", "json_schema": ' + SCHEMA + "},"
+    ' "end": "</tool_call>"}]}}'
+)
+
+
+@pytest.mark.parametrize(
+    ("server", "request_value", "whitespace_allowed"),
+    [
+        (False, None, True),
+        (False, True, False),
+        (True, None, False),
+        (True, False, True),
+    ],
+)
+def test_structural_tag_follows_disable_any_whitespace(
+    server: bool, request_value: bool | None, whitespace_allowed: bool
+):
+    manager = _manager("xgrammar", server)
+    params = StructuredOutputsParams(
+        structural_tag=STRUCTURAL_TAG, disable_any_whitespace=request_value
+    )
+    params._backend = "xgrammar"
+    request = Request(
+        "r",
+        prompt_token_ids=[0],
+        sampling_params=SamplingParams(structured_outputs=params),
+        pooling_params=None,
+    )
+    manager.grammar_init(request)
+    assert request.structured_output_request is not None
+    grammar = request.structured_output_request.grammar
+    assert grammar is not None and not isinstance(grammar, Exception)
+    spaced = manager.tokenizer.encode("<tool_call>" + SPACED + "</tool_call>")
+    assert grammar.accept_tokens("r", spaced) == whitespace_allowed
