@@ -38,6 +38,12 @@ class _HfExamplesInfo:
     The method to use for speculative decoding.
     """
 
+    num_speculative_tokens: int = 1
+    """
+    The number of speculative tokens to test with; drafts that propose a fixed
+    block of tokens need their block size.
+    """
+
     min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -391,9 +397,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
         },
     ),
-    "LLaMAForCausalLM": _HfExamplesInfo(
-        "decapoda-research/llama-7b-hf", is_available_online=False
-    ),
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
@@ -455,6 +458,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "NemotronLabsDiffusionForCausalLM": _HfExamplesInfo(
+        "nvidia/Nemotron-Labs-Diffusion-3B",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["NemotronLabsDiffusionForCausalLM"]},
+    ),
+    "NemotronLabsDiffusionModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Labs-Diffusion-3B",
     ),
     "NanbeigeForCausalLM": _HfExamplesInfo(
         "Nanbeige/Nanbeige4.2-3B",
@@ -958,6 +969,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "InklingForConditionalGeneration": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4", tokenizer_mode="inkling", max_model_len=4096
+    ),
+    "Inkling2ForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
     ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
@@ -1558,6 +1574,15 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "Inkling2DSparkModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        speculative_model="thinkingmachines/Inkling-2-Small",  # mtp.safetensors
+        speculative_method="dspark",
+        num_speculative_tokens=7,
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+        use_original_num_layers=True,
     ),
     "DSparkMiniMaxDraftModel": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
