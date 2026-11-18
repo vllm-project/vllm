@@ -18,6 +18,7 @@ import queue
 import socket
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
@@ -109,6 +110,10 @@ from .metrics import MooncakeStoreConnectorStats
 logger = init_logger(__name__)
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+# How long a save trusts the prefix its session stored before checking the
+# store again, which re-saves anything the store evicted.
+SESSION_SAVED_TTL_S = 300.0
+MAX_SAVED_SESSIONS = 65536
 _T = TypeVar("_T")
 
 
@@ -582,6 +587,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         # Per-request high-water mark of complete hybrid checkpoints.
         self._saved_offset: dict[str, int] = {}
+        # (session id, first block hash) -> (stored tokens, block hash ending
+        # there, expiry). A later request of the session saves from there.
+        self._session_saved: OrderedDict[
+            tuple[str, BlockHash], tuple[int, BlockHash, float]
+        ] = OrderedDict()
         # Retained only after a failed store so retry events can recover the
         # token suffix without full snapshots on the normal path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
@@ -887,6 +897,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         save_completed = False
         available_token_len = 0
         checkpoint_len = 0
+        session_key = None
+        session_expiry = time.monotonic() + SESSION_SAVED_TTL_S
         req_id = req_meta.req_id
         event_token_ids = req_meta.token_ids
         token_ids_start = req_meta.token_ids_start
@@ -924,6 +936,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             save_start = self._saved_offset.get(req_id, 0)
+            hashes = req_meta.block_hashes
+            if req_meta.session_id and hashes:
+                session_key = (req_meta.session_id, hashes[0])
+                saved = self._session_saved.get(session_key)
+                if saved is not None and saved[2] > time.monotonic():
+                    stored, end_hash, expiry = saved
+                    end = stored // self.coord.hash_block_size - 1
+                    # Chained hashes: equal here means an identical prefix.
+                    if end < len(hashes) and hashes[end] == end_hash:
+                        save_start = max(save_start, stored)
+                        session_expiry = expiry
             if checkpoint_len <= save_start:
                 return
 
@@ -1212,6 +1235,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         finally:
             if save_completed:
                 self._record_saved_offset(req_meta, checkpoint_len)
+                if session_key is not None:
+                    end = checkpoint_len // self.coord.hash_block_size - 1
+                    self._session_saved[session_key] = (
+                        checkpoint_len,
+                        req_meta.block_hashes[end],
+                        session_expiry,
+                    )
+                    self._session_saved.move_to_end(session_key)
+                    if len(self._session_saved) > MAX_SAVED_SESSIONS:
+                        self._session_saved.popitem(last=False)
             if self.enable_kv_event and available_token_len:
                 self._update_retry_token_ids(
                     req_meta,

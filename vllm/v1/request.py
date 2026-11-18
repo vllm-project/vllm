@@ -205,6 +205,9 @@ class Request:
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
+        # Copied to the blocks a request with a session id hits or caches:
+        # until then they are evicted after all other free blocks.
+        self.retain_until = 0.0
         self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.

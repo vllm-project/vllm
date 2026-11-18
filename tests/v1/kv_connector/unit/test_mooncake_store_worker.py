@@ -1053,6 +1053,7 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
             block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
+            session_id="s",
         ),
     )
 
@@ -1062,6 +1063,21 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6133",
     ]
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
+
+    # A later request of the session skips the prefix this one stored.
+    store.batch_put_from_multi_buffers.return_value = [256]
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-b",
+            token_len_chunk=80,
+            block_ids=([1, 2, 3, 4, 5],),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3", b"a4"],
+            can_save=True,
+            session_id="s",
+        ),
+    )
+    assert len(store.batch_is_exist.call_args.args[0]) == 1
 
 
 def test_store_sending_thread_delta_strides_with_local_phase():

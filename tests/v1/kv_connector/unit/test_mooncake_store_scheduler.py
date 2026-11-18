@@ -152,6 +152,7 @@ def _make_decode_scheduler_output(
 
 def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
     request = SimpleNamespace(
+        session_id=None,
         req_id="req-0",
         num_computed_tokens=0,
         prompt_token_ids=list(range(32)),
@@ -255,6 +256,7 @@ def _add_unfinished_request(
     prefill_end_tokens: int,
 ) -> None:
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=token_ids,
         num_prompt_tokens=prefill_end_tokens,
         block_hashes=block_hashes,
@@ -581,6 +583,7 @@ def _make_pending_load_unfinished_request(
     block_ids: tuple[list[int], ...] = ([0, 1, 2],),
 ) -> None:
     request = SimpleNamespace(
+        session_id=None,
         num_tokens=num_tokens,
         num_prompt_tokens=num_tokens,
         block_hashes=block_hashes,
@@ -646,6 +649,7 @@ def _make_resumed_unfinished_request(
     num_computed_tokens: int,
 ) -> None:
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=token_ids,
         num_prompt_tokens=32,
         block_hashes=block_hashes,
@@ -1251,6 +1255,7 @@ def _add_pending_partial_tail_request(
     out of the request's block table.
     """
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=list(range(num_tokens)),
         block_hashes=block_hashes,
         num_output_placeholders=0,
@@ -1346,6 +1351,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     )
     block_ids = (attention_ids, [50])
     request = SimpleNamespace(
+        session_id=None,
         request_id="req-0",
         block_hashes=[bytes([i]) for i in range(prompt_tokens // 4)],
         num_computed_tokens=prompt_tokens,
@@ -1580,6 +1586,7 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
     # claimed — leaving the core free to release the block immediately.
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=list(range(24)),
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
         num_output_placeholders=0,
@@ -1620,6 +1627,7 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
 
 def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_tokens):
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=list(range(64)),
         block_hashes=[bytes([i]) for i in range(16)],
         num_output_placeholders=0,
@@ -1723,6 +1731,7 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler._store_group_ids = (0, 1)
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=list(range(48)),
         block_hashes=[bytes([i]) for i in range(12)],
         num_prompt_tokens=48,
@@ -1878,6 +1887,7 @@ def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
         enable_partial_hash_hits=True,
     )
     request = SimpleNamespace(
+        session_id=None,
         all_token_ids=list(range(48)),
         block_hashes=[bytes([i]) for i in range(12)],
         num_output_placeholders=0,

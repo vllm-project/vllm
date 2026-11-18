@@ -199,6 +199,11 @@ class EngineClient(ABC):
         """Reset the prefix cache and optionally any configured connector cache."""
         ...
 
+    async def close_session(self, session_id: str) -> None:
+        """Stop preferring a session's cached blocks for retention. They stay
+        cached until evicted as usual."""
+        raise NotImplementedError
+
     @abstractmethod
     async def sleep(
         self, level: int = 1, mode: "PauseMode" = "abort", reset_connector: bool = True

@@ -218,6 +218,11 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def close_session(self, session_id: str) -> None:
+        """Stop preferring a session's cached blocks for retention."""
+        raise NotImplementedError
+
+    @abstractmethod
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:

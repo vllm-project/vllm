@@ -936,6 +936,9 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def close_session(self, session_id: str) -> None:
+        self.scheduler.close_session(session_id)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

@@ -307,6 +307,8 @@ class ReqMeta:
     # Set on the save that first covers the whole prompt, so the scheduler
     # publishes the prompt's partial tail once rather than on every save.
     publish_partial_tail: bool = False
+    # Lets a save skip the prefix its session already stored.
+    session_id: str | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -318,6 +320,7 @@ class ReqMeta:
         block_hashes: list[BlockHash] | None = None,
         save_partial_tail: bool = False,
         num_prompt_tokens: int | None = None,
+        session_id: str | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if save_partial_tail:
@@ -390,6 +393,7 @@ class ReqMeta:
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=input_token_len,
             publish_partial_tail=publish_tail and not skip_save,
+            session_id=session_id,
         )
 
 

@@ -215,6 +215,9 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    def close_session(self, session_id: str) -> None:
+        raise NotImplementedError
+
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
@@ -323,6 +326,9 @@ class EngineCoreClient(ABC):
     async def reset_prefix_cache_async(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        raise NotImplementedError
+
+    async def close_session_async(self, session_id: str) -> None:
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
@@ -468,6 +474,9 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def close_session(self, session_id: str) -> None:
+        self.engine_core.close_session(session_id)
 
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
@@ -1128,6 +1137,9 @@ class SyncMPClient(MPClient):
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
 
+    def close_session(self, session_id: str) -> None:
+        self.call_utility("close_session", session_id)
+
     def reset_encoder_cache(self) -> None:
         self.call_utility("reset_encoder_cache")
 
@@ -1424,6 +1436,9 @@ class AsyncMPClient(MPClient):
                 "reset_prefix_cache", reset_running_requests, reset_connector
             )
         )
+
+    async def close_session_async(self, session_id: str) -> None:
+        await self.call_utility_all_async("close_session", session_id)
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
