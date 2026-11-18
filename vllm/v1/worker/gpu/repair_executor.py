@@ -200,8 +200,8 @@ def execute_repair_only(
             block_size = _repair_block_size(layers[0])
 
             # Pre-write safety gate: the slot window and the block-table row
-            # are fetched once to the host (a single D2H per work item -- the
-            # same lists feed the post-write attestation) and the geometry is
+            # are fetched once to the host (two D2H copies per work item --
+            # the same lists feed the post-write attestation) and the geometry is
             # validated BEFORE the first cache-writing kernel, so a malformed
             # slot mapping can never write into another request's KV.
             slots_host = _tolist_timed(
@@ -222,19 +222,32 @@ def execute_repair_only(
             # write is refused.
             auth_blocks = tuple(work.expected_write_block_ids)
             auth_present = bool(auth_blocks)
-            span_blocks = -(-(span_end - span_start) // block_size)
+            # Grid range, matching the scheduler's
+            # _repair_write_set_block_ids slice
+            # (req_block_ids[rollback // bs : ceil(corrupt_end / bs)]): a
+            # span starting mid-block covers one block more than its
+            # rounded-up length.
+            first_blk = span_start // block_size
+            span_blocks = -(-span_end // block_size) - first_blk
             # The authorization must cover exactly the span's blocks: a
             # partial or over-long snapshot is malformed -- refused, never a
             # crash.
             auth_len_ok = len(auth_blocks) == span_blocks
+            # An aliased authorization (one block named twice) would alias
+            # two span tokens onto one cache row while every multiset
+            # derived from it carries the same alias: the blocks must be
+            # distinct.
+            auth_distinct_ok = len(set(auth_blocks)) == len(auth_blocks)
             expected_slots: Counter[int] = Counter()
             if auth_present and auth_len_ok:
-                first_blk = span_start // block_size
                 for tok in range(span_start, span_end):
                     block_id = auth_blocks[(tok // block_size) - first_blk]
                     expected_slots[block_id * block_size + tok % block_size] += 1
             auth_slots_ok = (
-                auth_present and auth_len_ok and Counter(slots_host) == expected_slots
+                auth_present
+                and auth_len_ok
+                and auth_distinct_ok
+                and Counter(slots_host) == expected_slots
             )
             # The worker block table's span slice must AGREE with the
             # authorization (an independent check of the row itself).
@@ -259,7 +272,8 @@ def execute_repair_only(
                 logger.error(
                     "Repair pre-write fence refused req=%s plan_id=%d "
                     "span=[%d,%d) ownership=%s coverage=%s auth_present=%s "
-                    "auth_slots=%s auth_table=%s -- no cache write executed",
+                    "auth_slots=%s auth_table=%s auth_distinct=%s -- no "
+                    "cache write executed",
                     work.request_id,
                     work.plan_id,
                     span_start,
@@ -269,6 +283,7 @@ def execute_repair_only(
                     auth_present,
                     auth_slots_ok,
                     auth_table_ok,
+                    auth_distinct_ok,
                 )
 
             hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
@@ -431,6 +446,7 @@ def execute_repair_only(
             # a malformed geometry from ever executing.
             "pre_write_geometry": pre_write_ok,
             "authorized_ownership": auth_present and auth_slots_ok,
+            "authorized_distinct": auth_distinct_ok,
             "authorized_table": auth_table_ok,
             "slot_ownership": pre_write_ownership,
             "write_coverage": pre_write_coverage,
@@ -711,6 +727,18 @@ def _repair_cache_views(layer) -> list[torch.Tensor]:
     if isinstance(cache, (list, tuple)):
         return list(cache)
     if isinstance(cache, torch.Tensor) and cache.dim() == 3 and cache.shape[0] == 2:
+        if cache.shape[1] == cache.shape[2]:
+            # [2, x, x] is ambiguous between the core
+            # [num_blocks=2, block_size, C] layout and the Ascend
+            # [2, num_blocks, block_size] stack: both readings derive the
+            # same block size, so the fence cannot separate them. Refuse
+            # rather than guess (a wrong guess re-zeros the wrong cells).
+            raise ValueError(
+                "ambiguous 3-D repair KV cache geometry "
+                f"{tuple(cache.shape)}: cannot distinguish the core "
+                "[2, block_size, C] layout from the Ascend "
+                "[2, num_blocks, block_size] K/V stack"
+            )
         # The Ascend stacked [2, num_blocks, tokens] form: dim 0 is the K/V
         # selector, not a block index (a core-layout view is 4-D).
         return [cache[0], cache[1]]

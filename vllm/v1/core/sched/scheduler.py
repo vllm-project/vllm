@@ -6354,11 +6354,13 @@ class Scheduler(SchedulerInterface):
     def _abort_repair_plan(
         self, plan: RecoveryPlan, request: Request, result: RepairResultReport
     ) -> None:
-        """Abort terminal state: the partial writes were re-zeroed
-        worker-side; here the failed span is invalidated (evicted from the
-        prefix cache so no future request matches untrustworthy content),
-        the request truncates to the rollback boundary, and the ordinary
-        recompute fallback owns it. The plan is already purged."""
+        """Abort terminal state: the worker's re-zero of partial writes is
+        best-effort (a clean full-depth replay that then fails the verdict
+        collective leaves its rows un-zeroed); the authoritative
+        invalidation happens here -- the failed span is evicted (so no
+        future request matches untrustworthy content), the request
+        truncates to the rollback boundary, and the ordinary recompute
+        fallback owns it. The plan is already purged."""
         if plan.failed_block_ids:
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
             try:
