@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracing::info;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::{
     DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer, Tokenizer,
     UnavailableTokenizer,
@@ -19,7 +20,9 @@ pub use self::config::{
     HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
     NamedSpecialToken, load_model_config, load_tokenizer_config,
 };
-pub use self::model_files::{ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
+pub use self::model_files::{
+    HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,
+};
 pub use self::overrides::HfOverrides;
 use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
@@ -153,6 +156,10 @@ impl TextBackend for HfTextBackend {
         self.model_vocab_size
     }
 
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        self.model_config.dtype()
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -258,6 +265,7 @@ mod tests {
             tokenizer: None,
             hf_config: None,
             skip_tokenizer_init,
+            hf_token: None,
         };
 
         assert!(ResolvedModelFiles::from_sources(&sources(false)).await.is_err());

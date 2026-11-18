@@ -34,6 +34,14 @@ We currently support the following OpenAI APIs:
 - [Translation API](./speech_to_text.md#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
 
+## Model-not-found errors
+
+The Completions, Chat Completions, and Responses APIs return HTTP 404 with a
+`NotFoundError` for an unknown model. The error message includes at most the
+first 256 characters of the requested model name, followed by `...` when
+truncated, to bound its size in responses and error logs. Model lookup still
+uses the complete name.
+
 ## Completions API
 
 In your terminal, you can [install](../../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`](../../configuration/serve_args.md) command. (You can also use our [Docker](../../deployment/docker.md) image.)
@@ -123,8 +131,10 @@ The `X-Request-Id` HTTP request header can be enabled with
 
 The Completions, Chat Completions, and Responses APIs also support the
 `X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. Non-zero priorities require the
-server to use priority scheduling.
+the `priority` value in the JSON request body. The header and the body
+`priority` share the range `[-2**31, 2**31 - 1]`, and a header value or body
+`priority` outside it is rejected.
+Non-zero priorities require the server to use priority scheduling.
 
 ```python
 completion = client.chat.completions.create(
