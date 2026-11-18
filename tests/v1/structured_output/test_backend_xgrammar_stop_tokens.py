@@ -16,21 +16,50 @@ Lark grammars, which can name such tokens, must still be able to emit them.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
+from transformers import AutoTokenizer, TokenizersBackend
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarBackend,
+    _model_stop_token_ids,
+)
 
-TOKENIZER = "openai-community/gpt2"
-VOCAB_SIZE = 50257
+VOCAB_SIZE = 9
 
-# gpt2 token ids used to drive a `{"type": "string"}` grammar deterministically.
-EOS = 50256  # <|endoftext|> -- the tokenizer's only default stop token
-QUOTE = 1  # standalone `"`; opens then closes the JSON string
-LETTER = 55  # `X`: valid string content, not a special/stop token by default
+EOS = 1
+QUOTE = 2
+LETTER = 3
+
+
+def _vllm_config_with_generation_eos(eos_token_id):
+    model_config = SimpleNamespace(
+        try_get_generation_config=lambda: {"eos_token_id": eos_token_id}
+    )
+    return SimpleNamespace(model_config=model_config)
+
+
+def _backend_config(generation_eos_token_id=None):
+    model_config = None
+    if generation_eos_token_id is not None:
+        model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="test"),
+            try_get_generation_config=lambda: {
+                "eos_token_id": generation_eos_token_id,
+            },
+        )
+    return SimpleNamespace(
+        model_config=model_config,
+        speculative_config=None,
+        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
+    )
+
 
 QWEN_TOKENIZER = "Qwen/Qwen3-0.6B"
 QWEN_VOCAB_SIZE = 151936
@@ -47,13 +76,45 @@ def _token_allowed(row, token_id: int) -> bool:
 
 
 @pytest.fixture(scope="module")
-def backend() -> XgrammarBackend:
-    vllm_config = VllmConfig(
-        structured_outputs_config=StructuredOutputsConfig(backend="xgrammar")
+def tokenizer() -> TokenizersBackend:
+    raw_tokenizer = Tokenizer(
+        WordLevel(
+            vocab={
+                "<unk>": 0,
+                "<eos>": EOS,
+                '"': QUOTE,
+                "X": LETTER,
+                "{": 4,
+                "}": 5,
+                ":": 6,
+                ",": 7,
+                " ": 8,
+            },
+            unk_token="<unk>",
+        )
     )
+    raw_tokenizer.pre_tokenizer = WhitespaceSplit()
+    return TokenizersBackend(
+        tokenizer_object=raw_tokenizer,
+        unk_token="<unk>",
+        eos_token="<eos>",
+    )
+
+
+@pytest.fixture(scope="module")
+def backend(tokenizer: TokenizersBackend) -> XgrammarBackend:
     return XgrammarBackend(
-        vllm_config,
-        tokenizer=AutoTokenizer.from_pretrained(TOKENIZER),
+        _backend_config(),
+        tokenizer=tokenizer,
+        vocab_size=VOCAB_SIZE,
+    )
+
+
+@pytest.fixture(scope="module")
+def backend_with_model_eos(tokenizer: TokenizersBackend) -> XgrammarBackend:
+    return XgrammarBackend(
+        _backend_config([EOS, LETTER]),
+        tokenizer=tokenizer,
         vocab_size=VOCAB_SIZE,
     )
 
@@ -95,6 +156,65 @@ def test_request_stop_tokens_gated_to_grammar_terminal(backend: XgrammarBackend)
     assert _token_allowed(bm_override[0], LETTER)
     assert _token_allowed(bm_default[0], EOS)
     assert _token_allowed(bm_override[0], EOS)
+
+
+def test_model_eos_tokens_gated_to_grammar_terminal(
+    backend_with_model_eos: XgrammarBackend,
+):
+    schema = '{"type": "string"}'
+    grammar = backend_with_model_eos.compile_grammar(
+        StructuredOutputOptions.JSON, schema
+    )
+
+    # Open the string: LETTER is valid JSON string content, but the model's
+    # generation_config also marks it as an EOS id. The backend must pass that
+    # model EOS id into xgrammar tokenizer info so it is masked until the JSON
+    # string can terminate.
+    assert grammar.accept_tokens("req", [QUOTE])
+
+    bitmask = backend_with_model_eos.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert not _token_allowed(bitmask[0], LETTER)
+
+    assert grammar.accept_tokens("req", [QUOTE])
+    assert not grammar.is_terminated()
+
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask[0], LETTER)
+
+
+@pytest.mark.parametrize(
+    ("generation_eos_token_id", "expected"),
+    [
+        ([EOS, LETTER], [EOS, LETTER]),
+        (LETTER, [EOS, LETTER]),
+        ([LETTER, EOS, LETTER], [EOS, LETTER]),
+        (None, [EOS]),
+        ("bad", [EOS]),
+        ([LETTER, "bad", None, True], [EOS, LETTER]),
+    ],
+)
+def test_model_stop_token_ids_include_generation_config_eos(
+    generation_eos_token_id, expected
+):
+    tokenizer = SimpleNamespace(eos_token_id=EOS)
+    vllm_config = _vllm_config_with_generation_eos(generation_eos_token_id)
+
+    assert _model_stop_token_ids(vllm_config, tokenizer) == expected
+
+
+def test_model_stop_token_ids_handles_absent_model_config():
+    tokenizer = SimpleNamespace(eos_token_id=EOS)
+    vllm_config = SimpleNamespace(model_config=None)
+
+    assert _model_stop_token_ids(vllm_config, tokenizer) == [EOS]
+
+
+def test_model_stop_token_ids_handles_missing_tokenizer_eos():
+    tokenizer = SimpleNamespace(eos_token_id=None)
+    vllm_config = _vllm_config_with_generation_eos(LETTER)
+
+    assert _model_stop_token_ids(vllm_config, tokenizer) == [LETTER]
 
 
 @pytest.fixture(scope="module")
