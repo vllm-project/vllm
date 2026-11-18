@@ -179,6 +179,9 @@ class RejectionSampler:
                 dtype=torch.float32,
                 device=device,
             )
+            # Optional FLy cost overlay: entropy is computed but never defers.
+            if spec_config.fly_window_size is not None:
+                self.fly_window_size = spec_config.fly_window_size
         elif rejection_sample_method == "block":
             self.use_block_verification = True
         elif rejection_sample_method == "fly":

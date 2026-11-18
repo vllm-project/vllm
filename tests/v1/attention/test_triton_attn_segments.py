@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilde
 from vllm.v1.attention.backends.triton_attn_diffkv import (
     TritonAttentionDiffKVMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 
 def _build(
@@ -53,7 +53,7 @@ def _build(
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=num_kv_heads,
         head_size=128,

@@ -157,15 +157,18 @@ steps:
   - vllm/model_executor/kernels/linear/mixed_precision/cpu.py
   - vllm/model_executor/kernels/linear/scaled_mm/cpu.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
+  - vllm/model_executor/layers/quantization/modelopt.py
   - tests/quantization/test_compressed_tensors.py
   - tests/quantization/test_cpu_wna16.py
   - tests/quantization/test_cpu_w8a8.py
+  - tests/quantization/test_modelopt_nvfp4_embedding.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
       pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
       pytest -x -v -s tests/quantization/test_cpu_wna16.py
-      pytest -x -v -s tests/quantization/test_cpu_w8a8.py"
+      pytest -x -v -s tests/quantization/test_cpu_w8a8.py
+      pytest -x -v -s tests/quantization/test_modelopt_nvfp4_embedding.py"
       
 - label: CPU-Distributed Tests (PP+TP)
   key: cpu-distributed-tests-pp-tp
