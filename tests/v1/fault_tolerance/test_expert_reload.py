@@ -3,6 +3,11 @@
 
 import torch
 
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.v1.worker.sentinel.expert_reload import _placement_weight_loader
 
 
@@ -24,6 +29,25 @@ def test_reload_every_local_replica_before_deferred_processing():
     for param, value, physical_id in pending:
         param[physical_id - 4].copy_(value)
     assert torch.equal(weights, torch.tensor([20.0, 20.0, 10.0]))
+
+
+def test_repeated_reload_uses_current_placement():
+    layer = torch.nn.Linear(1, 2, bias=False)
+
+    def load(param, loaded_weight, expert_id):
+        param[expert_id].copy_(loaded_weight)
+
+    layer.weight.weight_loader = load
+    record_metadata_for_reloading(layer)
+    for slots in ([1, 0], [0, 1]):
+        initialize_layerwise_reload(layer, defer_processing=True)
+        layer.weight.weight_loader = _placement_weight_loader(
+            layer.weight.weight_loader, {0: [slots[0]], 1: [slots[1]]}, 2, 2
+        )
+        for i in range(2):
+            layer.weight.weight_loader(layer.weight, torch.tensor([float(i)]), i)
+        finalize_layerwise_reload(layer, model_config=None)
+        assert layer.weight.flatten().tolist() == slots
 
 
 def test_preserve_global_activation_scales_for_nonlocal_experts():
