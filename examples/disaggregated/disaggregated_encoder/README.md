@@ -12,6 +12,44 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 - `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
+- `size_epd.py` - Estimates an E+PD split from measured single-worker saturation rates.
+
+## Size an E+PD deployment
+
+The sizing example assumes one GPU per worker, a fixed serving configuration,
+and replicas with comparable service rates. For each split it estimates capacity
+as the smaller of the two pools' aggregate rates. Run it with the total GPU
+budget and both single-worker rates in completed requests per second:
+
+```bash
+python examples/disaggregated/disaggregated_encoder/size_epd.py \
+    --num-gpus 8 --encoder-rps 57 --pd-rps 14.3
+```
+
+This example recommends two encoder and six combined prefill/decode workers, with
+an estimated capacity of 85.8 requests per second and PD as the bottleneck.
+Tied estimates favor the split with fewer encoder workers.
+
+1. Benchmark a representative workload through the E+PD proxy with one
+   encoder and enough PD workers to keep up. Increase offered load until the
+   encoder stays backlogged and its completion rate levels off. Record the
+   encoder's completion rate in a steady window from `/metrics`.
+2. Repeat with one PD worker and enough encoder workers to keep it supplied.
+   Use the PD worker's completion rate once it stays backlogged. Use the same
+   model, workload distribution, batching, and cache policy for both runs.
+3. Save the recommendation before testing it. Replay independent requests
+   drawn from the same workload distribution at a load that saturates the
+   deployment. Compare the summed PD completion rates in the same steady
+   window for each candidate split. For a cold-cache comparison, restart the
+   workers between runs, use fresh encoder-cache directories, and disable
+   prefix caching.
+
+Use successful `vllm:request_success_total` counter deltas over the measurement
+window and `vllm:num_requests_waiting` to confirm that the target is backlogged.
+Replica imbalance and shared transport or host resources can reduce measured
+capacity. If the request mix changes, supply rates representative of the new
+mix.
+
 ### Custom Configuration
 
 ```bash
