@@ -1173,6 +1173,16 @@ class ModelConfig:
         # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
+        # Linear attention models are attention free, or hybrid if they also have
+        # attention ("hybrid" and "hybrid_sliding" layers have both)
+        layer_types = set(getattr(self.hf_text_config, "layer_types", None) or ())
+        linear_attention = ""
+        if layer_types & {"linear_attention", "hybrid", "hybrid_sliding"}:
+            has_attention = any(
+                t.startswith("hybrid") or t.endswith("attention")
+                for t in layer_types - {"linear_attention"}
+            )
+            linear_attention = "Hybrid" if has_attention else "AttentionFree"
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
@@ -1201,22 +1211,8 @@ class ModelConfig:
         ):
             cls += "ForTranscription"
         else:
-            cls += self._get_transformers_backend_linear_attention_suffix()
-            cls += "ForCausalLM"
+            cls += linear_attention + "ForCausalLM"
         return cls
-
-    def _get_transformers_backend_linear_attention_suffix(self) -> str:
-        """The `AttentionFree` or `Hybrid` suffix for models with linear attention."""
-        layer_types = getattr(self.hf_text_config, "layer_types", None) or []
-        # "hybrid" layers contain both linear attention and attention
-        if not any(t in ("linear_attention", "hybrid") for t in layer_types):
-            return ""
-        if any(
-            t != "linear_attention" and t.endswith(("attention", "hybrid"))
-            for t in layer_types
-        ):
-            return "Hybrid"
-        return "AttentionFree"
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers modeling backend class."""
