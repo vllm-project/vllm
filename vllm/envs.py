@@ -144,6 +144,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_DSPARK_FUSED_CTX_NORMS: bool = False
+    VLLM_MUSE_DSPARK_FUSED_CTX_KV: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1370,6 +1372,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark DSpark draft on ROCm: compute the context K/V projection's input
+    # norms (hidden_norm and each layer's pre-QKV norm) in one kernel instead of
+    # one launch a norm and a stack. Bitwise the same.
+    "VLLM_MUSE_DSPARK_FUSED_CTX_NORMS": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_FUSED_CTX_NORMS", "0"))
+    ),
+    # Muse Spark DSpark draft on ROCm: K-norm, RoPE and the KV cache write of the
+    # context K/V in one launch a layer (fused_muse_spark_qknorm_rope_kv_insert).
+    # K is rounded once instead of twice, so K cache bytes can differ in the last
+    # bit.
+    "VLLM_MUSE_DSPARK_FUSED_CTX_KV": lambda: bool(
+        int(os.getenv("VLLM_MUSE_DSPARK_FUSED_CTX_KV", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
