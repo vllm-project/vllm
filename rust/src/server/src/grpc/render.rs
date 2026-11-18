@@ -14,6 +14,7 @@ use tonic::{Request, Response, Status};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
+use validator::Validate as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
     ChatOptions, ChatRequest, ChatRequestProcessor, ChatTool, ChatToolChoice, GenerationPromptMode,
@@ -30,8 +31,14 @@ use super::inference::text_error_to_status;
 use super::media;
 use super::pb;
 use super::pb::render_server::{Render, RenderServer};
+use crate::error::ApiError;
+use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
+use crate::routes::openai::utils::types::Normalizable as _;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
+use crate::routes::openai::{ChatCompletionRequest, lower_chat_request};
 use crate::state::AppState;
+use crate::utils::ResolvedRequestContext;
 
 pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
 
@@ -41,6 +48,13 @@ pub(crate) trait RenderContext: Send + Sync + 'static {
     fn text_processor(&self) -> &TextRequestProcessor;
     /// Whether `model` names a served model or LoRA adapter.
     fn is_served_model(&self, model: &str) -> impl Future<Output = bool> + Send;
+    /// Resolve the requested model against the model and LoRA registries.
+    fn resolve_model(
+        &self,
+        model: Option<&str>,
+    ) -> impl Future<Output = LoraModelResolution> + Send;
+    /// Maximum sequences allowed for `n`.
+    fn max_n_sequences(&self) -> i64;
 }
 
 impl RenderContext for AppState {
@@ -53,8 +67,16 @@ impl RenderContext for AppState {
     }
 
     async fn is_served_model(&self, model: &str) -> bool {
-        let resolution = self.resolve_model_with_loras(Some(model)).await;
+        let resolution = self.resolve_model(Some(model)).await;
         resolution.model_names.accepts(Some(model))
+    }
+
+    async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
+        self.resolve_model_with_loras(model).await
+    }
+
+    fn max_n_sequences(&self) -> i64 {
+        self.api_server_options.max_n_sequences
     }
 }
 
@@ -69,6 +91,17 @@ impl RenderContext for RenderState {
 
     async fn is_served_model(&self, model: &str) -> bool {
         self.model_names().accepts(Some(model))
+    }
+
+    async fn resolve_model(&self, _model: Option<&str>) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: self.model_names(),
+            lora_request: None,
+        }
+    }
+
+    fn max_n_sequences(&self) -> i64 {
+        self.max_n_sequences
     }
 }
 
@@ -104,6 +137,17 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         log_failure(&span, &result);
         result.map(Response::new)
     }
+
+    async fn render(
+        &self,
+        request: Request<pb::RenderRequest>,
+    ) -> Result<Response<pb::RenderResponse>, Status> {
+        let request = request.into_inner();
+        let span = info_span!("grpc_render", rpc = "Render");
+        let result = render(self.state.as_ref(), request).instrument(span.clone()).await;
+        log_failure(&span, &result);
+        result.map(Response::new)
+    }
 }
 
 fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
@@ -117,6 +161,74 @@ fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
     }
 }
 
+async fn render(
+    state: &impl RenderContext,
+    request: pb::RenderRequest,
+) -> Result<pb::RenderResponse, Status> {
+    let api = enum_from_proto::<pb::Api>(request.api, "api")?;
+    match api {
+        pb::Api::Chat => {}
+        pb::Api::Unspecified => return Err(Status::invalid_argument("api is required")),
+        other => {
+            return Err(Status::invalid_argument(format!(
+                "api `{}` is not supported",
+                other.as_str_name()
+            )));
+        }
+    }
+
+    let omit_media_kwargs =
+        match enum_from_proto::<pb::MmPayload>(request.mm_payload, "mm_payload")? {
+            pb::MmPayload::Unspecified | pb::MmPayload::Tensors => false,
+            pb::MmPayload::None => true,
+        };
+
+    let mut deserializer = serde_json::Deserializer::from_slice(&request.body);
+    let mut body: ChatCompletionRequest = serde_path_to_error::deserialize(&mut deserializer)
+        .map_err(|error| {
+            Status::invalid_argument(format!("failed to parse chat completion request: {error}"))
+        })?;
+
+    body.normalize();
+    body.validate().map_err(|errors| Status::invalid_argument(errors.to_string()))?;
+
+    let model = body.model.as_deref().filter(|m| !m.is_empty());
+    let lora_resolution = state.resolve_model(model).await;
+
+    let n = body.n;
+
+    let request_id = body.request_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_context = ResolvedRequestContext {
+        request_id,
+        ..Default::default()
+    };
+
+    let chat_request =
+        lower_chat_request(body, &lora_resolution, request_context).map_err(api_error_to_status)?;
+
+    validate_n_limit(n.unwrap_or(1), state.max_n_sequences()).map_err(api_error_to_status)?;
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text_processor().max_model_len(),
+    )
+    .map_err(api_error_to_status)?;
+
+    let RenderedChat {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    } = prepare_and_render_chat(state, chat_request, None, omit_media_kwargs).await?;
+
+    Ok(pb::RenderResponse {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    })
+}
+
 async fn render_chat(
     state: &impl RenderContext,
     chat: pb::ChatRequest,
@@ -125,6 +237,41 @@ async fn render_chat(
     check_model(state, &chat.model).await?;
     let requested_structured_output = chat.structured_output.clone();
     let chat_request = to_chat_request(chat)?;
+
+    let RenderedChat {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    } = prepare_and_render_chat(
+        state,
+        chat_request,
+        requested_structured_output,
+        omit_media_kwargs,
+    )
+    .await?;
+
+    Ok(pb::RenderChatResponse {
+        prompt_token_ids,
+        structured_output,
+        engine_reasoning_gate,
+        media,
+    })
+}
+
+struct RenderedChat {
+    prompt_token_ids: Vec<u32>,
+    structured_output: Option<pb::StructuredOutput>,
+    engine_reasoning_gate: Option<pb::EngineReasoningGate>,
+    media: Vec<pb::MediaItem>,
+}
+
+async fn prepare_and_render_chat(
+    state: &impl RenderContext,
+    chat_request: ChatRequest,
+    requested_structured_output: Option<pb::StructuredOutput>,
+    omit_media_kwargs: bool,
+) -> Result<RenderedChat, Status> {
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
 
     let text_request = state
@@ -156,7 +303,8 @@ async fn render_chat(
         Some(params) if Some(&params) != structured_outputs.as_ref() => {
             Some(convert::structured_output_to_proto(&params))
         }
-        Some(_) => requested_structured_output,
+        Some(params) => requested_structured_output
+            .or_else(|| Some(convert::structured_output_to_proto(&params))),
         None => None,
     };
     let ReasoningParserKwargs {
@@ -171,7 +319,7 @@ async fn render_chat(
         )),
     });
 
-    Ok(pb::RenderChatResponse {
+    Ok(RenderedChat {
         prompt_token_ids: prepared.generate_request.prompt_token_ids,
         structured_output,
         engine_reasoning_gate,
@@ -434,6 +582,20 @@ fn chat_error_to_status(error: vllm_chat::Error) -> Status {
         Status::unavailable(message)
     } else {
         Status::internal(message)
+    }
+}
+
+fn api_error_to_status(error: ApiError) -> Status {
+    let response = error.to_error_response();
+    let message = response.error.message;
+    match error {
+        ApiError::InvalidRequest { .. }
+        | ApiError::JsonParseError { .. }
+        | ApiError::InvalidQuery { .. } => Status::invalid_argument(message),
+        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => Status::not_found(message),
+        ApiError::Conflict { .. } => Status::failed_precondition(message),
+        ApiError::ServiceUnavailable { .. } => Status::unavailable(message),
+        ApiError::ServerError { .. } => Status::internal(message),
     }
 }
 
