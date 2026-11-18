@@ -27,6 +27,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
     DEFAULT_NUM_BUFFERS,
+    PIECE_ALIGNMENT,
     Box,
     FlatPiece,
     RdtRouter,
@@ -412,29 +413,11 @@ class ShardedRDTWeightTransferEngine(
             # fused tensor's slices, e.g. per-expert weights) are adjacent in
             # the bucket too and land with one copy.
             pieces.sort(key=_by_destination)
-        # Cut to the largest bucket the pieces within `buffer_bytes` make, and
-        # pieces over it into segments of that: the receive slot stays what
-        # those buckets need. (Cutting the other pieces to it gives the same
-        # buckets they get at `buffer_bytes`.)
-        budget = self._buffer_bytes
-        budget = max(
-            (
-                sum(piece_nbytes(box, dt) for _, box, dt, *_ in chunk)
-                for pieces in groups.values()
-                for chunk in _cut(
-                    [p for p in pieces if piece_nbytes(p[1], p[2]) <= budget], budget
-                )
-            ),
-            default=budget,
-        )
+        cap = self._bucket_cap(groups)
         buckets: list[_Bucket] = []
         for (producer, unit), pieces in groups.items():
-            pieces = [
-                seg
-                for piece in pieces
-                for seg in _rows(piece, budget, self._buffer_bytes)
-            ]
-            for chunk in _cut(pieces, budget):
+            pieces = [seg for piece in pieces for seg in _rows(piece, cap)]
+            for chunk in _cut(pieces, cap):
                 buckets.append(
                     _Bucket(
                         producer=producer,
@@ -461,6 +444,43 @@ class ShardedRDTWeightTransferEngine(
             b.seq = seqs[b.producer]
             seqs[b.producer] += 1
         return buckets
+
+    def _bucket_cap(self, groups: dict[tuple[int, int], list[_Piece]]) -> int:
+        """The one size every bucket is cut to: the largest bucket the pieces
+        within `buffer_bytes` make (or `buffer_bytes` if there are none),
+        raised to hold one row of every larger piece. Cutting the larger
+        pieces to `buffer_bytes` instead grows the receive slot; cutting
+        the others to the cap gives the buckets they get at `buffer_bytes`.
+
+        Raises:
+            RuntimeError: one row of a piece is over `buffer_bytes`.
+
+        """
+        limit = self._buffer_bytes
+        regular = [
+            [p for p in ps if piece_nbytes(p[1], p[2]) <= limit]
+            for ps in groups.values()
+        ]
+        cap = max(
+            (
+                sum(piece_nbytes(box, dt) for _, box, dt, _ in chunk)
+                for pieces in regular
+                for chunk in _cut(pieces, limit)
+            ),
+            default=limit,
+        )
+        for pieces in groups.values():
+            for name, box, dtype, _ in pieces:
+                if piece_nbytes(box, dtype) <= limit:
+                    continue
+                row = piece_nbytes(((0, 1), *box[1:]), dtype)
+                if row > limit:
+                    raise RuntimeError(
+                        f"Sharded RDT: one row of {name!r} (box {box}) is "
+                        f"{row} B, over buffer_bytes={limit}; raise buffer_bytes"
+                    )
+                cap = max(cap, row)
+        return cap
 
     def _send_buckets(self, buckets: list[_Bucket]) -> None:
         """Tell every producer, including those this worker pulls nothing
@@ -727,43 +747,30 @@ def _by_destination(piece: _Piece) -> tuple[int, int]:
     return (1, 0)
 
 
-def _rows(piece: _Piece, budget: int, limit: int | None = None) -> list[_Piece]:
-    """A piece over `budget` cut along dim 0 of its box into segments of
-    whole rows, each at most `budget` (with its alignment), or `limit` if one
-    row does not fit `budget`: ordinary pieces, whose destinations are the
-    same rows of the piece's, so every segment is a view on both sides (a
-    staging is indexed by the segment's box).
+def _rows(piece: _Piece, cap: int) -> list[_Piece]:
+    """A piece over `cap` cut along dim 0 of its box into segments of the
+    most whole rows that fit `cap` (with their alignment): ordinary pieces,
+    whose destinations are the same rows of the piece's, so every segment is
+    a view on both sides (a staging is indexed by the segment's box).
 
     Raises:
-        RuntimeError: one row is over `limit`, or a destination's rows are
-            not rows of the box.
+        RuntimeError: a destination's rows are not rows of the box.
 
     """
-    limit = budget if limit is None else limit
     name, box, dtype, dests = piece
-    if piece_nbytes(box, dtype) <= budget:
+    if piece_nbytes(box, dtype) <= cap:
         return [piece]
     shape = box_shape(box)
-    row = math.prod(shape[1:]) * dtype.itemsize
-    for cap in (budget, limit):
-        rows = cap // row
-        while rows and piece_nbytes(((0, rows), *box[1:]), dtype) > cap:
-            rows -= 1
-        if rows:
-            break
-    else:
-        raise RuntimeError(
-            f"Sharded RDT: one row of {name!r} (box {box}) is {row} B, over "
-            f"buffer_bytes={limit}; raise buffer_bytes"
-        )
+    rows = (cap - cap % PIECE_ALIGNMENT) // (math.prod(shape[1:]) * dtype.itemsize)
+    assert rows, f"{name!r}: the cap {cap} B holds no row"
     by_rows = []
     for dest in dests:
         if isinstance(dest, torch.Tensor) and tuple(dest.shape) != shape:
             if not dest.is_contiguous():
                 raise RuntimeError(
-                    f"Sharded RDT: {name!r} (box {box}) is over "
-                    f"buffer_bytes={budget} and its destination is not laid "
-                    "out by rows of it; raise buffer_bytes"
+                    f"Sharded RDT: {name!r} (box {box}) is over the {cap} B "
+                    "bucket cap and its destination is not laid out by rows "
+                    "of it; raise buffer_bytes"
                 )
             dest = dest.view(shape)
         by_rows.append(dest)
