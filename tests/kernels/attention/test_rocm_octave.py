@@ -27,11 +27,11 @@ def _arch() -> str | None:
 
 def _wmma_chip() -> bool:
     """The chips with the WMMA decode and prefill (octave_arch.cuh)."""
-    if _arch() != "rdna3":
+    if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1100, on_gfx1151
+    from vllm.platforms.rocm import get_rdna_version, on_rdna
 
-    return on_gfx1100() or on_gfx1151()
+    return on_rdna() and 2 < get_rdna_version() < 4
 
 
 pytestmark = pytest.mark.skipif(
@@ -314,7 +314,7 @@ def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt):
     return out
 
 
-@pytest.mark.skipif(not _wmma_chip(), reason="WMMA tier: gfx1100 and gfx1151")
+@pytest.mark.skipif(not _wmma_chip(), reason="WMMA tier is RDNA3-only")
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 def test_decode_runs_wmma_tier(cache_dtype):
     """use_wmma=True runs the WMMA decode on the chips that have it, instead of
