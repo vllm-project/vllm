@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
@@ -50,6 +51,10 @@ _ampere_all_reduce: "AmpereAllReduce | None" = None
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     """Check kernel requirements and safety of sharing the coefficient stream."""
+    if envs.VLLM_BATCH_INVARIANT and not envs.VLLM_BI_MHC_OVERLAP:
+        # BI keeps every M on one fused mHC unless the split kernels are opted
+        # in for every M.
+        return False
     config = vllm_config.model_config.hf_config
     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
     mix_size = config.hc_mult * (config.hc_mult + 2)
@@ -314,6 +319,8 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
     at TP4 on SM100, whose overlap path it serves, and at TP8 on SM90, where
     the boundaries of the SM80 kernels' path take it; both need NVLink
     multicast."""
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     if current_platform.is_device_capability(90):
@@ -525,6 +532,21 @@ def mhc_pre_delayed_overlap(
     if compute_input and n > 8:
         epilogue(split_mode="input")
     return outputs
+
+
+def hc_stream_mean(streams: torch.Tensor) -> torch.Tensor:
+    """Mean over the hc streams of a [tokens, hc, hidden] tensor.
+
+    Under batch invariance aten::mean is a Triton kernel with one program per
+    output element (~10 ms for 8192 tokens); a fixed-order FP32 sum is row
+    invariant and elementwise.
+    """
+    if not envs.VLLM_BATCH_INVARIANT:
+        return streams.mean(dim=1)
+    acc = streams[:, 0].float()
+    for i in range(1, streams.shape[1]):
+        acc = acc + streams[:, i].float()
+    return (acc / streams.shape[1]).to(streams.dtype)
 
 
 def mhc_boundary_weight(
@@ -776,7 +798,7 @@ def mhc_shifted_post_pre(
             assert isinstance(x, torch.Tensor)
             residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         aux = (
-            residual.mean(dim=1)
+            hc_stream_mean(residual)
             if capture_aux
             else residual.new_empty(0, residual.shape[-1])
         )
@@ -840,14 +862,16 @@ def mhc_shifted_post_pre(
             norm_eps,
         )
         outputs = None
-        if boundary_weight is not None:
+        if boundary_weight is not None and not envs.VLLM_BATCH_INVARIANT:
             # Decode-size batches: one CuTe DSL kernel, the same TF32 products.
+            # Batch invariance keeps every M on Mega mHC's fixed split-K.
             outputs = _mhc_shifted_post_pre_boundary()(
                 *args[:5], boundary_weight, *args[6:]
             )
         if outputs is None:
             outputs = mhc_shifted_post_pre_deep_gemm(*args)
-        return *outputs, x.new_empty(0, x.shape[1])
+        aux = hc_stream_mean(outputs[0]) if capture_aux else x.new_empty(0, x.shape[1])
+        return *outputs, aux
 
     return mhc_fused_post_pre_delayed_tilelang(
         x,
