@@ -692,16 +692,18 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**(fields | overrides))
 
 
-_LORA = {"lora_config": object()}
+_TORCHAO = {"model_config": SimpleNamespace(quantization="torchao")}
 
 
 @pytest.mark.parametrize(
     "mode,overrides,match",
     [
-        ("direct", _LORA, "LoRA"),
-        ("layerwise", _LORA, "layerwise"),
+        ("direct", _TORCHAO, "torchao"),
+        ("layerwise", _TORCHAO, "layerwise"),
         # without weight updates, reloads are layerwise
-        ("direct", _LORA | {"weight_transfer_config": None}, "layerwise"),
+        ("direct", _TORCHAO | {"weight_transfer_config": None}, "layerwise"),
+        # post-load processing reruns on the cold-start modules
+        ("direct", {"lora_config": object()}, None),
         (
             "direct",
             {
@@ -715,22 +717,17 @@ _LORA = {"lora_config": object()}
         ),
         (
             "direct",
-            {"model_config": SimpleNamespace(quantization="torchao")},
-            "torchao",
-        ),
-        (
-            "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
         ),
         ("direct", {}, "pre-processed"),
     ],
     ids=[
-        "lora",
+        "torchao",
         "layerwise",
         "no-updates",
+        "lora",
         "offload",
-        "torchao",
         "draft-lm-head",
         "pre-processed",
     ],
@@ -746,6 +743,10 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
     if match == "layerwise":
         assert not direct_reload_enabled()
         assert not hasattr(model, "_direct_reload_refusals")
+        return
+    if match is None:
+        assert hasattr(model, "_ckpt_param_names")
+        assert not model._direct_reload_refusals
         return
     assert not hasattr(model, "_ckpt_param_names")
     with pytest.raises(RuntimeError, match=match) as err:

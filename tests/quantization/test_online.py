@@ -21,6 +21,7 @@ from tests.quantization.utils import (
     load_model_without_vllm_runner,
     quant_config_args,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
@@ -360,8 +361,10 @@ def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
 @pytest.mark.skipif(
     not is_fp4_marlin_supported(), reason="No NVFP4 W4A16 kernel on this platform."
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
-    default_vllm_config, dist_init
+    default_vllm_config,
 ) -> None:
     """The W4A16 GEMM computes `x @ dequant(W).T` with the online NVFP4 weight."""
     default_vllm_config.model_config = SimpleNamespace(
@@ -424,8 +427,10 @@ def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> No
     "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
 )
 @pytest.mark.parametrize("requantize", [False, True])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_moe_stages_quantized_weights_for_humming(
-    scheme, requantize, tmp_path, dist_init, workspace_init
+    scheme, requantize, tmp_path, workspace_init
 ) -> None:
     """Real online conversion and reload must match a fresh Humming layer."""
     from vllm.config import set_current_vllm_config
@@ -788,12 +793,13 @@ def _write_minimal_llama_config(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="MXFP8 requantization requires CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
     raises_requantization_error: bool,
     with_updates: bool,
     default_vllm_config,
-    dist_init,
 ) -> None:
     """Online weights replace only layers left unquantized by a checkpoint."""
     default_vllm_config.model_config = ModelConfig()
@@ -852,8 +858,10 @@ def test_online_prequantized_compatibility(
     or not is_quant_method_supported("fp8"),
     reason="Requires FP8 support on CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_block_fp8_requantization_removes_source_scales(
-    default_vllm_config, dist_init, workspace_init
+    default_vllm_config, workspace_init
 ) -> None:
     """Blockwise FP8 replaces MXFP8 scales with its own scale parameter."""
     default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
@@ -881,8 +889,10 @@ def test_online_block_fp8_requantization_removes_source_scales(
         assert layer.weight_scale_inv.numel() > 0
 
 
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_ignore_keeps_checkpoint_quantization_linear(
-    default_vllm_config, dist_init, monkeypatch
+    default_vllm_config, monkeypatch
 ):
     """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
@@ -910,8 +920,10 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_configures_prequantized_moe(
-    default_vllm_config, dist_init
+    default_vllm_config,
 ) -> None:
     """Configure the checkpoint method as the online MoE's weight source."""
     default_vllm_config.model_config = ModelConfig()
@@ -1165,19 +1177,13 @@ def test_weight_loading_requantization(
         pytest.param("quark", id="quark_nvfp4"),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_weight_loading_requantization_moe(
     source_format: str, default_vllm_config, monkeypatch
 ) -> None:
     """Online re-quantization uses the original quant method for loading."""
     from tests.kernels.moe.utils import make_dummy_moe_config
 
-    # Loading local experts needs parameter TP metadata, not a process group.
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
@@ -1361,6 +1367,7 @@ def test_online_requantized_moe_padding(
         "int8",
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_online_requantized_moe_reload(
     source_format: str,
     online_target: str,
@@ -1381,14 +1388,6 @@ def test_online_requantized_moe_reload(
     )
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
-
-    # This is faster than `dist_init` arg.
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
 
     moe = SimpleNamespace(
         w13_num_shards=2,
@@ -2181,6 +2180,8 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization(
     model_name: str,
     quant_scheme: str | None,
@@ -2190,7 +2191,6 @@ def test_online_quantization(
     extra_runner_kwargs: dict,
     use_rocm_aiter: bool,
     monkeypatch,
-    dist_init,
     workspace_init,
 ) -> None:
     """Tests that online quantization frontend configuration works -
@@ -2561,9 +2561,10 @@ def test_online_quantization_loads_real_weights(
     ],
     ids=["linear_regex", "direct_fused_regex", "legacy_fused_regex"],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_targets(
     default_vllm_config,
-    dist_init,
     targets: dict[str, str],
     prefix: str,
     expected_method_cls,
@@ -2595,8 +2596,10 @@ def test_online_quantization_targets(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_records_global_config(
-    default_vllm_config, dist_init
+    default_vllm_config,
 ) -> None:
     default_vllm_config.model_config = ModelConfig()
     config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_block"))

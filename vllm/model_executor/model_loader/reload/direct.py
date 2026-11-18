@@ -178,10 +178,6 @@ def _config_refusals(vllm_config: VllmConfig) -> list[str]:
         # its load_weights runs a layerwise reload, and its post-load
         # processing replaces the weight parameter
         reasons.append("torchao quantization")
-    if vllm_config.lora_config is not None:
-        # LoRA wraps layers after cold start; their wrappers forward
-        # `quant_method`, so a rerun would process each base layer twice
-        reasons.append("LoRA")
     spec = vllm_config.speculative_config
     if spec is not None and spec.draft_lm_head_quantization is not None:
         # after `begin` the draft's quantized lm_head is a view of the target
@@ -278,6 +274,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         for name, p in model.named_parameters(remove_duplicate=False)
         if hasattr(p, "_ckpt")
     )
+    # reruns skip modules added after cold start (LoRA wrappers)
+    model._ckpt_modules = list(model.named_modules())
 
 
 def _check_params_kept(model: torch.nn.Module) -> None:
