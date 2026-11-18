@@ -240,6 +240,7 @@ class _RDTProducerServer:
         self._room = threading.Condition(self._lock)  # freed arena blocks
         self._unit_conds: dict[int, threading.Condition] = {}
         self._error: BaseException | None = None
+        self._failed_sync: int | None = None
         self._last_progress = time.monotonic()
 
         # consumer -> its buckets in pull order, and their count per unit
@@ -325,7 +326,8 @@ class _RDTProducerServer:
     def begin_sync(self, live_consumer_ids: list[int], sync_idx: int) -> None:
         """Open sync `sync_idx` for the given live consumers."""
         with self._cond:
-            self._error = None
+            if self._failed_sync != sync_idx:  # failed before this rank began it
+                self._error = None
             self._sync_idx = int(sync_idx)
             self._live = frozenset(int(c) for c in live_consumer_ids)
             self._freed = {c: Counter() for c in self._live}
@@ -438,10 +440,12 @@ class _RDTProducerServer:
             )
             return freed
 
-    def set_gather_error(self, message: str) -> None:
-        """Fail the sync: every blocked wait here raises."""
+    def set_gather_error(self, message: str, sync_idx: int | None = None) -> None:
+        """Fail sync `sync_idx` (the current one by default), even if this
+        rank has not begun it yet: every blocked wait here raises."""
         with self._lock:
             self._error = RuntimeError(message)
+            self._failed_sync = self._sync_idx if sync_idx is None else sync_idx
             self._notify_all()
 
     # ---------------- consumer-facing ----------------
@@ -516,19 +520,25 @@ class _RDTProducerServer:
             ) from None
         t0 = time.perf_counter()
         with self._lock:
-            if sync_idx < self._sync_idx:
-                raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
             self._wait_for(
                 self._unit_cond(spec.unit),
-                lambda: self._sync_idx != sync_idx or spec.unit not in self._resident,
+                lambda: (
+                    self._sync_idx < sync_idx
+                    or (self._sync_idx == sync_idx and spec.unit not in self._resident)
+                ),
                 f"unit {spec.unit} of sync {sync_idx}",
             )
             # the unit stays resident until this bucket is served and freed
             self._wait_for(
                 self._room,
-                lambda: self._carve(spec.nbytes, dry_run=True) < 0,
+                lambda: (
+                    self._sync_idx == sync_idx
+                    and self._carve(spec.nbytes, dry_run=True) < 0
+                ),
                 f"arena room for unit {spec.unit} of sync {sync_idx}",
             )
+            if self._sync_idx != sync_idx:
+                raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
             offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
@@ -536,7 +546,11 @@ class _RDTProducerServer:
             ready = self._ready.get(spec.unit)
             sources = self._sources[consumer_id]
             self._last_progress = time.monotonic()
-        flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
+        try:
+            flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
+        except BaseException:
+            self._freed_bucket(-1, spec.unit, sync_idx, offset)  # only the block
+            raise
         del tensors
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
@@ -765,6 +779,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 owner_sets=self._owner_sets,
                 name_owner_class=self._name_owner_class,
                 num_consumers=ii.num_consumers,
+                workers_per_replica=ii.workers_per_replica,
                 buffer_bytes=ii.buffer_bytes,
                 num_buffers=ii.num_buffers,
             )
@@ -939,7 +954,13 @@ class ShardedRDTTrainerWeightTransferEngine(
             ShardedRDTWeightTransferUpdateInfo,
         )
 
-        self.client.start_weight_update()
+        try:
+            self.client.start_weight_update()
+        except BaseException as e:
+            # the other ranks are gathering this sync: fail it on their
+            # producers too (a collective gather still waits on this rank)
+            self._fail_producers(f"start_weight_update failed: {e!r}")
+            raise
         update = asdict(ShardedRDTWeightTransferUpdateInfo(sync_idx=self._sync_idx))
         with ThreadPoolExecutor(max_workers=1) as exe:
             # the workers pull inside update_weights, alongside the gathers
@@ -954,15 +975,17 @@ class ShardedRDTTrainerWeightTransferEngine(
         on every producer at once, so no rank waits out the stall watchdog
         for releases that will not come."""
         error = update_future.exception()
-        if error is None:
-            return
-        message = f"update_weights failed: {error!r}"
+        if error is not None:
+            self._fail_producers(f"update_weights failed: {error!r}")
+
+    def _fail_producers(self, message: str) -> None:
+        """Fail this sync on every producer."""
         for name in self._server_names or []:
             with contextlib.suppress(Exception):
                 actor = ray.get_actor(
                     name, namespace=self._init_info.trainer_actor_namespace
                 )
-                actor.set_gather_error.remote(message)
+                actor.set_gather_error.remote(message, self._sync_idx)
 
     def _run_gather_loop(self, update_future, live: list[int]) -> None:
         """Gather and publish this rank's units in order, holding at most
@@ -1020,7 +1043,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             )
         except BaseException as e:
             with contextlib.suppress(Exception):
-                self._rpc("set_gather_error", repr(e))
+                self._rpc("set_gather_error", repr(e), self._sync_idx)
             self._inflight.clear()
             raise
         finally:

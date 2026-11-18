@@ -255,6 +255,31 @@ def test_a_pull_for_the_next_sync_waits_for_it(server):
     assert torch.equal(got, new[E])
 
 
+def test_a_pull_left_behind_by_a_new_sync_fails(server):
+    s = server()
+    s.register_consumer(0, [WHOLE_N])
+    s.begin_sync([0], 0)
+    future = _call(s.bucket, 0, 0, 0)
+    s.begin_sync([0], 1)
+    with pytest.raises(ValueError, match="sync 0, now 1"):
+        future.result(timeout=5)
+
+
+def test_a_failed_pack_gives_its_block_back(server, monkeypatch):
+    s = server()
+    s.register_consumer(0, [WHOLE_N])
+    s.begin_sync([0], 0)
+    _publish(s, _weights(), 0, 1)
+
+    def boom(*a):
+        raise RuntimeError("pack failed")
+
+    monkeypatch.setattr(trainer_mod, "_sources", boom)
+    with pytest.raises(RuntimeError, match="pack failed"):
+        s.bucket(0, 0, 0)
+    assert s._blocks == {}
+
+
 @pytest.mark.parametrize(
     "consumer,seq,sync_idx,match",
     [(0, 0, 2, "sync 2"), (0, 1, 3, "never registered"), (1, 0, 3, "never registered")],
@@ -373,7 +398,11 @@ def test_a_gather_error_releases_every_wait(server):
     for w in waits:
         with pytest.raises(RuntimeError, match="gather died"):
             w.result(timeout=5)
-    s.begin_sync([0], 1)  # clears it
+    s.set_gather_error("sender failed", sync_idx=1)  # before this rank begins 1
+    s.begin_sync([0], 1)
+    with pytest.raises(RuntimeError, match="sender failed"):
+        s.wait_freed()
+    s.begin_sync([0], 2)  # a new sync clears it
     _publish(s, _weights(), 1)
     assert s.end_sync() == [1]
 

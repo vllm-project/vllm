@@ -188,7 +188,7 @@ def test_worker_payload_survives_json():
     assert payload["trainer_actor_names"] == ["srv0", "srv1"]
     assert payload["name_owner_class"] == [0, 0, 1, 2]
     assert payload["dtype_names"] == ["float32"] * 4
-    assert payload["buffer_bytes"] == 64
+    assert payload["buffer_bytes"] == 64 and payload["workers_per_replica"] == 0
 
 
 def test_metadata_disagreement_across_ranks_fails_at_init(monkeypatch):
@@ -220,12 +220,21 @@ def test_the_sender_drives_the_workers_around_its_gathers(cpu_ipc):
     assert not engine._inflight
 
 
-def test_a_failed_update_fails_the_sync_on_every_producer_at_once(cpu_ipc, monkeypatch):
-    """A worker's pull fails: the sync fails at once, not by the watchdog."""
+@pytest.mark.parametrize("failing", ["start_weight_update", "update_weights"])
+def test_a_failed_worker_call_fails_the_sync_on_every_producer_at_once(
+    cpu_ipc, monkeypatch, failing
+):
+    """The sync fails at once with the worker's error, not by the watchdog."""
+
+    def fail():
+        raise RuntimeError("Failed to register cuda memory with NIXL")
 
     class _Failing(RecordingClient):
+        def start_weight_update(self):
+            return fail() if failing == "start_weight_update" else None
+
         def update_weights(self, update_info):
-            raise RuntimeError("Failed to register cuda memory with NIXL")
+            return fail() if failing == "update_weights" else None
 
     engine = _engine(_Source(_pairs(2)), client=_Failing(), buffer_bytes=32)
     server = _attach_server(engine)
@@ -242,6 +251,9 @@ def test_a_failed_update_fails_the_sync_on_every_producer_at_once(cpu_ipc, monke
     with pytest.raises(RuntimeError, match="register cuda memory"):
         engine.send_weights()
     assert time.monotonic() - t0 < 10  # the stall watchdog is 20 s
+    server.begin_sync([0], 0)  # a rank that begins the failed sync late
+    with pytest.raises(RuntimeError, match="register cuda memory"):
+        server.wait_freed()
 
 
 @pytest.mark.parametrize("lookahead", [0, 2])
