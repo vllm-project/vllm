@@ -5,6 +5,7 @@ import importlib
 import inspect
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from importlib.util import find_spec
 from typing import Any
 
@@ -4288,6 +4289,7 @@ def _sparse_attn_decode_bf16_partial_warmup_inputs(
     *,
     q: TritonWarmupTensor,
     kv: TritonWarmupTensor,
+    indices: TritonWarmupTensor,
     is_mxfp4: bool,
     num_splits: tuple[int, ...],
 ) -> dict[str, Any]:
@@ -4295,10 +4297,14 @@ def _sparse_attn_decode_bf16_partial_warmup_inputs(
     # for one decode row.
     splits: Any = WarmupChoices(*num_splits)
     num_heads = q.shape[1]
+    # `kv` views a KV cache, whose storage can change pointer class after the
+    # warmup (see TritonWarmupTensor.ptr_range_bytes): the extensible KV cache
+    # re-binds each layer to a view of its committed blocks. Warm both classes.
+    kv_ptr_range: Any = WarmupChoices(0, 2**32)
     return dict(
         q=q,
-        kv=kv,
-        indices=TritonWarmupTensor(torch.int32),
+        kv=replace(kv, ptr_range_bytes=kv_ptr_range),
+        indices=indices,
         indptr=TritonWarmupTensor(torch.int32),
         part_m=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),
         part_l=TritonWarmupTensor(torch.float32, shape=(1, splits, num_heads)),

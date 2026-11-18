@@ -1107,6 +1107,13 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+        # Storage of the metadata builder's paged_kv_indices, which the split-K
+        # decode reads.
+        self.paged_kv_indices_bytes = (
+            max_tokens
+            * vllm_config.model_config.hf_text_config.index_topk
+            * torch.int32.itemsize
+        )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
         rank = self.kv_lora_rank
         if kv_cache_dtype == "mxfp4_mla" and (rank < 128 or rank & (rank - 1)):
@@ -1181,8 +1188,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         Mirrors `_forward_mla`'s split-K launch for an all-decode batch at every
         count `rocm_sparse_decode_bf16_num_splits` can select: the padded query
-        buffer and the flat rows of `kv_cache`. ROCm also specializes a pointer
-        on whether its storage fits in 2 GB, so both keep their storage size.
+        buffer, the flat rows of `kv_cache` and the metadata builder's
+        paged_kv_indices. ROCm also specializes a pointer on whether its storage
+        fits in 2 GB, so the query and the indices keep their storage size; the
+        KV rows are warmed in both classes, as the KV cache can be re-bound.
         """
         q = AiterMLAHelper.get_mla_padded_q(self.num_heads, self.q_concat_buffer[:1])
         if self.use_aiter_sparse_mla or not _use_rocm_sparse_triton(
@@ -1200,6 +1209,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         _sparse_attn_decode_bf16_partial.register_warmup(
             q=_warmup_tensor(q),
             kv=_warmup_tensor(kv),
+            indices=TritonWarmupTensor(
+                torch.int32, ptr_range_bytes=self.paged_kv_indices_bytes
+            ),
             is_mxfp4=kv_cache_dtype == "mxfp4_mla",
             num_splits=num_splits,
         )
