@@ -66,7 +66,8 @@ def test_ilama_lora(ilama_lora_files):
 
 
 @pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+    current_platform.is_cuda_alike() or current_platform.is_xpu(),
+    reason="Skipping to avoid redundant model tests",
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
@@ -92,7 +93,8 @@ def test_ilama_lora_tp4(ilama_lora_files):
 
 
 @pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+    current_platform.is_cuda_alike() or current_platform.is_xpu(),
+    reason="Skipping to avoid redundant model tests",
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()

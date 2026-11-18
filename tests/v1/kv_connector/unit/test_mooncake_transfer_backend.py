@@ -3,9 +3,11 @@
 
 import threading
 
+import numpy as np
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
+    BatchTransferResult,
     MemoryRegion,
     RangeRequest,
     TransferEvent,
@@ -47,6 +49,14 @@ class FakeEngine:
         )
         return self.write_status
 
+    def batch_transfer_sync_write_arrays(
+        self, session, src_ptrs, dst_ptrs, lengths
+    ) -> int:
+        self.calls.append(
+            ("write", session, src_ptrs.tolist(), dst_ptrs.tolist(), lengths.tolist())
+        )
+        return self.write_status
+
     def batch_transfer_sync_read(self, session, src_ptrs, dst_ptrs, lengths) -> int:
         self.calls.append(
             ("read", session, list(src_ptrs), list(dst_ptrs), list(lengths))
@@ -71,6 +81,18 @@ def make_backend(engine: FakeEngine) -> TransferEngineBackend:
     )
 
 
+def submit(backend, op, ranges, use_arrays):
+    if use_arrays:
+        return backend.transfer_sync_arrays(
+            "10.0.0.2:1234",
+            op,
+            np.array([r.local_addr for r in ranges], dtype=np.uint64),
+            np.array([r.remote_addr for r in ranges], dtype=np.uint64),
+            np.array([r.length for r in ranges], dtype=np.uint64),
+        )
+    return backend.transfer("10.0.0.2:1234", op, ranges)
+
+
 def test_backend_initializes_engine_with_p2p_handshake():
     engine = FakeEngine()
     backend = make_backend(engine)
@@ -85,17 +107,19 @@ def test_backend_initializes_engine_with_p2p_handshake():
     assert backend.rpc_port == 12345
 
 
-def test_transfer_reports_completion_per_range():
+@pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
+def test_transfer_reports_completion_per_range(use_arrays):
     engine = FakeEngine()
     backend = make_backend(engine)
 
-    events = backend.transfer(
-        "10.0.0.2:1234",
+    result = submit(
+        backend,
         TransferOp.WRITE,
         [
             RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=256),
             RangeRequest(local_addr=0x1100, remote_addr=0x2100, length=256),
         ],
+        use_arrays,
     )
 
     assert engine.calls[-1] == (
@@ -105,47 +129,60 @@ def test_transfer_reports_completion_per_range():
         [0x2000, 0x2100],
         [256, 256],
     )
-    assert [event.state for event in events] == [
-        TransferState.COMPLETED,
-        TransferState.COMPLETED,
-    ]
-    assert [event.error for event in events] == [None, None]
+    if use_arrays:
+        assert result == BatchTransferResult(2, TransferState.COMPLETED)
+    else:
+        assert result == [TransferEvent(TransferState.COMPLETED)] * 2
 
 
-def test_transfer_reports_engine_failure_for_every_range():
+@pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
+def test_transfer_reports_engine_failure_for_every_range(use_arrays):
     engine = FakeEngine(write_status=7)
     backend = make_backend(engine)
 
-    events = backend.transfer(
-        "10.0.0.2:1234",
+    result = submit(
+        backend,
         TransferOp.WRITE,
         [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=64)],
+        use_arrays,
     )
 
-    assert len(events) == 1
-    assert events[0].state is TransferState.FAILED
-    assert events[0].error == "Mooncake transfer engine returned 7"
+    error = "Mooncake transfer engine returned 7"
+    if use_arrays:
+        assert result == BatchTransferResult(1, TransferState.FAILED, error)
+    else:
+        assert result == [TransferEvent(TransferState.FAILED, error)]
 
 
-def test_transfer_reads_when_op_is_read():
+@pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
+def test_transfer_reads_when_op_is_read(use_arrays):
     engine = FakeEngine(read_status=5)
     backend = make_backend(engine)
 
-    events = backend.transfer(
-        "10.0.0.2:1234",
+    result = submit(
+        backend,
         TransferOp.READ,
         [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=8)],
+        use_arrays,
     )
 
-    assert engine.calls[-1][0] == "read"
-    assert events[0].state is TransferState.FAILED
+    assert engine.calls[-1] == ("read", "10.0.0.2:1234", [0x1000], [0x2000], [8])
+    error = "Mooncake transfer engine returned 5"
+    if use_arrays:
+        assert result == BatchTransferResult(1, TransferState.FAILED, error)
+    else:
+        assert result == [TransferEvent(TransferState.FAILED, error)]
 
 
-def test_transfer_returns_nothing_for_an_empty_request():
+@pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
+def test_transfer_returns_nothing_for_an_empty_request(use_arrays):
     engine = FakeEngine()
     backend = make_backend(engine)
 
-    assert backend.transfer("10.0.0.2:1234", TransferOp.WRITE, []) == []
+    result = submit(backend, TransferOp.WRITE, [], use_arrays)
+    assert result == (
+        BatchTransferResult(0, TransferState.COMPLETED) if use_arrays else []
+    )
     assert engine.calls[-1][0] == "initialize"
 
 
@@ -197,18 +234,20 @@ def test_backend_rejects_failed_initialize():
         make_backend(FailingEngine())
 
 
-def test_concurrent_transfers_keep_their_own_events():
+@pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
+def test_concurrent_transfers_keep_their_own_events(use_arrays):
     engine = FakeEngine()
     backend = make_backend(engine)
-    results: dict[str, list[TransferEvent]] = {}
+    results: dict[str, list[TransferEvent] | BatchTransferResult] = {}
     submitted = threading.Barrier(2)
 
     def submit_and_collect(name: str, length: int) -> None:
         submitted.wait()
-        results[name] = backend.transfer(
-            "10.0.0.2:1234",
+        results[name] = submit(
+            backend,
             TransferOp.WRITE,
             [RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=length)],
+            use_arrays,
         )
 
     threads = [
@@ -220,7 +259,11 @@ def test_concurrent_transfers_keep_their_own_events():
     for thread in threads:
         thread.join()
 
-    assert [event.state for event in results["first"]] == [TransferState.COMPLETED]
-    assert [event.state for event in results["second"]] == [TransferState.COMPLETED]
+    expected = (
+        BatchTransferResult(1, TransferState.COMPLETED)
+        if use_arrays
+        else [TransferEvent(TransferState.COMPLETED)]
+    )
+    assert results == {"first": expected, "second": expected}
     lengths = sorted(call[4][0] for call in engine.calls if call[0] == "write")
     assert lengths == [16, 32]
