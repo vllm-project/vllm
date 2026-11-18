@@ -19,9 +19,12 @@ def _config(model_type="qwen3_5_text"):
     return SimpleNamespace(model_type=model_type)
 
 
-def _layout(dcp=1, pcp=1):
+def _layout(dcp=1, pcp=1, ep=False, sp_moe=False):
     return SimpleNamespace(
-        decode_context_parallel_size=dcp, prefill_context_parallel_size=pcp
+        decode_context_parallel_size=dcp,
+        prefill_context_parallel_size=pcp,
+        enable_expert_parallel=ep,
+        use_sequence_parallel_moe=sp_moe,
     )
 
 
@@ -46,8 +49,17 @@ def test_moe_is_refused(installs):
     assert installs == []
 
 
-@pytest.mark.parametrize("layout", [_layout(dcp=2), _layout(pcp=2)])
-def test_context_parallel_is_refused(installs, layout):
-    with pytest.raises(NotImplementedError, match="context parallelism"):
+@pytest.mark.parametrize(
+    "layout, reason",
+    [
+        (_layout(dcp=2), "context parallelism"),
+        (_layout(pcp=2), "context parallelism"),
+        (_layout(ep=True), "expert parallelism"),
+        (_layout(sp_moe=True), "sequence-parallel MoE"),
+    ],
+)
+def test_unsynced_layouts_are_refused(installs, layout, reason):
+    # Each of these turns the TP-synced autotune off (tp_synced_autotune.configure).
+    with pytest.raises(NotImplementedError, match=reason):
         setup_replicated_ffn(_config(), layout)
     assert installs == []
