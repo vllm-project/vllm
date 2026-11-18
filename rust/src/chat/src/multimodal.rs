@@ -2178,7 +2178,11 @@ mod tests {
         assert!(info.validate_mm_limits(&at_limit).is_ok());
 
         let over_limit: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
-        assert!(info.validate_mm_limits(&over_limit).is_err());
+        let error = info.validate_mm_limits(&over_limit).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 999 image(s) may be provided in one prompt."
+        );
     }
 
     #[test]
@@ -2191,8 +2195,11 @@ mod tests {
         assert!(info.validate_mm_limits(&parts).is_ok());
 
         let over: Vec<_> = std::iter::repeat_with(image_url_part).take(2001).collect();
-        assert!(over.len() > super::DEFAULT_MM_ITEMS_PER_PROMPT);
-        assert!(info.validate_mm_limits(&over).is_err());
+        let error = info.validate_mm_limits(&over).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 2000 image(s) may be provided in one prompt."
+        );
     }
 
     #[test]
@@ -2242,7 +2249,11 @@ mod tests {
         assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
 
         let over_default: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
-        assert!(info.validate_mm_limits(&over_default).is_err());
+        let error = info.validate_mm_limits(&over_default).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 999 image(s) may be provided in one prompt."
+        );
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {
