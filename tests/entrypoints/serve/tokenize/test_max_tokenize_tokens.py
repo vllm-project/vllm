@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 import requests
 
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
+from vllm.config import ModelConfig
 from vllm.entrypoints.common.cli_args import BaseFrontendArgs
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -48,7 +48,7 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
     cli_args = [] if cli_value is None else ["--max-tokenize-tokens", cli_value]
     args = parser.parse_args(cli_args)
 
-    model_config = SimpleNamespace(max_model_len=100)
+    model_config = ModelConfig(max_model_len=100)
     resolved = resolve_max_tokenize_tokens(
         args.max_tokenize_tokens, model_config.max_model_len
     )
@@ -78,7 +78,7 @@ def test_max_tokenize_tokens_default_uses_model_length_floor(
 
 
 def test_tokenize_request_models_respect_max_total_tokens():
-    model_config = SimpleNamespace(max_model_len=100)
+    model_config = ModelConfig(max_model_len=100)
 
     # 1. TokenizeCompletionRequest
     req_cmpl = TokenizeCompletionRequest(model="test-model", prompt="hello")
