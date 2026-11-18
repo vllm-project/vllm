@@ -552,7 +552,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
+        if pynccl_comm is None or pynccl_comm.disabled:
+            # Fall back when pynccl is unavailable, e.g. an old NCCL version.
+            return super().reduce_scatter(input_, dim)
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
