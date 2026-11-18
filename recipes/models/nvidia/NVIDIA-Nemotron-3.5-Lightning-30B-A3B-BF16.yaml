@@ -34,7 +34,7 @@ model:
   base_env: {}
 
 dependencies:
-  - command: 'uv pip install "fastokens>=0.2.0"'
+  - command: 'uv pip install "fastokens>=0.3.5"'
     note: "Required by the BF16 variant, which sets VLLM_USE_FASTOKENS=1; vLLM does not bundle it yet (vllm-project/vllm#47859)"
 
 features:
@@ -161,8 +161,6 @@ variants:
           - "none"
           - "--async-scheduling"
           - "--enable-chunked-prefill"
-          - "--gpu-memory-utilization"
-          - "0.8"
           - "--load-format"
           - "instanttensor"
           - "--safetensors-load-strategy"

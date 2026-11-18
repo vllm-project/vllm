@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
+from typing import get_args
+
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -17,7 +19,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingCompletionRequest,
     EmbeddingRequest,
 )
-from vllm.entrypoints.pooling.typing import (
+from vllm.entrypoints.pooling.types import (
     PoolingEngineInput,
     PoolingServeContext,
 )
@@ -109,6 +111,65 @@ class TestEmbeddingRequestParsing:
             [{"role": "user", "content": "goodbye"}],
         ]
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": "hello"},
+            {"input": [[1, 2], [3]]},
+            {"input": []},
+            {"input": [{"role": "user", "content": "hi"}]},
+            {"input": [[{"role": "user", "content": "hi"}]]},
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"messages": [[{"role": "user", "content": "hi"}]]},
+            {"messages": []},
+            {"messages": [{"author": {"role": "user"}, "content": []}]},
+            {"input": "hello", "messages": [{"role": "user", "content": "hi"}]},
+            {
+                "input": [{"role": "user", "content": "hi"}],
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        ],
+    )
+    def test_parses_like_plain_union(self, body):
+        """The completion fast path must parse like the plain union."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        expected = plain_union.validate_python(body)
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(request) is type(expected)
+        assert request.model_dump(exclude={"request_id"}) == expected.model_dump(
+            exclude={"request_id"}
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": [1, "a"]},
+            {"input": [[1], "x"]},
+            {"input": "x", "dimensions": "abc"},
+            {
+                "input": "x",
+                "continue_final_message": True,
+                "add_generation_prompt": True,
+            },
+        ],
+    )
+    def test_rejects_like_plain_union(self, body):
+        """Invalid bodies must fail exactly as the plain union fails them."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        with pytest.raises(Exception) as expected:
+            plain_union.validate_python(body)
+        with pytest.raises(Exception) as actual:
+            TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(actual.value) is type(expected.value)
+        if isinstance(expected.value, ValidationError):
+            assert actual.value.errors(include_url=False) == expected.value.errors(
+                include_url=False
+            )
+        else:
+            assert str(actual.value) == str(expected.value)
 
 
 class TestCohereEmbedRequestParsing:

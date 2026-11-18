@@ -6,9 +6,12 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
@@ -38,7 +41,8 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. Use "auto" or None for automatic selection."""
+    """Attention backend to use. Use "auto" or None for automatic
+    selection. TORCH_SDPA is reserved for multi-modal encoder attention."""
 
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass"
     """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
@@ -82,7 +86,10 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED; on ROCm,
+    ROCM_AITER_FA and ROCM_AITER_FLYDSL_FP8. ROCM_AITER_FLYDSL_FP8 is opt-in
+    (gfx950, bf16 models): it quantizes Q/K/V to FP8 per tensor at runtime and
+    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -113,22 +120,40 @@ class AttentionConfig:
     concurrent decodes at 128K context and grows with batch and context."""
 
     indexer_sparse_logits: bool | None = None
-    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
-    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
-    the whole context and masking them. Requires an SM100-class GPU (FP8 or
-    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
-    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
-    parallelism. The sparse path costs O(candidate blocks) per query regardless
-    of context length. None (default) enables it wherever these requirements
-    hold; True forces it (and errors where they do not); False disables it.
-    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
-    candidate pool instead, with fp32 logits, and keeps the masked dense walk
-    for steps whose contexts are too short for the pool to pay; it is not
-    enabled by default there."""
+    """Score only candidate blocks in the DeepSeek V4.1 two-level indexer.
+    None (default) enables it on SM90 and supported SM100 configurations;
+    True forces it; False uses dense scoring. Requires no context parallelism.
+    SM90 uses CuTe DSL with FP8 cache and dense fallback for short prefills.
+    Unsupported cache, model geometry or microbatching raises at initialization,
+    including with the default None.
+    SM100 requires DeepGEMM >= 2.8 and DeepSelect (FP8/MXFP4 cache).
+    ROCm gfx950 uses aiter with MXFP4 cache and remains opt-in."""
 
-    indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
-    """Minimum total prefill rows for the sparse-attention indexer to split
-    them across TP ranks instead of scoring every row on each rank."""
+    indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
+    """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
+    sparse-attention indexer. "auto" (default) picks the model's default:
+    "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100, "float32" otherwise.
+    "float32" reduces the head-weighted scores in FP32 and feeds them to the
+    top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
+    in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
+    logits directly, while other top-k kernels read an FP32 copy. The sparse
+    MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
+    on SM90 and ROCm, independently of this setting."""
+
+    sparse_mla_shard_q: bool = True
+    """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
+    instead of by head: each TP rank runs the indexer and the sparse attention
+    for its slice of the tokens with all heads, and all-to-all exchanges move
+    the query and the attention output between the layouts. Applies to steps
+    with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
+    FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
+    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
+    sharded by head."""
+
+    sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
+    """Minimum number of tokens after a step's decodes (requests of at most
+    1 + num_speculative_tokens tokens) for `sparse_mla_shard_q` to apply. Below
+    it the all-to-all exchanges can cost more than they save."""
 
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
@@ -196,6 +221,14 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        if AttentionBackendEnum.TORCH_SDPA in (
+            self.backend,
+            *self.backend_per_kind.values(),
+        ):
+            raise ValueError(
+                "TORCH_SDPA is only supported for multi-modal encoder attention "
+                "and cannot be used as a decoder attention backend."
+            )
         # Checked here rather than at indexer selection, which the two CP
         # backends reach separately: bf16 goes to the Triton indexer and fp8
         # to the AITER MSA one, so neither ever sees the other's dtype and
@@ -220,17 +253,22 @@ class AttentionConfig:
             return default
         return self.indexer_kv_dtype
 
-    def compute_hash(self) -> str:
+    def resolve_indexer_logits_dtype(
+        self, default: Literal["float32", "bfloat16"]
+    ) -> Literal["float32", "bfloat16"]:
+        """Resolve `indexer_logits_dtype`, substituting `default` for "auto"."""
+        if self.indexer_logits_dtype == "auto":
+            return default
+        return self.indexer_logits_dtype
+
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+        return get_compile_factors(self, set())
 
     @field_validator("backend", mode="before")
     @classmethod

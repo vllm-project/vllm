@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
-from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -326,9 +325,6 @@ class EncoderCacheManager:
         self.freed = []
         return freed
 
-    def get_manager_metadata(self) -> EncoderCacheManagerMetadata | None:
-        return None
-
 
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
@@ -373,9 +369,18 @@ def compute_mm_encoder_budget(
     encoder_compute_budget = max(
         scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
     )
-    encoder_cache_size = max(
-        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    # None when a config was built without `__post_init__` resolution.
+    requested_cache_size = (
+        scheduler_config.encoder_cache_size or scheduler_config.max_num_batched_tokens
     )
+    encoder_cache_size = max(requested_cache_size, max_tokens_per_mm_item)
+    if encoder_cache_size > requested_cache_size:
+        logger.warning(
+            "Raising encoder_cache_size from %d to %d tokens so one %s item fits.",
+            requested_cache_size,
+            encoder_cache_size,
+            max(mm_max_toks_per_item, key=lambda m: mm_max_toks_per_item[m]),
+        )
 
     return encoder_compute_budget, encoder_cache_size
 
