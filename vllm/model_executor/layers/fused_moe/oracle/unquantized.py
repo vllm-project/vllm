@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -27,9 +26,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -535,8 +531,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     the standalone functions. Follow-up PRs may move logic from the
     module-level functions into these methods.
 
-    Priority and selection methods use `self.moe_config` by default. Legacy
-    callers can pass `moe_config` explicitly to override it for one call.
+    Priority and selection methods read `self.moe_config`.
     """
 
     name = "Unquantized"
@@ -545,12 +540,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend
 
-    def get_priority_backends(
-        self, moe_config: FusedMoEConfig | None = None
-    ) -> list[UnquantizedMoeBackend]:
-        if moe_config is None:
-            moe_config = self.moe_config
-        return _get_priority_backends(moe_config)
+    def get_priority_backends(self) -> list[UnquantizedMoeBackend]:
+        return _get_priority_backends(self.moe_config)
 
     def backend_to_kernel_cls(
         self, backend: UnquantizedMoeBackend
@@ -563,17 +554,12 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
 
     def select_backend(
         self,
-        moe_config: FusedMoEConfig | None = None,
-        weight_key: "QuantKey | None" = None,
-        activation_key: "QuantKey | None" = None,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        assert weight_key is None and activation_key is None, (
+        assert self.weight_key is None and self.activation_key is None, (
             "Weights and activations will never be quantized for "
             "UnquantizedMoEKernelOracle"
         )
-        if moe_config is None:
-            moe_config = self.moe_config
-        return select_unquantized_moe_backend(moe_config)
+        return select_unquantized_moe_backend(self.moe_config)
 
     def convert_to_kernel_format(
         self,
