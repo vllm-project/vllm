@@ -67,6 +67,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 from .mm_features import (
+    mm_hashes_from_engine_input,
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
     rebuild_mm_placeholders,
@@ -400,10 +401,16 @@ class ServingTokens(GenerateBaseServing):
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
+        return_mm_info = (
+            request.return_token_ids and not self.model_config.is_encoder_decoder
+        )
         request._response_mm_placeholders = (
             placeholder_ranges_from_engine_input(engine_input)
-            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            if return_mm_info
             else None
+        )
+        request._response_mm_hashes = (
+            mm_hashes_from_engine_input(engine_input) if return_mm_info else None
         )
 
         # Schedule the request and get the result generator.
@@ -711,6 +718,7 @@ class ServingTokens(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             mm_placeholders=request._response_mm_placeholders,
+            mm_hashes=request._response_mm_hashes,
             metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
@@ -875,6 +883,7 @@ class ServingTokens(GenerateBaseServing):
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
                         chunk.mm_placeholders = request._response_mm_placeholders
+                        chunk.mm_hashes = request._response_mm_hashes
                         prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
@@ -886,7 +895,12 @@ class ServingTokens(GenerateBaseServing):
                     # Omit fields that are absent from token-bearing chunks.
                     exclude = {
                         name
-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        for name in (
+                            "prompt_token_ids",
+                            "mm_placeholders",
+                            "mm_hashes",
+                            "metrics",
+                        )
                         if getattr(chunk, name) is None
                     }
                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
