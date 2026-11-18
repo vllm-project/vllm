@@ -147,9 +147,9 @@ impl Error {
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
-            | Self::ParserUnavailableForModel { kind: "tool", .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
