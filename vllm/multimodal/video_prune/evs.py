@@ -12,6 +12,97 @@ import typing
 
 import torch
 
+_MROPE_POS_NUM_LANES = 4
+
+
+def _mrope_pos_lanes_for_dtype(dtype: torch.dtype) -> int:
+    bits = torch.finfo(dtype).bits
+    if bits < 16:
+        raise ValueError(
+            f"Unsupported embedding dtype {dtype} for M-RoPE position packing; "
+            "expected at least 16-bit floating point."
+        )
+    if bits >= 32:
+        return 1
+    return _MROPE_POS_NUM_LANES
+
+
+def pack_mrope_positions(
+    positions: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Encode non-negative integer M-RoPE metadata columns into ``dtype``.
+
+    ``bfloat16`` and ``float16`` only represent contiguous integers exactly up
+    to ``256`` and ``2048`` respectively, so concatenating raw ``int64``
+    positions onto a 16-bit embedding tensor rounds larger positions. For
+    16-bit floats, each integer channel is split into four base-256 digits in
+    ``[0.0, 255.0]``, which are exact normal finite floats and preserve 32-bit
+    unsigned integers ``[0, 2**32 - 1]`` losslessly. For >=32-bit floats, a
+    single lane per channel is used directly.
+
+    Args:
+        positions: Integer tensor of shape ``(N, C)`` with non-negative values.
+        dtype: Floating-point dtype of the target embedding tensor.
+
+    Returns:
+        Tensor of shape ``(N, C * lanes)`` with dtype ``dtype``.
+
+    """
+    lanes = _mrope_pos_lanes_for_dtype(dtype)
+    if lanes == 1:
+        return positions.to(dtype=dtype)
+
+    pos_i64 = positions.to(dtype=torch.long)
+    digits = torch.stack(
+        (
+            pos_i64 & 0xFF,
+            (pos_i64 >> 8) & 0xFF,
+            (pos_i64 >> 16) & 0xFF,
+            (pos_i64 >> 24) & 0xFF,
+        ),
+        dim=-1,
+    )
+    return digits.reshape(positions.shape[0], positions.shape[1] * lanes).to(
+        dtype=dtype
+    )
+
+
+def unpack_mrope_positions(
+    mm_embedding: torch.Tensor,
+    num_channels: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Strip and decode M-RoPE metadata columns appended via
+    ``pack_mrope_positions``.
+
+    Args:
+        mm_embedding: 2-D tensor of shape
+            ``(N, hidden_dim + num_channels * lanes)``.
+        num_channels: Number of logical metadata channels ``C`` (4 for
+            Qwen2.5-VL, 5 for Qwen3-VL / CohereCompass).
+
+    Returns:
+        Tuple ``(cleaned_embedding, positions)`` where ``cleaned_embedding``
+        has shape ``(N, hidden_dim)`` and ``positions`` has shape ``(C, N)``
+        with dtype ``torch.long``.
+
+    """
+    lanes = _mrope_pos_lanes_for_dtype(mm_embedding.dtype)
+    packed_cols = num_channels * lanes
+    cleaned = mm_embedding[:, :-packed_cols]
+    raw = mm_embedding[:, -packed_cols:]
+    if lanes == 1:
+        return cleaned, raw.permute(1, 0).long()
+
+    digits = raw.reshape(raw.shape[0], num_channels, lanes).long()
+    positions = (
+        digits[..., 0]
+        | (digits[..., 1] << 8)
+        | (digits[..., 2] << 16)
+        | (digits[..., 3] << 24)
+    )
+    return cleaned, positions.permute(1, 0)
+
 
 def compute_retained_tokens_count(
     tokens_per_frame: int, num_frames: int, q: float
