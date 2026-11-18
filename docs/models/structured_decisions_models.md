@@ -259,9 +259,12 @@ Use OpenAI Python SDK 3.26.0 or newer for `client.decisions.create`.
 Scores are probability-weighted averages of zero-based level indices.
 
 The request contract follows the OpenAI OpenAPI schemas retrieved on
-October 7, 2026. This MVP supports 1–64 questions, 2–26 choices, and 2–10 score
-levels. Upstream permits 200 questions and 255 choices; this backend returns
-a 400 when either model limit is exceeded.
+October 7, 2026. This MVP supports 1–64 questions and 2–10 score levels.
+Choice questions require at least 2 options. Labeled read strategies allow up
+to `min(DecisionLimits.max_options, 26)` choices; unlabeled read strategies
+(`DecisionLimits.labeled=False`) allow up to `DecisionLimits.max_options`.
+The request schema caps questions at 200 and choices at 255; requests that
+exceed either the schema or model limits return 400.
 The optional `safety_identifier` is caller metadata, available in request
 body logging with `--enable-log-requests` and DEBUG logging; it does not
 authenticate callers.
