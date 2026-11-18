@@ -18,6 +18,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, MutableMapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
@@ -1598,6 +1599,21 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
+    if current_platform.is_rocm() and not torch.cuda.is_initialized():
+        # HIP memory queries initialize HIP, which forces vLLM to spawn instead
+        # of fork its engine processes; poll from a forked child instead.
+        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
+            pool.submit(
+                _wait_for_gpu_memory_to_clear_with_hip,
+                devices=devices,
+                threshold_bytes=threshold_bytes,
+                threshold_ratio=threshold_ratio,
+                timeout_s=timeout_s,
+                stable_duration_s=stable_duration_s,
+                stable_tolerance_bytes=stable_tolerance_bytes,
+                poll_interval_s=poll_interval_s,
+            ).result()
+        return
     # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
         devices = get_physical_device_indices(devices)
@@ -1716,6 +1732,11 @@ def wait_for_gpu_memory_to_clear(
             )
 
         time.sleep(poll_interval_s)
+
+
+def _wait_for_gpu_memory_to_clear_with_hip(**kwargs) -> None:
+    torch.cuda.init()
+    wait_for_gpu_memory_to_clear(**kwargs)
 
 
 def wait_for_memory_to_settle(

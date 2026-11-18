@@ -361,7 +361,11 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register(
     "qwen3_vl",
-    video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
+    video_processor=(
+        "Qwen3VLVideoProcessor",
+        "Cosmos3EdgeVideoProcessor",
+        "Lfm3VlVideoProcessor",
+    ),
 )
 class Qwen3VLVideoBackend(VideoBackend):
     _MAX_FRAMES: ClassVar[int] = 768

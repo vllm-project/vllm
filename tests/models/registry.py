@@ -1094,6 +1094,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "LiquidAI/LFM2-VL-450M",
     ),
     "Lfm3AudioForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-Audio-2B"),
+    "Lfm3OmniForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-Omni-2B"),
     "Lfm3VlForConditionalGeneration": _HfExamplesInfo("LiquidAI/LFM3-VL-2B"),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -1527,6 +1528,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DSpineDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.8-27B",
+        speculative_model="tencent/Qwen3.8-27B-DSpine-b16",
+        is_available_online=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
         max_num_seqs=32,
     ),
     # LiLiCorr checkpoints are not published yet.
