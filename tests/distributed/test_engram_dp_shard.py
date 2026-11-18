@@ -385,6 +385,18 @@ def test_engram_pool_table_rejects_reload(monkeypatch):
         pool.ready(table)
 
 
+def test_engram_pool_proxy_stops_on_failed_completion():
+    """A failed RDMA completion stops the proxy instead of being skipped, so
+    requesters see the failure rather than wait for the GPU timeout."""
+    from vllm.distributed.engram_pool import proxy
+
+    wc = (verbs.ibv_wc * 2)()
+    proxy._check(wc, 2, "gather")
+    wc[1].status, wc[1].qp_num = 5, 77
+    with pytest.raises(RuntimeError, match="gather failed on QP 77"):
+        proxy._check(wc, 2, "gather")
+
+
 def _check_fp8_batch(vllm_config):
     """MXFP8 staging matches the tables across peer/all-to-all slots, idle
     replicas and graph replays."""

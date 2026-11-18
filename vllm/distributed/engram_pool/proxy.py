@@ -69,19 +69,14 @@ def mailbox_bytes(max_wrs: int, max_items: int) -> int:
     return max_wrs * WR_BYTES + max_items * SGE_BYTES
 
 
-def _failed(wc: ctypes.Array, count: int, what: str) -> bool:
-    """Report failed completions in `wc`; True if any."""
-    failed = False
+def _check(wc: ctypes.Array, count: int, what: str) -> None:
+    """Raise on the first failed completion in `wc`."""
     for c in wc[:count]:
         if c.status:
-            print(
-                f"Engram pool RDMA {what} failed: ibv_wc status {c.status}, "
-                f"vendor error {c.vendor_err:#x}",
-                file=sys.stderr,
-                flush=True,
+            raise RuntimeError(
+                f"Engram pool RDMA {what} failed on QP {c.qp_num}: ibv_wc status "
+                f"{c.status}, vendor error {c.vendor_err:#x}"
             )
-            failed = True
-    return failed
 
 
 class Owner:
@@ -238,17 +233,10 @@ class Owner:
                 device.notify_cq(self.recv_cq)
                 continue
             self.retire(block=False)
+            _check(wc, count, "request")
             for c in wc[:count]:
                 peer, qp = self.receivers[c.qp_num]
                 device.post_recv(qp, recv_wr)
-                if c.status:
-                    print(
-                        f"Engram pool RDMA request from GPU {peer} failed: "
-                        f"ibv_wc status {c.status}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    continue
                 num_wrs, table = c.imm_data & 0xFFFFFF, c.imm_data >> 24
                 box = self.boxes + self.box_starts[peer] + table * self.box_sizes[peer]
                 pending.append(_Request(self.qps[peer], box, num_wrs))
@@ -296,7 +284,7 @@ class Owner:
                     continue
             if not count:
                 return
-            _failed(wc, count, "gather")
+            _check(wc, count, "gather")
             # A QP completes its chains in order; each ends in a signaled WR.
             for c in wc[:count]:
                 qp = self.by_qpn[c.qp_num]
@@ -341,6 +329,14 @@ def main() -> None:
         return
     # Native crashes (ctypes into verbs) print where it was.
     faulthandler.enable()
+
+    def exit_on_error(args: threading.ExceptHookArgs) -> None:
+        # A failed transfer leaves the group unusable: exit, so requesters see
+        # it at their next fetch instead of at the GPU's timeout.
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        os._exit(1)
+
+    threading.excepthook = exit_on_error
     Owner(socket.socket(fileno=int(sys.argv[1]))).serve()
     # Its worker sleeps in a C call; leave it there.
     os._exit(0)
