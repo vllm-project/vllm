@@ -21,12 +21,6 @@ if HAS_TRITON:
         apply_top_k_top_p_triton,
     )
 
-from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
-from vllm._cpu_ops import (
-    cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
-)
-from vllm._cpu_ops import cpu_topp_sampling as _cpu_topp_sampling_op
-
 logger = init_logger(__name__)
 
 
@@ -303,6 +297,12 @@ def apply_top_k_top_p_cpu(
     p: torch.Tensor | None,
 ) -> torch.Tensor:
     """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
+    from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._cpu_ops import (
+        cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+    )
+    from vllm._cpu_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
     if p is None and k is None:
         return logits
 
