@@ -148,7 +148,6 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "MiniMaxM3SparseTritonBackend"
     )
     STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
-    # Nemotron Shortcut's SDSA core (model-driven; selected via the SDSA layer).
     NEMOTRON_SHORTCUT_SDSA = (
         "vllm.models.nemotron_shortcut.nvidia.sdsa.backend.SdsaAttentionBackend"
     )

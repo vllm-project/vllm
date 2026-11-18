@@ -564,7 +564,6 @@ _MULTIMODAL_MODELS = {
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeForConditionalGeneration",
     ),
-    # The checkpoints' architecture name.
     "Nemotron4ForConditionalGeneration": (
         "vllm.models.nemotron_shortcut",
         "NemotronShortcutForConditionalGeneration",
