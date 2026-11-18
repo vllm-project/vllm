@@ -67,7 +67,7 @@ _COPY_FUNCS: MambaStateCopyFuncsByType = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class MambaCopyBuffers:
     """Staging buffers for the CPU reference copy path below."""
 
@@ -245,7 +245,7 @@ def postprocess_mamba(
 # -----------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _TestConfig:
     """Common test configuration for fused kernel tests."""
 

@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3 vision-language MoE (427B total / 26B active) for frontier coding, agent toolchains, and 1M-token reasoning via MSA sparse attention — native multimodal (image + video + computer use); BF16 plus MXFP8, NVIDIA Blackwell NVFP4, and AMD MI355X MXFP4 variants. Runs on NVIDIA (Hopper/Blackwell) and AMD CDNA4/CDNA3."
   date_added: 2026-06-12
-  date_updated: 2026-10-26
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -27,7 +27,6 @@ model:
     reasoning_parser: minimax_m3
     tool_call_parser: minimax_m3
   min_vllm_version: "0.24.0"
-  nightly_required: true
   docker_image:
     nvidia: "vllm/vllm-openai:minimax-m3"
     amd: "vllm/vllm-openai-rocm:nightly"
@@ -1063,7 +1062,7 @@ guide: |
     --max-model-len 131072        # 128K instead of the full 1M
   ```
 
-  AMD ROCm notes: Native context is 512K. To go past it, supply a YaRN rope_scaling on the text config
+  AMD ROCm notes: Native context is 512K. To go past it, supply YaRN rope_parameters on the text config
   (a top-level override silently misses the decoder's config) and allow the long max length.
   TP=8 + fp8 KV is the practical combo at 1M:
 
@@ -1080,7 +1079,7 @@ guide: |
     --tool-call-parser minimax_m3 \
     --enable-auto-tool-choice \
     --reasoning-parser minimax_m3 \
-    --hf-overrides '{"text_config":{"rope_scaling":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":524288}}}'
+    --hf-overrides '{"text_config":{"rope_parameters":{"rope_type":"yarn","rope_theta":5000000,"factor":2.0,"original_max_position_embeddings":524288}}}'
   ```
 
   - Set `--max-model-len` to the longest prompt + output you actually serve

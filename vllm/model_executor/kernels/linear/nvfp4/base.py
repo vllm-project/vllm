@@ -21,16 +21,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class NvFp4LinearLayerConfig:
     """Configuration for an NVFP4 linear layer.
 
     All NVFP4 layers share the same structure: packed uint8 weights (2 FP4 values per
     byte), FP8-E4M3 per-block weight scales (group size 16), and scalar global
-    scales for both weights and activations.
+    scales for both weights and activations. `act_dtype` is the activation
+    dtype of weight-only layers, when the caller knows it.
     """
 
-    pass
+    act_dtype: torch.dtype | None = None
 
 
 class NvFp4LinearKernel(ABC):
@@ -89,6 +90,16 @@ class NvFp4LinearKernel(ABC):
     ) -> tuple[bool, str | None]:
         """Return whether this kernel can run on the current platform."""
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

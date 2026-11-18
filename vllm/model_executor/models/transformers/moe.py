@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class TransformersMoEState:
     topk_ids: torch.Tensor | None = None
     is_sequence_parallel: bool = False

@@ -51,7 +51,6 @@ def test_models(example_prompts, model_name) -> None:
     llm = LLM(
         model=model_name,
         max_model_len=MAX_MODEL_LEN,
-        trust_remote_code=True,
         enforce_eager=True,
         quantization="modelopt",
     )

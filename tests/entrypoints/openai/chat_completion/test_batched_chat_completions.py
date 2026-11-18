@@ -54,6 +54,7 @@ def default_server_args():
         "--block-size",
         "16",
         "--enforce-eager",
+        "--enable-scale-out",
     ]
 
 
@@ -61,6 +62,49 @@ def default_server_args():
 def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        pytest.param(
+            "v1/chat/completions",
+            {"messages": [{"role": "user", "content": "Hello"}]},
+            id="chat",
+        ),
+        pytest.param(
+            "v1/chat/completions/batch",
+            {"messages": [[{"role": "user", "content": "Hello"}]]},
+            id="batch-chat",
+        ),
+        pytest.param("v1/responses", {"input": "Hello"}, id="responses"),
+        pytest.param(
+            "inference/v1/generate",
+            {"token_ids": [1], "sampling_params": {"max_tokens": 1}},
+            id="tokens",
+        ),
+    ],
+)
+async def test_inference_invalid_model_error_is_bounded(
+    server: RemoteOpenAIServer, endpoint: str, payload: dict
+) -> None:
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for(endpoint),
+            json={"model": "x" * 16384, **payload},
+            timeout=60,
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == {
+        "message": (
+            f"The model `{'x' * 256}...` does not exist. Valid aliases: {MODEL_NAME}."
+        ),
+        "type": "NotFoundError",
+        "param": "model",
+        "code": 404,
+    }
 
 
 @pytest.mark.asyncio
