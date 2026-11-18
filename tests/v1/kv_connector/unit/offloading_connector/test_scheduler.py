@@ -123,6 +123,8 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _as_mock(value: object) -> MagicMock:
     assert isinstance(value, MagicMock)
@@ -688,7 +690,6 @@ def _make_dcp_shaped_request(
     return request
 
 
-@pytest.mark.cpu_test
 def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     assert scheduler.config.supports_partial_tail
@@ -718,7 +719,6 @@ def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     ).config.supports_partial_tail
 
 
-@pytest.mark.cpu_test
 def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     _make_dcp_shaped_request(scheduler, num_tokens=46)
@@ -765,7 +765,6 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
     assert len(full_attention_event.block_hashes) == 3
 
 
-@pytest.mark.cpu_test
 def test_partial_tail_store_skips_aligned_boundary_under_dcp():
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     _make_dcp_shaped_request(scheduler, num_tokens=70)
@@ -816,7 +815,6 @@ def _dcp_partial_tail_store(
     )
 
 
-@pytest.mark.cpu_test
 def test_partial_tail_store_uses_prompt_checkpoint_under_dcp():
     # The request-end hand-off includes an aligned recurrent state at 48
     # and the prompt checkpoint at 56. Only the latter pairs attention/state.
@@ -849,7 +847,6 @@ def test_partial_tail_store_uses_prompt_checkpoint_under_dcp():
         (48, [12, 99], [1, 2]),
     ],
 )
-@pytest.mark.cpu_test
 def test_partial_tail_store_indexes_the_block_ending_at_the_boundary(
     boundary, expected_blocks, expected_indices
 ):
@@ -866,7 +863,6 @@ def test_partial_tail_store_indexes_the_block_ending_at_the_boundary(
     assert pair.src_spec.block_indices == expected_indices
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_and_load_address_each_group_block_size_under_dcp():
     # Everything resident: complete hit at 32, tail at 44. The load must lay
     # the tail out per group: the full-attention chunk plus its partial block
@@ -1714,7 +1710,6 @@ def _make_anchored_partial_tail_request(scheduler, hits, num_tokens=30):
     return request, req_status
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_anchors_on_full_attention_prefix():
     # No recurrent state at the chunk boundary 16, the common case: the search
     # must still find the tail at 28 from the full-attention prefix alone.
@@ -1726,7 +1721,6 @@ def test_partial_lookup_anchors_on_full_attention_prefix():
     assert req_status.partial_tail_boundary == 28
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_anchor_loads_only_verified_chunks():
     scheduler = _make_partial_tail_scheduler()
     request, req_status = _make_anchored_partial_tail_request(
@@ -1754,7 +1748,6 @@ def test_partial_lookup_anchor_loads_only_verified_chunks():
     assert load_job.dst_spec.block_indices == [0, 1]
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_returns_zero_without_stored_tail():
     scheduler = _make_partial_tail_scheduler()
     _, req_status = _make_anchored_partial_tail_request(
@@ -1764,7 +1757,6 @@ def test_partial_lookup_returns_zero_without_stored_tail():
     assert req_status.partial_tail_boundary is None
 
 
-@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "pending_result", [LookupResult.RETRY, LookupResult.HIT_PENDING]
 )
@@ -1788,7 +1780,6 @@ def test_partial_lookup_defers_only_for_viable_pending_boundary(
     assert scheduler.get_num_new_matched_tokens(request, 0) == (expected, False)
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_requires_resident_full_attention_prefix():
     # Tail keys resident but the chunk [0,16) was evicted: reporting the tail
     # would make the load request a missing chunk.
@@ -1800,7 +1791,6 @@ def test_partial_lookup_requires_resident_full_attention_prefix():
     assert req_status.partial_tail_boundary is None
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_prefers_tail_over_aligned_recurrent_state():
     scheduler = _make_partial_tail_scheduler()
     _, req_status = _make_anchored_partial_tail_request(
@@ -1809,7 +1799,6 @@ def test_partial_lookup_prefers_tail_over_aligned_recurrent_state():
     assert scheduler._lookup(req_status) == 28
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_defers_while_anchor_chunk_is_loading():
     scheduler = _make_partial_tail_scheduler()
     _, req_status = _make_anchored_partial_tail_request(
@@ -1820,7 +1809,6 @@ def test_partial_lookup_defers_while_anchor_chunk_is_loading():
     assert req_status.partial_tail_boundary is None
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_does_not_defer_on_pending_anchor_chunk():
     # Like the complete-chunk lookup, a full-attention chunk that is still
     # being stored does not defer the request; the tail is not reported.
@@ -1840,7 +1828,6 @@ def test_partial_lookup_does_not_defer_on_pending_anchor_chunk():
     assert req_status.partial_tail_boundary is None
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_anchor_spans_multiple_complete_chunks():
     # 46-token prompt: chunks [0,16) and [16,32) resident, tail at 44, no
     # recurrent state at 16 or 32. The bug as seen in production: the tail
@@ -1853,7 +1840,6 @@ def test_partial_lookup_anchor_spans_multiple_complete_chunks():
     assert req_status.partial_tail_boundary == 44
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_anchor_honours_max_num_new_tokens():
     scheduler = _make_partial_tail_scheduler()
     request, _ = _make_anchored_partial_tail_request(
@@ -1867,7 +1853,6 @@ def test_partial_lookup_anchor_honours_max_num_new_tokens():
     assert scheduler._req_status["req"].partial_tail_boundary == 20
 
 
-@pytest.mark.cpu_test
 def test_partial_lookup_anchor_after_gpu_prefix_hit():
     # The first chunk is already on the GPU; the anchor starts there and the
     # tail is found without any recurrent state at the chunk boundary.
@@ -1891,7 +1876,6 @@ def test_partial_lookup_anchor_after_gpu_prefix_hit():
         (30, None, True, True, 8),
     ],
 )
-@pytest.mark.cpu_test
 def test_partial_lookup_keeps_tail_below_longer_attention_prefix(
     num_tokens, max_new_tokens, pending_anchor, eagle, expected_hit
 ):
@@ -6053,7 +6037,6 @@ class TestEagle:
         # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
         assert sched._lookup(req_status) == 8
 
-    @pytest.mark.cpu_test
     @pytest.mark.parametrize(
         "num_lookahead, num_tokens, blocks_per_chunk, expected",
         [
@@ -6607,7 +6590,6 @@ class TestEagle:
         )
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
 
-    @pytest.mark.cpu_test
     @pytest.mark.parametrize("async_scheduling", [True, False])
     @pytest.mark.parametrize("num_lookahead, expected_blocks", [(1, 4), (5, 2)])
     def test_lookahead_store_includes_block_hashed_by_sampled_token(
@@ -7745,14 +7727,12 @@ def _make_real_dcp_offload_scheduler(cache_hit_alignment=4, hash_size=4):
 
 
 @pytest.mark.parametrize("alignment,enabled", [(4, True), (32, False), (None, False)])
-@pytest.mark.cpu_test
 def test_dcp_partial_tail_follows_core_hit_alignment(alignment, enabled):
     """CPU tails must use boundaries core's prefix-cache managers can resume."""
     scheduler = _make_real_dcp_offload_scheduler(alignment)
     assert scheduler.config.supports_partial_tail is enabled
 
 
-@pytest.mark.cpu_test
 def test_dcp_partial_tail_supports_hash_sized_recurrent_blocks():
     """DCP still needs tails when hashing equals the unsharded Mamba block."""
     scheduler = _make_real_dcp_offload_scheduler(16, hash_size=16)
@@ -7761,7 +7741,6 @@ def test_dcp_partial_tail_supports_hash_sized_recurrent_blocks():
 
 
 @pytest.mark.parametrize("split_handoffs", [False, True])
-@pytest.mark.cpu_test
 def test_dcp_partial_tail_store_is_independent_of_handoff_batching(split_handoffs):
     """Only the prompt checkpoint pairs attention with its recurrent state."""
     scheduler = _make_real_dcp_offload_scheduler()
@@ -7835,7 +7814,6 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
 
 @pytest.mark.parametrize("lookahead", [1, 5])
 @pytest.mark.parametrize("eagle", [False, True])
-@pytest.mark.cpu_test
 def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
     engine = _make_lookahead_hybrid_engine(lookahead, eagle)
     connector = engine.connector
@@ -7856,7 +7834,6 @@ def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
 
 
 @pytest.mark.parametrize("lookahead", [1, 5])
-@pytest.mark.cpu_test
 def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
     engine = _make_lookahead_hybrid_engine(lookahead)
     connector = engine.connector
