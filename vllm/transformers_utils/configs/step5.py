@@ -71,7 +71,7 @@ class Step5Config(PreTrainedConfig):
         moe_num_experts: int = 16,
         moe_top_k: int = 4,
         rope_theta: float | list[float] | None = 500000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         head_dim: int | None = None,
         share_expert_dim: int | None = None,
         norm_dtype: str = "bf16",
@@ -134,7 +134,7 @@ class Step5Config(PreTrainedConfig):
         self.moe_top_k = moe_top_k
 
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        self.rope_parameters = rope_parameters
         self.head_dim = head_dim
         self.share_expert_dim = (
             moe_intermediate_size * moe_top_k

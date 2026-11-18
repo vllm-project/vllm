@@ -4,18 +4,20 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::utils::deserialize_query_bool;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorldSizeParams {
     /// If true (default), returns the world size including data parallelism
     /// (TP * PP * DP). If false, returns the world size without data
     /// parallelism (TP * PP).
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", deserialize_with = "deserialize_query_bool")]
     include_dp: bool,
 }
 
@@ -40,8 +42,9 @@ pub(crate) struct WorldSizeResponse {
 ///   output stream into shared state (zero per-request overhead, more complex).
 pub async fn get_world_size(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<WorldSizeParams>,
+    params: Result<Query<WorldSizeParams>, QueryRejection>,
 ) -> Result<Json<WorldSizeResponse>, ApiError> {
+    let Query(params) = params?;
     let client = state.engine_core_client();
 
     let ws = client.world_size();

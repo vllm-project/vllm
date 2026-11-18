@@ -15,10 +15,9 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.config.utils import CompileFactors, Range, normalize_value
 from vllm.env_override import _apply_constrain_to_fx_strides_patch
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -49,6 +48,14 @@ class CompilerInterface:
     # This is a class-level attribute.
     name: str
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "compute_hash" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} defines `compute_hash`, which is no longer "
+                "called. Implement `compile_factors` instead."
+            )
+
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
@@ -66,16 +73,14 @@ class CompilerInterface:
         """
         pass
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        """Gather all the relevant information from the vLLM config,
-        to compute a hash so that we can cache the compiled model.
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        """Gather compiler-specific factors for the compilation cache key.
 
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
-        to check what information
-        is already considered by default. This function should only
-        consider the information that is specific to the compiler.
+        See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
+        for what is already considered by default. This method should only
+        return the information that is specific to the compiler.
         """
-        return ""
+        return {}
 
     def compile(
         self,
@@ -178,7 +183,7 @@ def _get_vllm_functorch_config(use_aot_compile: bool = True) -> dict[str, Any]:
     return cfg
 
 
-def get_inductor_factors(use_aot_compile: bool = True) -> list[Any]:
+def get_inductor_factors(use_aot_compile: bool = True) -> Any:
     factors: list[Any] = []
     # summarize system state
     from torch._inductor.codecache import CacheBase
@@ -198,7 +203,7 @@ def get_inductor_factors(use_aot_compile: bool = True) -> list[Any]:
     factors.append(inductor_config.save_config_portable())
     with functorch_config.patch(_get_vllm_functorch_config(use_aot_compile)):
         factors.append(functorch_config.save_config_portable())
-    return factors
+    return normalize_value(factors)
 
 
 def is_compile_cache_enabled(
@@ -278,12 +283,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         self.save_format = save_format
         self.use_aot_compile = use_aot_compile
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors(self.use_aot_compile)
-        hash_str: str = safe_hash(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor": get_inductor_factors(self.use_aot_compile)}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -345,7 +346,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         )
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
-        # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
+        # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
@@ -394,7 +395,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
         else:
             fake_mode_ctx = contextlib.nullcontext()
 
-        with pregrad_ctx, fake_mode_ctx, set_functorch_config(self.use_aot_compile):
+        with (
+            pregrad_ctx,
+            fake_mode_ctx,
+            set_functorch_config(self.use_aot_compile),
+            set_compile_on_one_rank(),
+        ):
             compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if not self.use_aot_compile:
@@ -479,12 +485,8 @@ class InductorAdaptor(CompilerInterface):
     def __init__(self, *, use_aot_compile: bool) -> None:
         self.use_aot_compile = use_aot_compile
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors(self.use_aot_compile)
-        hash_str: str = safe_hash(
-            str(factors).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor": get_inductor_factors(self.use_aot_compile)}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -568,7 +570,7 @@ class InductorAdaptor(CompilerInterface):
             # tracing context, and also disables caching for graphs
             # with high-order ops.
             # For vLLM, in either case, we want to cache the graph.
-            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
+            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221
             return
 
         def _get_shape_env() -> AlwaysHitShapeEnv:
@@ -576,6 +578,7 @@ class InductorAdaptor(CompilerInterface):
 
         with ExitStack() as stack:
             stack.enter_context(set_functorch_config(self.use_aot_compile))
+            stack.enter_context(set_compile_on_one_rank())
             # for hijacking the hash of the compiled graph
             stack.enter_context(
                 patch(
@@ -787,6 +790,20 @@ def set_functorch_config(use_aot_compile: bool) -> Generator[None, None, None]:
     else:
         with torch._functorch.config.patch(overrides):
             yield
+
+
+@contextlib.contextmanager
+def set_compile_on_one_rank() -> Generator[None, None, None]:
+    # Resolve the device at run time so the cached code runs on any device
+    # index (--device-ids). Follow VLLM_COMPILE_ON_ONE_RANK, which is part of
+    # the cache key, rather than torch's own setting.
+    from torch.compiler import config as compiler_config
+
+    if not is_torch_equal_or_newer("2.14.0.dev"):
+        yield
+        return
+    with compiler_config.patch(compile_on_one_rank=envs.VLLM_COMPILE_ON_ONE_RANK):
+        yield
 
 
 def trigger_inductor_lazy_init(device: torch.device | None = None) -> None:

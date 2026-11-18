@@ -32,9 +32,11 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -46,30 +48,40 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    get_pp_missing_layer_names,
+    compute_skip_topk_layers,
+    copy_pp_buffers,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_topk_buffers,
+)
+from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .attention import (
     HYV4MLAAttention,
-    compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
+    sparse_layer_ids,
 )
 from .hc import HYV4HCHeadLayer, HYV4HCLayer
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
+
+# Smallest step that shards the iHC rows; shorter ones keep them replicated.
+_IHC_SP_MIN_TOKENS = 1024
 
 
 def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
@@ -85,7 +97,7 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
 class HYV4DecoderLayer(nn.Module):
     """One HY V4 decoder layer: MLA attention plus a dense or MoE MLP.
 
-    When``config.enable_ihc`` is set the layer runs on ``hc_mult`` residual
+    When`config.enable_ihc` is set the layer runs on `hc_mult` residual
     channels and each sub-block is wrapped by an `HYV4HCLayer` boundary;
     otherwise it uses the standard single-stream residual.
     """
@@ -98,11 +110,13 @@ class HYV4DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        ihc_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.config = config
         self.enable_ihc = getattr(config, "enable_ihc", False)
+        self.defer_reduction = ihc_sequence_parallel and self.enable_ihc
         layer_idx = int(prefix.split(".")[-1])
         self.layer_idx = layer_idx
 
@@ -123,6 +137,7 @@ class HYV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             layer_idx=layer_idx,
             topk_indices_buffer=topk_indices_buffer,
+            reduce_results=not self.defer_reduction,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         if config.mlp_layer_types[layer_idx] == "dense":
@@ -132,11 +147,15 @@ class HYV4DecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.defer_reduction,
             )
             self.block_type = "feedforward"
         else:
             self.mlp = HYV4MoEFused(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.defer_reduction,
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -188,19 +207,37 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
         """IHC forward: each sub-block reduces and re-scatters the channels."""
+        full_num_tokens = positions.shape[0]
+        use_ihc_sequence_parallel = hidden_states.shape[0] < full_num_tokens
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        if self.defer_reduction:
+            hidden_states = (
+                sp_reduce_scatter(hidden_states)
+                if use_ihc_sequence_parallel
+                else tensor_model_parallel_all_reduce(hidden_states)
+            )
         hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
 
         hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.mlp(hidden_states)
+        if self.defer_reduction:
+            hidden_states = (
+                sp_reduce_scatter(hidden_states)
+                if use_ihc_sequence_parallel
+                else tensor_model_parallel_all_reduce(hidden_states)
+            )
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
         # Under iHC the residual is carried inside hidden_states.
@@ -234,6 +271,22 @@ class HYV4Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.enable_ihc = getattr(config, "enable_ihc", False)
+        speculative_config = vllm_config.speculative_config
+        self.ihc_sequence_parallel = (
+            self.enable_ihc
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.data_parallel_size == 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.all2all_backend != "passthrough"
+            and vllm_config.lora_config is None
+            and not envs.VLLM_BATCH_INVARIANT
+            and (
+                speculative_config is None
+                or not speculative_config.uses_aux_hidden_states
+            )
+        )
 
         if get_pp_group().is_first_rank or (
             self.config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -253,6 +306,7 @@ class HYV4Model(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
+                ihc_sequence_parallel=self.ihc_sequence_parallel,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -260,6 +314,9 @@ class HYV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, sparse_layer_ids(config)
+        )
         if self.enable_ihc:
             # iHC head layer: merge the residual channels into one stream.
             if get_pp_group().is_last_rank:
@@ -274,13 +331,15 @@ class HYV4Model(nn.Module):
                 self.hc_head = PPMissingLayer()
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states"], config.hc_mult * config.hidden_size
+                    ["hidden_states"],
+                    config.hc_mult * config.hidden_size,
+                    self.pp_buffers,
                 )
             )
         else:
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states", "residual"], config.hidden_size
+                    ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
                 )
             )
 
@@ -358,6 +417,10 @@ class HYV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        full_num_tokens = positions.shape[0]
+        use_ihc_sequence_parallel = is_sequence_parallel_active(
+            self.ihc_sequence_parallel, full_num_tokens, _IHC_SP_MIN_TOKENS
+        )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -371,24 +434,33 @@ class HYV4Model(nn.Module):
             # previous PP stage is reshaped back to 3D by the first layer's
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
 
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
+            buffers = {k: v[: positions.shape[0]] for k, v in self.pp_buffers.items()}
             if self.enable_ihc:
                 # hidden_states is [num_tokens, hc, h]; flatten the channel dim
                 # for PP transfer (matches the 2D receive buffer).
-                return IntermediateTensors({"hidden_states": hidden_states.flatten(1)})
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states.flatten(1), **buffers}
+                )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states, "residual": residual, **buffers}
             )
         if self.enable_ihc:
             hidden_states = self.hc_head(hidden_states)
         else:
             hidden_states = hidden_states + residual
 
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        return hidden_states
 
     def load_fused_expert_weights(
         self,
@@ -417,9 +489,6 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
 
         # Must not be cached on `self`: `process_weights_after_loading` swaps in
@@ -464,24 +533,12 @@ class HYV4Model(nn.Module):
         for name, loaded_weight in weights:
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
                 continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             # Names and stacked shard ids are normalized upstream by
             # AutoWeightsLoader, through quant_config.get_cache_scale_mapper()
             # and hf_to_vllm_mapper.
             stacked_shard_id = getattr(loaded_weight, "shard_id", None)
-            if ".indexer.wk." in name:
-                name = name.replace(".indexer.wk.", ".indexer.wk_weights_proj.")
-                stacked_shard_id = 0
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -606,15 +663,12 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-            ".indexer.weights_proj.": (".indexer.wk_weights_proj.", 1),
         }
     )
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        # The indexer fuses wk and weights_proj into one GEMM.
-        "wk_weights_proj": ["wk", "weights_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

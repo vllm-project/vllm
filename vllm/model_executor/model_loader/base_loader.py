@@ -3,6 +3,7 @@
 import gc
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 
 import torch
 import torch.nn as nn
@@ -12,6 +13,10 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload.direct import (
+    direct_reload_enabled,
+    track_loaded_params,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -59,6 +64,18 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Iterate over all weights by checkpoint name, for filtered
+        partial reloads (e.g. FT expert reload after scale_down)."""
+        raise NotImplementedError(
+            f"load_format={self.load_config.load_format!r} does not support "
+            "iterating weights by checkpoint name"
+        )
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -85,6 +102,8 @@ class BaseModelLoader(ABC):
                 )
 
             logger.debug("Loading weights on %s ...", load_device)
+            if direct_reload_enabled():
+                track_loaded_params(model)  # what every update must load again
             self.load_weights(model, model_config)
 
             # Release transient tensors held by PyTorch's caching allocator

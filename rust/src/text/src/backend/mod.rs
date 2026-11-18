@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
@@ -93,7 +94,7 @@ impl SamplingLimits {
     pub const DEFAULT_MAX_LOGPROBS: i32 = 20;
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
-    pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
+    pub const MAX_LOGPROB_TOKEN_IDS: usize = 256;
 
     /// Return the union bound used to validate token-ID prompts.
     pub fn prompt_token_vocab_size(&self) -> usize {
@@ -105,6 +106,13 @@ impl SamplingLimits {
 pub trait TextBackend: Send + Sync {
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
+
+    /// Return whether a real tokenizer is loaded. Under
+    /// `--skip-tokenizer-init` it is not: [`Self::tokenizer`] fails every text
+    /// operation, and requests are served token IDs only.
+    fn has_tokenizer(&self) -> bool {
+        true
+    }
 
     /// Return whether the loaded model is a mixture-of-experts model.
     fn is_moe(&self) -> bool {
@@ -126,6 +134,11 @@ pub trait TextBackend: Send + Sync {
     /// backends should override it with the resolved model config value.
     fn model_vocab_size(&self) -> usize {
         usize::MAX
+    }
+
+    /// Return the checkpoint dtype declared by the model config, if any.
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        None
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

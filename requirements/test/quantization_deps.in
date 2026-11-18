@@ -1,0 +1,13 @@
+# Packages only the Quantization CI steps use, installed into /opt/quantization-deps in
+# the CUDA 13 and ROCm test images (docker/Dockerfile, docker/Dockerfile.rocm) instead
+# of site-packages. The Quantization steps put that folder on PYTHONPATH; other jobs
+# never see it.
+# - torchao: transformers imports it whenever it is installed, and torchao checks the
+#   GPU at import, which initializes CUDA in the pytest process and breaks tests that fork.
+# - conch-triton-kernels: vLLM picks the Conch kernel whenever the package is installed,
+#   which would change the mixed-precision kernel other jobs run. CUDA only: ROCm
+#   already ships it in requirements/rocm.txt, so the ROCm lock leaves it out.
+# Their dependencies are already in requirements/test/{cuda,rocm}.txt, so the locks
+# (quantization_deps_cuda.txt, quantization_deps_rocm.txt) hold these alone (--no-deps).
+torchao==0.18.0
+conch-triton-kernels==1.3

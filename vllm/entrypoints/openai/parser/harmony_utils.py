@@ -38,7 +38,7 @@ def is_function_recipient(
 
     The optional *allowed_function_tool_names* parameter is used by the
     Responses API to distinguish bare function-call recipients (missing the
-    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    `functions.` prefix) from MCP tool calls.  When provided, a bare
     recipient is only treated as a function call if it appears in the set.
     The Chat Completions path omits this parameter so that all bare
     recipients are accepted as function calls (the heuristic fallback).
@@ -512,11 +512,12 @@ def _use_legacy_tool_call_headers(token_ids: list[int]) -> list[int]:
             index = header_end + 1
             continue
 
+        # Decoded from text tokens, so special-token text here is plain text.
         legacy_header = (
             [start]
-            + encoding.encode(f"assistant to={recipient}")
+            + encoding.encode(f"assistant to={recipient}", disallowed_special=())
             + [channel_token]
-            + encoding.encode(f"{channel} {content_type}")
+            + encoding.encode(f"{channel} {content_type}", disallowed_special=())
             + [message]
         )
         result[index : header_end + 1] = legacy_header
