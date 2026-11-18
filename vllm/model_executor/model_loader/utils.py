@@ -171,7 +171,7 @@ def process_weights_after_loading(
     if direct_reload_enabled():
         record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
-    for name, module in model.named_modules():
+    for name, module in model.__dict__.get("_ckpt_modules") or model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             if (
