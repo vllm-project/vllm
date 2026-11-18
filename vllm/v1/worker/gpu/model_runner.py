@@ -822,6 +822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
             piecewise_capture_available=piecewise_capture_available,
+            vllm_config=self.vllm_config,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,

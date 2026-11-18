@@ -412,6 +412,21 @@ def test_pipeline_parallel_mamba_only_stage_prefix_caching(
     )
 
 
+def test_mamba_eager_runs_with_fewer_cache_blocks_than_max_num_seqs(vllm_runner):
+    with vllm_runner(
+        SSM_MODELS[0],
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        enable_extensible_kv_cache=False,
+        max_model_len=128,
+        max_num_seqs=32,
+        num_gpu_blocks_override=16,
+    ) as model:
+        [(token_ids, _)] = model.generate_greedy(["Hello"], max_tokens=1)
+
+    assert len(token_ids) == 1
+
+
 @pytest.mark.parametrize("model", FULL_CUDA_GRAPH_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
