@@ -18,6 +18,7 @@ from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
     REASONING_EFFORT_MAPPINGS,
     encode_messages,
+    parse_tool_call_arguments,
 )
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
@@ -78,33 +79,15 @@ def _escape_deep(value: Any, escape: Callable[[Any], Any]) -> Any:
     return escape(value)
 
 
-def _escape_arguments(arguments: Any, escape: Callable[[Any], Any]) -> Any:
-    """Tool call arguments as the encoder reads them, with every key and string
-    escaped (the encoder accepts JSON strings, including double-encoded ones)."""
-    parsed = arguments
-    for _ in range(2):
-        if not isinstance(parsed, str):
-            break
-        try:
-            parsed = json.loads(parsed)
-        except Exception:
-            break
-    if not isinstance(parsed, dict):
-        parsed = {"arguments": arguments}
-    return _escape_deep(parsed, escape)
-
-
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
-    escape: Callable[[Any], Any] | None = None,
-    escape_assistant: Callable[[Any], Any] | None = None,
+    escape: Callable[[Any], Any],
+    escape_assistant: Callable[[Any], Any],
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # tool_reference, and ValueError (400) instead of the reference's asserts.
     # A tool_reference renders as the tool name; `_add_updated_tool_schemas`
     # lists the referenced tools after the user turn.
-    escape = escape or (lambda text: text)
-    escape_assistant = escape_assistant or escape
     result: list[dict[str, Any]] = []
     for original_message in messages:
         content = original_message.get("content")
@@ -158,7 +141,10 @@ def _normalize_messages(
         for tool_call in message.get("tool_calls") or []:
             function = tool_call["function"]
             function["name"] = escape(function.get("name"))
-            function["arguments"] = _escape_arguments(function.get("arguments"), escape)
+            # The same parsing as the encoder, so what it renders is escaped.
+            function["arguments"] = _escape_deep(
+                parse_tool_call_arguments(function.get("arguments")), escape
+            )
 
     return result
 

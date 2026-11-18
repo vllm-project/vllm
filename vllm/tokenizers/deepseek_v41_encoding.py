@@ -268,9 +268,29 @@ def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
     )
 
 
-# The tokenizer escapes the keys and strings of the arguments before they reach
-# this encoder (`_escape_arguments` in deepseek_v41.py, which parses them the
-# same way): change the two together.
+def parse_tool_call_arguments(arguments: Any) -> Dict[str, Any]:
+    """Parse tool call arguments into the dict the encoder renders.
+
+    Tolerates JSON strings, including double-encoded ones, and wraps anything
+    that is not an object as {"arguments": <original value>}. The V4.1 tokenizer
+    escapes the keys and strings of the result before rendering, with this same
+    function.
+    """
+    parsed = arguments
+    if not isinstance(parsed, dict):
+        for _ in range(2):
+            if isinstance(parsed, str):
+                try:
+                    parsed = json.loads(parsed)
+                except Exception:
+                    break
+            else:
+                break
+        if not isinstance(parsed, dict):
+            parsed = {"arguments": arguments}
+    return parsed
+
+
 def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     """Encode tool call arguments into V4.1 DSML parameter format."""
     p_dsml_template = (
@@ -279,19 +299,7 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     )
     P_dsml_strs = []
 
-    arguments = tool_call["arguments"]
-    if not isinstance(arguments, dict):
-        # Tolerate JSON strings, including double-encoded ones.
-        for _ in range(2):
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except Exception:
-                    break
-            else:
-                break
-        if not isinstance(arguments, dict):
-            arguments = {"arguments": tool_call["arguments"]}
+    arguments = parse_tool_call_arguments(tool_call["arguments"])
 
     for k, v in arguments.items():
         P_dsml_strs.append(
