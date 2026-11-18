@@ -992,6 +992,27 @@ _FULL_GRAPH_PROFILING_SAMPLES = 2
 _MIN_PER_GRAPH_BYTES = 1 << 20
 
 
+def _reset_peak_memory_stats(device: torch.device | None) -> bool:
+    try:
+        torch.accelerator.reset_peak_memory_stats(device)
+        return True
+    except (RuntimeError, ValueError, AttributeError):
+        return False
+
+
+def _measure_transient_peak_bytes(device: torch.device | None) -> int:
+    try:
+        torch.accelerator.synchronize()
+        stats = torch.accelerator.memory_stats(device)
+    except (RuntimeError, ValueError, AttributeError):
+        return 0
+    return max(
+        stats.get("allocated_bytes.all.peak", 0)
+        - stats.get("allocated_bytes.all.current", 0),
+        0,
+    )
+
+
 @torch.inference_mode()
 def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     """Estimate the GPU memory needed for CUDA graph capture.
@@ -1009,6 +1030,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     partition reclaims the storages of earlier cudagraph recordings once the
     real capture records new ones, leading to use-after-free crashes).
     """
+    runner.cudagraph_capture_transient_peak_bytes = 0
     if (
         runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
         and not runner.needs_cudagraph_capture()
@@ -1070,8 +1092,18 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
+            device = getattr(runner, "device", None)
+            peak_stats_reset = _reset_peak_memory_stats(device)
             with capture_outside_cumem_pool():
                 measured = int(runner.capture_model(profile_only=True))
+
+            # Record transient allocation headroom required *during* capture
+            # (e.g. speculator / sparse-indexer warmup workspaces) before
+            # teardown releases the profiled graphs.
+            if peak_stats_reset:
+                runner.cudagraph_capture_transient_peak_bytes = (
+                    _measure_transient_peak_bytes(device)
+                )
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the

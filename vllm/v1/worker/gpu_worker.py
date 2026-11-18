@@ -783,11 +783,15 @@ class Worker(WorkerBase):
         # The estimate is a throwaway capture pass; skip it when the flag
         # says its result is not applied.
         cudagraph_memory_estimate = 0
+        cudagraph_capture_transient_peak = 0
         may_capture_graphs = (
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         )
         if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            cudagraph_capture_transient_peak = getattr(
+                self.model_runner, "cudagraph_capture_transient_peak_bytes", 0
+            )
 
         init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -810,15 +814,37 @@ class Worker(WorkerBase):
                 profile_result.total_consumed + profile_result.transient_peak_headroom
             )
 
+        # `profile_run()` skips attention and does not run the speculator, so
+        # CUDA graph capture warmup (e.g. speculator / sparse indexer
+        # workspaces) can have a larger transient allocation peak than
+        # `profile_result.transient_peak_headroom`. Reserve the larger of the
+        # two so post-KV capture does not OOM without double-counting overlap.
+        extra_capture_transient_peak = max(
+            cudagraph_capture_transient_peak - profile_result.transient_peak_headroom,
+            0,
+        )
+        if extra_capture_transient_peak > 0:
+            logger.info_once(
+                "CUDA graph capture transient peak (%s GiB) exceeds "
+                "profile_run transient peak (%s GiB); reserving %s GiB "
+                "additional headroom.",
+                format_gib(cudagraph_capture_transient_peak),
+                format_gib(profile_result.transient_peak_headroom),
+                format_gib(extra_capture_transient_peak),
+            )
+
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate
+            profile_result.transient_peak_headroom
+            + extra_capture_transient_peak
+            + cudagraph_memory_estimate
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
+            - extra_capture_transient_peak
             - cudagraph_memory_estimate
         )
 
