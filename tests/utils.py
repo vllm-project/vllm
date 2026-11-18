@@ -18,6 +18,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, MutableMapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
@@ -1598,6 +1599,25 @@ def wait_for_gpu_memory_to_clear(
     poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
+    if (
+        current_platform.is_rocm()
+        and not torch.cuda.is_initialized()
+        and envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn"
+    ):
+        # HIP memory queries initialize HIP, which forces vLLM to spawn instead
+        # of fork its engine processes; poll from a forked child instead.
+        with ProcessPoolExecutor(max_workers=1, mp_context=get_context("fork")) as pool:
+            pool.submit(
+                _wait_for_gpu_memory_to_clear_with_hip,
+                devices=devices,
+                threshold_bytes=threshold_bytes,
+                threshold_ratio=threshold_ratio,
+                timeout_s=timeout_s,
+                stable_duration_s=stable_duration_s,
+                stable_tolerance_bytes=stable_tolerance_bytes,
+                poll_interval_s=poll_interval_s,
+            ).result()
+        return
     # HIP already applies device visibility; keep logical IDs and threshold keys.
     if not current_platform.is_rocm():
         devices = get_physical_device_indices(devices)
@@ -1716,6 +1736,11 @@ def wait_for_gpu_memory_to_clear(
             )
 
         time.sleep(poll_interval_s)
+
+
+def _wait_for_gpu_memory_to_clear_with_hip(**kwargs) -> None:
+    torch.cuda.init()
+    wait_for_gpu_memory_to_clear(**kwargs)
 
 
 def wait_for_memory_to_settle(
@@ -2303,3 +2328,17 @@ class TestFP8Layer(torch.nn.Module):
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(self, y, bias)
+
+
+def core_dumped_bytes(start: int, end: int) -> int:
+    """Bytes of [start, end) that a core dump may include (no `dd` VmFlag)."""
+    total, overlap = 0, 0
+    with open("/proc/self/smaps") as smaps:
+        for line in smaps:
+            fields = line.split()
+            if ":" not in fields[0]:
+                lo, hi = (int(value, 16) for value in fields[0].split("-"))
+                overlap = max(0, min(hi, end) - max(lo, start))
+            elif fields[0] == "VmFlags:" and "dd" not in fields[1:]:
+                total += overlap
+    return total

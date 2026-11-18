@@ -437,6 +437,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
@@ -513,6 +514,30 @@ steps:
   - tests/models/qwen3_5/
   commands:
   - pytest -v -s models/qwen3_5/
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) Qwen3.5"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
+      - vllm/model_executor/layers/fused_qk_norm_rope.py
+      - vllm/model_executor/layers/mamba/gdn
+      - vllm/models/minimax_m3/amd/ops/gemma_rmsnorm.py
+      - vllm/models/qwen3_5/
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/config/vllm.py
+      - vllm/_aiter_ops.py
+      - vllm/distributed/device_communicators/aiter_custom_all_reduce.py
+      - vllm/platforms/rocm.py
+      - tests/models/qwen3_5/
+      - tests/kernels/mamba/test_gdn_output_projection.py
+      commands:
+      - pytest -v -s models/qwen3_5/ kernels/mamba/test_gdn_output_projection.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
@@ -531,6 +556,7 @@ steps:
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
+  - tests/models/test_qwen3_5_slot.py
   - tests/models/test_beam_weight_mapping.py
   - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
@@ -565,6 +591,7 @@ steps:
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py
+      models/test_qwen3_5_slot.py
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
