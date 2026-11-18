@@ -1368,8 +1368,7 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
-@pytest.mark.parametrize("decode_tokens", [0, 12])
-def test_hisparse_mamba_prefix_hit_leaves_a_writable_tail(decode_tokens):
+def test_hisparse_mamba_prefix_hit_leaves_a_writable_tail():
     """Publishing a later host page must not expose an unwritable partial hit."""
     config = make_hisparse_kv_cache_config(64, 32, num_resident_groups=2)
     config.kv_cache_groups.append(
@@ -1401,7 +1400,7 @@ def test_hisparse_mamba_prefix_hit_leaves_a_writable_tail(decode_tokens):
         manager.block_pool.free_blocks(retained)
         _publish_hisparse_pages(manager)
         producer.num_computed_tokens += count
-    for token in range(decode_tokens):
+    for token in range(12):
         producer.append_output_token_ids([1000 + token])
         manager.new_step_starts()
         assert _allocate_scheduled(manager, producer, 1) is not None

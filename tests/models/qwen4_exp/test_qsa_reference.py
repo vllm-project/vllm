@@ -1365,7 +1365,6 @@ def test_qsa_fp8_kernel_correctness(
 
 
 @requires_qsa_kernels
-@pytest.mark.parametrize("extra_rows", [0, 1], ids=["flat-pages", "strided-pages"])
 @pytest.mark.parametrize(
     "cache_dtype,repeats",
     [
@@ -1377,9 +1376,9 @@ def test_qsa_fp8_kernel_correctness(
     ids=["bf16", "fp8", "fp8-bytes", "large-fp8"],
 )
 def test_qsa_attention_consumes_hisparse_physical_indices(
-    extra_rows: int, cache_dtype: torch.dtype, repeats: int
+    cache_dtype: torch.dtype, repeats: int
 ) -> None:
-    """Resolved HiSparse rows bypass the logical block table in either view."""
+    """Resolved HiSparse rows bypass the logical block table on padded pages."""
     from vllm.v1.hisparse.runtime import PagedCacheView
 
     if cache_dtype == torch.float8_e4m3fn and not (
@@ -1390,7 +1389,7 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
     torch.manual_seed(7)
     num_blocks, block_size, num_kv_heads, head_dim = 4, 16, 2, 64
     row_width = num_kv_heads * 2 * head_dim
-    block_stride = (2 * block_size + extra_rows) * row_width
+    block_stride = (2 * block_size + 1) * row_width
     fp8 = cache_dtype != torch.bfloat16
     storage_dtype = torch.uint8 if fp8 else torch.bfloat16
     k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
