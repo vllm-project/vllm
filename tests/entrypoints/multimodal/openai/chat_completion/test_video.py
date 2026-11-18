@@ -537,9 +537,12 @@ async def test_omitted_media_cache_miss_names_every_item(
         }
     ]
 
-    with pytest.raises(openai.BadRequestError) as exc_info:
+    # The chat path orders modalities image, audio, video, so the image comes first.
+    with pytest.raises(
+        openai.BadRequestError,
+        match=(
+            "Cache miss for image at index 0; video at index 0, 1 "
+            "but data is not provided"
+        ),
+    ):
         await client.chat.completions.create(model=model_name, messages=messages)
-
-    message = str(exc_info.value)
-    assert "video at index 0, 1" in message
-    assert "image at index 0" in message
