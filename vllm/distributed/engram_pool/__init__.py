@@ -103,6 +103,9 @@ class EngramPool:
         max_items: Most rows of one table one fetch gathers on this GPU.
         max_row_bytes: Largest row of any table.
         max_tables: Most tables one fetch reads.
+        rdma_inflight: Most prefill-sized gathering chains (64 WRs) each GPU's
+            NIC has in flight for others (RDMA; 0: no limit). Decode-sized
+            fetches bypass it, so another engine's prefill delays them little.
 
     """
 
@@ -114,6 +117,7 @@ class EngramPool:
         max_items: int,
         max_row_bytes: int,
         max_tables: int = 1,
+        rdma_inflight: int = 8,
     ) -> None:
         if transport not in ("nvlink", "rdma"):
             raise ValueError(f"Unknown Engram pool transport {transport!r}")
@@ -132,7 +136,9 @@ class EngramPool:
         else:
             from vllm.distributed.engram_pool.rdma import RdmaTransport
 
-            self.transport = RdmaTransport(group, max_items, max_row_bytes, max_tables)
+            self.transport = RdmaTransport(
+                group, max_items, max_row_bytes, max_tables, rdma_inflight
+            )
         self.kind = transport
         self.output = torch.empty(
             max_items * max_tables * max_row_bytes,

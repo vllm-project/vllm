@@ -272,6 +272,7 @@ def get_engram_pool(layout: EngramLayout) -> EngramPool:
         vllm_config.scheduler_config.max_num_batched_tokens * n_hash_cols,
         _row_bytes(layout.row_bytes, layout.head_dim, 32),
         len(layout.num_embeddings),
+        config.peer_group_rdma_inflight,
     )
 
 

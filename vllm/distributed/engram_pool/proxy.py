@@ -110,7 +110,7 @@ class Owner:
     def start(self) -> None:
         threading.Thread(target=self.run, daemon=True).start()
 
-    def init(self, device, world, rank, qps_per_peer, sq_depth):
+    def init(self, device, world, rank, qps_per_peer, sq_depth, max_large):
         self.device = dev = verbs.Device(device)
         # CPUs of another NUMA node post twice as slowly.
         if cpus := verbs.local_cpus(device) & os.sched_getaffinity(0):
@@ -154,6 +154,8 @@ class Owner:
         # QP's last chain's READ and flag stay queued until its next completion.
         self.room = {qp: depth - 2 for qps in self.qps.values() for qp in qps}
         self.large = dict.fromkeys(self.room, 0)
+        # Large chains in flight on all QPs, at most max_large (0: no limit).
+        self.large_total, self.max_large = 0, max_large or 1 << 30
         self.chains: dict[int, collections.deque] = {
             qp: collections.deque() for qp in self.room
         }
@@ -272,6 +274,7 @@ class Owner:
                 self.room[qp] -= wrs
                 large = request.num_wrs > SMALL_WRS
                 self.large[qp] += large
+                self.large_total += large
                 self.chains[qp].append((wrs, large))
                 request.posted += 1
             pending.remove(request)
@@ -280,11 +283,14 @@ class Owner:
 
     def fits(self, request: "_Request") -> bool:
         """Whether the request's next chain fits its send queue, and for a large
-        request also no other large chain is queued there."""
+        request also no other large chain is queued there and fewer than
+        `max_large` in all: their backlog delays small requests on this NIC."""
         qp = request.next_qp
         if self.room[qp] < request.next_wrs:
             return False
-        return request.num_wrs <= SMALL_WRS or not self.large[qp]
+        return request.num_wrs <= SMALL_WRS or (
+            not self.large[qp] and self.large_total < self.max_large
+        )
 
     def retire(self, block: bool) -> None:
         """Reap completed chains, returning their send queue room; with
@@ -308,6 +314,7 @@ class Owner:
                 wrs, large = self.chains[qp].popleft()
                 self.room[qp] += wrs
                 self.large[qp] -= large
+                self.large_total -= large
             block = False
 
 

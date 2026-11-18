@@ -537,6 +537,7 @@ class RdmaTransport:
         max_items: int,
         max_row_bytes: int,
         max_tables: int = 1,
+        max_large_chains: int = 8,
     ) -> None:
         self.group = group
         self.rank, self.world = group.rank_in_group, group.world_size
@@ -560,7 +561,13 @@ class RdmaTransport:
         threading.Thread(target=self.proc.wait, daemon=True).start()
         device = pick_device()
         info = self._call(
-            "init", device, self.world, self.rank, self.qps_per_peer, SQ_DEPTH
+            "init",
+            device,
+            self.world,
+            self.rank,
+            self.qps_per_peer,
+            SQ_DEPTH,
+            max_large_chains,
         )
         # This GPU posts its requests itself, on one QP per gatherer.
         self.verbs = verbs.Device(device)

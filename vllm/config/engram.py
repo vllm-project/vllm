@@ -80,6 +80,12 @@ class EngramConfig:
     stream beside the layers, so their SM work (all of NVLink's gather)
     overlaps compute, at a CUDA graph break per fetch."""
 
+    peer_group_rdma_inflight: int = 8
+    """With `rdma`, the most prefill-sized gathers (64 WRs each) a GPU's NIC
+    has in flight for its peers; 0 means no limit. Decode-sized fetches bypass
+    it, so one engine's prefill delays another engine's decode by at most this
+    backlog. The default (~2 MB) keeps prefill fetches at full rate."""
+
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required
     with `peer_group_size`: the same path for every engine, reachable by all of
@@ -93,6 +99,8 @@ class EngramConfig:
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
+        if self.peer_group_rdma_inflight < 0:
+            raise ValueError("peer_group_rdma_inflight must be >= 0")
         if (self.peer_group_size > 0) != (self.peer_group_store is not None):
             raise ValueError(
                 "peer_group_size and peer_group_store must be set together"
@@ -193,4 +201,6 @@ class EngramConfig:
         """Hash settings that affect embedding execution and graph structure."""
         # The store only matters at startup; a per-launch path must not
         # invalidate the compile cache.
-        return get_compile_factors(self, {"peer_group_store"})
+        return get_compile_factors(
+            self, {"peer_group_store", "peer_group_rdma_inflight"}
+        )
