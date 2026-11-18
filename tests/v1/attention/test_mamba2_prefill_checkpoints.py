@@ -79,7 +79,7 @@ def _create_mamba2_builder(
     enable_prefix_caching: bool = True,
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
-    prefill_backend: MambaBackendEnum | None = None,
+    prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
 ) -> Mamba2AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
