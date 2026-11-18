@@ -380,8 +380,10 @@ pub struct ServerUnsupportedArgs {
     pub enable_server_load_tracking: Option<Noop>,
 
     /// Log level for uvicorn.
-    #[arg(long)]
-    pub uvicorn_log_level: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend does not run uvicorn.
+    #[arg(long, hide = true)]
+    pub uvicorn_log_level: Option<Noop>,
 
     /// Refresh SSL Context when SSL certificate files change
     #[arg(

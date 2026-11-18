@@ -2197,13 +2197,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--uvicorn-log-level",
-        "debug",
+        "--tool-server",
+        "demo",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'debug' for '--uvicorn-log-level <UVICORN_LOG_LEVEL>': argument is not implemented in Rust frontend yet
+        error: invalid value 'demo' for '--tool-server <TOOL_SERVER>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -2990,14 +2990,14 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - uvicorn_log_level
+        - tool_server
 
         Remove these arguments to continue.
 
@@ -3017,16 +3017,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - uvicorn_log_level
+        - tool_server
 
         Remove these arguments to continue.
 
@@ -3045,6 +3045,8 @@ fn noop_args_are_accepted() {
         "--disable-fastapi-docs",
         "--enable-offline-docs",
         "--aggregate-engine-logging",
+        "--uvicorn-log-level",
+        "debug",
     ])
     .expect("no-op flags are accepted");
 
@@ -3058,7 +3060,7 @@ fn noop_args_are_accepted() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true,"uvicorn_log_level":"debug"}"#,
     ])
     .expect("no-op fields are accepted");
 }
