@@ -38,10 +38,14 @@ def benchmark(args):
     generator = torch.Generator().manual_seed(0)
     order = random.Random(0)
     experts, topk, rows = args.experts, args.topk, 1024
-    replicas = torch.tensor([1, 2, 4, 8], dtype=torch.int64).repeat(
-        triton.cdiv(experts, 4)
-    )[:experts]
-    mapping = torch.arange(experts * 8, dtype=torch.int64).reshape(experts, 8)
+    redundant = args.redundant_experts
+    num_physical = experts + redundant
+    replicas = torch.ones(experts, dtype=torch.int64)
+    replicas[:redundant] = 2
+    mapping = torch.full((experts, redundant + 1), -1, dtype=torch.int64)
+    mapping[:, 0] = torch.arange(experts)
+    if redundant:
+        mapping[:redundant, 1] = torch.arange(experts, num_physical)
     hashed_rows = (torch.arange(rows, dtype=torch.int64) * 2654435769) & 0xFFFFFFFF
     table = mapping.gather(1, (hashed_rows[:, None] % replicas).T).T.int()
     mappings = [mapping.to(device).clone() for _ in range(args.tables)]
@@ -56,14 +60,14 @@ def benchmark(args):
         real_tokens = torch.tensor(tokens, device=device, dtype=torch.int32)
         for recording in (False, True):
             gate = torch.tensor(recording, device=device)
-            expected_load = torch.bincount(expected.flatten(), minlength=experts * 8)
+            expected_load = torch.bincount(expected.flatten(), minlength=num_physical)
             if not recording:
                 expected_load.zero_()
             for block in args.blocks:
                 arms = {}
                 for name in ("hash", "table"):
                     out = torch.empty_like(ids)
-                    load = torch.zeros(experts * 8, dtype=torch.int32, device=device)
+                    load = torch.zeros(num_physical, dtype=torch.int32, device=device)
 
                     def launch(
                         index=0,
@@ -86,8 +90,8 @@ def benchmark(args):
                             gate,
                             real_tokens,
                             experts,
-                            8,
-                            experts * 8,
+                            mapping.shape[1],
+                            num_physical,
                             ids.numel(),
                             topk,
                             BLOCK_SIZE=block,
@@ -148,6 +152,7 @@ def benchmark(args):
         "triton": triton.__version__,
         "experts": experts,
         "topk": topk,
+        "redundant_experts": redundant,
         "tables": args.tables,
         "table_bytes": table.numel() * table.element_size() * args.tables,
         "iterations": args.iterations,
@@ -166,6 +171,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--experts", type=int, default=256)
     parser.add_argument("--topk", type=int, default=8)
+    parser.add_argument("--redundant-experts", type=int, default=32)
     parser.add_argument("--blocks", type=int, nargs="+", default=[256])
     parser.add_argument("--tables", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=128)
@@ -179,4 +185,6 @@ if __name__ == "__main__":
         parser.error(
             "token counts, blocks, tables, iterations and repeats must be positive"
         )
+    if not 0 <= args.redundant_experts <= args.experts:
+        parser.error("redundant experts must be between zero and logical experts")
     benchmark(args)
