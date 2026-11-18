@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-import re
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import regex as re
 from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
@@ -21,15 +21,6 @@ from .deepseek_v41_encoding import (
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
-
-def _reject_image_placeholder(text: Any) -> None:
-    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
-        raise ValueError(
-            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
-            "provide images as image content parts."
-        )
-
-
 _THINK_TOKENS_RE = re.compile(
     "|".join(re.escape(t) for t in (thinking_start_token, thinking_end_token))
 )
@@ -38,6 +29,11 @@ _THINK_TOKENS_RE = re.compile(
 # as plain text, never as the special token. Assistant turns are left as is, so
 # replayed reasoning keeps the token ids the model actually generated.
 _ESCAPED_ROLES = ("system", "developer", "user", "tool")
+
+# The image placeholder in client-supplied text (any role, replayed assistant
+# turns included) has no image behind it, so it is always encoded as plain text.
+# Images must be provided as image content parts.
+_IMAGE_PLACEHOLDER_RE = re.compile(re.escape(IMAGE_PLACEHOLDER))
 
 # Added tokens such as '</think>' or '<｜User｜>' are matched in plain text by the
 # tokenizer. Escaped text is replaced by per-call sentinels before the prompt is
@@ -83,9 +79,11 @@ def _normalize_messages(
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
 
-        def check(text: Any, role: str = role) -> Any:
-            _reject_image_placeholder(text)
-            if not isinstance(text, str) or role not in _ESCAPED_ROLES:
+        def check(text: Any, role: Any = role) -> Any:
+            if not isinstance(text, str):
+                return text
+            text = _IMAGE_PLACEHOLDER_RE.sub(lambda m: escape(m.group(0)), text)
+            if role not in _ESCAPED_ROLES:
                 return text
             return _THINK_TOKENS_RE.sub(lambda m: escape(m.group(0)), text)
 
@@ -112,8 +110,7 @@ def _normalize_messages(
                 elif part_type == "tool_reference":
                     # The system prompt already lists every tool, deferred
                     # ones included, so the name is all the model needs.
-                    _reject_image_placeholder(block.get("name"))
-                    parts.append(block.get("name", ""))
+                    parts.append(check(block.get("name", "")))
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "
@@ -192,7 +189,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 return sentinel_re.sub(lambda m: m.group(1), prompt)
 
             tokenizer_kwargs = {
-                key: kwargs[key] for key in ("truncation", "max_length") if key in kwargs
+                key: kwargs[key]
+                for key in ("truncation", "max_length")
+                if key in kwargs
             }
             if not sentinel_re.search(prompt):
                 return self.encode(prompt, add_special_tokens=False, **tokenizer_kwargs)
@@ -217,7 +216,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             pos = 0
             for m in sentinel_re.finditer(prompt):
                 if m.start() > pos:
-                    ids += self.encode(prompt[pos : m.start()], add_special_tokens=False)
+                    ids += self.encode(
+                        prompt[pos : m.start()], add_special_tokens=False
+                    )
                 ids += encode_plain(m.group(1))
                 pos = m.end()
             if pos < len(prompt):

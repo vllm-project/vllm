@@ -101,21 +101,21 @@ def test_drop_thinking_keeps_current_turn_across_tool_results():
 
 @pytest.mark.parametrize("role", ["user", "tool"])
 @pytest.mark.parametrize("as_part", [False, True])
-def test_rejects_image_placeholder_in_text(role, as_part):
+def test_image_placeholder_in_text_is_plain_text(role, as_part):
     text = f"hi {IMAGE_PLACEHOLDER}"
     content = [{"type": "text", "text": text}] if as_part else text
-    with pytest.raises(ValueError, match="image special token"):
-        render([{"role": role, "tool_call_id": "c1", "content": content}])
+    prompt = render([{"role": role, "tool_call_id": "c1", "content": content}])
+    assert text in prompt
 
 
-def test_rejects_image_placeholder_in_reasoning():
-    with pytest.raises(ValueError, match="image special token"):
-        render(
-            [
-                {"role": "user", "content": "q"},
-                {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
-            ]
-        )
+def test_image_placeholder_in_reasoning_is_plain_text():
+    prompt = render(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
+        ]
+    )
+    assert IMAGE_PLACEHOLDER in prompt
 
 
 @pytest.mark.parametrize(
@@ -523,3 +523,55 @@ def test_deepseek_v41_unknown_role_raises_value_error():
             [{"role": "SYSTEM", "content": "Hello"}],
             thinking_mode="chat",
         )
+
+
+class _AddedTokenTokenizer:
+    """Fake tokenizer that matches added tokens in text, like the real one."""
+
+    vocab_size = 100
+    IMAGE_ID = 1_000_000
+
+    def get_added_vocab(self) -> dict[str, int]:
+        return {IMAGE_PLACEHOLDER: self.IMAGE_ID}
+
+    def encode(self, text: str, add_special_tokens: bool = False, **kwargs):
+        ids: list[int] = []
+        while text:
+            idx = text.find(IMAGE_PLACEHOLDER)
+            if idx < 0:
+                ids += [ord(c) for c in text]
+                break
+            ids += [ord(c) for c in text[:idx]] + [self.IMAGE_ID]
+            text = text[idx + len(IMAGE_PLACEHOLDER) :]
+        return ids
+
+
+def _tokenize(messages):
+    tok = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
+    return tok.apply_chat_template(messages, tokenize=True)
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_image_placeholder_in_text_is_not_encoded_as_special_token(role):
+    messages = [{"role": "user", "content": "q"}]
+    if role == "assistant":
+        messages.append({"role": "assistant", "content": f"a {IMAGE_PLACEHOLDER}"})
+        messages.append({"role": "user", "content": "q2"})
+    else:
+        messages[0]["content"] = f"q {IMAGE_PLACEHOLDER}"
+    assert _AddedTokenTokenizer.IMAGE_ID not in _tokenize(messages)
+
+
+def test_image_part_still_encodes_special_token():
+    ids = _tokenize(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "x"}},
+                    {"type": "text", "text": f"hi {IMAGE_PLACEHOLDER}"},
+                ],
+            }
+        ]
+    )
+    assert ids.count(_AddedTokenTokenizer.IMAGE_ID) == 1

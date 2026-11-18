@@ -30,7 +30,6 @@ from vllm.parser.engine.token_id_scanner import (
     TokenIDScanner,
 )
 
-
 _QUOTE_CHARS = frozenset("'\"`")
 
 
@@ -432,9 +431,7 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
-        events = (
-            self._resolve_pending(None) if self._pending_guard is not None else []
-        )
+        events = self._resolve_pending(None) if self._pending_guard is not None else []
         if (
             terminal in self.config.quote_guarded_terminals
             and self.state in self._PLAIN_STATES
