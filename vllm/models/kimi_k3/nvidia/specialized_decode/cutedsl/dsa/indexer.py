@@ -38,6 +38,7 @@ with unit MX scales and the BF16 head weights that fold its scale (DsaIndex).
 """
 
 import functools
+import os
 
 import cutlass
 import cutlass.cute as cute
@@ -456,6 +457,7 @@ class IndexerScore:
         assert pitch % 512 == 0 and not (pitch and topk)
         self.rows, self.q, self.ctas, self.topk = rows, q, ctas, topk
         self.pitch, self.fp4 = pitch, fp4
+        self.prefetch = SCORE_PREFETCH and pitch > 0
         # The epilogue's TMEM accumulators and warpgroups per accumulator.
         self.epi_groups, self.epi_split = score_epilogue(q)
         self.epi_warps = 4 * self.epi_groups * self.epi_split
@@ -714,6 +716,57 @@ class IndexerScore:
                     store_b16(tops_base + (element >> 3) * 2, top)
 
     @cute.jit
+    def issue_tile(
+        self, pages, t, it, blocks, scales, sSc, tma_k, tKgK, tKsK, kv_full, kv_empty,
+        sc_empty,
+    ):  # fmt: skip
+        """The producer's loads of an item's tile `t` (page ids `pages`, lane l:
+        the item's page l) into stage `it` mod stages."""
+        stage = it % self.stages
+        p0 = cute.arch.shuffle_sync(pages, 2 * t)
+        p1 = cute.arch.shuffle_sync(pages, 2 * t + 1)
+        # A partial last tile's second page may lie past the request's
+        # blocks: keep its (unused) scale read in bounds.
+        p1 = cutlass.min(cutlass.max(p1, Int32(0)), blocks - 1)
+        ph = ((it // self.stages) & 1) ^ 1
+        cute.arch.mbarrier_wait(kv_empty + stage, ph)
+        if cutlass.const_expr(not self.fp4):  # FP4: no epilogue read
+            cute.arch.mbarrier_wait(sc_empty + stage, ph)
+        key_bytes = FP4_TILE_BYTES if self.fp4 else TILE * DIM
+        with cute.arch.elect_one():
+            cute.arch.mbarrier_arrive_and_expect_tx(
+                kv_full + stage, key_bytes + TILE * 4
+            )
+            # 64-bit page offsets: page ids index the whole KV pool
+            # view, so page x stride (2112 words) passes Int32 from
+            # page 1,016,801 (the static stride makes it a 32-bit
+            # multiply, and the bulk copy is not bounds-checked).
+            bulk_g2s(
+                sSc.iterator + stage * TILE,
+                scales.iterator + stride_pages(p0, scales),
+                kv_full + stage,
+                PAGE * 4,
+            )
+            bulk_g2s(
+                sSc.iterator + stage * TILE + PAGE,
+                scales.iterator + stride_pages(p1, scales),
+                kv_full + stage,
+                PAGE * 4,
+            )
+        cute.copy(
+            tma_k,
+            tKgK[(None, 0, 0, p0)],
+            tKsK[(None, 2 * stage)],
+            tma_bar_ptr=kv_full + stage,
+        )
+        cute.copy(
+            tma_k,
+            tKgK[(None, 0, 0, p1)],
+            tKsK[(None, 2 * stage + 1)],
+            tma_bar_ptr=kv_full + stage,
+        )
+
+    @cute.jit
     def mma_fp4(self, sA, sB, sSc, sQsc, tmem_ptr, bars, cursor, sStart, requests):
         """The MMA warp (MXFP4): per item, the query's scale words into TMEM; per
         tile, the keys' scale words into TMEM (tcgen05.cp after an in-place smem
@@ -903,7 +956,11 @@ class IndexerScore:
             if lane == 0:
                 sStart[0] = Int32(0)
         cute.arch.sync_threads()
-        cute.arch.griddepcontrol_wait()
+        if cutlass.const_expr(self.prefetch):
+            if warp != self.producer:  # the producer waits after its prefetch
+                cute.arch.griddepcontrol_wait()
+        else:
+            cute.arch.griddepcontrol_wait()
         cute.arch.griddepcontrol_launch_dependents()
         total = sStart[requests]
         lo = Int32((Int64(total) * Int64(bid)) // Int64(self.ctas))
@@ -961,6 +1018,22 @@ class IndexerScore:
                     table, n_req, cutlass.min(n_k0 // PAGE + lane, max_page)
                 )
                 n_end = row_ends[n_req * Q + cutlass.min(lane, Q - 1)]
+            skip = Int32(0)  # the first item's tiles issued ahead of the PDL wait
+            if cutlass.const_expr(self.prefetch):
+                if n_nt > 0:
+                    # Keys from this step's first verify row's own key on are new
+                    # (DsaIndex inserts them): only whole tiles before it.
+                    old = cute.arch.shuffle_sync(n_end, 0) - Int32(1)
+                    ahead = cutlass.min(n_nt, Int32(self.stages))
+                    for t in cutlass.range(ahead, unroll=1):
+                        if (skip == t) & (n_k0 + (t + Int32(1)) * Int32(TILE) <= old):
+                            self.issue_tile(
+                                n_page, t, it, blocks, scales, sSc, tma_k, tKgK,
+                                tKsK, kv_full, kv_empty, sc_empty,
+                            )  # fmt: skip
+                            skip += 1
+                            it += 1
+                cute.arch.griddepcontrol_wait()
             has_item = n_nt > 0
             while has_item:
                 req = n_req
@@ -1015,51 +1088,61 @@ class IndexerScore:
                         tma_bar_ptr=q_full + qs,
                     )
                 j += 1
-                for t in cutlass.range(ntile, unroll=1):
-                    stage = it % self.stages
-                    p0 = cute.arch.shuffle_sync(my_page, 2 * t)
-                    p1 = cute.arch.shuffle_sync(my_page, 2 * t + 1)
-                    # A partial last tile's second page may lie past the request's
-                    # blocks: keep its (unused) scale read in bounds.
-                    p1 = cutlass.min(cutlass.max(p1, Int32(0)), blocks - 1)
-                    ph = ((it // self.stages) & 1) ^ 1
-                    cute.arch.mbarrier_wait(kv_empty + stage, ph)
-                    if cutlass.const_expr(not self.fp4):  # FP4: no epilogue read
-                        cute.arch.mbarrier_wait(sc_empty + stage, ph)
-                    key_bytes = FP4_TILE_BYTES if self.fp4 else TILE * DIM
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive_and_expect_tx(
-                            kv_full + stage, key_bytes + TILE * 4
+                if cutlass.const_expr(self.prefetch):
+                    for t in cutlass.range(ntile, unroll=1):
+                        if t >= skip:
+                            self.issue_tile(
+                                my_page, t, it, blocks, scales, sSc, tma_k, tKgK,
+                                tKsK, kv_full, kv_empty, sc_empty,
+                            )  # fmt: skip
+                            it += 1
+                    skip = Int32(0)
+                else:
+                    for t in cutlass.range(ntile, unroll=1):
+                        stage = it % self.stages
+                        p0 = cute.arch.shuffle_sync(my_page, 2 * t)
+                        p1 = cute.arch.shuffle_sync(my_page, 2 * t + 1)
+                        # A partial last tile's second page may lie past the
+                        # request's blocks: keep its (unused) scale read in bounds.
+                        p1 = cutlass.min(cutlass.max(p1, Int32(0)), blocks - 1)
+                        ph = ((it // self.stages) & 1) ^ 1
+                        cute.arch.mbarrier_wait(kv_empty + stage, ph)
+                        if cutlass.const_expr(not self.fp4):  # FP4: no epilogue read
+                            cute.arch.mbarrier_wait(sc_empty + stage, ph)
+                        key_bytes = FP4_TILE_BYTES if self.fp4 else TILE * DIM
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive_and_expect_tx(
+                                kv_full + stage, key_bytes + TILE * 4
+                            )
+                            # 64-bit page offsets: page ids index the whole KV pool
+                            # view, so page x stride (2112 words) passes Int32 from
+                            # page 1,016,801 (the static stride makes it a 32-bit
+                            # multiply, and the bulk copy is not bounds-checked).
+                            bulk_g2s(
+                                sSc.iterator + stage * TILE,
+                                scales.iterator + stride_pages(p0, scales),
+                                kv_full + stage,
+                                PAGE * 4,
+                            )
+                            bulk_g2s(
+                                sSc.iterator + stage * TILE + PAGE,
+                                scales.iterator + stride_pages(p1, scales),
+                                kv_full + stage,
+                                PAGE * 4,
+                            )
+                        cute.copy(
+                            tma_k,
+                            tKgK[(None, 0, 0, p0)],
+                            tKsK[(None, 2 * stage)],
+                            tma_bar_ptr=kv_full + stage,
                         )
-                        # 64-bit page offsets: page ids index the whole KV pool
-                        # view, so page x stride (2112 words) passes Int32 from
-                        # page 1,016,801 (the static stride makes it a 32-bit
-                        # multiply, and the bulk copy is not bounds-checked).
-                        bulk_g2s(
-                            sSc.iterator + stage * TILE,
-                            scales.iterator + stride_pages(p0, scales),
-                            kv_full + stage,
-                            PAGE * 4,
+                        cute.copy(
+                            tma_k,
+                            tKgK[(None, 0, 0, p1)],
+                            tKsK[(None, 2 * stage + 1)],
+                            tma_bar_ptr=kv_full + stage,
                         )
-                        bulk_g2s(
-                            sSc.iterator + stage * TILE + PAGE,
-                            scales.iterator + stride_pages(p1, scales),
-                            kv_full + stage,
-                            PAGE * 4,
-                        )
-                    cute.copy(
-                        tma_k,
-                        tKgK[(None, 0, 0, p0)],
-                        tKsK[(None, 2 * stage)],
-                        tma_bar_ptr=kv_full + stage,
-                    )
-                    cute.copy(
-                        tma_k,
-                        tKgK[(None, 0, 0, p1)],
-                        tKsK[(None, 2 * stage + 1)],
-                        tma_bar_ptr=kv_full + stage,
-                    )
-                    it += 1
+                        it += 1
                 has_item = n_nt > 0
         elif warp == self.mma_warp:
             if cutlass.const_expr(self.fp4):
@@ -1915,6 +1998,21 @@ LOCAL_ABOVE_BITS = 10  # a scanned count: keys above the threshold (< n), then t
 # decode-step A/B there.
 LOCAL_CLUSTER = {16: "8:4", 8: "5-15:4"}
 LOCAL_SPLIT_FROM = 1024  # 8-key vectors: shorter rows select on CTA 0; tunable
+# VLLM_KIMI_K3_DCP8_LOCAL_SPLIT=1: the local select per DCP size and batch "rows:C.S": C
+# CTAs per row (one cluster) and the split threshold S (8-key vectors; at least
+# LOCAL_SPLIT_FROM): rows of at least S vectors split over the C CTAs, shorter ones
+# select on CTA 0 alone, as one CTA per row does. Every setting selects the same keys in
+# the same slots. Long rows (several hundred thousand tokens of context) then no longer
+# run on one SM. Measured faster in A/B (8-rank LocalTopk -> merge chain, synthetic
+# 131K-600K and mixed contexts, and real logits). Opt-in; default off.
+LOCAL_SPLIT = {8: "25-35:4.2048,40:3.2048"}
+LOCAL_SPLIT_ON = os.environ.get("VLLM_KIMI_K3_DCP8_LOCAL_SPLIT", "0") == "1"
+# VLLM_KIMI_K3_DSA_SCORE_PREFETCH=1 (DCP scorer, `pitch` > 0): the producer issues the
+# first item's key tiles that hold only keys from before this step (their pages, scales
+# and block-table entries are fixed for the step) ahead of the PDL wait, so they are in
+# flight while the kernel before (DsaIndex: this step's keys and query) finishes. The
+# same tiles and stages in the same order, so the same logits. Opt-in; default off.
+SCORE_PREFETCH = os.environ.get("VLLM_KIMI_K3_DSA_SCORE_PREFETCH", "0") == "1"
 # A cluster's shared words (CTA 0's copy is the cluster's): this CTA's candidate count
 # and pass-4 count, then the shares' candidate prefix and total (CTA-local).
 XC_COUNT, XC_SLOTS, XC_PREFIX = 0, 1, 2
@@ -1922,7 +2020,21 @@ XC_COUNT, XC_SLOTS, XC_PREFIX = 0, 1, 2
 
 def local_cluster(world: int, rows: int) -> int:
     """CTAs per row of the local top-N of `rows` rows at DCP `world`."""
+    if LOCAL_SPLIT_ON:
+        entry = batch_table(LOCAL_SPLIT.get(world, "")).get(rows)
+        if entry is not None:
+            return entry[0]
     return batch_table(LOCAL_CLUSTER.get(world, "")).get(rows, 1)
+
+
+def local_split(world: int, rows: int):
+    """The split threshold (8-key vectors) of the local top-N of `rows` rows at DCP
+    `world` (None: LOCAL_SPLIT_FROM)."""
+    if LOCAL_SPLIT_ON:
+        entry = batch_table(LOCAL_SPLIT.get(world, "")).get(rows)
+        if entry is not None:
+            return entry[1]
+    return None
 
 
 @asm()
@@ -1974,7 +2086,13 @@ class IndexerLocalTopk:
     selects the same keys in the same slots."""
 
     def __init__(
-        self, rows: int, n: int, pitch: int, exchange: int = 0, clusters: int = 1
+        self,
+        rows: int,
+        n: int,
+        pitch: int,
+        exchange: int = 0,
+        clusters: int = 1,
+        split_from: int | None = None,
     ):
         assert n % 32 == 0 and n < 1 << LOCAL_ABOVE_BITS and pitch % 512 == 0
         assert clusters == 1 or (exchange > 0 and 1 < clusters <= CLUSTER_MAX)
@@ -1984,7 +2102,8 @@ class IndexerLocalTopk:
         self.exchange = exchange
         self.clusters = clusters
         # Every share of a split row holds more than n vectors (its own bound).
-        self.split_from = max(LOCAL_SPLIT_FROM, clusters * (n + clusters))
+        split_from = max(split_from or LOCAL_SPLIT_FROM, LOCAL_SPLIT_FROM)
+        self.split_from = max(split_from, clusters * (n + clusters))
 
     @cute.jit
     def __call__(self, logits, row_ends, out, valid, peers, epoch, xrank, xrows, s):
@@ -2758,7 +2877,8 @@ def compile_indexer(
             out = fake((rows, width), (width, 1), torch.int32, 4)
             valid = fake((rows,), (1,), torch.int32, 4)
             clusters = local_cluster(exchange, rows) if exchange else 1
-            local = IndexerLocalTopk(rows, topk, pitch, exchange, clusters)
+            split = local_split(exchange, rows) if exchange else None
+            local = IndexerLocalTopk(rows, topk, pitch, exchange, clusters, split)
             peers = dynamic_fake(1, torch.int64)
             epoch = dynamic_fake(1, torch.int32)
             xargs = peers, epoch, Int32(0), Int32(1)

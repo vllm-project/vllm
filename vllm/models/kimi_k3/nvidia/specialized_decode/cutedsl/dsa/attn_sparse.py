@@ -57,7 +57,7 @@ from functools import cache
 import cutlass
 import cutlass.cute as cute
 import torch
-from cutlass import Float32, Int32, Int64, Uint8, Uint32
+from cutlass import Float32, Int32, Int64, Uint8, Uint32, Uint64
 from cutlass.cute.runtime import make_fake_stream
 
 from ..common.host import fake, stream, to_cute
@@ -70,19 +70,34 @@ from ..common.primitives import (
     bits_float,
     copy_g2s,
     copy_s2cluster,
+    fence_tmem,
     float_bits,
     launch,
     ldmatrix,
+    load_tmem,
     load_words,
     mma_into,
+    named_barrier,
     no_neg_zero,
+    pack_fp8,
     push_float,
+    release_tmem,
+    shared_address,
     store_relaxed,
+    store_shared_words,
     store_words,
     wait,
     zeros,
 )
-from ..mla.dcp import EMPTY_LSE, Q_SENT
+from ..mla.dcp import (
+    EMPTY_LSE,
+    Q_SENT,
+    TCS_ON,
+    TCS_PAIR_OWN,
+    TCS_ROWS,
+    TCS_WIDE_ON,
+    TCS_WIDE_ROWS,
+)
 
 ROW = 576  # FP8 bytes per cache / query row (512 latent + 64 rope)
 LATENT = 512
@@ -865,10 +880,1181 @@ class SparseDcpDecodePx(SparseDcpDecode):
             store_words(q_dst, sentinel)
 
 
+# ---- Tensor-core sparse decode (VLLM_KIMI_K3_DCP8_TC_SPARSE)
+# --------------------------------------------- TcsDecode: a cluster of TCS_GROUP CTAs
+# per row. CTA g owns the row's keys of split g (consecutive ranges of ceil(n / G) keys,
+# as SparseDcpDecode) and latent columns 128 g .. 128 g + 127. On tcgen05 it computes S
+# = Q K^T of its keys (M = 128 padded heads, N = its key count rounded to 16, K = 576
+# FP8) into tensor memory, then E4M3 P at 448 of its keys' maximum per head (as
+# SparseDcpDecode's split) and the FP32 sums; it sends its P block, maxima and sums to
+# the other CTAs (DSMEM), and accumulates P_j V_j of every CTA j's keys for its 128
+# columns (V: the 128-byte latent block of each key row) in tensor memory accumulator j.
+# The four accumulators then merge in FP32 with weights 2^(m_j - m) (m_j: CTA j's
+# maxima, m: the row's) into one BF16 row, as the split merge. Rows with more keys than
+# a pass (TCS_PASS) merge each pass into the running rows the same way.
+TCS_GROUP = 4  # CTAs per row (a cluster)
+TCS_COLS = LATENT // TCS_GROUP  # latent columns per CTA
+TCS_OWN = 96  # keys per CTA per pass (its S columns)
+TCS_PASS = TCS_GROUP * TCS_OWN
+TCS_OTHERS = (TCS_GROUP - 1) * TCS_OWN // 32  # V gather iterations (4 keys per warp)
+TCS_THREADS = 288  # warps 0-7: loads, softmax, epilogue; warp 8: MMA issue
+TCS_REGION = TCS_OWN * 128  # one 128-byte K block of 96 rows (8-row atoms of 1 KB)
+TCS_STAGED = 4 * TCS_REGION + TCS_OWN * 64  # 96 staged FP8 rows of 576 bytes
+# Shared memory (bytes from a 1024-aligned base): q rows (96 heads; the MMA's padded
+# rows 96-127 read the next block), own key rows, the other CTAs' V blocks, the P
+# blocks of the four CTAs, the exchanged maxima and sums, the pass's row indices and
+# the owners' mailbox addresses.
+TCS_Q = 0
+TCS_K = TCS_STAGED
+TCS_V = 2 * TCS_STAGED
+TCS_P = TCS_V + (TCS_GROUP - 1) * TCS_REGION
+TCS_X = TCS_P + TCS_GROUP * TCS_REGION + 4096
+TCS_RW = TCS_X + 2 * TCS_GROUP * 128 * 4
+TCS_PP = TCS_RW + TCS_PASS * 4
+TCS_T = TCS_PP + 2 * 16 * 8  # the two warp halves' partial maxima and sums
+TCS_SMEM = TCS_T + 4 * 128 * 4
+TCS_SW128 = 2  # tcgen05 shared-memory descriptor layouts
+TCS_INTERLEAVE = 0
+
+
+def tcs_instruction(n, b_mn_major):
+    """tcgen05 kind::f8f6f4 instruction descriptor: E4M3 A and B, FP32 D, M = 128."""
+    return 1 << 4 | int(b_mn_major) << 16 | (n >> 3) << 17 | (128 >> 4) << 24
+
+
+@cute.jit
+def tcs_desc(
+    address,
+    lbo: cutlass.Constexpr[int],
+    sbo: cutlass.Constexpr[int],
+    layout: cutlass.Constexpr[int],
+):
+    """tcgen05 shared-memory matrix descriptor of the operand at `address`."""
+    fixed: cutlass.Constexpr = (
+        (lbo >> 4) << 16 | (sbo >> 4) << 32 | 1 << 46 | layout << 61
+    )
+    return Uint64((Uint32(address) & 262143) >> 4) | Uint64(fixed)
+
+
+@asm()
+def tcs_mma_ss(d, a, b, instruction, accumulate):
+    """One tcgen05 FP8 MMA, A and B from shared memory (descriptors)."""
+    code = "{ .reg .pred p; setp.ne.b32 p,$4,0; "
+    code += "tcgen05.mma.cta_group::1.kind::f8f6f4 [$0],$1,$2,$3,p; }"
+    ops = (Uint32(d), Uint64(a), Uint64(b), Uint32(instruction), Int32(accumulate))
+    return code, "r,l,l,r,r", ops
+
+
+@asm()
+def tcs_commit(barrier):
+    code = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];"
+    return code, "r", (barrier,)
+
+
+@asm()
+def tcs_cp_commit_wait():
+    """Wait for this thread's cp.async copies."""
+    return "cp.async.commit_group; cp.async.wait_group 0;", "~{memory}", ()
+
+
+@asm(Float32, pure=True)
+def tcs_scaled(s, scale, i, n):
+    """Scaled score: s * scale (log2 units) for key i < n, else -inf."""
+    code = "{ .reg .pred p; .reg .f32 x; mul.f32 x,$1,$2; setp.lt.s32 p,$3,$4; "
+    code += "selp.f32 $0,x,0fFF800000,p; }"
+    return code, "=f,f,f,r,r", (Float32(s), Float32(scale), Int32(i), Int32(n))
+
+
+@asm()
+def tcs_bar_sync(barrier_id, count: int):
+    """Named barrier `barrier_id` (a register) of `count` threads."""
+    return f"bar.sync $0,{count};", "r,~{memory}", (Int32(barrier_id),)
+
+
+@cute.jit
+def tcs_key_address(base, key, chunk):
+    """Shared address of 16-byte chunk `chunk` (0..35) of staged row `key` (< 96) of
+    a [96, 576] FP8 operand: four 128-byte K blocks, K-major 128B-swizzled (8-row
+    atoms of 1 KB), then the 64-byte rope block K-major without swizzle (8-row core
+    matrices of 8 x 16 B: chunk c at 128 c, 8-row groups 512 B apart)."""
+    block = chunk // 8
+    address = base + block * TCS_REGION + key // 8 * 1024 + key % 8 * 128
+    address = address + ((chunk % 8) ^ (key % 8)) * 16
+    if block == 4:
+        rope = base + 4 * TCS_REGION + key // 8 * 512 + (chunk - 32) * 128
+        address = rope + key % 8 * 16
+    return address
+
+
+@cute.jit
+def tcs_first(count, cta):
+    """First key of CTA `cta` in a pass of `count` keys: the CTAs take consecutive
+    ranges of ceil(count / G) keys (SparseDcpDecode's split of a row's keys)."""
+    return min(count, cta * ((count + TCS_GROUP - 1) // TCS_GROUP))
+
+
+@cute.jit
+def tcs_owned(count, cta):
+    """Keys of a pass of `count` keys owned by CTA `cta` (see tcs_first)."""
+    per = (count + TCS_GROUP - 1) // TCS_GROUP
+    return max(min(count - tcs_first(count, cta), per), Int32(0))
+
+
+class TcsDecode:
+    """Pushing sparse decode of `batch` rows on tcgen05 (see TCS_*): grid (G, rows),
+    one cluster of G CTAs per row. `heads` gathered heads (96: the q mailbox holds
+    `padded` rows per token), the merge's row width `width`. `push` (owner heads H,
+    DCP, mailbox rows): the rows and base-2 LSEs into the owners' DcpValue "bf16"
+    mailbox and the q mailbox rows read re-armed; else the latent [B, padded, 512]
+    and natural-log LSE [B, padded]."""
+
+    def __init__(
+        self, batch, heads, padded, width, push=None, groups=TCS_GROUP, carry=False
+    ):
+        assert heads == TCS_OWN and heads <= padded and groups == TCS_GROUP
+        assert push is None or push[1] <= 16
+        self.batch, self.heads, self.padded, self.width = batch, heads, padded, width
+        self.push, self.groups = push, groups
+        # `carry`: from the second pass on, a CTA's P anchor (its exchanged maximum)
+        # is the larger of its own maximum and the running maximum of the passes
+        # before (the same value in every CTA of the row), as a running-max split
+        # quantizes P; the first pass and single-pass rows are unchanged.
+        self.carry = carry
+        self.grid = (groups, batch, 1)
+
+    @cute.jit
+    def __call__(self, *args):
+        launch(
+            self.kernel,
+            args,
+            self.grid,
+            TCS_THREADS,
+            cluster=(self.groups, 1, 1),
+            min_blocks_per_mp=1,
+        )
+
+    @cute.kernel
+    def kernel(self, args):
+        query, valid_in = args[0], args[3]
+        smem = cutlass.utils.SmemAllocator()
+        buf = alloc(smem, Uint8, TCS_SMEM, 1024)
+        # k_full (loads), s_full (QK), p_local (this CTA's P written), p_src[j] (CTA
+        # j's P block, maximum and sum in; j != g), o_full (PV)
+        bars = alloc(smem, cutlass.Uint64, 8, 8)
+        tslot = alloc(smem, Uint32, 1)
+        tid, _, _ = cute.arch.thread_idx()
+        g, b, _ = cute.arch.block_idx()
+        warp, lane = tid // 32, tid % 32
+        bar = bars.iterator
+        ba = Int32(shared_address(buf.iterator))
+        if tid == 0:
+            cute.arch.mbarrier_init(bar, 256)
+            cute.arch.mbarrier_init(bar + 1, 1)
+            cute.arch.mbarrier_init(bar + 2, 256)
+            for j in cutlass.range_constexpr(TCS_GROUP):
+                cute.arch.mbarrier_init(bar + 3 + j, 1)
+            cute.arch.mbarrier_init(bar + 7, 1)
+            cute.arch.mbarrier_init_fence()
+            p_bytes: cutlass.Constexpr = self.heads * (128 + 8)
+            for j in cutlass.range_constexpr(TCS_GROUP):
+                if j != g:
+                    cute.arch.mbarrier_arrive_and_expect_tx(bar + 3 + j, p_bytes)
+        if warp == 8:
+            cute.arch.alloc_tmem(512, tslot.iterator)
+            cute.arch.relinquish_tmem_alloc_permit()
+        if cutlass.const_expr(self.push is not None):
+            # The owners' mailbox addresses (static: read before the PDL wait).
+            peers, lpeers = args[8], args[9]
+            if tid < self.push[1]:
+                pp = ba + TCS_PP + 8 * tid
+                for k, table in ((0, peers), (128, lpeers)):
+                    word = table[tid]
+                    halves = (Uint32(word & 0xFFFFFFFF), Uint32(word >> 32))
+                    store_shared_words(pp + k, halves)
+        fence_tmem(before=True)
+        cute.arch.sync_threads()
+        fence_tmem()
+        tmem = Int32(tslot[0])
+        # The barriers above are armed before any peer writes this CTA (waited
+        # before the first DSMEM store).
+        cute.arch.cluster_arrive_relaxed()
+        # Nothing above reads the inputs: the kernel before may launch this early.
+        cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_launch_dependents()
+        if warp < 8:  # the flat rows of the first pass, alongside the count
+            self.load_rows(ba, args[2], b, 0, tid)
+        n = valid_in[b]
+        n = max(min(n, Int32(self.width)), Int32(0))
+        passes = (n + TCS_PASS - 1) // TCS_PASS
+        if warp == 8:
+            self.issue(tmem, ba, bar, n, passes, g, lane == 0)
+            cute.arch.sync_warp()
+            cute.arch.cluster_wait()
+        else:
+            self.work(args, tmem, ba, bar, n, passes, g, b, tid)
+        release_tmem(tmem, 512, warp, 8)
+        # No peer copies into this CTA or out of its blocks any more (warps 0-7
+        # arrived after the last exchange; warp 8 and empty rows arrive here).
+        if (warp == 8) | (passes == 0):
+            cute.arch.cluster_arrive_relaxed()
+        cute.arch.cluster_wait()
+        if cutlass.const_expr(self.push is not None):  # noqa: SIM102
+            if (passes == 0) & (warp < 8):  # no q row was read
+                self.rearm(query, g, tid)
+
+    @cute.jit
+    def rearm(self, query, g, tid):
+        """Q_SENT into this CTA's share of the row's q mailbox rows."""
+        _, b, _ = cute.arch.block_idx()
+        part: cutlass.Constexpr = self.heads * (ROW // 16) // self.groups
+        for i in range(tid, part, 256):
+            flat = g * part + i
+            q_row, q_chunk = flat // (ROW // 16), flat % (ROW // 16)
+            sentinel = (Uint32(Q_SENT),) * 4
+            store_words(at(query, b, q_row, 16 * q_chunk), sentinel)
+
+    @cute.jit
+    def issue(self, tmem, ba, bar, n, passes, g, leader):
+        """Warp 8 (the `leader` lane issues): per pass QK of this CTA's keys into S
+        (columns 0 ..), then, once every CTA's P is here, PV of CTA j's keys into
+        accumulator j (columns 128 j .. 128 j + 127; S is consumed by then)."""
+        base_qk: cutlass.Constexpr = tcs_instruction(16, False) & ~(63 << 17)
+        pv: cutlass.Constexpr = tcs_instruction(TCS_COLS, True)
+        for p in cutlass.range(passes, unroll=1):
+            cnt = min(n - p * TCS_PASS, Int32(TCS_PASS))
+            own = tcs_owned(cnt, g)
+            wait(bar, p % 2, scope="cta")
+            cute.arch.fence_proxy("async.shared", space="cta")
+            fence_tmem()
+            if own > 0:
+                n16 = (own + 15) // 16 * 16
+                qk = Uint32(base_qk) | (Uint32(n16) >> 3) << 17
+                for ks in cutlass.range_constexpr(18):
+                    if cutlass.const_expr(ks < 16):
+                        at_q = ba + TCS_Q + ks // 4 * TCS_REGION + ks % 4 * 32
+                        a = tcs_desc(at_q, 16, 1024, TCS_SW128)
+                        at_k = ba + TCS_K + ks // 4 * TCS_REGION + ks % 4 * 32
+                        bd = tcs_desc(at_k, 16, 1024, TCS_SW128)
+                    else:
+                        rope = 4 * TCS_REGION + (ks - 16) * 256
+                        a = tcs_desc(ba + TCS_Q + rope, 128, 512, TCS_INTERLEAVE)
+                        bd = tcs_desc(ba + TCS_K + rope, 128, 512, TCS_INTERLEAVE)
+                    if leader:
+                        tcs_mma_ss(tmem, a, bd, qk, Int32(ks > 0))
+            if leader:
+                tcs_commit(bar + 1)
+            # PV of this CTA's keys once its P is written, then of each other CTA's
+            # keys once its P block is here.
+            for d in cutlass.range_constexpr(TCS_GROUP):
+                j = (g + d) % TCS_GROUP
+                if cutlass.const_expr(d == 0):
+                    wait(bar + 2, p % 2, scope="cta")
+                    v_at = ba + TCS_K + g * TCS_REGION
+                else:
+                    wait(bar + 3 + j, p % 2)
+                    v_at = ba + TCS_V + (j - Int32(j > g)) * TCS_REGION
+                fence_tmem()
+                steps = (tcs_owned(cnt, j) + 31) // 32
+                for kk in cutlass.range(steps, unroll=1):
+                    p_at = ba + TCS_P + j * TCS_REGION + kk * 32
+                    a = tcs_desc(p_at, 16, 1024, TCS_SW128)
+                    bd = tcs_desc(v_at + kk * 4096, TCS_REGION, 1024, TCS_SW128)
+                    if leader:
+                        tcs_mma_ss(
+                            tmem + TCS_COLS * j, a, bd, Uint32(pv), Int32(kk > 0)
+                        )
+            if leader:
+                tcs_commit(bar + 7)
+
+    @cute.jit
+    def work(self, args, tmem, ba, bar, n, passes, g, b, tid):
+        """Warps 0-7: per pass the loads, the softmax and exchange, then the fold of
+        the four accumulators into this thread's 64 output columns (FP32 registers);
+        then the epilogue."""
+        query, kv, rows_in = args[0], args[1], args[2]
+        warp, lane = tid // 32, tid % 32
+        kv_base = Int64(kv.iterator.toint())
+        # Head 32 (w % 4) + lane, columns 64 (w // 4) .. of this CTA's block.
+        out = zeros(TCS_COLS // 2, Float32)
+        m_run, l_run = Float32(-math.inf), Float32(0)
+        lane_tmem = tmem + ((32 * (warp % 4)) << 16)
+        if passes == 0:
+            cute.arch.cluster_wait()
+        for p in cutlass.range(passes, unroll=1):
+            base = p * TCS_PASS
+            cnt = min(n - base, Int32(TCS_PASS))
+            if p > 0:
+                self.load_rows(ba, rows_in, b, base, tid)
+            if p == 0:
+                # The q rows (warp w: heads w, w + 8, ..; lane l: 16-byte chunk l, and
+                # 32 + l (the rope) on lanes 0-3).
+                for j in cutlass.range_constexpr(self.heads // 8):
+                    h = warp + 8 * j
+                    src = at(query, b, h, 0).toint()
+                    copy_g2s(tcs_key_address(ba + TCS_Q, h, lane), src + lane * 16)
+                    if lane < 4:
+                        dst = tcs_key_address(ba + TCS_Q, h, 32 + lane)
+                        copy_g2s(dst, src + 512 + lane * 16)
+            named_barrier(1, 256)  # the pass's row indices
+            self.gather(ba, kv_base, cnt, g, warp, lane)
+            tcs_cp_commit_wait()
+            cute.arch.fence_proxy("async.shared", space="cta")
+            fence_tmem(before=True)  # the last fold's TMEM loads precede this QK
+            cute.arch.mbarrier_arrive(bar)
+            if p == 0:
+                cute.arch.cluster_wait()  # every peer's barriers are armed
+            top, total = self.softmax(
+                args, ba, bar, lane_tmem, p, passes, cnt, g, m_run
+            )
+            wait(bar + 7, p % 2, scope="cta")  # PV of this pass done
+            cute.arch.sync_warp()
+            fence_tmem()
+            m_run, l_run = self.fold(
+                ba, lane_tmem, out, cnt, g, top, total, m_run, l_run
+            )
+        self.epilogue(args, ba, out, m_run, l_run, passes, g, b, tid)
+
+    @cute.jit
+    def load_rows(self, ba, rows_in, b, base, tid):
+        """The flat rows of a pass's TCS_PASS keys into shared memory (no dependence
+        on the count; indices past the merge's width read its last entry)."""
+        last = Int32(self.width - 1)
+        for i in cutlass.range_constexpr(-(-TCS_PASS // 256)):
+            k = tid + 256 * i
+            if k < TCS_PASS:
+                row = rows_in[b, min(base + k, last)]
+                store_shared_words(ba + TCS_RW + 4 * k, (Uint32(row),))
+
+    @cute.jit
+    def gather(self, ba, kv_base, cnt, g, warp, lane):
+        """cp.async of this pass: the CTA's own key rows (warp w: keys w, w + 8, ..),
+        then the other CTAs' keys' 128-byte V blocks of this CTA's columns (4 keys
+        per warp instruction); V rows past a count up to its 32-key step zeroed."""
+        own = tcs_owned(cnt, g)
+        first = tcs_first(cnt, g)
+        span = (own + 31) // 32 * 32
+        for j in cutlass.range_constexpr(TCS_OWN // 8):
+            i = warp + 8 * j
+            if i < own:
+                key_at = ba + TCS_RW + 4 * (first + i)
+                row = load_words(key_at, count=1, shared=True)[0]
+                src = kv_base + Int64(row) * ROW
+                copy_g2s(tcs_key_address(ba + TCS_K, i, lane), src + lane * 16)
+                if lane < 4:
+                    dst = tcs_key_address(ba + TCS_K, i, 32 + lane)
+                    copy_g2s(dst, src + 512 + lane * 16)
+            elif (i < span) & (lane // 8 == g):
+                dst = tcs_key_address(ba + TCS_K, i, lane)
+                store_shared_words(dst, (Uint32(0),) * 4)
+        chunk = lane % 8
+        for it in cutlass.range_constexpr(TCS_OTHERS):
+            t = 4 * (warp + 8 * it) + lane // 8
+            q = t // TCS_OWN
+            i = t % TCS_OWN
+            j = q + Int32(q >= g)
+            nj = tcs_owned(cnt, j)
+            dst = ba + TCS_V + q * TCS_REGION + i // 8 * 1024 + i % 8 * 128
+            dst = dst + (chunk ^ (i % 8)) * 16
+            if i < nj:
+                key = tcs_first(cnt, j) + i
+                row = load_words(ba + TCS_RW + 4 * key, count=1, shared=True)[0]
+                src = kv_base + Int64(row) * ROW + g * TCS_COLS + chunk * 16
+                copy_g2s(dst, src)
+            elif i < (nj + 31) // 32 * 32:
+                store_shared_words(dst, (Uint32(0),) * 4)
+
+    @cute.jit
+    def softmax(self, args, ba, bar, lane_tmem, p, passes, cnt, g, m_prev):
+        """Warps 0-7, thread = head h = 32 (w % 4) + lane; warp w takes this CTA's S
+        chunks w // 4 and w // 4 + 2 (32 keys each): the CTA's maximum, P of its keys
+        (E4M3 at 448 of that maximum) into its P block and the FP32 sum; the P block
+        (bulk copies, 32 heads per warp), maximum and sum (DSMEM stores) go to the
+        other CTAs. -> (maximum, sum) of this CTA."""
+        scale_log2 = args[6]
+        tid, _, _ = cute.arch.thread_idx()
+        warp, lane = tid // 32, tid % 32
+        quarter, half = warp % 4, warp // 4
+        h = 32 * quarter + lane
+        live = h < self.heads
+        own = tcs_owned(cnt, g)
+        span = (own + 31) // 32 * 32
+        wait(bar + 1, p % 2, scope="cta")
+        cute.arch.sync_warp()
+        fence_tmem()
+        top = Float32(-math.inf)
+        for i in cutlass.range_constexpr(2):
+            c = half + 2 * i
+            if 32 * c < own:
+                s = load_tmem(lane_tmem + 32 * c, 32)
+                for e in cutlass.range_constexpr(32):
+                    top = max(top, tcs_scaled(s[e], scale_log2, 32 * c + e, own))
+        tmp = ba + TCS_T + 4 * h
+        store_shared_words(tmp + 512 * half, (float_bits(top),))
+        named_barrier(1, 256)
+        top = max(
+            bits_float(load_words(tmp, count=1, shared=True)[0]),
+            bits_float(load_words(tmp + 512, count=1, shared=True)[0]),
+        )
+        if cutlass.const_expr(self.carry):
+            top = max(top, m_prev)  # -inf before the first fold
+        bias = top - Float32(LOG2_P_SCALE)
+        total = Float32(0)
+        row_at = ba + TCS_P + g * TCS_REGION + h // 8 * 1024 + h % 8 * 128
+        for i in cutlass.range_constexpr(2):
+            c = half + 2 * i
+            if 32 * c < span:
+                s = load_tmem(lane_tmem + 32 * c, 32)
+                for hf in cutlass.range_constexpr(2):
+                    words = []
+                    for q in cutlass.range_constexpr(4):
+                        probs = []
+                        for e in cutlass.range_constexpr(4):
+                            k = 16 * hf + 4 * q + e
+                            x = tcs_scaled(s[k], scale_log2, 32 * c + k, own)
+                            prob = cute.math.exp2(x - bias, fastmath=True)
+                            total += prob
+                            probs.append(prob)
+                        words.append(pack_fp8(tuple(probs)))
+                    chunk = 2 * c + hf
+                    if live:
+                        store_shared_words(
+                            row_at + (chunk ^ (h % 8)) * 16, tuple(words)
+                        )
+        store_shared_words(tmp + 1024 + 512 * half, (float_bits(total),))
+        cute.arch.fence_proxy("async.shared", space="cta")
+        tcs_bar_sync(3 + quarter, 64)  # warps w and w + 4: this quarter's P rows
+        total = bits_float(load_words(tmp + 1024, count=1, shared=True)[0])
+        total += bits_float(load_words(tmp + 1536, count=1, shared=True)[0])
+        inbound = bar + 3 + g  # each receiver's barrier of this CTA's data
+        if live & (half == 0):
+            mine = ba + TCS_X + 4 * (g * 128 + h)
+            for d in cutlass.range_constexpr(1, TCS_GROUP):
+                peer = (g + d) % TCS_GROUP
+                push_float(mine, top, inbound, peer)
+                push_float(mine + TCS_GROUP * 512, total, inbound, peer)
+            if lane == 0:  # these 32 heads' P rows (4 KB) to the other CTAs
+                block = ba + TCS_P + g * TCS_REGION + 4096 * quarter
+                for d in cutlass.range_constexpr(1, TCS_GROUP):
+                    copy_s2cluster(
+                        block, block, inbound, (g + d) % TCS_GROUP, size=4096
+                    )
+        cute.arch.mbarrier_arrive(bar + 2)  # this CTA's P is written (fenced above)
+        for d in cutlass.range_constexpr(1, TCS_GROUP):
+            wait(bar + 3 + (g + d) % TCS_GROUP, p % 2)
+        if cutlass.const_expr(self.push is not None):  # noqa: SIM102
+            if p == 0:
+                # Every CTA of the row computed its QK: their q rows are read.
+                self.rearm(args[0], g, tid)
+        if p + 1 == passes:
+            # Every peer's data is here: it may exit once the others have theirs.
+            cute.arch.cluster_arrive_relaxed()
+        if (tid == 0) & (p + 1 < passes):  # the next pass's exchange
+            p_bytes: cutlass.Constexpr = self.heads * (128 + 8)
+            for d in cutlass.range_constexpr(1, TCS_GROUP):
+                source = bar + 3 + (g + d) % TCS_GROUP
+                cute.arch.mbarrier_arrive_and_expect_tx(source, p_bytes)
+        return top, total
+
+    @cute.jit
+    def fold(self, ba, lane_tmem, out, cnt, g, top, total, m_run, l_run):
+        """Warps 0-7 (thread: head h, its 64 columns): this pass's accumulators j,
+        weighted by 2^(m_j - m) (m_j: CTA j's maximum, m: the running maximum), into
+        `out` (rescaled by 2^(m_old - m)); -> the running maximum and sum."""
+        tid, _, _ = cute.arch.thread_idx()
+        warp, lane = tid // 32, tid % 32
+        quarter, half = warp % 4, warp // 4
+        h = 32 * quarter + lane
+        maxima, sums = [], []
+        for j in cutlass.range_constexpr(TCS_GROUP):
+            mj, lj = top, total
+            if j != g:
+                at_j = ba + TCS_X + 4 * (j * 128 + h)
+                mj = bits_float(load_words(at_j, count=1, shared=True)[0])
+                lj = bits_float(
+                    load_words(at_j + TCS_GROUP * 512, count=1, shared=True)[0]
+                )
+            maxima.append(mj)
+            sums.append(lj)
+        m_new = m_run
+        for j in cutlass.range_constexpr(TCS_GROUP):
+            m_new = max(m_new, maxima[j])
+        alpha = cute.math.exp2(m_run - m_new, fastmath=True)
+        weights = [cute.math.exp2(maxima[j] - m_new, fastmath=True) for j in range(4)]
+        l_new = l_run * alpha
+        for j in cutlass.range_constexpr(TCS_GROUP):
+            if tcs_owned(cnt, j) > 0:
+                l_new += weights[j] * sums[j]
+        if 32 * quarter < self.heads:
+            if (
+                tcs_owned(cnt, TCS_GROUP - 1) > 0
+            ):  # every CTA owns keys (CTA G - 1 fewest)
+                for e in cutlass.range_constexpr(TCS_COLS // 2):
+                    out[e] = out[e] * alpha
+                for j in cutlass.range_constexpr(TCS_GROUP):
+                    for c0 in cutlass.range_constexpr(0, TCS_COLS // 2, 32):
+                        o_at = lane_tmem + TCS_COLS * j + TCS_COLS // 2 * half + c0
+                        o = load_tmem(o_at, 32)
+                        for e in cutlass.range_constexpr(32):
+                            out[c0 + e] = out[c0 + e] + weights[j] * o[e]
+            else:  # the accumulators of CTAs with keys only
+                for e in cutlass.range_constexpr(TCS_COLS // 2):
+                    out[e] = out[e] * alpha
+                for j in cutlass.range_constexpr(TCS_GROUP):
+                    if tcs_owned(cnt, j) > 0:
+                        for c0 in cutlass.range_constexpr(0, TCS_COLS // 2, 32):
+                            o_at = lane_tmem + TCS_COLS * j + TCS_COLS // 2 * half + c0
+                            o = load_tmem(o_at, 32)
+                            for e in cutlass.range_constexpr(32):
+                                out[c0 + e] = out[c0 + e] + weights[j] * o[e]
+        return m_new, l_new
+
+    @cute.jit
+    def epilogue(self, args, ba, out, m_run, l_run, passes, g, b, tid):
+        """Warps 0-7: the folded rows times out_scale / l as BF16 into shared memory
+        (over the own key rows), then the rows and LSEs out (pushed to their owners,
+        or the latent / LSE)."""
+        latent, lse_out, out_scale = args[4], args[5], args[7]
+        warp, lane = tid // 32, tid % 32
+        h = 32 * (warp % 4) + lane
+        half = warp // 4
+        pitch: cutlass.Constexpr = 2 * TCS_COLS + 16
+        stage = ba + TCS_K
+        if (passes > 0) & (32 * (warp % 4) < self.heads):
+            inverse = out_scale / l_run
+            for q in cutlass.range_constexpr(TCS_COLS // 16):
+                words = tuple(
+                    bf16x2(
+                        out[8 * q + 2 * e] * inverse, out[8 * q + 2 * e + 1] * inverse
+                    )
+                    for e in range(4)
+                )
+                if cutlass.const_expr(self.push is not None):
+                    words = tuple(no_neg_zero(w) for w in words)
+                at_byte = h * pitch + 2 * (TCS_COLS // 2 * half + 8 * q)
+                store_shared_words(stage + at_byte, words)
+        named_barrier(1, 256)
+        lse2 = m_run - Float32(LOG2_P_SCALE) + cute.math.log2(l_run, fastmath=False)
+        chunks: cutlass.Constexpr = TCS_COLS // 8  # 16-byte chunks per head row
+        if cutlass.const_expr(self.push is None):
+            for i in range(tid, self.heads * chunks, 256):
+                hh, c = i // chunks, i % chunks
+                words = (Uint32(0),) * 4
+                if passes > 0:
+                    words = load_words(
+                        stage + hh * pitch + 16 * c, count=4, shared=True
+                    )
+                store_words(at(latent, b, hh, g * TCS_COLS + 8 * c), words)
+            if (g == 0) & (tid < self.heads):
+                value = Float32(-math.inf)
+                if passes > 0:
+                    value = lse2 * LN2
+                lse_out[b, tid] = value
+        else:
+            parity, rank = args[10], args[11]
+            H, D, cap = self.push
+            if passes > 0:
+                for i in cutlass.range_constexpr(self.heads * chunks // 256):
+                    hh = (tid + 256 * i) // chunks
+                    c = (tid + 256 * i) % chunks
+                    words = load_words(
+                        stage + hh * pitch + 16 * c, count=4, shared=True
+                    )
+                    slot = ((parity * D + rank) * cap + b) * H + hh % H
+                    pw = load_words(ba + TCS_PP + 8 * (hh // H), count=2, shared=True)
+                    owner = Int64(pw[0]) | (Int64(pw[1]) << 32)
+                    address = owner + (Int64(slot) * LATENT + g * TCS_COLS + 8 * c) * 2
+                    store_relaxed(address, words)
+            if (g == 0) & (tid < self.heads):
+                value = Float32(EMPTY_LSE)
+                if passes > 0:
+                    value = lse2
+                    bad = (value != value) | (value <= Float32(EMPTY_LSE))
+                    if bad | (value >= Float32(-EMPTY_LSE)):
+                        value = Float32(EMPTY_LSE)
+                slot = ((parity * D + rank) * cap + b) * H + tid % H
+                lw = load_words(
+                    ba + TCS_PP + 128 + 8 * (tid // H), count=2, shared=True
+                )
+                laddr = Int64(lw[0]) | (Int64(lw[1]) << 32)
+                store_relaxed(laddr + Int64(slot) * 4, (float_bits(value),))
+
+
+# Pair decode (TcsDecodePair): two CTAs per row, so a row's cluster is half as wide and
+# up to twice as many rows run in one wave. Each CTA takes 256 latent columns and up to
+# PAIR_OWN keys per pass; the two CTAs exchange their maxima before P, both quantize P
+# at 448 of the same anchor (the pair's maximum, never below the passes before), so the
+# PV of both CTAs' keys accumulates into one TMEM accumulator (columns 0-255; S in
+# columns 256-383). When the anchor rises between passes the accumulator is rescaled
+# in TMEM. The maxima exchange also orders the P blocks: a CTA's next P block reaches
+# its peer only after the peer's PV of the pass before.
+PAIR_GROUP = 2
+PAIR_COLS = LATENT // PAIR_GROUP
+PAIR_OWN = 160  # a row's keys on one DCP rank (about top-k / DCP) mostly in one pass
+PAIR_PASS = PAIR_GROUP * PAIR_OWN
+PAIR_KREG = PAIR_OWN * 128  # one 128-byte K block of 160 rows (8-row atoms of 1 KB)
+PAIR_KSTAGED = 4 * PAIR_KREG + PAIR_OWN * 64
+PAIR_TAIL = 128 * 32  # P keys 128-159 of 128 rows: K-major, no swizzle (8 x 16 B cores)
+PAIR_Q = 0
+PAIR_K = TCS_STAGED
+PAIR_V = PAIR_K + PAIR_KSTAGED
+PAIR_P = PAIR_V + 2 * PAIR_KREG  # P keys 0-127 (128B-swizzled), then the two tails
+PAIR_PT = PAIR_P + PAIR_GROUP * TCS_REGION
+PAIR_X = PAIR_PT + PAIR_GROUP * PAIR_TAIL
+PAIR_RW = PAIR_X + 2 * PAIR_GROUP * 128 * 4
+PAIR_PP = PAIR_RW + PAIR_PASS * 4
+PAIR_T = PAIR_PP + 2 * 16 * 8
+PAIR_SMEM = PAIR_T + 4 * 128 * 4
+assert PAIR_SMEM + 1024 + 128 <= 232448, PAIR_SMEM
+PAIR_S = 2 * 128  # TMEM column of S
+PAIR_P_BYTES = TCS_OWN * (128 + 32 + 4)  # a P block, its tail and the sums (96 heads)
+
+
+@asm()
+def tcs_store_tmem(address, values):
+    """Store len(values) FP32 TMEM columns of this lane and wait for the stores."""
+    n = len(values)
+    registers = ",".join(f"${i + 1}" for i in range(n))
+    code = f"tcgen05.st.sync.aligned.32x32b.x{n}.b32 [$0],{{{registers}}}; "
+    code += "tcgen05.wait::st.sync.aligned;"
+    constraints = ",".join(["r"] + ["f"] * n + ["~{memory}"])
+    return code, constraints, (Uint32(address), *[Float32(v) for v in values])
+
+
+@cute.jit
+def pair_key_address(base, key, chunk, kreg: cutlass.Constexpr[int]):
+    """tcs_key_address of a staged [rows, 576] FP8 operand (K blocks `kreg` bytes)."""
+    block = chunk // 8
+    address = base + block * kreg + key // 8 * 1024 + key % 8 * 128
+    address = address + ((chunk % 8) ^ (key % 8)) * 16
+    if block == 4:
+        rope = base + 4 * kreg + key // 8 * 512 + (chunk - 32) * 128
+        address = rope + key % 8 * 16
+    return address
+
+
+@cute.jit
+def pair_first(count, cta):
+    """First key of CTA `cta` in a pass of `count` keys (consecutive halves)."""
+    return min(count, cta * ((count + PAIR_GROUP - 1) // PAIR_GROUP))
+
+
+@cute.jit
+def pair_owned(count, cta):
+    per = (count + PAIR_GROUP - 1) // PAIR_GROUP
+    return max(min(count - pair_first(count, cta), per), Int32(0))
+
+
+class TcsDecodePair:
+    """TcsDecode with two CTAs per row (see PAIR_*): grid (2, rows), one cluster of two
+    CTAs per row; same arguments and outputs as TcsDecode."""
+
+    def __init__(self, batch, heads, padded, width, push=None, own=PAIR_OWN):
+        assert heads == TCS_OWN and heads <= padded and own in (128, PAIR_OWN)
+        assert push is None or push[1] <= 16
+        self.batch, self.heads, self.padded, self.width = batch, heads, padded, width
+        self.push, self.groups = push, PAIR_GROUP
+        self.grid = (PAIR_GROUP, batch, 1)
+        # `own` keys per CTA per pass (PAIR_*'s layout for that count).
+        self.own, self.npass, self.kreg = own, PAIR_GROUP * own, own * 128
+        self.kstaged = 4 * self.kreg + own * 64
+        self.off_k = TCS_STAGED
+        self.off_v = self.off_k + self.kstaged
+        self.off_p = self.off_v + 2 * self.kreg
+        self.off_pt = self.off_p + PAIR_GROUP * TCS_REGION
+        self.off_x = self.off_pt + PAIR_GROUP * PAIR_TAIL
+        self.off_rw = self.off_x + 2 * PAIR_GROUP * 128 * 4
+        self.off_pp = self.off_rw + self.npass * 4
+        self.off_t = self.off_pp + 2 * 16 * 8
+        self.smem = self.off_t + 4 * 128 * 4
+
+    @cute.jit
+    def __call__(self, *args):
+        launch(
+            self.kernel,
+            args,
+            self.grid,
+            TCS_THREADS,
+            cluster=(PAIR_GROUP, 1, 1),
+            min_blocks_per_mp=1,
+        )
+
+    @cute.kernel
+    def kernel(self, args):
+        query, valid_in = args[0], args[3]
+        smem = cutlass.utils.SmemAllocator()
+        buf = alloc(smem, Uint8, self.smem, 1024)
+        # k_full (loads), s_full (QK), p_local (this CTA's P written), p_src (the peer's
+        # P block and sum in), m_src (the peer's maximum in), o_full (PV)
+        bars = alloc(smem, cutlass.Uint64, 8, 8)
+        tslot = alloc(smem, Uint32, 1)
+        tid, _, _ = cute.arch.thread_idx()
+        g, b, _ = cute.arch.block_idx()
+        warp = tid // 32
+        bar = bars.iterator
+        ba = Int32(shared_address(buf.iterator))
+        if tid == 0:
+            cute.arch.mbarrier_init(bar, 256)
+            cute.arch.mbarrier_init(bar + 1, 1)
+            cute.arch.mbarrier_init(bar + 2, 256)
+            cute.arch.mbarrier_init(bar + 3, 1)
+            cute.arch.mbarrier_init(bar + 4, 1)
+            cute.arch.mbarrier_init(bar + 5, 1)
+            cute.arch.mbarrier_init_fence()
+            p_bytes: cutlass.Constexpr = self.heads * (128 + 32 + 4)
+            m_bytes: cutlass.Constexpr = self.heads * 4
+            cute.arch.mbarrier_arrive_and_expect_tx(bar + 3, p_bytes)
+            cute.arch.mbarrier_arrive_and_expect_tx(bar + 4, m_bytes)
+        if warp == 8:
+            cute.arch.alloc_tmem(512, tslot.iterator)
+            cute.arch.relinquish_tmem_alloc_permit()
+        if cutlass.const_expr(self.push is not None):
+            peers, lpeers = args[8], args[9]
+            if tid < self.push[1]:
+                pp = ba + self.off_pp + 8 * tid
+                for k, table in ((0, peers), (128, lpeers)):
+                    word = table[tid]
+                    halves = (Uint32(word & 0xFFFFFFFF), Uint32(word >> 32))
+                    store_shared_words(pp + k, halves)
+        fence_tmem(before=True)
+        cute.arch.sync_threads()
+        fence_tmem()
+        tmem = Int32(tslot[0])
+        cute.arch.cluster_arrive_relaxed()
+        cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_launch_dependents()
+        if warp < 8:
+            self.load_rows(ba, args[2], b, 0, tid)
+        n = valid_in[b]
+        n = max(min(n, Int32(self.width)), Int32(0))
+        passes = (n + self.npass - 1) // self.npass
+        if warp == 8:
+            self.issue(tmem, ba, bar, n, passes, g, tid % 32 == 0)
+            cute.arch.sync_warp()
+            cute.arch.cluster_wait()
+        else:
+            self.work(args, tmem, ba, bar, n, passes, g, b, tid)
+        release_tmem(tmem, 512, warp, 8)
+        if (warp == 8) | (passes == 0):
+            cute.arch.cluster_arrive_relaxed()
+        cute.arch.cluster_wait()
+        if cutlass.const_expr(self.push is not None):  # noqa: SIM102
+            if (passes == 0) & (warp < 8):
+                self.rearm(query, g, tid)
+
+    @cute.jit
+    def rearm(self, query, g, tid):
+        """Q_SENT into this CTA's share of the row's q mailbox rows."""
+        _, b, _ = cute.arch.block_idx()
+        part: cutlass.Constexpr = self.heads * (ROW // 16) // self.groups
+        for i in range(tid, part, 256):
+            flat = g * part + i
+            q_row, q_chunk = flat // (ROW // 16), flat % (ROW // 16)
+            sentinel = (Uint32(Q_SENT),) * 4
+            store_words(at(query, b, q_row, 16 * q_chunk), sentinel)
+
+    @cute.jit
+    def issue(self, tmem, ba, bar, n, passes, g, leader):
+        """Warp 8: per pass QK of this CTA's keys into S, then PV of this CTA's keys
+        and of the peer's keys into the accumulator (two N = 128 halves per k-step)."""
+        base_qk: cutlass.Constexpr = tcs_instruction(16, False) & ~(63 << 17)
+        pv: cutlass.Constexpr = tcs_instruction(128, True)
+        for p in cutlass.range(passes, unroll=1):
+            cnt = min(n - p * self.npass, Int32(self.npass))
+            own = pair_owned(cnt, g)
+            wait(bar, p % 2, scope="cta")
+            cute.arch.fence_proxy("async.shared", space="cta")
+            fence_tmem()
+            if own > 0:
+                n16 = (own + 15) // 16 * 16
+                qk = Uint32(base_qk) | (Uint32(n16) >> 3) << 17
+                for ks in cutlass.range_constexpr(18):
+                    if cutlass.const_expr(ks < 16):
+                        at_q = ba + PAIR_Q + ks // 4 * TCS_REGION + ks % 4 * 32
+                        a = tcs_desc(at_q, 16, 1024, TCS_SW128)
+                        at_k = ba + self.off_k + ks // 4 * self.kreg + ks % 4 * 32
+                        bd = tcs_desc(at_k, 16, 1024, TCS_SW128)
+                    else:
+                        a = tcs_desc(
+                            ba + PAIR_Q + 4 * TCS_REGION + (ks - 16) * 256,
+                            128,
+                            512,
+                            TCS_INTERLEAVE,
+                        )
+                        bd = tcs_desc(
+                            ba + self.off_k + 4 * self.kreg + (ks - 16) * 256,
+                            128,
+                            512,
+                            TCS_INTERLEAVE,
+                        )
+                    if leader:
+                        tcs_mma_ss(tmem + PAIR_S, a, bd, qk, Int32(ks > 0))
+            if leader:
+                tcs_commit(bar + 1)
+            for d in cutlass.range_constexpr(PAIR_GROUP):
+                j = (g + d) % PAIR_GROUP
+                if cutlass.const_expr(d == 0):
+                    wait(bar + 2, p % 2, scope="cta")
+                    v_at = ba + self.off_k + 2 * g * self.kreg
+                else:
+                    wait(bar + 3, p % 2)
+                    v_at = ba + self.off_v
+                fence_tmem()
+                steps = (pair_owned(cnt, j) + 31) // 32
+                # The pass's first MMA overwrites the accumulator (pass 0) or adds.
+                mine = pair_owned(cnt, g)
+                for kk in cutlass.range(steps, unroll=1):
+                    a = tcs_desc(
+                        ba + self.off_pt + j * PAIR_TAIL, 128, 256, TCS_INTERLEAVE
+                    )
+                    if kk < 4:
+                        a = tcs_desc(
+                            ba + self.off_p + j * TCS_REGION + kk * 32,
+                            16,
+                            1024,
+                            TCS_SW128,
+                        )
+                    add = Int32(p > 0) | Int32(kk > 0)
+                    if cutlass.const_expr(d > 0):
+                        add = add | Int32(mine > 0)
+                    for half in cutlass.range_constexpr(2):
+                        bd = tcs_desc(
+                            v_at + half * self.kreg + kk * 4096,
+                            self.kreg,
+                            1024,
+                            TCS_SW128,
+                        )
+                        if leader:
+                            tcs_mma_ss(tmem + 128 * half, a, bd, Uint32(pv), add)
+            if leader:
+                tcs_commit(bar + 5)
+
+    @cute.jit
+    def work(self, args, tmem, ba, bar, n, passes, g, b, tid):
+        """Warps 0-7: per pass the loads, the maxima exchange, P and the sums (and the
+        accumulator's rescale), then the epilogue."""
+        query, kv, rows_in = args[0], args[1], args[2]
+        warp, lane = tid // 32, tid % 32
+        kv_base = Int64(kv.iterator.toint())
+        m_run, l_run = Float32(-math.inf), Float32(0)
+        lane_tmem = tmem + ((32 * (warp % 4)) << 16)
+        if passes == 0:
+            cute.arch.cluster_wait()
+        for p in cutlass.range(passes, unroll=1):
+            base = p * self.npass
+            cnt = min(n - base, Int32(self.npass))
+            if p > 0:
+                self.load_rows(ba, rows_in, b, base, tid)
+            if p == 0:
+                for j in cutlass.range_constexpr(self.heads // 8):
+                    h = warp + 8 * j
+                    src = at(query, b, h, 0).toint()
+                    copy_g2s(tcs_key_address(ba + PAIR_Q, h, lane), src + lane * 16)
+                    if lane < 4:
+                        dst = tcs_key_address(ba + PAIR_Q, h, 32 + lane)
+                        copy_g2s(dst, src + 512 + lane * 16)
+            named_barrier(1, 256)
+            self.gather(ba, kv_base, cnt, g, warp, lane)
+            tcs_cp_commit_wait()
+            cute.arch.fence_proxy("async.shared", space="cta")
+            fence_tmem(before=True)
+            cute.arch.mbarrier_arrive(bar)
+            if p == 0:
+                cute.arch.cluster_wait()
+            m_run, l_run = self.softmax(
+                args, ba, bar, lane_tmem, p, passes, cnt, g, m_run, l_run
+            )
+            wait(bar + 5, p % 2, scope="cta")  # PV of this pass done
+            cute.arch.sync_warp()
+            fence_tmem()
+        self.epilogue(args, ba, lane_tmem, m_run, l_run, passes, g, b, tid)
+
+    @cute.jit
+    def load_rows(self, ba, rows_in, b, base, tid):
+        last = Int32(self.width - 1)
+        for i in cutlass.range_constexpr(-(-self.npass // 256)):
+            k = tid + 256 * i
+            if k < self.npass:
+                row = rows_in[b, min(base + k, last)]
+                store_shared_words(ba + self.off_rw + 4 * k, (Uint32(row),))
+
+    @cute.jit
+    def gather(self, ba, kv_base, cnt, g, warp, lane):
+        """cp.async of this pass: the CTA's own key rows, then the peer's keys' two
+        128-byte V blocks of this CTA's columns (2 keys per warp instruction); V rows
+        past a count up to its 32-key step zeroed."""
+        own = pair_owned(cnt, g)
+        first = pair_first(cnt, g)
+        span = (own + 31) // 32 * 32
+        for j in cutlass.range(self.own // 8, unroll=4):
+            i = warp + 8 * j
+            if i < own:
+                row = load_words(
+                    ba + self.off_rw + 4 * (first + i), count=1, shared=True
+                )[0]
+                src = kv_base + Int64(row) * ROW
+                copy_g2s(
+                    pair_key_address(ba + self.off_k, i, lane, self.kreg),
+                    src + lane * 16,
+                )
+                if lane < 4:
+                    copy_g2s(
+                        pair_key_address(ba + self.off_k, i, 32 + lane, self.kreg),
+                        src + 512 + lane * 16,
+                    )
+            elif (i < span) & (lane // 16 == g):
+                store_shared_words(
+                    pair_key_address(ba + self.off_k, i, lane, self.kreg),
+                    (Uint32(0),) * 4,
+                )
+        peer = 1 - g
+        nj = pair_owned(cnt, peer)
+        fj = pair_first(cnt, peer)
+        chunk = lane % 16
+        block, sub = chunk // 8, chunk % 8
+        for it in cutlass.range(-(-self.own // 16), unroll=2):
+            i = 2 * (warp + 8 * it) + lane // 16
+            dst = ba + self.off_v + block * self.kreg + i // 8 * 1024 + i % 8 * 128
+            dst = dst + (sub ^ (i % 8)) * 16
+            if i < nj:
+                row = load_words(ba + self.off_rw + 4 * (fj + i), count=1, shared=True)[
+                    0
+                ]
+                src = kv_base + Int64(row) * ROW + g * PAIR_COLS + chunk * 16
+                copy_g2s(dst, src)
+            elif i < (nj + 31) // 32 * 32:
+                store_shared_words(dst, (Uint32(0),) * 4)
+
+    @cute.jit
+    def softmax(self, args, ba, bar, lane_tmem, p, passes, cnt, g, m_run, l_run):
+        """Warps 0-7, thread = head h = 32 (w % 4) + lane, warp w the S chunks w // 4
+        and w // 4 + 2: this CTA's maximum to the peer, the anchor max(both maxima,
+        running), the accumulator rescaled to it (passes after the first), P (E4M3 at
+        448 of the anchor) and its FP32 sum, the P block and sum to the peer.
+        -> (anchor, running sum)."""
+        scale_log2 = args[6]
+        tid, _, _ = cute.arch.thread_idx()
+        warp, lane = tid // 32, tid % 32
+        quarter, half = warp % 4, warp // 4
+        h = 32 * quarter + lane
+        live = h < self.heads
+        own = pair_owned(cnt, g)
+        span = (own + 31) // 32 * 32
+        peer = 1 - g
+        wait(bar + 1, p % 2, scope="cta")
+        cute.arch.sync_warp()
+        fence_tmem()
+        top = Float32(-math.inf)
+        for i in cutlass.range_constexpr(3):
+            c = half + 2 * i
+            if 32 * c < own:
+                for hf in cutlass.range_constexpr(2):
+                    s = load_tmem(lane_tmem + PAIR_S + 32 * c + 16 * hf, 16)
+                    for e in cutlass.range_constexpr(16):
+                        top = max(
+                            top, tcs_scaled(s[e], scale_log2, 32 * c + 16 * hf + e, own)
+                        )
+        tmp = ba + self.off_t + 4 * h
+        store_shared_words(tmp + 512 * half, (float_bits(top),))
+        named_barrier(1, 256)
+        top = max(
+            bits_float(load_words(tmp, count=1, shared=True)[0]),
+            bits_float(load_words(tmp + 512, count=1, shared=True)[0]),
+        )
+        if live & (half == 0):
+            push_float(ba + self.off_x + 4 * (g * 128 + h), top, bar + 4, peer)
+        wait(bar + 4, p % 2)
+        other = bits_float(
+            load_words(ba + self.off_x + 4 * (peer * 128 + h), count=1, shared=True)[0]
+        )
+        anchor = max(max(top, other), m_run)  # m_run: -inf before the first pass
+        alpha = Float32(1)
+        if p > 0:
+            alpha = cute.math.exp2(m_run - anchor, fastmath=True)
+            if 32 * quarter < self.heads:  # warp-uniform: this warp's TMEM lanes
+                for c0 in cutlass.range_constexpr(0, PAIR_COLS // 2, 16):
+                    o_at = lane_tmem + PAIR_COLS // 2 * half + c0
+                    o = load_tmem(o_at, 16)
+                    tcs_store_tmem(o_at, [o[e] * alpha for e in range(16)])
+        bias = anchor - Float32(LOG2_P_SCALE)
+        total = Float32(0)
+        row_at = ba + self.off_p + g * TCS_REGION + h // 8 * 1024 + h % 8 * 128
+        tail_at = ba + self.off_pt + g * PAIR_TAIL + h // 8 * 256 + h % 8 * 16
+        for i in cutlass.range_constexpr(3):
+            c = half + 2 * i
+            if 32 * c < span:
+                for hf in cutlass.range_constexpr(2):
+                    s = load_tmem(lane_tmem + PAIR_S + 32 * c + 16 * hf, 16)
+                    words = []
+                    for q in cutlass.range_constexpr(4):
+                        probs = []
+                        for e in cutlass.range_constexpr(4):
+                            k = 16 * hf + 4 * q + e
+                            x = tcs_scaled(s[4 * q + e], scale_log2, 32 * c + k, own)
+                            prob = cute.math.exp2(x - bias, fastmath=True)
+                            total += prob
+                            probs.append(prob)
+                        words.append(pack_fp8(tuple(probs)))
+                    chunk = 2 * c + hf
+                    if live & (c < 4):
+                        store_shared_words(
+                            row_at + (chunk ^ (h % 8)) * 16, tuple(words)
+                        )
+                    if live & (c >= 4):
+                        store_shared_words(tail_at + hf * 128, tuple(words))
+        store_shared_words(tmp + 1024 + 512 * half, (float_bits(total),))
+        cute.arch.fence_proxy("async.shared", space="cta")
+        tcs_bar_sync(3 + quarter, 64)  # warps w and w + 4: this quarter's P rows
+        total = bits_float(load_words(tmp + 1024, count=1, shared=True)[0])
+        total += bits_float(load_words(tmp + 1536, count=1, shared=True)[0])
+        if live & (half == 0):
+            push_float(
+                ba + self.off_x + PAIR_GROUP * 512 + 4 * (g * 128 + h),
+                total,
+                bar + 3,
+                peer,
+            )
+            if lane == 0:  # these 32 heads' P rows (4 KB + 1 KB of tail) to the peer
+                block = ba + self.off_p + g * TCS_REGION + 4096 * quarter
+                copy_s2cluster(block, block, bar + 3, peer, size=4096)
+                tail = ba + self.off_pt + g * PAIR_TAIL + 1024 * quarter
+                copy_s2cluster(tail, tail, bar + 3, peer, size=1024)
+        fence_tmem(before=True)  # the rescale's TMEM stores precede the PV
+        cute.arch.mbarrier_arrive(bar + 2)
+        wait(bar + 3, p % 2)
+        theirs = bits_float(
+            load_words(
+                ba + self.off_x + PAIR_GROUP * 512 + 4 * (peer * 128 + h),
+                count=1,
+                shared=True,
+            )[0]
+        )
+        l_new = l_run * alpha + total + theirs
+        if cutlass.const_expr(self.push is not None):  # noqa: SIM102
+            if p == 0:
+                self.rearm(args[0], g, tid)
+        if p + 1 == passes:
+            cute.arch.cluster_arrive_relaxed()
+        if (tid == 0) & (p + 1 < passes):
+            p_bytes: cutlass.Constexpr = self.heads * (128 + 32 + 4)
+            m_bytes: cutlass.Constexpr = self.heads * 4
+            cute.arch.mbarrier_arrive_and_expect_tx(bar + 3, p_bytes)
+            cute.arch.mbarrier_arrive_and_expect_tx(bar + 4, m_bytes)
+        return anchor, l_new
+
+    @cute.jit
+    def epilogue(self, args, ba, lane_tmem, m_run, l_run, passes, g, b, tid):
+        """Warps 0-7: the accumulator times out_scale / l as BF16 into shared memory,
+        then the rows and LSEs out (pushed to their owners, or the latent / LSE)."""
+        latent, lse_out, out_scale = args[4], args[5], args[7]
+        warp, lane = tid // 32, tid % 32
+        h = 32 * (warp % 4) + lane
+        half = warp // 4
+        pitch: cutlass.Constexpr = 2 * PAIR_COLS + 16
+        stage = ba + self.off_k
+        if (passes > 0) & (32 * (warp % 4) < self.heads):
+            inverse = out_scale / l_run
+            for c0 in cutlass.range_constexpr(0, PAIR_COLS // 2, 16):
+                o = load_tmem(lane_tmem + PAIR_COLS // 2 * half + c0, 16)
+                for q in cutlass.range_constexpr(2):
+                    words = tuple(
+                        bf16x2(
+                            o[8 * q + 2 * e] * inverse, o[8 * q + 2 * e + 1] * inverse
+                        )
+                        for e in range(4)
+                    )
+                    if cutlass.const_expr(self.push is not None):
+                        words = tuple(no_neg_zero(w) for w in words)
+                    at_byte = h * pitch + 2 * (PAIR_COLS // 2 * half + c0 + 8 * q)
+                    store_shared_words(stage + at_byte, words)
+        named_barrier(1, 256)
+        lse2 = m_run - Float32(LOG2_P_SCALE) + cute.math.log2(l_run, fastmath=False)
+        chunks: cutlass.Constexpr = PAIR_COLS // 8
+        if cutlass.const_expr(self.push is None):
+            for i in range(tid, self.heads * chunks, 256):
+                hh, c = i // chunks, i % chunks
+                words = (Uint32(0),) * 4
+                if passes > 0:
+                    words = load_words(
+                        stage + hh * pitch + 16 * c, count=4, shared=True
+                    )
+                store_words(at(latent, b, hh, g * PAIR_COLS + 8 * c), words)
+            if (g == 0) & (tid < self.heads):
+                value = Float32(-math.inf)
+                if passes > 0:
+                    value = lse2 * LN2
+                lse_out[b, tid] = value
+        else:
+            parity, rank = args[10], args[11]
+            H, D, cap = self.push
+            if passes > 0:
+                for i in cutlass.range_constexpr(self.heads * chunks // 256):
+                    hh = (tid + 256 * i) // chunks
+                    c = (tid + 256 * i) % chunks
+                    words = load_words(
+                        stage + hh * pitch + 16 * c, count=4, shared=True
+                    )
+                    slot = ((parity * D + rank) * cap + b) * H + hh % H
+                    pw = load_words(
+                        ba + self.off_pp + 8 * (hh // H), count=2, shared=True
+                    )
+                    owner = Int64(pw[0]) | (Int64(pw[1]) << 32)
+                    address = owner + (Int64(slot) * LATENT + g * PAIR_COLS + 8 * c) * 2
+                    store_relaxed(address, words)
+            if (g == 0) & (tid < self.heads):
+                value = Float32(EMPTY_LSE)
+                if passes > 0:
+                    value = lse2
+                    bad = (value != value) | (value <= Float32(EMPTY_LSE))
+                    if bad | (value >= Float32(-EMPTY_LSE)):
+                        value = Float32(EMPTY_LSE)
+                slot = ((parity * D + rank) * cap + b) * H + tid % H
+                lw = load_words(
+                    ba + self.off_pp + 128 + 8 * (tid // H), count=2, shared=True
+                )
+                laddr = Int64(lw[0]) | (Int64(lw[1]) << 32)
+                store_relaxed(laddr + Int64(slot) * 4, (float_bits(value),))
+
+
+def tcs_groups(batch, dcp):
+    """CTAs per row of TcsDecode for the pushing decode of `batch` rows under DCP
+    `dcp` (TCS_ROWS, VLLM_KIMI_K3_DCP8_TC_SPARSE=1), else 0."""
+    if not TCS_ON or not dcp:
+        return 0
+    return batch_table(TCS_ROWS.get(dcp, "")).get(batch, 0)
+
+
+def tcs_pair_own(batch, dcp):
+    """Keys per CTA per pass of TcsDecodePair at `batch` rows under DCP `dcp`
+    (TCS_PAIR_OWN, else PAIR_OWN)."""
+    return (
+        batch_table(TCS_PAIR_OWN.get(dcp, "")).get(batch, PAIR_OWN) if dcp else PAIR_OWN
+    )
+
+
+def tcs_carry(batch, dcp):
+    """Whether TcsDecode of `batch` rows under DCP `dcp` anchors P at the running
+    maximum from its second pass on (the VLLM_KIMI_K3_DCP8_TC_SPARSE_WIDE batches)."""
+    return bool(
+        TCS_WIDE_ON and dcp and batch_table(TCS_WIDE_ROWS.get(dcp, "")).get(batch, 0)
+    )
+
+
+def _dcp_world():
+    """The decode context parallel size of this process (0 if unknown)."""
+    try:
+        from vllm.distributed.parallel_state import get_dcp_group
+
+        return get_dcp_group().world_size
+    except Exception:  # noqa: BLE001 (no distributed state: not a DCP decode)
+        return 0
+
+
 def sparse_for(rows, gathered, padded):
     """Whether a DCP batch of `rows` runs SparseDcpDecode (`gathered` query
-    heads of a `padded`-row q mailbox)."""
+    heads of a `padded`-row q mailbox), or TcsDecode (tcs_groups)."""
     fits = gathered % HEADS == 0 and gathered <= padded
+    if fits and TCS_ON and gathered <= 128 and tcs_groups(rows, _dcp_world()):
+        return True
     return fits and batch_table(SPARSE_DCP).get(rows) == "sparse"
 
 
@@ -896,12 +2082,48 @@ def sparse_layout(batch, heads, push=None):
 
 @cache
 def compile_sparse(
-    batch, heads, padded, width, cap, device, push=None, tiles=None, bulk=None, px=None
+    batch,
+    heads,
+    padded,
+    width,
+    cap,
+    device,
+    push=None,
+    tiles=None,
+    bulk=None,
+    px=None,
+    groups=None,
 ):
     """SparseDcpDecode of `batch` rows (the q mailbox of `cap` rows; `push`:
     (owner heads, DCP) to push into the DcpValue mailbox; `tiles` / `bulk`:
     sparse_layout's unless given; `px`: SparseDcpDecodePx, sparse_px's unless
-    given)."""
+    given; `groups`: TcsDecode's CTAs per row, tcs_groups' of the pushing decode
+    unless given, 0: none)."""
+    if groups is None:
+        groups = tcs_groups(batch, push[1]) if push is not None else 0
+    if groups:
+        query = fake((cap, padded, ROW), None, torch.uint8)
+        kv = fake((cute.sym_int(), ROW), (ROW, 1), torch.uint8)
+        rows = fake((cute.sym_int(), width), (width, 1), torch.int32, 4)
+        valid = fake((cute.sym_int(),), (1,), torch.int32, 4)
+        latent = fake((batch, padded, LATENT))
+        lse = fake((batch, padded), None, torch.float32, 4)
+        owners = None if push is None else (*push, cap)
+        carry = tcs_carry(batch, push[1]) if push is not None else False
+        if groups == PAIR_GROUP:
+            own = tcs_pair_own(batch, push[1]) if push is not None else PAIR_OWN
+            tcs: TcsDecode | TcsDecodePair = TcsDecodePair(
+                batch, heads, padded, width, owners, own
+            )
+        else:
+            tcs = TcsDecode(batch, heads, padded, width, owners, groups, carry)
+        tcs_args: tuple = (query, kv, rows, valid, latent, lse)
+        tcs_args += (Float32(1.0), Float32(1.0))
+        if push is not None:
+            peers = fake((push[1],), None, torch.int64, 8)
+            tcs_args += (peers, peers, Int32(0), Int32(0))
+        with torch.accelerator.device_index(device):
+            return cute.compile(tcs, *tcs_args, make_fake_stream())
     px = sparse_px(batch, heads, push) if px is None else px
     layout = sparse_layout(batch, heads, push)
     tiles = layout[0] if tiles is None else tiles

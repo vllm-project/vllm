@@ -11,6 +11,7 @@
 
 The packed projection row is [q_a 1536 | kv_a 576 | gate H*128 | wk 128 | wv 32]."""
 
+import os
 from functools import cache
 
 import cutlass
@@ -39,8 +40,12 @@ def gate_columns(heads):
 def index_policies(batches):
     """Split-K tactics of the replicated wq_b projection (N 4096, K 1536) per padded
     batch (GB300 us, previous / these: B1-8 4.9/2.9, B32 3.7/3.4, B64 4.9/3.9);
-    wider batches run 64-row N tiles."""
+    wider batches run 64-row N tiles. VLLM_KIMI_K3_DSA_QUERY_40ROW_TILES=1: 33-40
+    rows on 40-row batch tiles with six stages (the same K order; measured faster in
+    A/B, 48 distinct weights back to back). Opt-in; default off."""
     tactics = {8: (128, 8, 3, 4), 16: (64, 16, 2, 6), 32: (64, 32, 1, 8)}
+    if os.environ.get("VLLM_KIMI_K3_DSA_QUERY_40ROW_TILES", "0") == "1":
+        tactics[40] = (64, 40, 1, 6)
     tactics[64] = (64, 64, 1, 4)
     return {b: tactics[next((n for n in tactics if b <= n), 64)] for b in batches}
 
