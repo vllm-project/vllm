@@ -51,7 +51,8 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_enable_force_include_usage.py
   # The Rust frontend rejects batched prompts.
   # The Rust frontend keeps the last of top_logprobs candidates with the same
-  # text and decodes byte fragments to "\ufffd" until #63926 lands.
+  # text until #68488 lands, and decodes byte fragments to "\ufffd" until
+  # #63926 lands.
   - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_prompt_logprobs_completion and not test_batch_completions and not string_collision"
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
   - pytest -v -s entrypoints/openai/completion/test_token_in_token_out.py
