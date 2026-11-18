@@ -37,12 +37,14 @@ def test_mm_device_do_normalize(width: int, height: int):
     normalized_values = processor(prompt, mm_items=mm_items)["mm_kwargs"].get_data()[
         "pixel_values"
     ]
+    assert isinstance(normalized_values, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     raw_values = processor(prompt, mm_items=mm_items)["mm_kwargs"].get_data()[
         "pixel_values"
     ]
+    assert isinstance(raw_values, torch.Tensor)
     assert raw_values.dtype == torch.uint8
     assert raw_values.shape == normalized_values.shape
 
@@ -71,7 +73,11 @@ def test_array_image_inputs(mm_device_do_normalize: bool, layout: str):
 
     def pixel_values(img: object) -> torch.Tensor:
         mm_items = processor.info.parse_mm_data({"image": [img]})
-        return processor([0], mm_items=mm_items)["mm_kwargs"].get_data()["pixel_values"]
+        values = processor([0], mm_items=mm_items)["mm_kwargs"].get_data()[
+            "pixel_values"
+        ]
+        assert isinstance(values, torch.Tensor)
+        return values
 
     torch.testing.assert_close(pixel_values(item), pixel_values(image), rtol=0, atol=0)
 
@@ -88,5 +94,6 @@ def test_explicit_kwargs_without_device_normalize():
 
     mm_items = processor.info.parse_mm_data({"image": [_noise_image(310, 470)]})
     values = processor([0], mm_items=mm_items)["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(values, torch.Tensor)
     # The remote processor ignores these kwargs and still normalises on the host.
     assert values.is_floating_point()

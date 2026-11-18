@@ -49,6 +49,16 @@ pub struct ModelSource {
     pub revision: Option<String>,
 }
 
+/// A Hugging Face Hub access token (`--hf-token`). `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HfToken(pub String);
+
+impl std::fmt::Debug for HfToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HfToken(<redacted>)")
+    }
+}
+
 /// Where each group of model files is read from, matching Python's
 /// `ModelConfig`: the tokenizer files and the chat template follow
 /// `--tokenizer`, `config.json` and `generation_config.json` follow
@@ -61,13 +71,20 @@ pub struct ModelFileSources {
     /// Source of `config.json` and `generation_config.json`, or `None` for
     /// `model`. When set, it must provide `config.json`.
     pub hf_config: Option<ModelSource>,
+    /// Resolve no tokenizer-side files (tokenizer, tokenizer config, chat
+    /// template), like Python's `skip_tokenizer_init`. `tokenizer` is ignored.
+    pub skip_tokenizer_init: bool,
+    /// Token sent on Hub requests in place of `HF_TOKEN` and the stored login
+    /// token, or `None` for those.
+    pub hf_token: Option<HfToken>,
 }
 
 /// Concrete tokenizer/config file locations resolved for one HF model id.
 #[derive(Debug, Clone)]
 pub struct ResolvedModelFiles {
-    /// The selected tokenizer source for this model.
-    pub tokenizer: TokenizerSource,
+    /// The selected tokenizer source for this model, or `None` with
+    /// [`ModelFileSources::skip_tokenizer_init`].
+    pub tokenizer: Option<TokenizerSource>,
     pub tokenizer_config_path: Option<PathBuf>,
     pub generation_config_path: Option<PathBuf>,
     pub preprocessor_config_path: Option<PathBuf>,
@@ -109,6 +126,8 @@ impl ResolvedModelFiles {
             },
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
+            hf_token: None,
         })
         .await
     }
@@ -119,27 +138,43 @@ impl ResolvedModelFiles {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
+            hf_token,
         } = sources;
+        let hf_token = hf_token.as_ref();
         // A cached model snapshot must contain the files that only the model provides.
         let model_required = match (tokenizer, hf_config) {
-            (None, _) => RequiredFile::Tokenizer,
-            (Some(_), None) => RequiredFile::Config,
-            (Some(_), Some(_)) => RequiredFile::Nothing,
+            (None, _) if !*skip_tokenizer_init => RequiredFile::Tokenizer,
+            (_, None) => RequiredFile::Config,
+            (_, Some(_)) => RequiredFile::Nothing,
         };
-        let model_files = SourceFiles::open(model, model_required).await?;
-        let tokenizer_files = match tokenizer {
-            Some(source) => Some(SourceFiles::open(source, RequiredFile::Tokenizer).await?),
-            None => None,
+        let model_files = SourceFiles::open(model, model_required, hf_token).await?;
+        // Under `skip_tokenizer_init` no tokenizer-side file is read: not the
+        // tokenizer, its config, or the chat template.
+        let (tokenizer, tokenizer_config_path, chat_template_path) = if *skip_tokenizer_init {
+            (None, None, None)
+        } else {
+            let tokenizer_files = match tokenizer {
+                Some(source) => {
+                    Some(SourceFiles::open(source, RequiredFile::Tokenizer, hf_token).await?)
+                }
+                None => None,
+            };
+            let tokenizer_files = tokenizer_files.as_ref().unwrap_or(&model_files);
+            let tokenizer_config_path = tokenizer_files.get("tokenizer_config.json").await?;
+            let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
+            (
+                Some(tokenizer_files.tokenizer(&tokenizer_config).await?),
+                tokenizer_config_path,
+                tokenizer_files.chat_template().await?,
+            )
         };
-        let tokenizer_files = tokenizer_files.as_ref().unwrap_or(&model_files);
         let config_files = match hf_config {
-            Some(source) => Some(SourceFiles::open(source, RequiredFile::Config).await?),
+            Some(source) => Some(SourceFiles::open(source, RequiredFile::Config, hf_token).await?),
             None => None,
         };
         let config_files = config_files.as_ref().unwrap_or(&model_files);
 
-        let tokenizer_config_path = tokenizer_files.get("tokenizer_config.json").await?;
-        let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
         let config_path = config_files.get("config.json").await?;
         if config_path.is_none()
             && let Some(source) = hf_config
@@ -152,7 +187,7 @@ impl ResolvedModelFiles {
         }
 
         Ok(Self {
-            tokenizer: tokenizer_files.tokenizer(&tokenizer_config).await?,
+            tokenizer,
             tokenizer_config_path,
             generation_config_path: config_files.get("generation_config.json").await?,
             preprocessor_config_path: model_files.get("preprocessor_config.json").await?,
@@ -160,7 +195,7 @@ impl ResolvedModelFiles {
                 .get("video_preprocessor_config.json")
                 .await?,
             processor_config_path: model_files.get("processor_config.json").await?,
-            chat_template_path: tokenizer_files.chat_template().await?,
+            chat_template_path,
             config_path,
             config_temp_path: None,
         })
@@ -218,7 +253,11 @@ enum SourceFiles {
 impl SourceFiles {
     /// Open a local model directory when `source` points to one, otherwise a
     /// cached snapshot that contains `required`, and finally the Hub.
-    async fn open(source: &ModelSource, required: RequiredFile) -> Result<Self> {
+    async fn open(
+        source: &ModelSource,
+        required: RequiredFile,
+        hf_token: Option<&HfToken>,
+    ) -> Result<Self> {
         let model_id = source.id.as_str();
         if Path::new(model_id).is_dir() {
             return Ok(Self::Dir(PathBuf::from(model_id)));
@@ -246,7 +285,8 @@ impl SourceFiles {
             )));
         }
 
-        let api = build_api(&cache).map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+        let api = build_api(&cache, hf_token)
+            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
         let repo = api.repo(repo);
         let info = repo.info().await.map_err(|error| {
             Error::Tokenizer(format!(
@@ -413,12 +453,16 @@ fn is_hf_hub_offline() -> bool {
     })
 }
 
-fn build_api(cache: &Cache) -> anyhow::Result<Api> {
+/// Like `huggingface_hub`, an explicit token wins over `HF_TOKEN`, which wins
+/// over the stored login token that `ApiBuilder::from_env` reads.
+fn build_api(cache: &Cache, hf_token: Option<&HfToken>) -> anyhow::Result<Api> {
     let mut builder =
         ApiBuilder::from_env().with_cache_dir(cache.path().clone()).with_progress(true);
-    if let Ok(token) = std::env::var(HF_TOKEN_ENV)
-        && !token.is_empty()
-    {
+    let token = match hf_token {
+        Some(HfToken(token)) => Some(token.clone()),
+        None => std::env::var(HF_TOKEN_ENV).ok().filter(|token| !token.is_empty()),
+    };
+    if let Some(token) = token {
         builder = builder.with_token(Some(token));
     }
     Ok(builder.build()?)
@@ -506,7 +550,7 @@ mod tests {
     use tempfile::tempdir;
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
-    use super::{ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
+    use super::{HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource};
 
     fn source(id: impl AsRef<std::ffi::OsStr>, revision: Option<&str>) -> ModelSource {
         ModelSource {
@@ -581,7 +625,7 @@ mod tests {
             .await
             .expect("resolve local model files");
 
-        match files.tokenizer {
+        match files.tokenizer.expect("tokenizer resolved") {
             TokenizerSource::HuggingFace(path) => {
                 assert_eq!(path, dir.path().join("tokenizer.json"));
             }
@@ -617,6 +661,8 @@ mod tests {
             model: source(model.path(), None),
             tokenizer: Some(source(tokenizer.path(), None)),
             hf_config: Some(source(config.path(), None)),
+            skip_tokenizer_init: false,
+            hf_token: None,
         })
         .await
         .unwrap();
@@ -626,7 +672,10 @@ mod tests {
             ["model", "tokenizer", "config"][dirs.iter().position(|d| d.path() == dir).unwrap()]
         };
         let origins = [
-            ("tokenizer", Some(files.tokenizer.path())),
+            (
+                "tokenizer",
+                files.tokenizer.as_ref().map(TokenizerSource::path),
+            ),
             ("tokenizer_config", files.tokenizer_config_path.as_deref()),
             ("chat_template", files.chat_template_path.as_deref()),
             ("config", files.config_path.as_deref()),
@@ -676,11 +725,13 @@ mod tests {
             model: source(model.path(), None),
             tokenizer: Some(source(tokenizer.path(), None)),
             hf_config: Some(source(tokenizer.path(), None)),
+            skip_tokenizer_init: false,
+            hf_token: None,
         })
         .await
         .unwrap();
         assert_eq!(
-            files.tokenizer.path(),
+            files.tokenizer.unwrap().path(),
             tokenizer.path().join("tokenizer.json")
         );
         assert_eq!(
@@ -700,6 +751,8 @@ mod tests {
             model: source(model.path(), None),
             tokenizer: None,
             hf_config: Some(source(model.path(), Some("release"))),
+            skip_tokenizer_init: false,
+            hf_token: None,
         })
         .await
         .unwrap_err();
@@ -745,7 +798,7 @@ mod tests {
             let files = ResolvedModelFiles::new("test/model", Some("release")).await.unwrap();
             let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
             assert_eq!(
-                files.tokenizer.path(),
+                files.tokenizer.as_ref().unwrap().path(),
                 cache.join("models--test--model/snapshots/commit/tokenizer.json")
             );
             let error = ResolvedModelFiles::new("test/model", Some("missing")).await.unwrap_err();
@@ -758,10 +811,12 @@ mod tests {
                 model: source("test/weights", Some("release")),
                 tokenizer: Some(source("test/model", Some("release"))),
                 hf_config: Some(source("test/config", Some("release"))),
+                skip_tokenizer_init: false,
+                hf_token: None,
             };
             let files = ResolvedModelFiles::from_sources(&sources).await.unwrap();
             assert_eq!(
-                files.tokenizer.path(),
+                files.tokenizer.as_ref().unwrap().path(),
                 cache.join("models--test--model/snapshots/commit/tokenizer.json")
             );
             assert_eq!(
@@ -812,6 +867,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hub_requests_send_hf_token_over_the_environment_token() {
+        const CHILD: &str = "VLLM_TEST_HF_TOKEN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            for hf_token in [Some(HfToken("flag-token".to_string())), None] {
+                // The mock Hub answers 404, so resolution fails after the request.
+                let result = ResolvedModelFiles::from_sources(&ModelFileSources {
+                    model: source("test/model", None),
+                    tokenizer: None,
+                    hf_config: None,
+                    skip_tokenizer_init: false,
+                    hf_token,
+                })
+                .await;
+                assert!(result.is_err());
+            }
+            return;
+        }
+
+        // Record the `Authorization` header of each Hub request.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let hub = std::thread::spawn(move || {
+            (0..2)
+                .map(|_| {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = std::io::BufReader::new(&stream);
+                    let mut authorization = None;
+                    loop {
+                        let mut line = String::new();
+                        std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("authorization")
+                        {
+                            authorization = Some(value.trim().to_string());
+                        }
+                    }
+                    std::io::Write::write_all(
+                        &mut &stream,
+                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                    authorization
+                })
+                .collect::<Vec<_>>()
+        });
+
+        // Isolate environment variables from other tests and Tokio worker threads.
+        let dir = tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "backend::hf::model_files::tests::hub_requests_send_hf_token_over_the_environment_token", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HF_HOME", dir.path())
+            .env("HF_ENDPOINT", &endpoint)
+            .env("HF_TOKEN", "env-token")
+            .env_remove("HF_HUB_CACHE")
+            .env_remove("HF_HUB_OFFLINE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            hub.join().unwrap(),
+            [
+                Some("Bearer flag-token".to_string()),
+                Some("Bearer env-token".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "too slow for CI and requires network access to Hugging Face"]
     async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
         let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5", None)
@@ -819,7 +952,7 @@ mod tests {
             .expect("resolve real Kimi K2.5 model files");
 
         let tokenizer_path = match &files.tokenizer {
-            TokenizerSource::Tiktoken(path) => path.clone(),
+            Some(TokenizerSource::Tiktoken(path)) => path.clone(),
             other => panic!("expected tiktoken tokenizer source, got {other:?}"),
         };
 

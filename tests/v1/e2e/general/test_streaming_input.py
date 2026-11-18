@@ -26,8 +26,11 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        reason="V1 currently only supported on CUDA, ROCm and XPU.",
+        allow_module_level=True,
+    )
 
 # Use a small model that doesn't require authentication for fast tests
 MODEL = "facebook/opt-125m"
@@ -259,7 +262,7 @@ async def test_streaming_input_cancel_output_stream(engine: AsyncLLM):
 
     # Collect a few outputs then cancel
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             if outputs_received >= 5:
                 # Cancel by breaking out of the loop (generator will be GC'd)
@@ -384,7 +387,7 @@ async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
     output_gen = engine.generate(many_inputs_generator(), sampling_params, request_id)
 
     try:
-        async for output in output_gen:
+        async for _ in output_gen:
             outputs_received += 1
             # Cancel after receiving some outputs
             if outputs_received >= 10:

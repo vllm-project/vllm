@@ -19,6 +19,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -28,7 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 # v4.1 per-layer compress ratios: 0 = pure sliding window, 1 = full-length
 # compressed cache, 2 = ratio-2 compressed cache. Ratio-1 and ratio-2 layers
@@ -97,9 +98,9 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 class DeepseekV4SparseMLABackend(AttentionBackend):
     """DeepSeek-V4.1 sparse-MLA backend base.
 
-    Subclasses ``AttentionBackend`` directly (not the V3.2
-    ``FlashMLASparseBackend``): DeepSeek-V4.1 runs its own attention layer
-    (``DeepseekV4Attention``), so it does not reuse the V3.2 builder or impl, and
+    Subclasses `AttentionBackend` directly (not the V3.2
+    `FlashMLASparseBackend`): DeepSeek-V4.1 runs its own attention layer
+    (`DeepseekV4Attention`), so it does not reuse the V3.2 builder or impl, and
     only needs to declare its own metadata builder, KV-cache layout, and the
     sparse-MLA capability flags.
     """
@@ -254,7 +255,17 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
 
 class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
@@ -275,10 +286,10 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
     """FlashMLA's mega-attention kernel: Q RoPE + sparse attention + inverse
     RoPE + FP8 cast of the output, in one launch.
 
-    Same metadata and KV-cache geometry as ``FLASHMLA_SPARSE_DSV41`` -- what
+    Same metadata and KV-cache geometry as `FLASHMLA_SPARSE_DSV41` -- what
     differs is the attention layer's interface contract (it takes an unnormed,
     unroped Q and returns an already-inverse-RoPE'd, quantized output) and the
-    extra ``nvfp4_ds_mla`` compressed-cache record only this kernel can read.
+    extra `nvfp4_ds_mla` compressed-cache record only this kernel can read.
     SM100 only; the kernel has no SM90 instantiation.
     """
 

@@ -57,7 +57,7 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "b12x MXFP8 kernels require a Blackwell 12x device"
         mxfp8 = _import_b12x_mxfp8()
         if mxfp8 is None:
-            return False, "Install the B12X backend with `pip install vllm[b12x]`"
+            return False, "The b12x backend requires flashinfer-python>=0.7.2"
         if not mxfp8.is_supported():
             return False, "b12x.gemm.mxfp8_linear is not supported"
         return True, None

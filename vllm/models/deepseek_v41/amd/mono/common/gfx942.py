@@ -5,14 +5,14 @@ kernels use.
 
 FP8 on gfx942 is FNUZ: the same bit patterns as OCP e4m3 stand for half the
 OCP value, and 0x80 is NaN instead of -0. The kernels quantize with an FP8
-maximum of 224 there (``arch.GFX942``), which gives the same bit patterns as
+maximum of 224 there (`arch.GFX942`), which gives the same bit patterns as
 OCP quantization with 448 and a scale code one higher. A product of two
 bytes then needs 2^(code_a + code_b - 254) with the FNUZ codes, which is what
-``mx_factor`` returns.
+`mx_factor` returns.
 
-gfx942 has no scaled MFMA. A GEMV runs one ``v_mfma_f32_16x16x32_fp8_fp8``
+gfx942 has no scaled MFMA. A GEMV runs one `v_mfma_f32_16x16x32_fp8_fp8`
 per 32-wide K block (one scale block) with a zero accumulator and adds the
-result times the block's scale factor (``mfma_fp8_scaled``). A lane holds 8
+result times the block's scale factor (`mfma_fp8_scaled`). A lane holds 8
 bytes of each block: K 8 (lane / 16) .. + 8 of the block, for its row (A) or
 column (B).
 """
@@ -37,7 +37,7 @@ def pair_i64(lo, hi):
 
 def mfma_fp8(a, b, c):
     """One v_mfma_f32_16x16x32_fp8_fp8: A and B are a lane's 8 FNUZ bytes as
-    an i64 (``pair_i64``), C a Vector of 4 f32."""
+    an i64 (`pair_i64`), C a Vector of 4 f32."""
     return fx.Vector(
         rocdl.mfma_f32_16x16x32_fp8_fp8(T.vec(4, T.f32), [a, b, c, 0, 0, 0])
     )
@@ -51,7 +51,7 @@ def mx_factor(code_sum):
 
 
 def acc_scaled(acc, d, f):
-    """``acc`` + ``d`` * ``f`` for the 4 accumulator values of a lane."""
+    """`acc` + `d` * `f` for the 4 accumulator values of a lane."""
     return fx.Vector.from_elements(
         [fx.Float32(fmath.fma(d[i], f, acc[i])) for i in range(4)], fx.Float32
     )
@@ -82,8 +82,8 @@ def pin_acc(acc):
 
 
 def mfma_fp8_scaled(acc, a, b, code_sum):
-    """``acc`` plus one 32-wide K block's product: the FP8 MFMA with a zero
-    accumulator, then times the block's scale factor (``mx_factor``)."""
+    """`acc` plus one 32-wide K block's product: the FP8 MFMA with a zero
+    accumulator, then times the block's scale factor (`mx_factor`)."""
     zero = fx.Vector.filled(4, 0.0, fx.Float32)
     return acc_scaled(acc, mfma_fp8(a, b, zero), mx_factor(code_sum))
 
@@ -109,7 +109,7 @@ def fp4x8_fnuz(w):
     to bits 4 .. 2, which are the low two exponent bits and the top mantissa
     bit of e4m3 with bias 8. A scale code for these bytes is the e8m0 code
     plus 7. A negative zero nibble (0x8) would give 0x80, the FNUZ NaN, so
-    the weights must not hold one: ``weights942.fp4_drop_negative_zero_``
+    the weights must not hold one: `weights942.fp4_drop_negative_zero_`
     rewrites them to +0 at load, which changes no product."""
     w = fx.Int32(w)
     even = ((w << 2) & 0x1C1C1C1C) | ((w << 4) & SIGN_BYTES)
@@ -118,7 +118,7 @@ def fp4x8_fnuz(w):
 
 
 def fp8x2_f32(word, hi):
-    """Two FNUZ bytes of a dword as f32: bytes 0 and 1, or 2 and 3 when ``hi``."""
+    """Two FNUZ bytes of a dword as f32: bytes 0 and 1, or 2 and 3 when `hi`."""
     v = fx.Vector(rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), fx.Int32(word), hi))
     return v[0], v[1]
 
@@ -132,9 +132,9 @@ def bf16_hi_pair(a, b):
 
 
 def mfma_bf16_k32(a, b, c):
-    """The 16x16x32 bf16 product of gfx950's ``mfma_f32_16x16x32_bf16`` as two
-    16x16x16 bf16 MFMAs: lane l holds K 8 (l // 16) .. + 8 in ``a`` and
-    ``b`` (8 bf16 each). The first MFMA takes elements 0 .. 3 of every lane,
+    """The 16x16x32 bf16 product of gfx950's `mfma_f32_16x16x32_bf16` as two
+    16x16x16 bf16 MFMAs: lane l holds K 8 (l // 16) .. + 8 in `a` and
+    `b` (8 bf16 each). The first MFMA takes elements 0 .. 3 of every lane,
     the second elements 4 .. 7, so together they cover all 32 K."""
     a16 = fx.Vector(a).bitcast(fx.Int16)
     b16 = fx.Vector(b).bitcast(fx.Int16)

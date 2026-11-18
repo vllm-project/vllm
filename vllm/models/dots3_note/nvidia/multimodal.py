@@ -318,10 +318,6 @@ class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             mapper=self.hf_to_vllm_mapper,
         )
 
-    def process_weights_after_loading(self) -> None:
-        if self.visual is not None:
-            self.visual.process_weights_after_loading()
-
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(
             language_model="language_model",

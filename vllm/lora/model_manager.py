@@ -482,8 +482,17 @@ class LoRAModelManager:
             return module_name.rpartition(".")[0]
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+        # Layers that share a suffix with a LoRA layer but are not wrapped,
+        # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
+        self.unsupported_lora_modules: set[str] = set()
 
-        for module_name, module in self.model.named_modules(remove_duplicate=False):
+        named_modules = list(self.model.named_modules(remove_duplicate=False))
+        runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
+        # MoERunner aliases block modules. Visit them last so that the block path,
+        # which is what adapters target, is the one tracked in `self.modules`.
+        named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
+
+        for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
                 continue
 
@@ -495,6 +504,11 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 ):
+                    if (
+                        module_name.rsplit(".", 1)[-1] in self.supported_lora_modules
+                        and self._get_punica_wrapper(module_name) is not None
+                    ):
+                        self.unsupported_lora_modules.add(module_name)
                     continue
             elif not self._match_target_modules(module_name) and not is_classifier_head:
                 # Full classification heads bypass the A/B LoRA target filter.
@@ -618,7 +632,7 @@ class LoRAModelManager:
                 continue
             self.register_module(module_name, new_module)
 
-            self._register_packed_modules(module_name)
+            self._register_packed_modules(module_name, module)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)
 
@@ -696,13 +710,13 @@ class LoRAModelManager:
                     )
                     model.loras[module_name] = lora
                 elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
-                    # Case for 3D moe model
+                    # Case for 3D moe model, sized by global experts for EP
                     # w2
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         module.w2_input_size,
                         module.w2_output_size,
-                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w2_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -712,8 +726,7 @@ class LoRAModelManager:
                         module_name,
                         module.w13_input_size,
                         module.w13_output_size,
-                        rank
-                        * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w13_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -834,10 +847,17 @@ class LoRAModelManager:
 
         return None
 
-    def _register_packed_modules(self, module_full_name: str) -> None:
+    def _register_packed_modules(
+        self, module_full_name: str, module: nn.Module
+    ) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
-        replacements = self.packed_modules_mapping.get(module_name, [])
+        # A base layer may set `lora_packed_modules` to override the leaf-name
+        # mapping for that layer only, e.g. Gemma4 k_eq_v layers pack
+        # [q_proj, k_proj, k_proj].
+        replacements = getattr(
+            module, "lora_packed_modules", None
+        ) or self.packed_modules_mapping.get(module_name, [])
         # When replacements is less than or equal to 1, it indicates that this
         # module is not a packed module.
         if len(replacements) <= 1:
@@ -925,7 +945,7 @@ class LoRAModelManager:
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
-            lora_device = next(iter(first_lora.lora_a))
+            lora_device = next(t for t in first_lora.lora_a if t is not None).device
         else:
             lora_device = first_lora.lora_a.device
         # Execute pin_memory after LoRA weight merging, mainly because:
@@ -1015,6 +1035,8 @@ class LoRAModelManager:
                     gate_up_proj_lora.lora_b,
                     down_proj_lora.lora_b,
                 ]
+                # Avoid pinning the gate_up tensors twice
+                lora_model.loras.pop(module_name + ".base_layer", None)
             else:
                 # Some 3D MoE models haven't added the `is_3d_moe_weight`
                 # attribute yet, so fallback here
@@ -1176,17 +1198,17 @@ class LoRAModelManager:
     ) -> list[str]:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
-        ``new_module_names`` is produced by
-        ``fused_moe_make_expert_params_mapping`` and is ordered
-        ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
+        `new_module_names` is produced by
+        `fused_moe_make_expert_params_mapping` and is ordered
+        `[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
-        ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
+        `FusedMoEWithLoRA` with EP enabled, we slice the list to the
         contiguous block of experts owned by this rank so the downstream
-        ``pack_moe`` call only consumes local weights and produces a
-        tensor sized to ``local_num_experts`` directly.
+        `pack_moe` call only consumes local weights and produces a
+        tensor sized to `local_num_experts` directly.
 
         Returns the original list unchanged for non-MoE modules, the 3D
-        MoE path (handled separately by ``_stack_moe_lora_weights``),
+        MoE path (handled separately by `_stack_moe_lora_weights`),
         modules without EP, or layouts we cannot cleanly partition.
         """
         module = self.modules.get(module_name)

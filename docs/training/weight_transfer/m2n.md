@@ -50,14 +50,14 @@ vllm serve my-model --weight-transfer-config '{"backend": "nccl_m2n"}'
 
 ## Trainer Side
 
-The trainer uses the stateful trainer engine. m2n needs each parameter's source layout, which the base `WeightSource` does not carry, so it takes an `M2NWeightSource`. `DTensorModuleSource` covers the common case: it reads each parameter's device mesh and placements and yields **local shards** — it never calls `full_tensor()`.
+The trainer uses the stateful trainer engine. m2n plans each reshard from the parameter's source layout, which a [`WeightSource`](base.md#parammeta-ownership-and-layout) declares on its `ParamMeta` (`owners`, `mesh_shape`, `placements`), and sends what `iter_local()` yields: each rank's **local shard**, never a `full_tensor()`. `ModuleSource` covers the common case: it reads each parameter's device mesh and placements.
 
 ```python
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
 from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
 # Called on every trainer rank; rank 0 is the sender.
@@ -70,7 +70,7 @@ engine = WeightTransferTrainerFactory.trainer_init(
         rank=my_rank,
     ),
     client=RayVLLMWeightSyncClient(llm_handle),
-    source=DTensorModuleSource(model, num_trainer_ranks),
+    source=ModuleSource(model),
 )
 
 # Each round, on every trainer rank:
@@ -80,14 +80,10 @@ engine.send_weights()
 `send_weights()` drives the whole round — `start_weight_update`, `update_weights`, `finish_weight_update`. Every rank in the communicator must be inside the same reshard, so `update_weights` has to be in flight while the trainer sends; the engine runs it on a helper thread so the trainer loop does not have to open-code that.
 
 Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass
-`M2NWeightSource` and supply layouts explicitly. A source may yield any
-nccl4py-compatible CUDA buffer: a torch tensor, a CUDA Array Interface object,
-or a raw device pointer. vLLM keeps buffer owners alive through stream
-completion, using allocator stream tracking when the buffer provides it.
-Sources must provide buffers on the communicator's current device; nccl4py
-resolves their pointers but does not verify device ownership. Raw-pointer
-sources are additionally responsible for pointer lifetime and matching their
-declared dtype and local shape.
+`WeightSource`, declare each layout on `ParamMeta` and implement `iter_local()`.
+A 1-D mesh is described over m2n's 2-D mesh with a size-1 second axis. Each
+yielded tensor must match its declared dtype and local shape, and is kept alive
+in stream order until its reshard completes.
 
 See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
@@ -95,8 +91,8 @@ See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable
 
 - vLLM validates tensor-rank and dtype support while agreeing on the complete
   plan; the installed M2N runtime validates them again for each reshard.
-- Each parameter's source mesh must cover the same contiguous trainer-rank interval starting at 0, and be 1-D or 2-D.
-- `Partial` placements are not supported.
+- **No pipeline-parallel trainers.** Every parameter must be owned by all trainer ranks, in rank order (`owners` unset or `(0, ..., T-1)`), with a 1-D or 2-D mesh. Partitioned owners, such as one group per pipeline stage, are rejected at init.
+- `Partial` placements cannot be sent as shards. `ModuleSource` declares such a parameter replicated and gathers it in `iter_local()`.
 - Models with known model-level checkpoint preprocessing use the full-tensor
   fallback for the affected module.
 - A reshard cannot be issued from inside a CUDA graph capture (weight updates run outside capture, so this only matters for custom callers).

@@ -4,8 +4,8 @@
 #
 # Upload ROCm wheels to S3 with proper index generation
 #
-# Usage: upload-rocm-wheels.sh <base-dockerfile>
-#   base-dockerfile  the ROCm stack, e.g. docker/Dockerfile.rocm_base (see rocm/stack.sh)
+# Usage: upload-rocm-wheels.sh <stack> <dir>
+#   stack  rocm (TheRock);  dir  the stack's wheels plus the vLLM wheel
 #
 # Required environment variables:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IAM role)
@@ -23,11 +23,11 @@ set -ex
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
-# shellcheck source=.buildkite/scripts/rocm/stack.sh
-source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "${1:?Usage: $0 <base-dockerfile>}"
+STACK="${1:?Usage: $0 <stack> <dir>}"
+WHEEL_DIR="${2:?Usage: $0 <stack> <dir>}"
+VARIANT=$(basename "$WHEEL_DIR"/vllm-*.whl | grep -oE 'rocm[0-9]+' | tail -1)
 ROCM_SUBPATH="rocm/${BUILDKITE_COMMIT}"
-WHEEL_DIRS="$ROCM_STACK_BASE_WHEELS_DIR $ROCM_STACK_VLLM_WHEEL_DIR"
-WHEEL_SUBPATH="$ROCM_SUBPATH/${ROCM_STACK_VARIANT}-wheels"
+WHEEL_SUBPATH="$ROCM_SUBPATH/${VARIANT:?no vLLM wheel in $WHEEL_DIR}-wheels"
 S3_WHEEL_PREFIX="s3://$BUCKET/$WHEEL_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
 
@@ -61,9 +61,7 @@ source .buildkite/scripts/lib/manylinux.sh
 # Collect all wheels
 rm -rf all-rocm-wheels "$INDICES_OUTPUT_DIR"
 mkdir -p all-rocm-wheels
-for dir in $WHEEL_DIRS; do
-    cp "$dir"/*.whl all-rocm-wheels/ 2>/dev/null || true
-done
+cp "$WHEEL_DIR"/*.whl all-rocm-wheels/ 2>/dev/null || true
 
 WHEEL_COUNT=$(find all-rocm-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
 echo "Total wheels to upload: $WHEEL_COUNT"
@@ -119,10 +117,10 @@ sed -i 's/import pybase64 as base64/import base64/g' tools/vllm-rocm/therock_whe
 
 INDEX_ARGS=(--version "$ROCM_SUBPATH" --wheel-dir "${WHEEL_SUBPATH#rocm/}")
 # TheRock's SDK, device kernels and torchvision/torchaudio are linked, not hosted
-if [[ "$ROCM_STACK_THEROCK" == "1" ]]; then
+if [[ "$STACK" == "rocm" ]]; then
     $PYTHON tools/vllm-rocm/therock_wheels.py external-links \
-        --dockerfile "$ROCM_STACK_BASE_DOCKERFILE" \
-        --torch-wheel "$(ls "$ROCM_STACK_BASE_WHEELS_DIR"/torch-*.whl)" > therock-external-links.txt
+        --dockerfile docker/Dockerfile.rocm_base \
+        --torch-wheel "$(ls "$WHEEL_DIR"/torch-*.whl)" > therock-external-links.txt
     cat therock-external-links.txt
     INDEX_ARGS+=(--external-links therock-external-links.txt)
 fi
@@ -191,11 +189,11 @@ echo "Wheels available at:"
 echo "  s3://$BUCKET/$WHEEL_SUBPATH/"
 echo ""
 echo "Install command (by commit):"
-echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/$ROCM_STACK_VARIANT/"
+echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/$VARIANT/"
 echo ""
 if [[ "${NIGHTLY:-0}" == "1" ]]; then
     echo "Install command (nightly):"
-    echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/rocm/nightly/$ROCM_STACK_VARIANT/"
+    echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/rocm/nightly/$VARIANT/"
 fi
 echo ""
 echo "Wheel count: $WHEEL_COUNT"
