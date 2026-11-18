@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-15
+  date_updated: 2026-11-18
   tasks:
     - multimodal
     - text
@@ -30,6 +30,9 @@ meta:
     dgx_spark_gb10: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
+    # FP8 validated 2026-11-18 on 1×MI325X (TP1), tool calls included: vllm-openai-rocm
+    # nightly-7c3a9302 (vLLM 0.34.0rc1.dev776+g7c3a9302f, ROCm 10.0.0).
+    mi325x: verified
 
 model:
   model_id: "Qwen/Qwen3.8-27B"
@@ -185,6 +188,28 @@ variants:
     vram_minimum_gb: 38
     description: "Official block-scaled FP8 checkpoint — 28.7 GiB: 1 GPU."
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi355x, rtx_5090, rtx_5090_2x]
+    hardware_overrides:
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_args:
+          - "--attention-backend"
+          - "ROCM_AITER_FA"
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "30720"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--enable-chunked-prefill"
+          - "--compilation-config"
+          - '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+rms_norm","+quant_fp8"]}'
+          - "--disable-log-stats"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
   nvfp4:
     model_id: "Inferact/Qwen3.8-27B-NVFP4"
     precision: nvfp4
@@ -285,6 +310,13 @@ hardware_overrides:
       - "--enforce-eager"
 
 strategy_overrides: {}
+
+notes:
+  - title: "MI325X was verified with FP8"
+    when: { hardware: [mi325x], variants: [default] }
+    body: |
+      The verified run on MI325X used the FP8 checkpoint at TP1. This BF16 command has
+      not been run on MI325X.
 
 guide: |
   ## Overview
@@ -410,6 +442,15 @@ guide: |
   Validated on 4x Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
   official vLLM XPU image `vllm/vllm-openai-xpu:latest`. `--enforce-eager` is required on this
   backend. Select Arc Pro B60/B70 in the hardware picker above for the exact command.
+
+  ### AMD MI325X
+
+  Verified on one MI325X at TP1 with the FP8 checkpoint and the official
+  `vllm/vllm-openai-rocm:nightly` image (tested at `nightly-7c3a9302`), tool calls
+  included. BF16, the other variants and TP > 1 were not run on this GPU.
+
+  GSM8K scores 0.950 with vLLM's `tests/evals/gsm8k/gsm8k_eval.py`: 5-shot, all 1,319
+  questions, temperature 0, `--max-tokens 1024`.
 
   <!-- overlay:vllm-ascend:ascend -->
   
