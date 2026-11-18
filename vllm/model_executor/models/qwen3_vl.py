@@ -2242,14 +2242,17 @@ class Qwen3VLForConditionalGeneration(
                     mask_fn = vidcom2_compute_retention_mask
                 else:
                     mask_fn = compute_retention_mask
-                retention_mask = mask_fn(
-                    emb,
-                    size,
-                    spatial_merge_size=self.visual.spatial_merge_size,
-                    q=self.video_pruning_rate,
-                )
-
+                # Pruning picks the kept tokens and the per-frame counts on the
+                # host, so this step syncs by design (this method runs only with
+                # pruning enabled).
                 with gpu_sync_allowed():
+                    retention_mask = mask_fn(
+                        emb,
+                        size,
+                        spatial_merge_size=self.visual.spatial_merge_size,
+                        q=self.video_pruning_rate,
+                    )
+
                     # Apply retention mask.
                     emb = emb[retention_mask]
 
@@ -2264,13 +2267,16 @@ class Qwen3VLForConditionalGeneration(
                 num_tokens_per_frame = [feature_size] * num_frames
                 retention_mask = None
 
-            emb = self._create_final_video_embeddings(
-                video_embeddings=emb,
-                num_tokens_per_frame=num_tokens_per_frame,
-                timestamps=timestamps,
-                video_grid_thw=size,
-                retention_mask=retention_mask,
-            )
+            # The replacement token ids are built on the host from the kept
+            # per-frame counts.
+            with gpu_sync_allowed():
+                emb = self._create_final_video_embeddings(
+                    video_embeddings=emb,
+                    num_tokens_per_frame=num_tokens_per_frame,
+                    timestamps=timestamps,
+                    video_grid_thw=size,
+                    retention_mask=retention_mask,
+                )
 
             video_embeds_out.append(emb)
 
