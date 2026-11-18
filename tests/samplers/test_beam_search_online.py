@@ -121,8 +121,12 @@ async def test_online_beam_search_bounds_finished_histories(
 
     live = weakref.WeakValueDictionary()
 
+    class TrackedSequence(BeamSearchSequence):
+        # Allow weak references for lifetime tracking in this test.
+        pass
+
     def track_sequence(**kwargs):
-        beam = BeamSearchSequence(**kwargs)
+        beam = TrackedSequence(**kwargs)
         if beam.finish_reason == "stop":
             live[id(beam)] = beam
         return beam
