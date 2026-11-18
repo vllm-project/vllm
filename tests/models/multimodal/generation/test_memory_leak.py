@@ -3,12 +3,12 @@
 
 import gc
 import random
-import re
 import string
 import sys
 from pathlib import Path
 
 import pytest
+import regex as re
 import torch
 from PIL import Image
 
