@@ -8,6 +8,7 @@ from pydantic import model_validator
 from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 if TYPE_CHECKING:
+    from vllm.config.load import LoadConfig
     from vllm.config.model import ModelConfig
     from vllm.config.parallel import ParallelConfig
 
@@ -61,6 +62,11 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    shared_host_endpoint: str | None = None
+    """Opt-in owner host:port for an immutable external Engram generation."""
+
+    shared_host_generation: str | None = None
+    """Expected generation printed by the owner after checkpoint publication."""
     peer_group_size: int = 0
     """Split each GPU table's rows over this many GPUs of several engines in one
     NVLink domain (the sum of their GPU counts); lookups read rows from the
@@ -75,6 +81,24 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        shared_values = (
+            self.shared_host_endpoint,
+            self.shared_host_generation,
+        )
+        if any(shared_values) and not all(shared_values):
+            raise ValueError("shared Engram requires endpoint and generation")
+        if self.shared_host_endpoint and (
+            not self.cpu_offload
+            or self.dp_shared_memory
+            or self.use_thp
+            or self.embedding_across_dp
+            or self.peer_group_size
+            or self.peer_group_store
+        ):
+            raise ValueError(
+                "shared Engram requires CPU offload without DP sharing, "
+                "huge-page storage, embedding_across_dp or peer group"
+            )
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -105,6 +129,17 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if self.shared_host_endpoint:
+            from vllm.platforms import current_platform
+
+            if (
+                model_config.architecture != "DeepseekV41ForCausalLM"
+                or not current_platform.is_cuda()
+            ):
+                raise ValueError("shared Engram requires CUDA DeepSeek V4.1")
+            quant = getattr(model_config.hf_text_config, "quantization_config", None)
+            if (quant or {}).get("engram_embed_quant", "fp8") != "fp8":
+                raise ValueError("shared Engram requires FP8 embedding tables")
         if self.disk_offload:
             from vllm.platforms import current_platform
 
@@ -120,6 +155,7 @@ class EngramConfig:
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
+                and not self.shared_host_endpoint
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
@@ -127,6 +163,8 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.shared_host_endpoint and parallel_config.data_parallel_size != 1:
+            raise ValueError("shared Engram initially requires DP size 1")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
@@ -160,6 +198,20 @@ class EngramConfig:
                     f"An Engram peer group of {self.peer_group_size} GPUs cannot "
                     f"hold an engine of {parallel_config.data_parallel_size}"
                 )
+
+    def verify_load_config(self, load_config: "LoadConfig") -> None:
+        """External tables require skipping mixed-shard tensors before reading."""
+        if not self.shared_host_endpoint:
+            return
+        if (
+            load_config.load_format not in ("auto", "safetensors")
+            or load_config.safetensors_load_strategy != "lazy"
+            or load_config.model_loader_extra_config.get("enable_multithread_load")
+        ):
+            raise ValueError(
+                "shared Engram requires safetensors lazy loading without "
+                "multi-thread loading"
+            )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
