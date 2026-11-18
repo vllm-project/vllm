@@ -341,3 +341,14 @@ def test_skip_falls_back_when_input_shapes_differ(tmp_path, monkeypatch):
     finally:
         undo()
     assert calls == [(3, 5)]
+
+
+@cuda
+def test_audit_reports_cuda_state_outside_the_snapshot(tmp_path, caplog):
+    model = _Toy()
+    hidden = {"kept_elsewhere": torch.rand(1024, 1024, device="cuda")}
+    tensors, _, _ = ws.collect_state(_roots(model))
+    with caplog.at_level("WARNING"):
+        ws._audit(_roots(model), tensors)
+    assert "uncovered CUDA storages" in caplog.text
+    del hidden

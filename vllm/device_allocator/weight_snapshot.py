@@ -347,6 +347,8 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     finally:
         os.close(fd)
     _restore_scalars(roots, header.get("scalars", {}), scalars)
+    if envs.VLLM_WEIGHT_SNAPSHOT_AUDIT:
+        _audit(roots, tensors)
     total = sum(t.nbytes for _, t in tensors)
     elapsed = time.perf_counter() - t0
     logger.info(
@@ -391,6 +393,32 @@ def _plan(roots, saved: list[dict], tensors, aliases, offset: int, path) -> list
             f"({len(problems)} total); delete it to rebuild"
         )
     return plan
+
+
+def _audit(roots, tensors) -> None:
+    """Log live CUDA tensors whose storage the snapshot does not cover."""
+    import gc
+
+    covered = {t.untyped_storage().data_ptr() for _, t in tensors}
+    seen, missed = set(), []
+    for obj in gc.get_objects():
+        if isinstance(obj, torch.Tensor) and obj.is_cuda and obj.numel():
+            ptr = obj.untyped_storage().data_ptr()
+            if ptr in covered or ptr in seen:
+                continue
+            seen.add(ptr)
+            owners = [type(r).__name__ for r in gc.get_referrers(obj)][:4]
+            missed.append(
+                (obj.untyped_storage().nbytes(), obj.dtype, tuple(obj.shape), owners)
+            )
+    missed.sort(key=lambda m: -m[0])
+    logger.warning(
+        "Weight snapshot audit: %d uncovered CUDA storages, %.2f GiB",
+        len(missed),
+        sum(m[0] for m in missed) / 2**30,
+    )
+    for m in missed[:40]:
+        logger.warning("  uncovered %.1f MiB %s %s via %s", m[0] / 2**20, *m[1:])
 
 
 def _bind(roots, key: str, t) -> bool:
