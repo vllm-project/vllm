@@ -544,8 +544,7 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
-  # test_sdsa_engine.py runs TP2. The SDSA and GDP tests skip themselves
-  # while vLLM's FlashInfer lacks their kernels.
+  # test_sdsa_engine.py runs TP2.
   num_devices: 2
   source_file_dependencies:
   - vllm/models/nemotron_shortcut/

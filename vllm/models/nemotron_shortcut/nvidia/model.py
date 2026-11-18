@@ -689,9 +689,17 @@ class NemotronShortcutTextModel(nn.Module):
         self.residual_readout = NemotronShortcutWideResidualRead(config)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+        self._make_empty_streams = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.hidden_size * config.wide_residual_num_streams
         )
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        # The streams cross PP stages in the dtype they are kept in.
+        if self.config.residual_in_fp32:
+            dtype = torch.float32
+        return self._make_empty_streams(batch_size, dtype, device)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

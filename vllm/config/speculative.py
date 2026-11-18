@@ -1042,13 +1042,8 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
-        from vllm.transformers_utils.configs.nemotron_shortcut import (
-            NemotronShortcutConfig,
-            NemotronShortcutTextConfig,
-        )
-
         if (
-            hf_config.model_type == NemotronShortcutConfig.model_type
+            hf_config.model_type == "nemotron4"
             and getattr(hf_config.get_text_config(), "num_nextn_predict_layers", 0) > 0
         ):
             # The MTP head reads the language model's fields; the quant config
@@ -1061,7 +1056,7 @@ class SpeculativeConfig:
             ):
                 hf_config.quantization_config = copy.deepcopy(quantization_config)
         if (
-            hf_config.model_type == NemotronShortcutTextConfig.model_type
+            hf_config.model_type == "nemotron4_text"
             and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
         ):
             hf_config.model_type = "nemotron_shortcut_mtp"

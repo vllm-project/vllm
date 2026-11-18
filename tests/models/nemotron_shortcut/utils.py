@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A small Nemotron Shortcut config and module builder for the tests."""
 
+import math
+
 import torch
 
 from vllm.platforms import current_platform
@@ -53,3 +55,12 @@ def build(factory):
     for param in module.parameters():
         param.data.uniform_(-0.1, 0.1)
     return module
+
+
+def realistic_weights(model: torch.nn.Module) -> None:
+    """Scale matrices to +-1/sqrt(fan_in), norms to 1: dummy weights are +-1e-3."""
+    for name, param in model.named_parameters():
+        if "norm" in name and param.dim() == 1:
+            param.data.fill_(1.0)
+        elif param.dim() >= 2 and param.is_floating_point():
+            param.data *= 1 / (1e-3 * math.sqrt(param.shape[-1]))

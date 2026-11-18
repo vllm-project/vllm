@@ -41,11 +41,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.interfaces import (
     LocalArgmaxMixin,
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
     SupportsPP,
     SupportsQuant,
+    _require_is_multimodal,
 )
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
 )
@@ -187,7 +191,17 @@ class NemotronShortcutMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class NemotronShortcutMTP(LocalArgmaxMixin, nn.Module, SupportsPP, SupportsQuant):
+class NemotronShortcutMTP(
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsPP,
+    SupportsQuant,
+    SupportsMultiModalEmbeddings,
+):
+    """The draft head is trained on the target's input stream, so on image and
+    video prompts the placeholder positions carry the target's vision
+    embeddings, not the text embedding of the placeholder token."""
+
     # The draft head consumes only the `mtp.*` subtree plus the shared embedding
     # and head; everything else in the checkpoint belongs to the target.
     hf_to_vllm_mapper = WeightsMapper(
@@ -250,6 +264,22 @@ class NemotronShortcutMTP(LocalArgmaxMixin, nn.Module, SupportsPP, SupportsQuant
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            multimodal_embeddings,
+            _require_is_multimodal(is_multimodal),
+        )
 
     def forward(
         self,

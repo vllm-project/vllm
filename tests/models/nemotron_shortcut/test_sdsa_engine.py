@@ -4,13 +4,12 @@
 no checkpoint is needed: build, compile, the KV cache shared with GDP layers,
 chunked prefill, CUDA graphs, TP2 and MTP. The sdsa/ tests check the selection."""
 
-import math
 import random
 
 import torch
 
 from tests.conftest import VllmRunner
-from tests.models.nemotron_shortcut.utils import make_config
+from tests.models.nemotron_shortcut.utils import make_config, realistic_weights
 from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_marks
 from vllm import SamplingParams
@@ -24,15 +23,6 @@ rng = random.Random(0)
 # Two prompts of at most K tokens, and one of 3K tokens, prefilled in chunks.
 # The last token id is the image token, so the prompts do not use it.
 PROMPTS = [[rng.randrange(VOCAB - 1) for _ in range(n)] for n in (300, K - 8, 3000)]
-
-
-def realistic_weights(model: torch.nn.Module) -> None:
-    """Scale matrices to +-1/sqrt(fan_in), norms to 1: dummy weights are +-1e-3."""
-    for name, param in model.named_parameters():
-        if "norm" in name and param.dim() == 1:
-            param.data.fill_(1.0)
-        elif param.dim() >= 2 and param.is_floating_point():
-            param.data *= 1 / (1e-3 * math.sqrt(param.shape[-1]))
 
 
 def run(path, index_topk, **kwargs) -> tuple[list, dict]:
