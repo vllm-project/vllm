@@ -244,7 +244,7 @@ Secondary tiers, such as `fs` and `obj`, accept an optional `access_mode` field 
 | Value | Behavior |
 | --- | --- |
 | `readwrite` | Both loads and stores (default; same behavior as omitting `access_mode`). |
-| `read` | Serves loads only. The tier is never written to. Use it to consume a cache populated by another instance. |
+| `read` | Serves loads only. The tier is never written to except possibly at initialization for probing. Use it to consume a cache populated by another instance. |
 | `write` | Accepts stores only. Lookups always miss, so the tier never serves loads. Use it to populate a shared cache that other instances read. |
 
 ### Threading model
