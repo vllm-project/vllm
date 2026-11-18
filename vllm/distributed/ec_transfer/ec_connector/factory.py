@@ -62,7 +62,7 @@ class ECConnectorFactory:
         """Get the connector class by name."""
         connector_name = ec_transfer_config.ec_connector
         if connector_name is None:
-            raise ValueError("EC connect must not be None")
+            raise ValueError("EC connector must not be None")
         elif connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
         else:

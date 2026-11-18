@@ -4799,6 +4799,7 @@ def create_scheduler_with_priority(
     num_speculative_tokens: int | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    ec_transfer_config: ECTransferConfig | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -4852,15 +4853,12 @@ def create_scheduler_with_priority(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
 
-    ec_transfer_config = (
-        ECTransferConfig(
+    if ec_transfer_config is None and use_ec_connector:
+        ec_transfer_config = ECTransferConfig(
             ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
-        if use_ec_connector
-        else None
-    )
 
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
@@ -5939,6 +5937,14 @@ def _assert_right_encoder_inputs(
 def test_scheduler_no_ec_connector_by_default():
     """Test scheduler doesn't have EC connector by default."""
     scheduler = create_scheduler()
+    assert scheduler.ec_connector is None
+
+
+def test_scheduler_inactive_ec_transfer_config():
+    """Test scheduler does not create EC connector when ECTransferConfig is inactive."""
+    cfg = ECTransferConfig(ec_buffer_size=1048576)
+    assert not cfg.is_ec_transfer_instance
+    scheduler = create_scheduler(ec_transfer_config=cfg)
     assert scheduler.ec_connector is None
 
 
