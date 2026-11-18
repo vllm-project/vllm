@@ -14,7 +14,13 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    HiSparseConfig,
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -69,7 +75,9 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         block_size=16,
         device=torch.device("cpu"),
     )
-    attention_config = SimpleNamespace(sparse_mla_shard_q_min_tokens=9100)
+    attention_config = SimpleNamespace(
+        sparse_mla_shard_q_min_tokens=9100, hisparse_config=None
+    )
     hf_config = SimpleNamespace(index_topk=5299)
     vllm_config = SimpleNamespace(
         speculative_config=(
@@ -96,6 +104,45 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         device=torch.device("cpu"),
     )
     assert build_shardq_split(short, vllm_config) is None
+
+
+@pytest.mark.parametrize("query_lens", [[4, 2, 4096], [4, 4, 4096]])
+def test_build_shardq_split_skips_mixed_spec_verify_under_hisparse(
+    monkeypatch, query_lens
+):
+    """HiSparse forces the sparse-MLA builder to treat only 1-token requests as
+    decodes with uniform lengths, so speculative-verification tokens in a mixed
+    batch are prefills there. ShardQ's 1 + num_spec boundary would count them as
+    decodes and disagree with both the indexer's token-sharded top-k layout and
+    the separate prefill path, so it must be skipped for that step."""
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        attention_config=SimpleNamespace(
+            hisparse_config=object(), sparse_mla_shard_q_min_tokens=1024
+        ),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+    )
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 300 for q in query_lens], query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    assert build_shardq_split(metadata, vllm_config) is None
+
+    # A regular decode step batched with a long prefill has the same boundary in
+    # both derivations and still shards.
+    regular = create_common_attn_metadata(
+        BatchSpec(seq_lens=[301, 301, 4396], query_lens=[1, 1, 4096]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    split = build_shardq_split(regular, vllm_config)
+    assert split is not None
+    assert split.num_decode_tokens == 2
+    assert split.num_tokens_per_rank.sum() == 4096
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
@@ -169,7 +216,7 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
     )
 
 
-def _check_builder_shardq_route(rank, world, port):
+def _check_builder_shardq_route(rank, world, port, hisparse=False):
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
@@ -189,6 +236,10 @@ def _check_builder_shardq_route(rank, world, port):
         dtype="bfloat16",
     )
     config.cache_config.cache_dtype = "fp8_ds_mla"
+    if hisparse:
+        config.attention_config.hisparse_config = HiSparseConfig(
+            device_buffer_size=4096,
+        )
     config.model_config = ModelConfig(
         model="deepseek-ai/DeepSeek-V3.2",
         hf_overrides={"num_attention_heads": 32},
@@ -245,7 +296,7 @@ def _check_builder_shardq_route(rank, world, port):
                 assert metadata.prefill is not None
                 expected = (
                     SparseMLAPrefillRoute.SPARSE_MQA
-                    if enabled
+                    if enabled or hisparse
                     else SparseMLAPrefillRoute.DENSE_MHA
                 )
                 assert metadata.prefill.route is expected, metadata.prefill.route
@@ -266,3 +317,20 @@ def test_builder_selects_mqa_after_shardq_split():
     if not supported:
         pytest.skip(reason)
     mp.spawn(_check_builder_shardq_route, args=(world, get_open_port()), nprocs=world)
+
+
+def test_builder_selects_shardq_under_hisparse():
+    """HiSparse + quantized cache + TP>1 must keep the ShardQ route enabled."""
+    world = 2
+    if not current_platform.is_cuda() or torch.accelerator.device_count() < world:
+        pytest.skip("requires two CUDA GPUs for FlashMLA ShardQ")
+    from vllm.v1.attention.ops import flashmla
+
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+    mp.spawn(
+        _check_builder_shardq_route,
+        args=(world, get_open_port(), True),
+        nprocs=world,
+    )

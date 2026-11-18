@@ -110,6 +110,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
+    _localize_prefill_chunks,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
@@ -137,6 +138,65 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+
+
+def _make_prefill_chunk(chunk_cls, req_start_idx, num_reqs, chunk_tot_seqlen):
+    return chunk_cls(
+        tokens_slice=slice(0, 0),
+        block_table=torch.zeros((num_reqs, 1), dtype=torch.int32),
+        req_start_idx=req_start_idx,
+        workspace_starts=torch.zeros(num_reqs, dtype=torch.int32),
+        chunk_tot_seqlen=chunk_tot_seqlen,
+        seq_lens=None,
+    )
+
+
+def test_localize_prefill_chunks_matches_rank_token_ranges():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    # One decode token, then prefill requests of 10, 15 and 15 tokens.
+    query_start_loc = torch.tensor([0, 1, 11, 26, 41], dtype=torch.int32)
+    chunks = [
+        _make_prefill_chunk(chunk_cls, 0, 2, 25),
+        _make_prefill_chunk(chunk_cls, 2, 1, 15),
+    ]
+    local_ids = torch.tensor([0, 3, 9, 12, 24, 30, 39], dtype=torch.int32).numpy()
+
+    request_ids, ranges = _localize_prefill_chunks(
+        query_start_loc, num_decodes=1, chunks=chunks, local_ids=local_ids
+    )
+
+    assert request_ids.tolist() == [0, 0, 0, 1, 1, 2, 2]
+    assert ranges == [(0, 0, 5), (1, 5, 7)]
+
+
+def test_localize_prefill_chunks_skips_chunks_without_local_tokens():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    query_start_loc = torch.tensor([0, 10, 20], dtype=torch.int32)
+    chunks = [
+        _make_prefill_chunk(chunk_cls, 0, 1, 10),
+        _make_prefill_chunk(chunk_cls, 1, 1, 10),
+    ]
+    local_ids = torch.tensor([0, 4, 9], dtype=torch.int32).numpy()
+
+    request_ids, ranges = _localize_prefill_chunks(
+        query_start_loc, num_decodes=0, chunks=chunks, local_ids=local_ids
+    )
+
+    assert request_ids.tolist() == [0, 0, 0]
+    assert ranges == [(0, 0, 3)]
+
+
+def test_localize_prefill_chunks_rejects_uncovered_tokens():
+    chunk_cls = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk
+    query_start_loc = torch.tensor([0, 10, 20], dtype=torch.int32)
+    chunks = [_make_prefill_chunk(chunk_cls, 0, 1, 10)]
+    local_ids = torch.tensor([0, 10], dtype=torch.int32).numpy()
+
+    with pytest.raises(AssertionError, match="cover every local token"):
+        _localize_prefill_chunks(
+            query_start_loc, num_decodes=0, chunks=chunks, local_ids=local_ids
+        )
+
 
 if current_platform.is_rocm():
     from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -5283,6 +5343,115 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
     torch.testing.assert_close(
         fp8_metadata.decode.seq_lens, torch.arange(6, device=DEVICE_TYPE)
     )
+
+
+def test_flashmla_hisparse_fp8_prefill_uses_actual_heads_for_padded_output(
+    workspace_init, monkeypatch
+):
+    """The padded prefill workspace must not leak its padding into the output.
+
+    ShardQ runs with all TP ranks' heads. When the global head count is not a
+    multiple of the kernel padding, padded_out is wider than the query; the
+    copy and unshard must use q.shape[1], not padded_out.shape[1].
+    """
+    num_tokens = 16
+    local_heads = 48
+    actual_heads = 96
+    padded_heads = 128
+    head_dim = 512
+    topk = 4
+    device = torch.device(DEVICE_TYPE)
+
+    q = torch.randn(num_tokens, actual_heads, 576, dtype=torch.bfloat16, device=device)
+    topk_indices = torch.zeros((num_tokens, topk), dtype=torch.int32, device=device)
+    block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+
+    def convert_indices(*args, **kwargs):  # noqa: ARG001
+        counts = torch.full((num_tokens,), topk, dtype=torch.int32, device=device)
+        return topk_indices, counts
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_convert_req_index_to_global_index",
+        convert_indices,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.current_stream",
+        lambda: SimpleNamespace(wait_event=lambda event: None),
+    )
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.gather_fp8_prefill = lambda *args, **kwargs: object()
+
+    chunk = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk(
+        tokens_slice=slice(0, num_tokens),
+        block_table=block_table,
+        req_start_idx=0,
+        workspace_starts=torch.zeros(1, dtype=torch.int32, device=device),
+        chunk_tot_seqlen=num_tokens,
+    )
+    prefill = FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill(
+        request_ids=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        workspace_starts=torch.zeros(1, dtype=torch.int32, device=device),
+        chunks=[chunk],
+    )
+    fp8_metadata = FlashMLASparseMetadata.FP8SeparatePrefillDecode(
+        num_prefills=1,
+        num_prefill_tokens=num_tokens,
+        num_decode_tokens=0,
+        prefill=prefill,
+    )
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=fp8_metadata,
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=device),
+        block_table=block_table,
+        block_size=64,
+        num_decode_tokens=0,
+        num_actual_tokens=num_tokens,
+        topk_start=0,
+    )
+
+    def kernel(q, kv, indices, lengths, out=None):  # noqa: ARG001
+        assert q.shape[1] == actual_heads
+        assert out is not None and out.shape[1] == padded_heads
+        return (
+            torch.full(
+                (q.shape[0], actual_heads, head_dim),
+                7.0,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            None,
+        )
+
+    impl = SimpleNamespace(
+        kv_cache_dtype="fp8_ds_mla",
+        num_heads=local_heads,
+        workspace_specs=[
+            ((num_tokens, actual_heads, 576), torch.bfloat16),
+            ((num_tokens, 512), torch.bfloat16),
+            ((num_tokens, padded_heads, head_dim), torch.bfloat16),
+            ((num_tokens, local_heads, head_dim), torch.bfloat16),
+        ],
+        index_group=index_group,
+        index_group_index=0,
+        pcp_dcp_kv_gather=False,
+        need_to_return_lse_for_decode=False,
+        _bf16_flash_mla_kernel=kernel,
+    )
+    impl._forward_fp8_kv_separate_prefill_decode = MethodType(
+        FlashMLASparseImpl._forward_fp8_kv_separate_prefill_decode, impl
+    )
+
+    out, lse = impl._forward_fp8_kv_separate_prefill_decode(
+        q,
+        torch.empty(0, 64, 576, dtype=torch.uint8, device=device),
+        topk_indices,
+        metadata,
+    )
+
+    assert out.shape == (num_tokens, actual_heads, head_dim)
+    assert torch.all(out == 7)
+    assert lse is None
 
 
 @pytest.mark.parametrize("use_mixed_batch", [False, True])

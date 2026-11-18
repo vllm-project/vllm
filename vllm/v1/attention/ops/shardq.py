@@ -53,6 +53,8 @@ class ShardQMetadata:
     # Every rank's tokens, grouped by rank, and where each group starts.
     token_ids: torch.Tensor
     rank_offsets: torch.Tensor
+    # This rank's tokens on CPU (ascending), for host-side metadata building.
+    local_token_ids_cpu: np.ndarray | None = None
     # forward_mqa metadata of this rank's tokens, which run with all heads.
     attn_metadata: "SparseMLACommonMetadata" = field(init=False)
 
@@ -111,13 +113,31 @@ def build_shardq_split(
     """This step's `zigzag_split` over the TP group of the tokens after the
     decodes (requests of at most 1 + num_speculative_tokens tokens). None when
     too few tokens follow the decodes, none of their requests is longer than
-    the top-k, or a rank would own no tokens.
+    the top-k, a rank would own no tokens, or the decode boundary does not
+    match the sparse-MLA metadata's.
     """
     spec_config = vllm_config.speculative_config
     num_spec = spec_config.num_speculative_tokens if spec_config else 0
     num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
         split_decodes_and_prefills(common_attn_metadata, decode_threshold=1 + num_spec)
     )
+    if vllm_config.attention_config.hisparse_config is not None:
+        # The sparse-MLA builder forces decode_threshold=1 and uniform decode
+        # lengths under HiSparse, so a speculative-verification token in a
+        # mixed batch is a prefill there. The indexer writes the token-sharded
+        # top-k layout from this split and the separate prefill path asserts
+        # both boundaries agree; skip ShardQ for this step rather than let them
+        # diverge.
+        hs_num_decodes, _, hs_num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=1,
+            require_uniform=True,
+        )
+        if (hs_num_decodes, hs_num_decode_tokens) != (
+            num_decodes,
+            num_decode_tokens,
+        ):
+            return None
     min_tokens = vllm_config.attention_config.sparse_mla_shard_q_min_tokens
     if num_prefills == 0 or num_prefill_tokens < min_tokens:
         return None
