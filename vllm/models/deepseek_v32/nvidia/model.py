@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from itertools import islice
 
 import torch
@@ -47,6 +48,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.models.glm5next.nvidia.specialized_decode.linear import planned_step
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -54,6 +56,11 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+from .specialized_decode import (
+    LayerDecode,
+    is_decode_step,
+    specialized_decode_config,
+)
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -69,6 +76,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
+        self._decode_config = specialized_decode_config(vllm_config, config)
+        self._decode: LayerDecode | None = None
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -118,6 +127,10 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
+    def process_weights_after_loading(self) -> None:
+        if self._decode_config is not None:
+            self._decode = LayerDecode(self, self._decode_config)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -128,6 +141,10 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         full_num_tokens = positions.shape[0]
         use_sequence_parallel = (
             self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
+        )
+        decode = self._decode
+        use_decode = decode is not None and is_decode_step(
+            full_num_tokens, decode.config
         )
 
         if residual is None:
@@ -147,7 +164,10 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_states, residual, self.input_layernorm
             )
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        with planned_step() if use_decode else nullcontext():
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
         if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
@@ -165,6 +185,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states = sp_reduce_scatter(hidden_states)
         elif self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        elif use_decode and decode is not None:
+            hidden_states = decode.run_mlp(self, hidden_states)
         else:
             hidden_states = self.mlp(hidden_states)
         return hidden_states, residual

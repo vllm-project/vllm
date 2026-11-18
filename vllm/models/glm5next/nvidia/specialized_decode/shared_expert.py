@@ -354,14 +354,17 @@ class _DownKernel:
 
 
 def block_scales(packed: torch.Tensor, n: int, k: int) -> torch.Tensor:
-    """FP32 [n / 128, k / 128] block scales from DeepGEMM's packed UE8M0 layout
+    """FP32 [ceil(n / 128), k / 128] block scales from the packed UE8M0 layout
     (int32 [n, k / 512], byte g % 4 of column g // 4 holds K group g)."""
     groups = k // GROUP
     index = torch.arange(groups, device=packed.device)
     exponents = (packed[:, index // 4] >> (index % 4 * 8)) & 0xFF
-    rows = exponents.view(n // GROUP, GROUP, groups)
-    assert bool((rows == rows[:, :1]).all()), "scales vary inside a 128-row block"
-    return (rows[:, 0].to(torch.int32) << 23).view(torch.float32).contiguous()
+    exponents = exponents[:n]
+    blocks = exponents[::GROUP]
+    assert torch.equal(exponents, blocks.repeat_interleave(GROUP, 0)[:n]), (
+        "scales vary inside a 128-row block"
+    )
+    return (blocks.to(torch.int32) << 23).view(torch.float32).contiguous()
 
 
 def _largest_carveout(compiled, device: int) -> None:
