@@ -180,7 +180,7 @@ guide: |
 
   - **MoE kernel tuning:** See [tune-moe-kernel](https://github.com/vllm-project/recipes/blob/main/Qwen/Qwen3-Next.md#tune-moe-kernel)
     to tune Triton kernels for your hardware.
-  - **FP8 DeepGEMM:** For FP8, install DeepGEMM via [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/v0.16.0rc0/tools/install_deepgemm.sh).
+  - **FP8 DeepGEMM:** FP8 uses DeepGEMM, which is bundled in vLLM wheels since v0.20.0; no separate install is needed.
   - **B200 FlashInfer FP8 MoE error:** The `routing_logits must be bfloat16`
     error on B200 was fixed in vLLM v0.28.0 — no workaround is needed.
   - **FP8 + TP4 incompatibility:** Use DP4+EP instead.
