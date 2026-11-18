@@ -1896,7 +1896,7 @@ class Qwen3VLForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-    def _init_marker_embed_tokens(self, vllm_config: VllmConfig) -> None:
+    def _init_marker_embed_tokens(self, vllm_config: VllmConfig, prefix: str) -> None:
         """Keep the token embedding on an encoder-only instance that prunes.
 
         Pruned video outputs include the embeddings of the timestamp and
@@ -1915,6 +1915,7 @@ class Qwen3VLForConditionalGeneration(
             text_config.vocab_size,
             text_config.hidden_size,
             quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "language_model.model.embed_tokens"),
         )
         mapper = type(self).hf_to_vllm_mapper
         self.hf_to_vllm_mapper = replace(
@@ -1984,7 +1985,7 @@ class Qwen3VLForConditionalGeneration(
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-        self._init_marker_embed_tokens(vllm_config)
+        self._init_marker_embed_tokens(vllm_config, prefix)
 
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
