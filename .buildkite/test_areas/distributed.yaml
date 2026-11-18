@@ -14,6 +14,7 @@ steps:
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
+  - tools/formal/shm_broadcast
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
@@ -21,6 +22,7 @@ steps:
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_flashinfer_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_broadcast_model.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/test_pipeline_partition.py
@@ -37,12 +39,14 @@ steps:
       source_file_dependencies:
       - vllm/distributed
       - tests/distributed
+      - tools/formal/shm_broadcast
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
       - pytest -v -s distributed/test_cpu_all_reduce.py
       - pytest -v -s distributed/test_pipeline_partition.py
       - pytest -v -s distributed/test_shm_broadcast.py
+      - pytest -v -s distributed/test_shm_broadcast_model.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
 

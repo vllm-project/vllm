@@ -1,0 +1,4 @@
+.runs/
+.tmp/
+_apalache-out/
+states/
