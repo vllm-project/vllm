@@ -589,9 +589,11 @@ def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
     assert os.listdir(tmp_path) == []
 
 
-def test_wait_idle_blocks_until_tasks_complete():
-    """wait_idle must not return while a task is still in flight."""
+def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
+    """Completion wakes the idle waiter without broadcasting to workers."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    worker_notify_all = MagicMock(wraps=pool._condition.notify_all)
+    monkeypatch.setattr(pool._condition, "notify_all", worker_notify_all)
     gate = threading.Event()
     pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
 
@@ -603,6 +605,7 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         waiter.join(timeout=5.0)
         assert not waiter.is_alive(), "wait_idle did not unblock"
+        worker_notify_all.assert_not_called()
     finally:
         gate.set()
         pool.shutdown(wait=True)

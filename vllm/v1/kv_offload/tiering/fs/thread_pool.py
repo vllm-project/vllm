@@ -62,7 +62,8 @@ class DualQueueThreadPool:
 
     Load-priority threads drain the load queue first, then fall back to the
     store queue.  Store-priority threads do the reverse.  Both queues share
-    a single condition variable.
+    a condition variable. Idle waiters have a separate condition under the
+    same lock so job completion does not wake workers looking for tasks.
     """
 
     def __init__(
@@ -73,7 +74,9 @@ class DualQueueThreadPool:
     ) -> None:
         self._load_q: deque = deque()
         self._store_q: deque = deque()
-        self._condition = threading.Condition(threading.Lock())
+        lock = threading.Lock()
+        self._condition = threading.Condition(lock)
+        self._idle = threading.Condition(lock)
         self._stop = False
         self._threads: list[threading.Thread] = []
         self._finished_q: deque[tuple[JobId, bool, float]] = deque()
@@ -142,19 +145,20 @@ class DualQueueThreadPool:
         finish, so no worker thread is still copying data. Note:
         completed jobs may still be sitting in `_finished_q` waiting
         for `get_finished()` to drain them.
+
+        If shutdown has started, use shutdown(wait=True) to join workers
+        instead; queued tasks may have been discarded.
         """
-        with self._condition:
-            self._condition.wait_for(lambda: self._inflight_jobs == 0)
+        with self._idle:
+            self._idle.wait_for(lambda: self._stop or self._inflight_jobs == 0)
 
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
             self._stop = True
             self._load_q.clear()
             self._store_q.clear()
-            # Cancelled tasks will not decrement _inflight_jobs; reset it so a
-            # subsequent wait_idle() returns instead of hanging.
-            self._inflight_jobs = 0
             self._condition.notify_all()
+            self._idle.notify_all()
         if wait:
             for t in self._threads:
                 t.join()
@@ -191,4 +195,5 @@ class DualQueueThreadPool:
                 with self._condition:
                     self._finished_q.append((state.job_id, success, total_time))
                     self._inflight_jobs -= 1
-                    self._condition.notify_all()
+                    if self._inflight_jobs == 0:
+                        self._idle.notify_all()
