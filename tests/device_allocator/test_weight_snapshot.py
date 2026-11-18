@@ -236,3 +236,26 @@ def test_default_keeps_the_snapshot(tmp_path):
 def test_clear_and_rebuild_are_exclusive(tmp_path):
     with pytest.raises(ValueError, match="mutually exclusive"):
         ws.resolve(str(tmp_path), "aaa", 0, clear=True, rebuild=True)
+
+
+@cuda
+def test_restore_fills_dummy_weights_with_plausible_bytes():
+    from vllm.model_executor.model_loader import dummy_loader
+
+    orig = dummy_loader.initialize_single_dummy_weight
+    undo = ws._plausible_dummy_weights()
+    try:
+        w = torch.empty(4, 8, dtype=torch.bfloat16, device="cuda")
+        packed = torch.empty(16, dtype=torch.uint8, device="cuda")
+        for t in (w, packed):
+            dummy_loader.initialize_single_dummy_weight(t)
+        # 0x3C3C is a finite, positive bf16; quantization checks accept it.
+        assert torch.isfinite(w).all() and (w > 0).all()
+        assert (packed == 0x3C).all()
+    finally:
+        undo()
+    assert dummy_loader.initialize_single_dummy_weight is orig
+
+
+def test_is_restoring_is_false_outside_a_restore():
+    assert ws.is_restoring() is False
