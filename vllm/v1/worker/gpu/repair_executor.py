@@ -72,6 +72,11 @@ def verify_replay_compatibility(model: Any) -> None:
     tokens (models that transform embeddings after the embed call --
     e.g. muP input scaling -- would silently diverge too).
 
+    The probe sees only the layer-call shape and the layer-0 input:
+    state the model forward sets on itself and layers read internally
+    (per-forward model state) is invisible to it and remains outside the
+    verified set.
+
     Raises:
         RuntimeError: with the model-agnostic reason when either check
             fails; the engine then refuses to start under
@@ -305,12 +310,17 @@ def execute_repair_only(
                 f"(num_scheduled_tokens="
                 f"{scheduler_output.num_scheduled_tokens.get(req_id, 0)})"
             )
-            pos_first = _int_timed(positions[lo], f"positions[{lo}].int")
-            pos_last = _int_timed(positions[hi - 1], f"positions[{hi - 1}].int")
-            assert pos_first == span_start and pos_last == span_end - 1, (
-                f"hole repair: physical positions [{pos_first},"
-                f"{pos_last}] do not match the repair span "
-                f"[{span_start}, {span_end}) of {req_id}"
+            expected_positions = torch.arange(
+                span_start, span_end, dtype=positions.dtype, device=positions.device
+            )
+            # ORDER matters, not just the endpoints: a metadata bug that
+            # permutes the span's rows inside the authorized block would
+            # write each token's KV into a neighboring row while the
+            # boundary pair still matches.
+            assert torch.equal(positions[lo:hi], expected_positions), (
+                f"hole repair: the work's physical positions do not match "
+                f"the repair span [{span_start}, {span_end}) of {req_id} "
+                "in order"
             )
 
             layers = model.model.layers
@@ -363,16 +373,19 @@ def execute_repair_only(
             # derived from it carries the same alias: the blocks must be
             # distinct.
             auth_distinct_ok = len(set(auth_blocks)) == len(auth_blocks)
-            expected_slots: Counter[int] = Counter()
+            expected_slots: list[int] = []
             if auth_present and auth_len_ok:
                 for tok in range(span_start, span_end):
                     block_id = auth_blocks[(tok // block_size) - first_blk]
-                    expected_slots[block_id * block_size + tok % block_size] += 1
+                    expected_slots.append(block_id * block_size + tok % block_size)
+            # ORDER matters here too: the slot rows must match the span's
+            # token order exactly, so a permuted mapping (each token
+            # writing a neighbor's row) cannot reproduce the window.
             auth_slots_ok = (
                 auth_present
                 and auth_len_ok
                 and auth_distinct_ok
-                and Counter(slots_host) == expected_slots
+                and slots_host == expected_slots
             )
             # The worker block table's span slice must AGREE with the
             # authorization (an independent check of the row itself).
@@ -667,10 +680,6 @@ def _item_timed(t: torch.Tensor, label: str) -> int:
     return out
 
 
-def _int_timed(t: torch.Tensor, label: str) -> int:
-    return _item_timed(t, label)
-
-
 def _record_sync(label: str, seconds: float) -> None:
     if _REPAIR_SYNC_PROFILE is not None:
         _REPAIR_SYNC_PROFILE[label] = _REPAIR_SYNC_PROFILE.get(label, 0.0) + seconds
@@ -902,12 +911,16 @@ def _repair_block_size(layer) -> int:
     caches = _repair_cache_views(layer)
     cache = caches[0]
     dim = cache.dim()
-    # [B, H, N, C] core layout: tokens-per-block is dim 2.
+    # [B, H, N, C] core layout: tokens-per-block is dim 2. A 4-D
+    # per-K/V Ascend view ([num_blocks, block_size, heads, dim]) is NOT
+    # supported: it is shape-ambiguous with the core layout, and this
+    # reading would derive the head count as the block size, so every
+    # such repair fails the fence (fail-closed).
     if dim == 4:
         return int(cache.shape[2])
-    # Ascend [num_blocks, block_size, heads, dim] and older
-    # [num_blocks, block_size, x] forms: tokens-per-block is dim 1.
-    if dim in (2, 3, 4):
+    # Ascend 2-D/3-D [num_blocks, block_size, ...] views:
+    # tokens-per-block is dim 1.
+    if dim in (2, 3):
         return int(cache.shape[1])
     raise ValueError(f"unrecognized repair KV cache geometry: {tuple(cache.shape)}")
 
