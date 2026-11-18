@@ -286,3 +286,22 @@ def test_reasoning(
     else:
         content_ids = parser.extract_content_ids(output)
         assert content_ids == []
+
+
+@pytest.mark.parametrize(
+    "prompt, output, expected",
+    [
+        pytest.param([start_token], ["K", "K"], 2, id="truncated"),
+        pytest.param([start_token], ["K", "K", end_token, "K"], 2, id="complete"),
+        pytest.param([start_token, end_token], ["K"], 0, id="closed-in-prompt"),
+    ],
+)
+def test_count_reasoning_tokens_from_prompt(
+    deepseek_r1_qwen_tokenizer, prompt, output, expected
+):
+    tokenizer = deepseek_r1_qwen_tokenizer
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(tokenizer)
+    parser.set_prompt_token_ids(tokenizer.convert_tokens_to_ids(prompt))
+    assert parser.count_reasoning_tokens(tokenizer.convert_tokens_to_ids(output)) == (
+        expected
+    )

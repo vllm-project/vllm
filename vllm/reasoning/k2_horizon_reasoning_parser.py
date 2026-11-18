@@ -6,13 +6,13 @@ from collections.abc import Iterable, Sequence
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.utils import partial_tag_overlap
 from vllm.v1.token_buffer import rfind_tokens
 
 
-class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
+class K2HorizonReasoningParser(BaseThinkingReasoningParser):
     """Reasoning parser for K2 Horizon."""
 
     _TOOL_CALLS_START = "<ifm|tool_calls>"

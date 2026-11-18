@@ -92,6 +92,8 @@ The `reasoning` field contains the reasoning steps that led to the final conclus
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
+With `stream_options={"include_usage": true}`, the final chunk reports the generated reasoning token count in `usage.completion_tokens_details.reasoning_tokens`. For `deepseek_r1`, this includes reasoning that starts in the chat template and reaches the output token limit before the closing marker.
+
 ??? console "Json"
 
     ```json
