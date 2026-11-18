@@ -48,7 +48,6 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
         data_parallel_size=DP_SIZE,
         data_parallel_backend="mp",  # ray takes more time
-        trust_remote_code=True,
         max_model_len=16384,
         attention_config={"backend": attn_backend},
     )
