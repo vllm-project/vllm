@@ -332,6 +332,12 @@ def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
         # Wide N at 33..64: the ladder's (64, 64, 32, 4) ran at ~30 GB/s.
         (48, 5120, 34816, 128, (64, 32, 64, 2)),
         (48, 5120, 34816, 32, (64, 32, 32, 4)),
+        # A g32 tall-K or non-wide shape keeps the ladder tile.
+        (48, 1024, 256, 32, (64, 64, 32, 4)),
+        # The decode selector starts at M=9; M=8 still keeps the override.
+        (8, 4096, 6144, 128, (128, 64, 128, 8)),
+        # M=32 keeps the ladder rather than taking a 33..64 decode tile.
+        (32, 5120, 34816, 128, (32, 32, 128, 4)),
         # An overridden (prefill-tuned) shape keeps its override only above 64.
         (16, 4096, 6144, 128, (16, 32, 128, 2)),
         (96, 4096, 6144, 128, (128, 64, 128, 8)),

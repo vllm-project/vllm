@@ -293,7 +293,9 @@ def _triton_w4a16_skinny_fmt_kernel(
 
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
-# num_stages) tile-config overrides for prefill (M <= 128).
+# num_stages) tile-config overrides for prefill and selected decode-sized
+# batches (M <= 128). bf16 gfx1151 batches with 9 <= M <= 64 bypass these
+# overrides and use the decode tile selector.
 # Picked by sweeping benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py + a
 # per-config sweep script; only added when better than the generic heuristic
 # by > 20% at M=128. Re-run benchmarks after edits.
@@ -356,7 +358,8 @@ def _select_skinny_gfx1151_config(
     packed_dequant) for gfx1151.
 
     The packed fp16 dequant and the scalar bf16 dequant want different tiles,
-    so selection is dtype-aware. bf16 always uses the scalar-tuned ladder.
+    so selection is dtype-aware. bf16 uses the scalar-tuned ladder except where
+    gfx1151 decode tiles provide a better configuration.
 
     num_stages None means "leave Triton's default pipeline depth alone".
     Re-run benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py after edits.
