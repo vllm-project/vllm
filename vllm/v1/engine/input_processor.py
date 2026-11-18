@@ -458,6 +458,14 @@ class InputProcessor:
                     value=sampling_params.indexer_topk_prompt_start,
                 )
             validate_aux_request(self.vllm_config, sampling_params, resumable)
+            held = sampling_params.aux_held
+            if held is not None and held > prompt_len - 1:
+                raise VLLMValidationError(
+                    "aux_held must be at most the prompt length minus one: the "
+                    "request writes the products of the last prompt position.",
+                    parameter="aux_held",
+                    value=held,
+                )
             start = sampling_params.prompt_logprob_start or 0
             if start and start >= prompt_len - 1:
                 raise VLLMValidationError(

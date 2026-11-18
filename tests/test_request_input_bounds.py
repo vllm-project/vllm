@@ -155,6 +155,9 @@ def _segments(segments):
         ("job", _segments([[0, ""], [16, None]]), False, "increase from 0"),
         ("job", _segments([[0, "v1"], [16, "v1"], [32, None]]), False, "differ"),
         ("job", _segments([]), False, "increase from 0"),
+        ("job", {"aux_session": "s", "aux_held": 2}, False, None),
+        ("job", {"aux_session": "s", "aux_held": 3}, False, "prompt length minus"),
+        ("job", {"aux_held": 0}, False, "requires aux_session"),
     ],
     ids=[
         "valid",
@@ -175,6 +178,9 @@ def _segments(segments):
         "empty-version",
         "repeated-version",
         "no-segments",
+        "held-at-last-prompt-position",
+        "held-past-last-prompt-position",
+        "held-without-session",
     ],
 )
 def test_aux_session_validated_before_engine_submission(
