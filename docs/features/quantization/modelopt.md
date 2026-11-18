@@ -24,8 +24,9 @@ following `quantization.quant_algo` values:
   with 16-bit activations (use `quantization="modelopt_int8"`): a symmetric
   int8 `weight` and a `weight_scale` per `group_size` input elements (for
   example 16 or 32). `group_size` is required. vLLM serves these layers with
-  its mixed-precision (WNA16) linear and MoE kernels, such as Marlin and
-  Humming (`--moe-backend humming`).
+  its mixed-precision (WNA16) kernels, such as Marlin and Humming on NVIDIA and
+  Triton on ROCm. MoE experts run on NVIDIA GPUs only, on the WNA16 MoE
+  kernels (Marlin, Triton, or Humming with `--moe-backend humming`).
 - `MIXED_PRECISION`: per-layer formats specified by `quantized_layers`
   (use `quantization="modelopt_mixed"`). Each layer may use any format above;
   `INT8_PB_WO` layers take their own `group_size`. `INT8_PB_WO` routed

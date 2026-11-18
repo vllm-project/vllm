@@ -20,6 +20,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
@@ -138,7 +139,9 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     assert method.spec.activation is kNvfp4Dynamic
 
 
-def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(monkeypatch):
     """Standard MXFP8 checkpoints already have one scale row per weight row."""
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
@@ -960,7 +963,9 @@ def _tiny_checkpoint(moe: bool) -> tuple[Any, dict[str, torch.Tensor]]:
     return config, weights
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="WNA16 kernels are CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="WNA16 kernels are CUDA and ROCm"
+)
 @pytest.mark.parametrize(
     ("quant_algo", "dtype", "moe"),
     [
@@ -974,6 +979,8 @@ def test_modelopt_int8_pb_wo_checkpoint(tmp_path, vllm_runner, quant_algo, dtype
     """INT8_PB_WO layers (group 16 and 32, fused or not, dense or routed
     experts) next to FP8 and unquantized layers match the checkpoint holding
     their dequantized weights."""
+    if moe and not current_platform.is_cuda():
+        pytest.skip("INT8_PB_WO MoE experts run on NVIDIA GPUs only")
     from safetensors.torch import save_file
 
     from vllm import SamplingParams
