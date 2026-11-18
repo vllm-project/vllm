@@ -28,26 +28,34 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class _Session:
     """Per lookup group, the leading blocks of a session's latest request that
-    were cached under the request's hash for their position, and that hash."""
+    were cached under the request's hash for their position, and those hashes."""
 
-    blocks: dict[int, list[KVCacheBlock]]
-    keys: dict[int, list[BlockHashWithGroupId]]
+    groups: dict[int, tuple[list[KVCacheBlock], list[BlockHashWithGroupId]]]
     expires_at: float = 0.0
 
 
-def _num_cached(
-    blocks: Sequence[KVCacheBlock],
-    keys: Sequence[BlockHashWithGroupId],
-    end: int | None = None,
-) -> int:
-    """Count the leading blocks, up to `end`, that were not evicted since
-    their hash was recorded in `keys`."""
-    num_cached = 0
-    for block, key in islice(zip(blocks, keys), end):
-        if block.block_hash is not key:
-            break
-        num_cached += 1
-    return num_cached
+def _release(
+    blocks: list[KVCacheBlock],
+    keys: list[BlockHashWithGroupId],
+    start: int = 0,
+    demote: bool = False,
+) -> None:
+    """Drop `blocks[start:]` from a session. `demote` also stops retaining
+    those that no other session or running request uses."""
+    # Tail first, so demoted blocks keep the tail-first eviction order.
+    for i in range(len(blocks) - 1, start - 1, -1):
+        block = blocks[i]
+        # An evicted block was reset, count included.
+        if block.block_hash is not keys[i]:
+            continue
+        block.num_sessions -= 1
+        if demote and block.retain_until and not (block.num_sessions or block.ref_cnt):
+            block.retain_until = 0.0
+            pool = block.pool() if block.pool is not None else None
+            if pool is not None:
+                pool.free_block_queue.remove(block)
+                pool.free_block_queue.append(block)
+    del blocks[start:], keys[start:]
 
 
 class KVCacheSessions:
@@ -85,17 +93,16 @@ class KVCacheSessions:
         if not request.session_id or not request.block_hashes or not self.ttl:
             return
         session_key = (request.session_id, request.block_hashes[0])
-        session = self._sessions.pop(session_key, None) or _Session({}, {})
+        session = self._sessions.pop(session_key, None) or _Session({})
         session.expires_at = time.monotonic() + self.ttl
         for group_id, block_size in self.lookup_block_sizes.items():
             blocks = blocks_by_group[group_id]
-            kept = session.blocks.setdefault(group_id, [])
-            keys = session.keys.setdefault(group_id, [])
+            kept, keys = session.groups.setdefault(group_id, ([], []))
             # Keep what the previous turn recorded if this one extends it.
             num_kept = min(len(kept), len(blocks))
             if not num_kept or kept[num_kept - 1] is not blocks[num_kept - 1]:
                 num_kept = 0
-            del kept[num_kept:], keys[num_kept:]
+            _release(kept, keys, num_kept)
             hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, block_size
             )
@@ -106,10 +113,11 @@ class KVCacheSessions:
                     break
                 kept.append(block)
                 keys.append(key)
+                block.num_sessions += 1
 
         self._sessions[session_key] = session
         if len(self._sessions) > self.max_sessions:
-            self._sessions.popitem(last=False)
+            self._drop(next(iter(self._sessions)))
 
     def get_blocks(self, request: "Request") -> dict[int, list[KVCacheBlock]] | None:
         """Return, per KV cache group, the cached blocks of the request's
@@ -121,53 +129,41 @@ class KVCacheSessions:
         if session is None:
             return None
         found = {}
-        for group_id, block_size in self.lookup_block_sizes.items():
-            blocks, keys = session.blocks[group_id], session.keys[group_id]
+        for group_id, (blocks, keys) in session.groups.items():
             hashes = resolve_block_hashes(
-                request.block_hashes, self.hash_block_size, block_size
+                request.block_hashes,
+                self.hash_block_size,
+                self.lookup_block_sizes[group_id],
             )
             num_blocks = min(len(blocks), len(hashes))
-            if num_blocks == 0:
-                continue
             # Hashes are chained: a match at the last block implies a match
             # at every block before it.
-            last_key = make_block_hash_with_group_id(hashes[num_blocks - 1], group_id)
-            if keys[num_blocks - 1] == last_key:
-                num_cached = _num_cached(blocks, keys, num_blocks)
-                if num_cached < num_blocks:
+            if not num_blocks or keys[num_blocks - 1] != make_block_hash_with_group_id(
+                hashes[num_blocks - 1], group_id
+            ):
+                continue
+            num_cached = 0
+            for block, key in islice(zip(blocks, keys), num_blocks):
+                if block.block_hash is not key:
                     # Evicted since; `register` rebuilds from here.
-                    del blocks[num_cached:], keys[num_cached:]
-                found[group_id] = blocks[:num_cached]
+                    _release(blocks, keys, num_cached)
+                    break
+                num_cached += 1
+            found[group_id] = blocks[:num_cached]
         return found or None
 
+    def _drop(self, session_key: tuple[str, bytes], demote: bool = False) -> None:
+        for blocks, keys in self._sessions.pop(session_key).groups.values():
+            _release(blocks, keys, demote=demote)
+
     def close(self, session_id: str) -> None:
-        """Forget a session and stop retaining the blocks it recorded."""
+        """Forget a session and stop retaining the blocks only it recorded."""
         for session_key in [key for key in self._sessions if key[0] == session_id]:
-            session = self._sessions.pop(session_key)
-            for group_id, blocks in session.blocks.items():
-                # Tail first, so the blocks keep the tail-first eviction order.
-                for block, key in zip(
-                    reversed(blocks), reversed(session.keys[group_id])
-                ):
-                    if block.block_hash is not key or not block.retain_until:
-                        continue
-                    block.retain_until = 0.0
-                    pool = block.pool() if block.pool is not None else None
-                    if (
-                        pool is not None
-                        and not block.ref_cnt
-                        and block.prev_free_block is not None
-                    ):
-                        pool.free_block_queue.remove(block)
-                        pool.free_block_queue.append(block)
+            self._drop(session_key, demote=True)
 
     def expire(self) -> None:
         """Drop sessions past their TTL."""
         now = time.monotonic()
         sessions = self._sessions
         while sessions and next(iter(sessions.values())).expires_at <= now:
-            sessions.popitem(last=False)
-
-    def clear(self) -> None:
-        """Forget every session after the prefix cache was reset."""
-        self._sessions.clear()
+            self._drop(next(iter(sessions)))

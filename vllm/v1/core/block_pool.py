@@ -615,12 +615,6 @@ class BlockPool:
         if block.block_hash is None:
             return []
 
-        if block.retain_until:
-            # The cached content is gone, so there is nothing left to retain.
-            block.retain_until = 0.0
-            if block.ref_cnt == 0 and block.prev_free_block is not None:
-                self.free_block_queue.remove(block)
-                self.free_block_queue.prepend_n([block])
         block_hashes = [block.block_hash]
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
 
@@ -907,10 +901,6 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
-            block.retain_until = 0.0
-            if block.prev_free_block is not None:
-                self.free_block_queue.remove(block)
-                self.free_block_queue.append(block)
 
         if self.metrics_collector:
             self.metrics_collector.reset()

@@ -3276,7 +3276,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def close_session(self, session_id: str) -> None:
-        self.kv_cache_manager.close_session(session_id)
+        self.kv_cache_manager.sessions.close(session_id)
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

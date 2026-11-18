@@ -271,10 +271,6 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and request.prefix_cache_hit_limit != 0
 
-    def close_session(self, session_id: str) -> None:
-        """Stop preferring a session's blocks for retention."""
-        self.sessions.close(session_id)
-
     def get_num_cached_tokens(self, request: Request) -> int:
         """How many of a request's tokens are already in the prefix cache.
 
@@ -754,7 +750,6 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        self.sessions.clear()
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True

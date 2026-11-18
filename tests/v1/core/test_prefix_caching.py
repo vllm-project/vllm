@@ -7373,6 +7373,15 @@ def test_hybrid_session_retains_every_group():
     assert set(map(id, _retained_blocks(manager))) == set(map(id, cached))
 
 
+def test_close_session_keeps_blocks_another_session_shares():
+    manager = _session_manager(make_kv_cache_config(16, 11))
+    shared = list(range(2 * 16))
+    _run_turn(manager, "a", shared + list(range(100, 116)), session_id="a")
+    _run_turn(manager, "b", shared + list(range(200, 216)), session_id="b")
+    manager.sessions.close("a")
+    assert len(_retained_blocks(manager)) == 3
+
+
 @pytest.mark.parametrize("end", ["close", "ttl"])
 def test_session_end_stops_retaining_blocks(monkeypatch, end):
     now = 1000.0
@@ -7385,7 +7394,7 @@ def test_session_end_stops_retaining_blocks(monkeypatch, end):
     assert len(_retained_blocks(manager)) == 4
 
     if end == "close":
-        manager.close_session("s")
+        manager.sessions.close("s")
         assert _retained_blocks(manager) == []
     else:
         now += 1

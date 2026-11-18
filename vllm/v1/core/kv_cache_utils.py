@@ -187,6 +187,8 @@ class KVCacheBlock:
     # Until this time, the block is evicted after all others once it is free.
     # Set by requests that carry a session id.
     retain_until: float = 0.0
+    # Sessions that recorded the block; closing one keeps it retained for the rest.
+    num_sessions: int = 0
 
     def set_block_hash(
         self,
@@ -203,6 +205,8 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self.block_hash = None
         self.block_hash_num_tokens = None
+        self.retain_until = 0.0
+        self.num_sessions = 0
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
