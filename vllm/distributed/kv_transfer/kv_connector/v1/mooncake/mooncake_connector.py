@@ -800,8 +800,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
-        # Registers the device KV cache with an RDMA engine.
-        return KVCacheAccess.REGISTERS
+        access = KVCacheAccess.REGISTERS
+        # The worker defaults to DMA-BUF when using the extensible cache.
+        if os.environ.get("WITH_NVIDIA_PEERMEM", "0") != "0":
+            access |= KVCacheAccess.REGISTERS_WITH_PEERMEM
+        return access
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
