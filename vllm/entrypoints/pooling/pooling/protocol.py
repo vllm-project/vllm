@@ -71,7 +71,6 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
         return self._build_pooling_tok_params(
             model_config,
             default_tok_params,
-            # Why do we need this?
             add_special_tokens=not model_config.is_encoder_decoder,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
