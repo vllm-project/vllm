@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from copy import copy
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from vllm.config.quantization import resolve_quantization_config
-from vllm.config.utils import hash_factors, normalize_value
+from vllm.config.utils import hash_config, hash_factors, normalize_value
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECCPUWorkerMetadata,
@@ -118,13 +119,19 @@ class ECTieringScheduler(ECCPUScheduler):
             model_config.quantization, model_config.quantization_config
         )
         encoder_config = {
-            "model_config": model_identity.compute_hash(),
-            "multimodal_config": model_config.multimodal_config,
-            "kernel_config": vllm_config.kernel_config.compute_hash(),
+            "model_config": hash_config(model_identity),
+            # Encoder cache identity also covers preprocessing, which is
+            # intentionally excluded from the compilation hash.
+            "multimodal_config": (
+                asdict(model_config.multimodal_config)
+                if model_config.multimodal_config is not None
+                else None
+            ),
+            "kernel_config": hash_config(vllm_config.kernel_config),
         }
         lora_config = vllm_config.lora_config
         if lora_config is not None and lora_config.enable_tower_connector_lora:
-            encoder_config["lora_config"] = lora_config.compute_hash()
+            encoder_config["lora_config"] = hash_config(lora_config)
         return ECCacheNamespace(
             encoder_config_hash=hash_factors(
                 {"encoder_config": normalize_value(encoder_config)}

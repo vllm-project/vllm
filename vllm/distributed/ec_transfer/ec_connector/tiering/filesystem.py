@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-import re
 from collections import Counter, OrderedDict, deque
 from collections.abc import Iterator, Sequence
 from contextlib import suppress
@@ -16,6 +15,8 @@ from pathlib import Path
 from stat import S_ISREG
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
+
+import regex as re
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
     ECFileSystemBackpressureConfig,
@@ -169,12 +170,12 @@ class ECTemporaryFileOwner:
                         f"encoder-cache temporary directory is a symlink: {directory}"
                     )
                 try:
-                    entries = os.scandir(directory)
+                    temporary_entries = os.scandir(directory)
                 except FileNotFoundError:
-                    entries = None
-                if entries is not None:
-                    with entries:
-                        for item in entries:
+                    pass
+                else:
+                    with temporary_entries:
+                        for item in temporary_entries:
                             match = _TEMPORARY.fullmatch(item.name)
                             if match is None or match.group(2) != owner:
                                 continue
@@ -723,9 +724,9 @@ class ECFileSystemTier(Protocol):
     ) -> bool:
         """Queue a filesystem-to-CPU read without blocking.
 
-        Return ``False`` when the tier is no longer accepting work. On
+        Return `False` when the tier is no longer accepting work. On
         acceptance, exactly one completion must eventually be returned by
-        :meth:`poll_completed_reads`.
+        `poll_completed_reads`.
         """
         ...
 
@@ -737,11 +738,11 @@ class ECFileSystemTier(Protocol):
     ) -> bool:
         """Queue a CPU-to-filesystem write without blocking.
 
-        ``file_size_bytes`` is the allocated size of all complete CPU blocks.
+        `file_size_bytes` is the allocated size of all complete CPU blocks.
         The sources must contain every byte of every block, including undefined
         padding in the final block. On acceptance, exactly one completion must
-        eventually be returned by :meth:`poll_completed_writes`. Return
-        ``False`` when the tier is no longer accepting work or store pressure
+        eventually be returned by `poll_completed_writes`. Return
+        `False` when the tier is no longer accepting work or store pressure
         policy, capacity, or same-key lifecycle state skips this cache
         opportunity.
         """

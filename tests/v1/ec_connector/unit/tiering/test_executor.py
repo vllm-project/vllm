@@ -207,4 +207,3 @@ def test_completion_uses_executor_timing_instead_of_pool_wrapper(tmp_path, monke
         assert completion.queue_time >= 0
     finally:
         executor.shutdown()
-

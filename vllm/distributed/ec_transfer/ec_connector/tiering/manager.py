@@ -23,11 +23,14 @@ logger = init_logger(__name__)
 
 class _PrimaryEntry(Protocol):
     block_ids: tuple[int, ...]
-    ready: bool
+
+    @property
+    def ready(self) -> bool: ...
 
 
 class _PrimaryTier(Protocol):
-    block_size_bytes: int
+    @property
+    def block_size_bytes(self) -> int: ...
 
     def get(self, key: str) -> _PrimaryEntry | None: ...
 
@@ -343,14 +346,14 @@ class ECTieringManager:
                 )
 
         write_completions = self._secondary.poll_completed_writes()
-        for completion in write_completions:
-            identifier = self._pending_writes.pop(completion.cache_key)
+        for write_completion in write_completions:
+            identifier = self._pending_writes.pop(write_completion.cache_key)
             self._primary.unpin(identifier)
-            if not completion.success:
+            if not write_completion.success:
                 logger.warning(
                     "Encoder-cache filesystem store failed for %s: %s",
                     identifier,
-                    completion.error,
+                    write_completion.error,
                 )
         for identifier, descriptor in tuple(self._prefetch_probes.items()):
             waiters = self._prefetch_waiters.get(identifier)

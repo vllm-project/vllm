@@ -267,7 +267,7 @@ def test_request_adapter_name_and_path_isolate_all_encoder_cache_keys(
         LlamaConfig,
         LlavaConfig,
         LlavaProcessor,
-        PreTrainedTokenizerFast,
+        TokenizersBackend,
     )
 
     from vllm.config import ModelConfig, VllmConfig
@@ -302,7 +302,7 @@ def test_request_adapter_name_and_path_isolate_all_encoder_cache_keys(
         },
         image_token_index=3,
     ).save_pretrained(model_path)
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(
             WordLevel(
                 {"<unk>": 0, "<s>": 1, "</s>": 2, "<image>": 3}, unk_token="<unk>"

@@ -65,7 +65,7 @@ class _PendingJob:
 
 
 class ECFileIOExecutor:
-    """Run one complete ``.ec`` file transfer per thread-pool task."""
+    """Run one complete `.ec` file transfer per thread-pool task."""
 
     def __init__(self, n_read_threads: int, n_write_threads: int) -> None:
         if n_read_threads <= 0 or n_write_threads <= 0:
@@ -96,7 +96,7 @@ class ECFileIOExecutor:
         destinations: Sequence[memoryview],
         file_size_bytes: int,
     ) -> int | None:
-        """Submit one complete entry read, or return ``None`` after shutdown."""
+        """Submit one complete entry read, or return `None` after shutdown."""
         buffers = tuple(destinations)
         return self._submit(
             operation="read",
@@ -119,7 +119,7 @@ class ECFileIOExecutor:
         *,
         fsync: bool = False,
     ) -> int | None:
-        """Submit one complete entry write, or return ``None`` after shutdown."""
+        """Submit one complete entry write, or return `None` after shutdown."""
         buffers = tuple(sources)
         return self._submit(
             operation="write",
@@ -140,7 +140,7 @@ class ECFileIOExecutor:
         entry_path: Path,
         file_size_bytes: int,
     ) -> int | None:
-        """Submit one entry removal, or return ``None`` after shutdown."""
+        """Submit one entry removal, or return `None` after shutdown."""
         return self._submit(
             operation="delete",
             cache_key=cache_key,

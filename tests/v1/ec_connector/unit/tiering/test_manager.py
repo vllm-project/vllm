@@ -348,10 +348,12 @@ def indexed_scheduler(tmp_path, request, monkeypatch):
             ec_role="ec_both",
         ),
     )
-    config.ec_transfer_config.mm_encoder_output_widths = getattr(
-        request, "param", None
-    ) or {"image": 32}
-    config.ec_transfer_config.ec_connector_extra_config = {
+    ec_config = config.ec_transfer_config
+    assert ec_config is not None
+    ec_config.mm_encoder_output_widths = getattr(request, "param", None) or {
+        "image": 32
+    }
+    ec_config.ec_connector_extra_config = {
         "ec_cpu_bytes": 1 << 20,
         "secondary_tiers": [
             {
@@ -364,7 +366,7 @@ def indexed_scheduler(tmp_path, request, monkeypatch):
         ],
     }
     digest = ECTieringScheduler._build_namespace(config).digest()
-    file_size = 2 * config.ec_transfer_config.mm_encoder_output_widths["image"] * 2
+    file_size = 2 * ec_config.mm_encoder_output_widths["image"] * 2
     for identifier in ("A", "B"):
         key = build_ec_cache_key(digest, identifier, "image", 2, file_size)
         path = get_ec_entry_path(tmp_path, digest, key)
@@ -455,6 +457,7 @@ def test_restart_restores_exact_bytes_or_recomputes_after_deletion(
         if deleted_before_open:
             reads[0].unlink()
         release.set()
+        assert restored._filesystem is not None
         restored._filesystem.drain()
         # Retry each owner twice to guard against reloading the missing file.
         for request in requests * 2:
@@ -464,6 +467,7 @@ def test_restart_restores_exact_bytes_or_recomputes_after_deletion(
         if deleted_before_open:
             assert entry is None
         else:
+            assert entry is not None
             assert entry.shape == (2, 32)
             assert b"".join(restored._primary.block_views(entry.block_ids)) == expected
         for request in requests:
@@ -717,6 +721,8 @@ def test_connector_original_interface_uses_fresh_gpu_query(
     connector.bind_encoder_cache_query(cache.get_cached_num_encoder_embeds)
     request = image_request("A")
     scheduler = connector.connector_scheduler
+    assert scheduler is not None
+    assert scheduler._tiering_manager is not None
     try:
         if cpu_ready:
             scheduler._primary.alloc("A", 2, (2, 32))
@@ -757,7 +763,9 @@ def test_default_connector_hooks_preserve_cpu_cache(indexed_scheduler):
         indexed_scheduler._vllm_config, ECConnectorRole.SCHEDULER
     )
     try:
-        cache = connector.connector_scheduler._cache
+        scheduler = connector.connector_scheduler
+        assert scheduler is not None
+        cache = scheduler._cache
         entry = cache.alloc("A", 1, (2, 32))
         cache.mark_ready("A")
 

@@ -3,11 +3,11 @@
 
 """Persistent cache identity and full-block disk layout for encoder cache.
 
-Each ``.ec`` file contains every complete CPU block allocated to one encoder
+Each `.ec` file contains every complete CPU block allocated to one encoder
 cache item, including any final-block padding. Compatibility is isolated by a
 stable namespace directory, while the caller validates the expected allocated
 file size before loading. There is no per-file header or namespace
-``config.json``.
+`config.json`.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class ECCacheNamespace:
 
     The digest excludes process- and request-local identity so compatible model
     configurations can reuse files across restarts. Model identity and effective
-    configuration are captured by ``encoder_config_hash``.
+    configuration are captured by `encoder_config_hash`.
     """
 
     encoder_config_hash: str
