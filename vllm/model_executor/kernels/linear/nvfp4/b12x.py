@@ -143,6 +143,13 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
     """BF16 x NVFP4 GEMM without activation quantization."""
 
     @classmethod
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        act_dtype = config.act_dtype if config is not None else None
+        if act_dtype not in (None, torch.bfloat16):
+            return False, f"requires BF16 activations, got {act_dtype}"
+        return True, None
+
+    @classmethod
     def executed_activation_key(
         cls, activation_quant_key: QuantKey | None
     ) -> QuantKey | None:
