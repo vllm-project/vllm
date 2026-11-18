@@ -200,9 +200,8 @@ class OAIAttention(nn.Module):
 class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
-    # `GptOssModel.load_weights` writes full-checkpoint experts with
-    # `param.copy_`: online quantization keeps its online method for them
-    # instead of quantizing on load (direct reload refuses it)
+    # `GptOssModel.load_weights` writes experts with `param.copy_`, bypassing
+    # the weight loaders.
     writes_outside_weight_loaders = True
 
     @staticmethod

@@ -109,14 +109,12 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
 
 def _block_shapes_fit(layer: torch.nn.Module) -> bool:
     """Whether the 128x128 block FP8 checkpoint linear method accepts this
-    layer's tensor-parallel shards (the online method takes any). MoE needs no
-    check: the checkpoint MoE method refines its blocks to fit the shards."""
+    layer's tensor-parallel shards."""
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         validate_fp8_block_shape,
     )
 
-    # the sizes `create_weights` gets; a replicated layer may not have set its
-    # partition sizes yet, and its shards are the whole tensor
+    # A replicated layer may not have set its partition sizes yet.
     try:
         validate_fp8_block_shape(
             layer,
