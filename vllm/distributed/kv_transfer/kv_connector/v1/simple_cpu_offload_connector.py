@@ -42,6 +42,7 @@ from vllm.v1.simple_kv_offload.worker import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
@@ -80,6 +81,13 @@ def _find_simple_cpu_offload_connector(
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
+
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Blocks are copied whole between the GPU cache and a host or disk
+        # mirror created by this process, so a restored block holds the bytes
+        # vLLM's own cache writer stored.
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:
