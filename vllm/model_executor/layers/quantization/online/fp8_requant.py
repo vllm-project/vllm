@@ -151,7 +151,9 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
             device=weight.device,
         )
         for e in range(num_experts):
-            bf16 = dequant_block_fp8(weight[e], scale_inv[e], self.fp8_block_size)
+            bf16 = dequant_block_fp8(
+                weight[e], scale_inv[e], self.fp8_block_size, torch.bfloat16
+            )
             q, s = mxfp4_quantize(bf16)
             out[e] = q.view(torch.uint8)
             out_scale[e] = s.view(torch.uint8)

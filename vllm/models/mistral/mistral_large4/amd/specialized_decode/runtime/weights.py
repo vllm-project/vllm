@@ -149,7 +149,7 @@ def _shared_expert_mxfp4(mlp) -> dict[str, torch.Tensor]:
 
     def mx(linear):
         w, s = _fp8_param(linear)
-        q, sc = mxfp4_quantize(dequant_block_fp8(w, s, FP8_BLOCK))
+        q, sc = mxfp4_quantize(dequant_block_fp8(w, s, FP8_BLOCK, torch.bfloat16))
         return q.view(torch.uint8), sc.view(torch.uint8)
 
     ug, s_ug = mx(mlp.gate_up_proj)  # rows [gate; up], as w13

@@ -73,7 +73,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     parse_w4a16_int4_weight_config,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    dequantize_block_fp8_moe_weights,
+    dequantize_fp8_moe_weights,
     validate_fp8_block_shape_moe,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -868,18 +868,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
-        requantization. Other FP8 weight schemes are not supported."""
-        if self.weight_qscheme != "per_block":
-            raise NotImplementedError(
-                "MoE requantization from Quark FP8 is only supported for "
-                f"block-scaled weights, got weight scheme {self.weight_qscheme}."
-            )
-        return dequantize_block_fp8_moe_weights(
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
             layer.w2_weight,
             layer.w2_weight_scale,
+            weight_key=self.weight_quant_key,
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.weight_block_size,
             out_dtype=layer.orig_dtype,

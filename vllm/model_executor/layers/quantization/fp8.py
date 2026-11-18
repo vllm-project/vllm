@@ -48,7 +48,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    dequantize_block_fp8_moe_weights,
+    dequantize_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -518,6 +518,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation_key = kFp8DynamicTokenSym
             else:
                 activation_key = kFp8DynamicTensorSym
+        self.weight_quant_key = weight_key
         self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
@@ -716,18 +717,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
-        requantization. Other FP8 weight schemes are not supported."""
-        if not self.block_quant:
-            raise NotImplementedError(
-                "MoE requantization from FP8 is only supported for block-scaled "
-                "weights."
-            )
-        return dequantize_block_fp8_moe_weights(
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
             layer.w13_weight,
-            layer.w13_weight_scale_inv,
+            getattr(layer, f"w13_{self.weight_scale_name}"),
             layer.w2_weight,
-            layer.w2_weight_scale_inv,
+            getattr(layer, f"w2_{self.weight_scale_name}"),
+            weight_key=self.weight_quant_key,
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.weight_block_size,
             out_dtype=layer.orig_dtype,

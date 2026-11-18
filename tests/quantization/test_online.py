@@ -3188,7 +3188,9 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
     assert relative_error < 0.2
 
 
-def _fp8_moe_source_method(source: str, block_size: list[int] | None):
+def _fp8_moe_source_method(
+    source: str, block_size: list[int] | None, channel: bool = False
+):
     """A checkpoint FP8 MoE method with only the state `dequantize_weight` reads."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
         CompressedTensorsW8A8Fp8MoEMethod,
@@ -3206,82 +3208,91 @@ def _fp8_moe_source_method(source: str, block_size: list[int] | None):
     method.moe = SimpleNamespace(w13_num_shards=2)
     method.block_quant = block_size is not None
     method.weight_block_size = block_size
-    if source == "compressed_tensors":
-        from compressed_tensors.quantization import QuantizationStrategy
-
-        method.weight_quant = SimpleNamespace(
-            strategy=QuantizationStrategy.BLOCK
-            if block_size
-            else QuantizationStrategy.TENSOR
+    if block_size:
+        method.weight_quant_key = quant_utils.QuantKey(
+            quant_utils.FP8_DTYPE,
+            quant_utils.ScaleDesc(
+                torch.float32, True, quant_utils.GroupShape(*block_size)
+            ),
         )
-    elif source == "quark":
-        method.weight_qscheme = "per_block" if block_size else "per_tensor"
+    else:
+        method.weight_quant_key = (
+            kFp8StaticChannelSym if channel else kFp8StaticTensorSym
+        )
     # Only `Fp8MoEMethod` names block scales `weight_scale_inv`.
     method.scale_name = (
         "weight_scale_inv" if source == "fp8" and block_size else "weight_scale"
     )
+    method.weight_scale_name = method.scale_name
     return method
 
 
-@pytest.mark.parametrize("source", ["fp8", "compressed_tensors", "quark"])
-@pytest.mark.parametrize("chunk_experts", [1, 100])
 @pytest.mark.parametrize(
-    "block_size,intermediate_size,hidden_size",
+    "source,scheme",
     [
-        # Partial trailing blocks: each w13 shard has its own block grid.
-        pytest.param([128, 128], 192, 320, id="block_partial"),
-        pytest.param([64, 32], 96, 96, id="block_small"),
+        (source, scheme)
+        for source in ("fp8", "compressed_tensors", "quark")
+        for scheme in ("block_partial", "block_small", "per_tensor", "per_channel")
+        # `Fp8MoEMethod` only supports per-tensor and block scales.
+        if not (source == "fp8" and scheme == "per_channel")
     ],
 )
+@pytest.mark.parametrize("chunk_experts", [1, 100])
 @pytest.mark.skip_global_cleanup
-def test_block_fp8_moe_dequantize_weight_numerics(
-    source, block_size, intermediate_size, hidden_size, chunk_experts, monkeypatch
+def test_fp8_moe_dequantize_weight_numerics(
+    source, scheme, chunk_experts, monkeypatch
 ) -> None:
-    """The `dequantize_weight` of block-FP8 checkpoint MoE methods (the source of
-    FP8 -> MXFP4/... online requantization) matches a per-block reference,
-    whatever the chunking."""
+    """The `dequantize_weight` of FP8 checkpoint MoE methods (the source of
+    FP8 -> MXFP4/... online requantization) matches a reference for block,
+    per-tensor and per-channel scales, whatever the chunking."""
     import vllm.model_executor.layers.quantization.utils.fp8_utils as fp8_utils
 
+    # Partial trailing blocks: each w13 shard has its own block grid.
+    block_size, inter, hidden = {
+        "block_partial": ([128, 128], 192, 320),
+        "block_small": ([64, 32], 96, 96),
+    }.get(scheme, (None, 64, 96))
     num_experts = 4
-    expert_bytes = (
-        2 * intermediate_size * hidden_size + hidden_size * intermediate_size
-    ) * (4 + 4 + 2)
+    expert_bytes = (2 * inter * hidden + hidden * inter) * (4 + 4 + 2)
     monkeypatch.setattr(fp8_utils, "_DEQUANT_CHUNK_BYTES", chunk_experts * expert_bytes)
-    method = _fp8_moe_source_method(source, block_size)
+    method = _fp8_moe_source_method(source, block_size, scheme == "per_channel")
 
     torch.manual_seed(5)
-    w13 = torch.randn(num_experts, 2 * intermediate_size, hidden_size).to(
-        torch.float8_e4m3fn
-    )
-    w2 = torch.randn(num_experts, hidden_size, intermediate_size).to(
-        torch.float8_e4m3fn
-    )
-
-    def ceil_div(a: int, b: int) -> int:
-        return -(-a // b)
-
-    bn, bk = block_size
-    n_w13 = ceil_div(intermediate_size, bn)
-    w13_scale = torch.rand(num_experts, 2 * n_w13, ceil_div(hidden_size, bk)) + 0.5
-    w2_scale = (
-        torch.rand(
-            num_experts, ceil_div(hidden_size, bn), ceil_div(intermediate_size, bk)
-        )
-        + 0.5
-    )
-    # Each w13 shard (w1, w3) has its own block grid.
-    expected_w13 = torch.cat(
-        [
-            _naive_block_fp8_dequant(
-                w13[:, shard * intermediate_size : (shard + 1) * intermediate_size],
-                w13_scale[:, shard * n_w13 : (shard + 1) * n_w13],
-                block_size,
-            )
-            for shard in range(2)
-        ],
-        dim=1,
-    )
-    expected_w2 = _naive_block_fp8_dequant(w2, w2_scale, block_size)
+    w13 = torch.randn(num_experts, 2 * inter, hidden).to(torch.float8_e4m3fn)
+    w2 = torch.randn(num_experts, hidden, inter).to(torch.float8_e4m3fn)
+    if block_size:
+        bn, bk = block_size
+        n_w13 = -(-inter // bn)
+        w13_scale = torch.rand(num_experts, 2 * n_w13, -(-hidden // bk)) + 0.5
+        w2_scale = torch.rand(num_experts, -(-hidden // bn), -(-inter // bk)) + 0.5
+        # Each w13 shard (w1, w3) has its own block grid.
+        expected_w13 = torch.cat(
+            [
+                _naive_block_fp8_dequant(
+                    w13[:, s * inter : (s + 1) * inter],
+                    w13_scale[:, s * n_w13 : (s + 1) * n_w13],
+                    block_size,
+                )
+                for s in range(2)
+            ],
+            dim=1,
+        ).float()
+        expected_w2 = _naive_block_fp8_dequant(w2, w2_scale, block_size).float()
+    elif scheme == "per_channel":
+        # compressed-tensors keeps a trailing singleton dim, Quark does not.
+        tail = (1,) if source == "compressed_tensors" else ()
+        w13_scale = torch.rand(num_experts, 2 * inter, *tail) + 0.5
+        w2_scale = torch.rand(num_experts, hidden, *tail) + 0.5
+        expected_w13 = w13.float() * w13_scale.reshape(num_experts, 2 * inter, 1)
+        expected_w2 = w2.float() * w2_scale.reshape(num_experts, hidden, 1)
+    else:
+        w13_scale = torch.rand(num_experts, 2) + 0.5
+        w2_scale = torch.rand(num_experts) + 0.5
+        expected_w13 = (
+            w13.float().reshape(num_experts, 2, inter, hidden)
+            * w13_scale[:, :, None, None]
+        ).reshape(num_experts, 2 * inter, hidden)
+        expected_w2 = w2.float() * w2_scale[:, None, None]
 
     layer = SimpleNamespace(
         w13_weight=w13,
@@ -3308,23 +3319,6 @@ def test_block_fp8_moe_dequantize_weight_numerics(
     torch.testing.assert_close(
         actual_w2, expected_w2.to(torch.bfloat16), rtol=0, atol=0
     )
-
-
-@pytest.mark.parametrize("source", ["fp8", "compressed_tensors", "quark"])
-@pytest.mark.skip_global_cleanup
-def test_non_block_fp8_moe_dequantize_weight_is_not_implemented(source) -> None:
-    """Per-tensor / per-channel FP8 experts cannot be a requantization source."""
-    method = _fp8_moe_source_method(source, None)
-    layer = SimpleNamespace(
-        w13_weight=torch.zeros(2, 8, 8, dtype=torch.float8_e4m3fn),
-        w2_weight=torch.zeros(2, 8, 4, dtype=torch.float8_e4m3fn),
-        w13_weight_scale=torch.ones(2, 2),
-        w2_weight_scale=torch.ones(2),
-        orig_dtype=torch.bfloat16,
-    )
-    # Rejected when called, not lazily when the first group of experts is read.
-    with pytest.raises(NotImplementedError, match="block-scaled"):
-        method.dequantize_weight(layer)
 
 
 @pytest.mark.parametrize("requantization_source", [True, False])
@@ -3356,38 +3350,6 @@ def test_finalize_rejects_partially_loaded_requantization_source(
     else:
         finalize_layerwise_processing(model, SimpleNamespace())
         assert processed == [layer]
-
-
-@pytest.mark.skip_global_cleanup
-def test_block_fp8_source_does_not_leak_block_size_to_non_block_target(
-    default_vllm_config, dist_init, monkeypatch
-) -> None:
-    """The block size the FP8 source sets on the layer describes the serialized
-    weights: a non-block target must not inherit it in its kernel selection."""
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
-        lambda **kwargs: (None, None),
-    )
-    default_vllm_config.model_config = ModelConfig()
-    layer = FusedMoEFactory(
-        num_experts=2,
-        top_k=1,
-        hidden_size=256,
-        intermediate_size=256,
-        prefix="fp8_source_layer",
-    ).routed_experts
-    source = Fp8MoEMethod(Fp8Config(weight_block_size=[128, 128]), layer)
-    target = Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
-    target.set_requantization_source(source)
-    target.create_weights(
-        layer=layer,
-        num_experts=2,
-        hidden_size=256,
-        intermediate_size_per_partition=256,
-        params_dtype=torch.bfloat16,
-    )
-    assert layer.w13_weight.dtype == torch.float8_e4m3fn
-    assert layer.weight_block_size is None
 
 
 def _naive_block_fp8_dequant(
@@ -3466,6 +3428,9 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
             params_dtype=torch.bfloat16,
         )
         assert online_method.uses_meta_device
+        # The block size the FP8 source sets on the layer describes the serialized
+        # weights: the target must not inherit it in its kernel selection.
+        assert source_layer.weight_block_size != block
         _materialize_requantization_source(source_layer)
         assert source_layer.w13_weight.dtype == torch.float8_e4m3fn
 
