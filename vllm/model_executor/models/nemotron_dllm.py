@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import PreTrainedConfig
 
@@ -32,6 +33,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -532,6 +534,7 @@ class NemotronLabsDiffusionModelState(ModelState):
             diffusion_states=self.diffusion_states,
             selection_policy=self.selection_policy,
             confidence_threshold=self.confidence_threshold,
+            max_logprobs=self.model_config.max_logprobs,
         ), None
 
     def add_request(self, req_index: int, new_req_data: Any) -> None:
@@ -614,6 +617,27 @@ class NemotronLabsDiffusionModelState(ModelState):
     num_new_sampled_tokens_per_step: int = 0
 
 
+def _concat_logprobs(
+    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
+) -> LogprobsTensors:
+    """Join per-request logprobs of different widths.
+
+    Pad the narrow ones the way compute_topk_scores pads a mixed batch: token
+    id 0 at -inf, which the output processor never reports.
+    """
+    width = max(p.logprob_token_ids.shape[1] for p in parts)
+
+    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
+        return F.pad(t, (0, width - t.shape[1]), value=value)
+
+    return LogprobsTensors(
+        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
+        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
+        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
 # Penalty stub for the diffusion path: the runner reads
 # penalties_state.output_bin_counts, and post_update treats None as
 # "no penalty bookkeeping".
@@ -635,6 +659,7 @@ class MaskedDiffusionSampler:
         diffusion_states: NemotronLabsDiffusionRequestStates,
         selection_policy: str = "confidence_threshold",
         confidence_threshold: float = 0.9,
+        max_logprobs: int = 20,
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
@@ -658,19 +683,33 @@ class MaskedDiffusionSampler:
         self._query_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self._num_logits = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
-        # Per-slot stash for top-k (logprobs>0) tensors computed on the
-        # converging denoise step; consumed on the subsequent commit step.
-        self._pending_logprobs: dict[int, LogprobsTensors] = {}
+        # Per-slot top-k (logprobs>0) of the converging denoise step, read on
+        # the following commit step. Fixed width, allocated before memory
+        # profiling.
+        if max_logprobs < 0 or max_logprobs > MAX_LOGPROB_TOKEN_IDS:
+            max_logprobs = MAX_LOGPROB_TOKEN_IDS
+        self._stash_width = max_logprobs
+        self._topk_stash: LogprobsTensors | None = None
+        if max_logprobs > 0:
+            shape = (max_num_reqs, self.canvas_length, 1 + max_logprobs)
+            self._topk_stash = LogprobsTensors(
+                logprob_token_ids=torch.zeros(shape, dtype=torch.int64, device=device),
+                logprobs=torch.full(shape, float("-inf"), device=device),
+                selected_token_ranks=torch.zeros(
+                    shape[:2], dtype=torch.int64, device=device
+                ),
+            )
+        # Requests with a wider top-k, filled on the step a slot converges:
+        # a [canvas_length, vocab] stash per slot would not fit.
+        self._wide_logprobs: dict[int, LogprobsTensors] = {}
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
+        self._wide_logprobs.pop(req_idx, None)
         if use_penalty(sampling_params):
             logger.warning_once(
                 "Masked block-diffusion does not support repetition/frequency/"
                 "presence penalties; ignoring them for this request."
             )
-        # Purge any stale logprobs stashed under this slot by a prior request
-        # that was aborted between its converging denoise and commit steps.
-        self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
@@ -730,6 +769,188 @@ class MaskedDiffusionSampler:
     # ------------------------------------------------------------------
     # Decode helpers
     # ------------------------------------------------------------------
+
+    def _stash_topk_logprobs(
+        self,
+        logits_3d: torch.Tensor,
+        canvas_rows: torch.Tensor,
+        slots: torch.Tensor,
+        keep: torch.Tensor,
+        num_logprobs: int,
+    ) -> None:
+        """Stash the top-k of `slots` where `keep` (the step they converged).
+
+        `logits_3d` is [n, CL, vocab] and `canvas_rows` the converged canvases
+        [n, CL]. Rows past a truncated canvas are never emitted.
+        """
+        stash = self._topk_stash
+        assert stash is not None
+        n, CL, vocab = logits_3d.shape
+        new = compute_topk_scores(
+            logits_3d.reshape(n * CL, vocab), num_logprobs, canvas_rows.reshape(-1)
+        )
+        # Pad to the stash width the way compute_topk_scores pads a mixed
+        # batch: token id 0 at -inf, which the output processor never reports.
+        pad = stash.logprobs.shape[-1] - new.logprobs.shape[-1]
+        keep_3d = keep.view(n, 1, 1)
+        stash.logprob_token_ids[slots] = torch.where(
+            keep_3d,
+            F.pad(new.logprob_token_ids.view(n, CL, -1), (0, pad)),
+            stash.logprob_token_ids[slots],
+        )
+        stash.logprobs[slots] = torch.where(
+            keep_3d,
+            F.pad(new.logprobs.view(n, CL, -1), (0, pad), value=float("-inf")),
+            stash.logprobs[slots],
+        )
+        stash.selected_token_ranks[slots] = torch.where(
+            keep.view(n, 1),
+            new.selected_token_ranks.view(n, CL),
+            stash.selected_token_ranks[slots],
+        )
+
+    def _pend_wide_logprobs(
+        self,
+        logits_3d: torch.Tensor,
+        canvas_rows: torch.Tensor,
+        slots_np: np.ndarray,
+        valid_len_np: np.ndarray,
+        keep: torch.Tensor,
+        num_logprobs: int,
+    ) -> None:
+        """Compute the top-k of the wide requests that converged this step.
+
+        A per-slot stash for them would hold [CL, vocab] rows, and a top-k
+        over all their rows every step is a full sort. So read back which of
+        them converged and compute only those.
+        """
+        with gpu_sync_allowed():
+            converged_np = keep.cpu().numpy()
+        for i in np.flatnonzero(converged_np).tolist():
+            k = int(valid_len_np[i])
+            self._wide_logprobs[int(slots_np[i])] = compute_topk_scores(
+                logits_3d[i, :k], num_logprobs, canvas_rows[i, :k]
+            )
+
+    def _canvas_rows(
+        self,
+        sampled: torch.Tensor,
+        req_idx_np: np.ndarray,
+        slots_np: np.ndarray,
+        use_topk_np: np.ndarray,
+        width: int,
+    ) -> LogprobsTensors:
+        """[n, CL, width] logprobs rows for the requests at `req_idx_np`.
+
+        logprobs=0 requests report the at-unmask logprob; top-k requests read
+        the stash written on their converging step.
+        """
+        states = self.diffusion_states
+        CL = self.canvas_length
+        device = sampled.device
+        n = len(req_idx_np)
+        req_idx = async_tensor_h2d(req_idx_np.astype(np.int64), device=device)
+        slots = async_tensor_h2d(slots_np.astype(np.int64), device=device)
+
+        ids = torch.zeros(n, CL, width, dtype=torch.int64, device=device)
+        ids[..., 0] = sampled[req_idx].to(torch.int64)
+        lps = torch.full((n, CL, width), float("-inf"), device=device)
+        lps[..., 0] = states.unmask_logprobs[slots]
+        ranks = states.unmask_ranks[slots].to(torch.int64)
+        stash = self._topk_stash
+        if stash is not None and use_topk_np.any():
+            use_topk = async_tensor_h2d(use_topk_np, device=device)
+            ids = torch.where(
+                use_topk.view(n, 1, 1), stash.logprob_token_ids[slots, :, :width], ids
+            )
+            lps = torch.where(
+                use_topk.view(n, 1, 1), stash.logprobs[slots, :, :width], lps
+            )
+            ranks = torch.where(
+                use_topk.view(n, 1), stash.selected_token_ranks[slots], ranks
+            )
+        return LogprobsTensors(
+            logprob_token_ids=ids, logprobs=lps, selected_token_ranks=ranks
+        )
+
+    def _canvas_logprobs(
+        self,
+        num_reqs: int,
+        sampled: torch.Tensor,
+        req_idx_np: np.ndarray,
+        slots_np: np.ndarray,
+        use_topk_np: np.ndarray,
+        width: int,
+    ) -> LogprobsTensors:
+        """A canvas of logprobs rows for every logprobs request in decode.
+
+        Only committing requests read their rows (the scheduler slices
+        num_sampled of them), so which requests commit never has to be known
+        on the host.
+        """
+        rows = self._canvas_rows(sampled, req_idx_np, slots_np, use_topk_np, width)
+        rows_np = np.zeros(num_reqs, dtype=np.int64)
+        rows_np[req_idx_np] = self.canvas_length
+        return LogprobsTensors(
+            logprob_token_ids=rows.logprob_token_ids.view(-1, width),
+            logprobs=rows.logprobs.view(-1, width),
+            selected_token_ranks=rows.selected_token_ranks.view(-1),
+            cu_num_generated_tokens=(np.cumsum(rows_np) - rows_np).tolist(),
+        )
+
+    def _emitted_logprobs(
+        self,
+        num_reqs: int,
+        sampled: torch.Tensor,
+        num_sampled: torch.Tensor,
+        req_idx_np: np.ndarray,
+        slots_np: np.ndarray,
+        num_logprobs_np: np.ndarray,
+        width: int,
+    ) -> LogprobsTensors | None:
+        """Logprobs of the requests emitting this step, picked on the host.
+
+        For steps with a wide request: a canvas of rows for every logprobs
+        request, padded to its top-k, would not fit.
+        """
+        wide_np = num_logprobs_np > self._stash_width
+        narrow = None
+        if not wide_np.all():
+            narrow = self._canvas_rows(
+                sampled,
+                req_idx_np[~wide_np],
+                slots_np[~wide_np],
+                num_logprobs_np[~wide_np] > 0,
+                width,
+            )
+        with gpu_sync_allowed():
+            emitted_np = num_sampled.cpu().numpy()
+        parts: list[LogprobsTensors] = []
+        rows_np = np.zeros(num_reqs, dtype=np.int64)
+        j = 0
+        for req_idx, slot, wide in zip(
+            req_idx_np.tolist(), slots_np.tolist(), wide_np.tolist()
+        ):
+            k = int(emitted_np[req_idx])
+            part = None
+            if wide:
+                if k:
+                    part = self._wide_logprobs.pop(slot, None)
+            else:
+                assert narrow is not None
+                if k:
+                    part = LogprobsTensors(
+                        logprob_token_ids=narrow.logprob_token_ids[j, :k],
+                        logprobs=narrow.logprobs[j, :k],
+                        selected_token_ranks=narrow.selected_token_ranks[j, :k],
+                    )
+                j += 1
+            if part is not None:
+                parts.append(part)
+                rows_np[req_idx] = part.logprobs.shape[0]
+        if not parts:
+            return None
+        return _concat_logprobs(parts, (np.cumsum(rows_np) - rows_np).tolist())
 
     def _build_output(
         self,
@@ -878,70 +1099,60 @@ class MaskedDiffusionSampler:
             log_threshold=self.log_threshold,
         )
 
-        # Top-k introspection (logprobs>0): stash the converged denoise
-        # step's top-k (is_encoder_phase flipped False->True); attached on
-        # the commit. The logprobs==0 path reads the at-unmask buffers
-        # instead and needs no stash.
-        if max_num_logprobs > 0 and num_decode > 0:
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            with gpu_sync_allowed():
-                just_converged_np = just_converged.cpu().numpy()
-            if just_converged_np.any():
-                flat_logits = logits_3d.reshape(-1, logits_3d.shape[-1])
-                final_canvas = states.canvas[decode_slots]
-                for li in np.flatnonzero(just_converged_np).tolist():
-                    slot = int(decode_slots_np[li])
-                    k_i = int(valid_canvas_len_np[li])
-                    row = li * CL
-                    self._pending_logprobs[slot] = compute_topk_scores(
-                        flat_logits[row : row + k_i],
-                        max_num_logprobs,
-                        final_canvas[li][:k_i],
-                    )
-
-        # Commit steps: emit logprobs for the committed block. The sampled
-        # token's logprob/rank come from the at-unmask buffers when only
-        # they are needed (logprobs==0); top-k rows come from the stash.
         logprobs_tensors = None
-        emit = max_num_logprobs >= 0 and num_decode > 0
-        committing_np = None
-        if emit:
-            with gpu_sync_allowed():
-                committing_np = is_committing.cpu().numpy()
-        if emit and committing_np is not None and committing_np.any():
-            decode_row_of_req = {
-                int(decode_indices_np[li]): li for li in range(num_decode)
-            }
-            parts_ids, parts_lp, parts_ranks = [], [], []
-            cu_gen: list[int] = []
-            flat_offset = 0
-            for i in range(num_reqs):
-                cu_gen.append(flat_offset)
-                decode_row = decode_row_of_req.get(i)
-                if decode_row is None or not committing_np[decode_row]:
-                    continue
-                slot = int(slots_np[i])
-                k_i = int(valid_canvas_len_np[decode_row])
-                if max_num_logprobs > 0:
-                    lp = self._pending_logprobs.pop(slot, None)
-                    if lp is None:
-                        continue
-                    parts_ids.append(lp.logprob_token_ids)
-                    parts_lp.append(lp.logprobs)
-                    parts_ranks.append(lp.selected_token_ranks)
-                    flat_offset += lp.logprobs.shape[0]
-                else:
-                    parts_ids.append(sampled[i, :k_i].to(torch.int64).unsqueeze(-1))
-                    parts_lp.append(states.unmask_logprobs[slot, :k_i].unsqueeze(-1))
-                    parts_ranks.append(states.unmask_ranks[slot, :k_i])
-                    flat_offset += k_i
-            if parts_ids:
-                logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=torch.cat(parts_ids),
-                    logprobs=torch.cat(parts_lp),
-                    selected_token_ranks=torch.cat(parts_ranks),
-                    cu_num_generated_tokens=cu_gen,
+        if max_num_logprobs >= 0 and num_decode > 0:
+            dec_num_logprobs_np = self.sampling_states.num_logprobs[decode_slots_np]
+            wide_np = dec_num_logprobs_np > self._stash_width
+            narrow_np = (dec_num_logprobs_np >= 0) & ~wide_np
+            topk_rows_np = np.flatnonzero(narrow_np & (dec_num_logprobs_np > 0))
+            wide_rows_np = np.flatnonzero(wide_np)
+            # Every narrow row gets the batch's widest narrow top-k, as
+            # compute_topk_scores gives it.
+            num_logprobs = int(dec_num_logprobs_np[narrow_np].max(initial=0))
+            just_converged = states.is_encoder_phase[decode_slots] & ~is_committing
+            if len(topk_rows_np) > 0:
+                # Which slots converged is only known on the device, so the
+                # stash write is masked instead of picked on the host.
+                topk_rows = async_tensor_h2d(
+                    topk_rows_np.astype(np.int64), device=device
+                )
+                self._stash_topk_logprobs(
+                    logits_3d[topk_rows],
+                    states.canvas[decode_slots[topk_rows]],
+                    decode_slots[topk_rows],
+                    just_converged[topk_rows],
+                    num_logprobs,
+                )
+            lp_rows_np = np.flatnonzero(dec_num_logprobs_np >= 0)
+            if len(wide_rows_np) > 0:
+                wide_rows = async_tensor_h2d(
+                    wide_rows_np.astype(np.int64), device=device
+                )
+                self._pend_wide_logprobs(
+                    logits_3d[wide_rows],
+                    states.canvas[decode_slots[wide_rows]],
+                    decode_slots_np[wide_rows_np],
+                    valid_canvas_len_np[wide_rows_np],
+                    just_converged[wide_rows],
+                    int(dec_num_logprobs_np.max()),
+                )
+                logprobs_tensors = self._emitted_logprobs(
+                    num_reqs,
+                    sampled,
+                    num_sampled,
+                    decode_indices_np[lp_rows_np],
+                    decode_slots_np[lp_rows_np],
+                    dec_num_logprobs_np[lp_rows_np],
+                    1 + num_logprobs,
+                )
+            elif len(lp_rows_np) > 0:
+                logprobs_tensors = self._canvas_logprobs(
+                    num_reqs,
+                    sampled,
+                    decode_indices_np[lp_rows_np],
+                    decode_slots_np[lp_rows_np],
+                    dec_num_logprobs_np[lp_rows_np] > 0,
+                    1 + num_logprobs,
                 )
 
         return self._build_output(
