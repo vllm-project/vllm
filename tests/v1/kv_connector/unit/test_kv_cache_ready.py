@@ -30,15 +30,21 @@ class CacheReadyConnector(ExampleConnector):
         super().__init__(vllm_config, role, kv_cache_config)
         self.kv_caches = {}
         self.ready_count = 0
+        self.capture_reset_seen = False
 
     def register_kv_caches(self, kv_caches):
         self.kv_caches = kv_caches
 
+    def reset_capture_state(self):
+        assert self.ready_count == 0
+        self.capture_reset_seen = True
+        super().reset_capture_state()
+
     def on_kv_cache_ready(self):
         assert self.role == KVConnectorRole.WORKER
         assert self.kv_caches
-        if torch.cuda.is_available():
-            assert not torch.cuda.is_current_stream_capturing()
+        if not self._vllm_config.model_config.enforce_eager:
+            assert self.capture_reset_seen
         extra = self._kv_transfer_config.kv_connector_extra_config
         if extra.get("fail_ready", False):
             raise RuntimeError("deferred registration failed")
@@ -90,6 +96,7 @@ def test_connector_deferred_registration(tmp_path, fail_ready, dist_init):
     ensure_kv_transfer_initialized(config, KVCacheConfig(2, [], []))
     try:
         get_kv_transfer_group().register_kv_caches({"layer": torch.zeros(2, 1, 16, 4)})
+        get_kv_transfer_group().reset_capture_state()
         if fail_ready:
             with pytest.raises(RuntimeError, match="deferred registration failed"):
                 worker.notify_kv_cache_ready()
@@ -130,6 +137,8 @@ def test_cache_ready_before_first_request(vllm_runner, tmp_path, enforce_eager):
         max_num_seqs=4,
         max_num_batched_tokens=128,
         block_size=32,
+        # Keep the connector present during capture to check hook ordering.
+        enable_extensible_kv_cache=False,
     ) as runner:
         num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
         for name in ("first", "second"):

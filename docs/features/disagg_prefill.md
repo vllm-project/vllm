@@ -52,11 +52,14 @@ Now supports 9 types of connectors:
 ## KV connector startup notification
 
 Override `KVConnectorBase_V1.on_kv_cache_ready()` to finish deferred registration
-before the first request. It runs on each worker after startup warmup, CUDA Graph
+before the first request. During normal startup, it runs after warmup, CUDA Graph
 capture (when enabled), final KV cache sizing, and preceding device work. Eager
-mode uses the same hook. Startup paths that skip warmup, such as elastic scale-up,
-still receive the notification. The default is a no-op; `MultiConnector` forwards
-it to each child.
+mode uses the same hook. The default is a no-op; `MultiConnector` forwards it to
+each child.
+
+With `VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`, the hook runs before the deferred warmup
+and capture in `warm_and_capture()`. It is not repeated afterward. Connectors
+must not treat this notification as a post-capture boundary on that path.
 
 `register_kv_caches()` receives tensors earlier. To defer registration, retain
 those tensors and their layout until `on_kv_cache_ready()` runs.
