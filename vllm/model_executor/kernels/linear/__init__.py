@@ -267,6 +267,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
@@ -1036,14 +1037,19 @@ def init_mxfp8_linear_kernel(
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape.
 
-    Returns a placeholder for requantization sources, which have no kernel."""
+    Omitted activation keys preserve the existing W8A8 selection and A16
+    fallback. Explicit None requests weight-only execution.
+    Returns a placeholder for requantization sources, which have no kernel.
+    """
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeMxFp8LinearKernel()
 
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
+        activation_quant_key=activation_quant_key,
     )
 
     platform = current_platform._enum
@@ -1083,6 +1089,13 @@ def init_mxfp8_linear_kernel(
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if not kernel_cls._supports_quant_scheme(kMxfp8Static, activation_quant_key):
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: quantization scheme "
+                f"{kMxfp8Static}x{activation_quant_key} not supported"
+            )
             continue
 
         can_implement, reason = kernel_cls.can_implement(config)
