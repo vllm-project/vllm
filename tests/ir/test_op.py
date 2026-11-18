@@ -12,6 +12,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
+from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -379,6 +380,31 @@ class TestIrOpImplDispatch:
         assert len(caplog_vllm.records) == 1
         assert torch.all(out1 == 1 + 2 + 50)
         assert torch.all(out2 == 1 + 2)
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike(), reason="requires CUDA graphs"
+    )
+    def test_supports_args_debug_log_during_cuda_graph_capture(
+        self, custom_add_op, caplog_vllm: pytest.LogCaptureFixture
+    ):
+        _custom_add = custom_add_op
+        x = torch.ones((2, 3), device=current_platform.device_type)
+        y = torch.full((2, 3), 2.0, device=current_platform.device_type)
+        graph = torch.cuda.CUDAGraph()
+
+        with _custom_add.set_priority(["impl_even"]):
+            _custom_add(x, y)
+            with (
+                caplog_vllm.at_level(logging.DEBUG, logger="vllm"),
+                torch.cuda.graph(graph),
+            ):
+                out = _custom_add(x, y)  # size(1) == 3 → native fallback
+
+        graph.replay()
+        assert torch.all(out == 1 + 2)
+        assert any(
+            "Skipping provider impl_even" in r.getMessage() for r in caplog_vllm.records
+        )
 
     def test_default_priority(
         self,
