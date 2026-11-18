@@ -23,12 +23,9 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "XiaomiMiMo/MiMo-7B-RL",
-    "stepfun-ai/Step-3.5-Flash",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
-    "meituan-longcat/LongCat-Flash-Chat",
 }
 
 BASE_MODELS_TO_TEST = [
@@ -42,7 +39,7 @@ BASE_MODELS_TO_TEST = [
     # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
-    "luccafong/deepseek_mtp_main_random",
+    "vllm-project/deepseek_mtp_main_random",
     "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "tiny-random/qwen3-next-moe",
     "zai-org/GLM-4.5",
@@ -51,14 +48,17 @@ BASE_MODELS_TO_TEST = [
     "lmsys/gpt-oss-20b-bf16",
     "deepseek-ai/DeepSeek-V3.2-Exp",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "stepfun-ai/Step-3.5-Flash",
+    "meituan-longcat/LongCat-Flash-Chat",
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
-# (target_model, draft_model, trust_remote_code)
+# (target_model, draft_model)
 SPECULATIVE_MODELS = [
-    ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
-    ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
-    ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
-    ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    ("vllm-project/deepseek_mtp_main_random", "vllm-project/deepseek_mtp_draft_random"),
+    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random"),
+    ("meta-llama/Meta-Llama-3-8B-Instruct", "vllm-project/EAGLE-LLaMA3-Instruct-8B"),
+    ("meta-llama/Llama-3.1-8B-Instruct", "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"),
 ]
 
 
@@ -267,6 +267,30 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed_precision"])
+def test_modelopt_mixed_precision_config_is_normalized(legacy, quant_algo):
+    quantized_layers = {"model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}}
+    quantization = {
+        "quant_algo": quant_algo,
+        "quantized_layers": quantized_layers,
+    }
+    quantization_config = {"quantization": quantization}
+    if legacy:
+        quantization["modelopt_quant_config"] = {"quant_cfg": {}}
+    else:
+        quantization_config["producer"] = {"name": "modelopt"}
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    normalized = convertor.get_quantization_config()
+
+    assert normalized["quant_method"] == "modelopt_mixed"
+    assert normalized["quantization"]["quantized_layers"] == {
+        "model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}
+    }
 
 
 def _layer(**overrides) -> ModelArchitectureConfig:
@@ -491,17 +515,13 @@ def test_base_model_arch_config(model: str):
     _assert_model_config_methods(model_config, expected)
 
 
-@pytest.mark.parametrize(
-    "target_model,draft_model,trust_remote_code", SPECULATIVE_MODELS
-)
-def test_draft_model_arch_config(
-    target_model: str, draft_model: str, trust_remote_code: bool
-):
+@pytest.mark.parametrize("target_model,draft_model", SPECULATIVE_MODELS)
+def test_draft_model_arch_config(target_model: str, draft_model: str):
     """Test model architecture config for draft/speculative models."""
     groundtruth = _load_groundtruth("draft_model_arch_groundtruth.json")
     expected = groundtruth[draft_model]
 
-    target_model_config = ModelConfig(target_model, trust_remote_code=trust_remote_code)
+    target_model_config = ModelConfig(target_model)
     speculative_config = SpeculativeConfig(
         model=draft_model,
         num_speculative_tokens=1,

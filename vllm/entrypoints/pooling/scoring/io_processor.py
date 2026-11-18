@@ -2,26 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.exceptions import ChatTemplateResolutionError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import TokenizeParams
-from vllm.renderers.hf import safe_apply_chat_template
+from vllm.renderers import TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormat,
+    ChatTemplateContentFormatOption,
+)
+from vllm.renderers.hf import (
+    resolve_chat_template,
+    resolve_chat_template_content_format,
+    safe_apply_chat_template,
+)
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
+from vllm.transformers_utils.config import (
+    get_sentence_transformers_chat_template_kwargs,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyPoolingRequest,
     AnyRenderParam,
@@ -36,14 +48,16 @@ from ..typing import (
     RequestGenerator,
     ScoringRenderParams,
 )
+from ..utils import reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
-from .typing import ScoreData, ScoreInput, ScoringData
+from .types import ScoreData, ScoreInput, ScoringData
 from .utils import (
     compress_token_type_ids,
     compute_maxsim_score,
     get_num_special_tokens_for_pair,
-    parse_score_data,
+    parse_score_messages,
     score_data_to_prompts,
+    truncate_score_content,
     truncate_text_to_tokens,
     validate_score_input,
 )
@@ -457,9 +471,22 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
 
+        self.saved_chat_template: str | None = None
+        self.saved_chat_template_kwargs: dict[str, Any] = {}
+        if not self.supports_score_template:
+            try:
+                self.saved_chat_template, self.saved_chat_template_kwargs = (
+                    self._get_saved_chat_template()
+                )
+            except ValueError:
+                # An explicit chat template takes precedence anyway.
+                if self.chat_template is None:
+                    raise
+
         if (
             getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
             and self.chat_template is None
+            and self.saved_chat_template is None
         ):
             suggested_template = (
                 "examples/pooling/score/template/qwen3_vl_reranker.jinja"
@@ -474,6 +501,41 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.model_config.model,
                 suggested_template,
             )
+
+    def _get_saved_chat_template(self) -> tuple[str | None, dict[str, Any]]:
+        """Get the chat template and kwargs declared by the Sentence
+        Transformers config, if any."""
+        saved_kwargs = get_sentence_transformers_chat_template_kwargs(
+            self.model_config.model, self.model_config.revision
+        )
+        if saved_kwargs is None:
+            return None, {}
+
+        saved_kwargs = dict(saved_kwargs)
+        name = saved_kwargs.pop("chat_template", None)
+        if name == "default":
+            name = None
+        template = resolve_chat_template(
+            self.tokenizer,
+            chat_template=name,
+            tools=None,
+            model_config=self.model_config,
+        )
+        # Hugging Face returns an unknown template name unchanged.
+        if template is None or template == name:
+            raise ValueError(
+                "The Sentence Transformers config declares message inputs, but "
+                f"the checkpoint has no {name or 'default'!r} chat template."
+            )
+
+        if self.chat_template is None:
+            logger.info_once(
+                "Scoring with the %r chat template declared by the Sentence "
+                "Transformers config. Its suffix is not restored after "
+                "truncation; use max_tokens_per_doc to truncate documents.",
+                name or "default",
+            )
+        return template, saved_kwargs
 
     #######################################
     # online APIs
@@ -503,6 +565,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 data_1=data_1[i],
                 data_2=data_2[i],
                 chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
                 tok_params=tok_params,
@@ -548,7 +611,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=ctx.chat_template,
+                    chat_template=(
+                        self.chat_template
+                        if ctx.chat_template is None
+                        else ctx.chat_template
+                    ),
+                    chat_template_content_format=ctx.chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -563,6 +631,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     #######################################
     # helpers
+
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
 
     def render(
         self,
@@ -582,11 +658,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if self.num_post_process_tokens:
+            tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
             encode_kwargs=tok_params.get_encode_kwargs(),
             chat_template=render_params["chat_template"],
+            chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
@@ -595,6 +677,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        if self.model is not None:
+            self.model.post_process_tokens(engine_prompt)
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -640,25 +725,50 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
-        prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
-            data_1,
-            data_2,
-            model_config,
+        if chat_template is None and self.saved_chat_template is not None:
+            chat_template = self.saved_chat_template
+            chat_template_kwargs = merge_kwargs(
+                self.saved_chat_template_kwargs, chat_template_kwargs
+            )
+
+        given_format = chat_template_content_format or self.chat_template_content_format
+        content_format: ChatTemplateContentFormat = "string"
+        if chat_template is not None:
+            content_format = (
+                resolve_chat_template_content_format(
+                    chat_template,
+                    tools=None,
+                    given_format=given_format,
+                    tokenizer=tokenizer,
+                    model_config=model_config,
+                )
+                if given_format == "auto"
+                else given_format
+            )
+
+        conversation, mm_data, mm_uuids = parse_score_messages(
+            data_1, data_2, model_config, content_format
         )
 
-        # Limit the query and document separately before composing them.
-        if max_tokens_per_query > 0 and isinstance(prompt_1, str):
-            prompt_1 = truncate_text_to_tokens(
-                prompt_1, tokenizer, max_tokens_per_query
-            )
-        if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-            prompt_2 = truncate_text_to_tokens(prompt_2, tokenizer, max_tokens_per_doc)
+        # Limit text before composing the pair, preserving image blocks.
+        for message, limit in zip(
+            conversation, (max_tokens_per_query, max_tokens_per_doc)
+        ):
+            if limit > 0:
+                assert message["content"] is not None
+                message["content"] = truncate_score_content(
+                    message["content"], tokenizer, limit
+                )
+
+        prompt_1, prompt_2 = (message["content"] for message in conversation)
 
         def default_tokenizer_encode():
+            assert isinstance(prompt_1, str) and isinstance(prompt_2, str)
             local_kwargs = encode_kwargs.copy()
 
             if self.supports_score_template:
@@ -675,7 +785,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         query_tokens = tokenizer.encode(
                             prompt_1, add_special_tokens=False
                         )
-                        num_special = get_num_special_tokens_for_pair(tokenizer)
+                        num_special = (
+                            get_num_special_tokens_for_pair(tokenizer)
+                            if local_kwargs.get("add_special_tokens", True)
+                            else 0
+                        )
                         doc_limit_max_length = (
                             len(query_tokens) + max_tokens_per_doc + num_special
                         )
@@ -686,8 +800,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                             )
                         else:
                             effective_max_length = doc_limit_max_length
-                        local_kwargs["truncation"] = "only_second"
-                        local_kwargs["max_length"] = effective_max_length
+                        if len(query_tokens) + num_special < effective_max_length:
+                            local_kwargs["truncation"] = "only_second"
+                            local_kwargs["max_length"] = effective_max_length
 
                     prompt_inputs = tokenizer(
                         text=prompt_1, text_pair=prompt_2, **local_kwargs
@@ -699,7 +814,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        # FIXME: For now, we only apply a template when one is explicitly provided.
+        # FIXME: For now, we only apply a template when one is explicitly provided,
+        # either directly or by the Sentence Transformers config.
         # We cannot rely on the tokenizer's chat template because many models
         # inherit junk templates from their base LLM, which breaks both the models
         # and the tests that use them.
@@ -722,10 +838,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 full_prompt = safe_apply_chat_template(
                     model_config,
                     tokenizer,
-                    [
-                        {"role": "query", "content": prompt_1},
-                        {"role": "document", "content": prompt_2},
-                    ],
+                    conversation,
                     chat_template=chat_template,
                     tools=None,
                     tokenize=False,
@@ -733,15 +846,25 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 )
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
+                conversation, mm_data, mm_uuids = parse_score_messages(
+                    data_1, data_2, model_config
+                )
+                prompt_1, prompt_2 = (message["content"] for message in conversation)
+                assert isinstance(prompt_1, str) and isinstance(prompt_2, str)
+                if max_tokens_per_query > 0:
+                    prompt_1 = truncate_text_to_tokens(
+                        prompt_1, tokenizer, max_tokens_per_query
+                    )
+                if max_tokens_per_doc > 0:
+                    prompt_2 = truncate_text_to_tokens(
+                        prompt_2, tokenizer, max_tokens_per_doc
+                    )
                 full_prompt, prompt_inputs = default_tokenizer_encode()
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
 
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
-
-        if self.model is not None:
-            self.model.post_process_tokens(engine_prompt)
 
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
@@ -751,7 +874,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaRankingIOProcessorMixin:
+class JinaRankingIOProcessorMixin(PoolingIOProcessor):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["tok_params"].truncate_prompt_tokens is not None:
+            raise VLLMValidationError(
+                "JinaForRanking does not support truncate_prompt_tokens. Use "
+                "max_tokens_per_query and max_tokens_per_doc for scoring, or "
+                "truncate each input text on the client.",
+                parameter="truncate_prompt_tokens",
+            )
+        return super().render(render_params)
+
     @staticmethod
     def format_docs_prompts_func(
         query: str,
@@ -770,9 +903,12 @@ class JinaRankingIOProcessorMixin:
             special_tokens = default_special_tokens
 
         def sanitize_input(text: str) -> str:
-            for token in special_tokens.values():
-                text = text.replace(token, "")
-            return text
+            while True:
+                previous = text
+                for token in special_tokens.values():
+                    text = text.replace(token, "")
+                if text == previous:
+                    return text
 
         query = sanitize_input(query)
         docs = [sanitize_input(doc) for doc in docs]
@@ -868,10 +1004,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        # Forward truncation from the real request: the base factory reads
-        # these off ctx.request, so omitting them here silently drops
-        # truncate_prompt_tokens for Jina rerank/score (unlike the embed and
-        # bi/cross-encoder paths, which read them from the real request).
         ctx.request = PoolingCompletionRequest(
             task="token_embed",
             input=prompts,

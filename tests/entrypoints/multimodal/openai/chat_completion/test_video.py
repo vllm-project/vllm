@@ -32,7 +32,6 @@ def server():
         "--max-num-seqs",
         "2",
         "--enforce-eager",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
         "--media-io-kwargs",
@@ -96,7 +95,7 @@ def describe_video_messages(
     family of tests. *extra_video_fields* is merged into the top-level
     video content block (for uuid / bad-key tests).
 
-    Pass ``None`` for *video_url* to omit media (uuid-backed cache hits).
+    Pass `None` for *video_url* to omit media (uuid-backed cache hits).
     """
     video_block: dict = {
         "type": "video_url",
