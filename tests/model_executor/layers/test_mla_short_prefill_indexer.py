@@ -272,9 +272,11 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         "dummy",
     ],
 )
+@pytest.mark.parametrize("indexer_mxfp4", [False, True])
 def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     monkeypatch: pytest.MonkeyPatch,
     batch_kind: str,
+    indexer_mxfp4: bool,
 ) -> None:
     from vllm.models.deepseek_v32.amd import rocm
 
@@ -330,6 +332,9 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
         ),
     )
 
+    mxfp4_layout = (64, 32, 4)
+    monkeypatch.setattr(rocm, "rocm_paged_mxfp4_cache_layout", lambda *_: mxfp4_layout)
+
     calls: list[str] = []
 
     def call(name, result=None):
@@ -339,7 +344,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
 
         return fn
 
-    k_cache = torch.empty(1)
+    k_cache = torch.empty(1, 1)
     layer = SimpleNamespace(
         layer_name=MLA_LAYER,
         indexer=SimpleNamespace(
@@ -367,6 +372,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
         _fp8_kv=True,
         _fp8_kv_needs_view=False,
         _index_rope_interleave=False,
+        _indexer_mxfp4=indexer_mxfp4,
         num_local_heads=num_heads,
         qk_head_dim=nope_dim + rope_dim,
         qk_nope_head_dim=nope_dim,
@@ -405,9 +411,11 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     assert norm_rope["has_indexer"]
     assert norm_rope["index_k"] is index_k
     assert norm_rope["indexer_k_cache"] is (None if batch_kind == "dummy" else k_cache)
+    assert norm_rope["indexer_cache_mxfp4"] == (mxfp4_layout if indexer_mxfp4 else None)
 
     assert observed["fused_q"]["has_indexer"] is not should_skip
     assert (observed["fused_q"]["index_q"] is None) is should_skip
+    assert observed["fused_q"]["index_q_mxfp4"] is (indexer_mxfp4 and not should_skip)
     assert calls.count("wq_b") == calls.count("run_indexer") == int(not should_skip)
 
 
