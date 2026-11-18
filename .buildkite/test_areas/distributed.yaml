@@ -644,6 +644,7 @@ steps:
       - vllm/models/muse_spark/amd/model.py
       - tests/distributed/test_muse_spark_markov_vocab_shard.py
       - vllm/models/muse_spark/amd/ops/markov_vocab_shard.py
+      - vllm/models/muse_spark/amd/mono/kernels/markov_combine.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - tests/utils.py
       - tests/distributed/test_weight_transfer.py

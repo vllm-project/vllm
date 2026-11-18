@@ -20,6 +20,13 @@ the logits are the same elements, and the winner is the lowest-index maximum
 in either block partition. Only a NaN logit can choose differently, because the
 block boundaries move.
 
+Greedy drafts at TP 4 replace the keys all-gather and the combine launch with
+one FlyDSL launch a position (`mono/kernels/markov_combine.py`): each rank's
+shard argmax goes to every peer's mailbox and every rank picks the first
+maximum. It takes the argmax of `base + bias` before Muse's output transform,
+which is increasing, so the pick is the same unless the transform rounds two
+different logits to one fp32 value.
+
 The model installs `sample_sequential` from `attach`. Every check that sends a
 step back is the same on all ranks, so the ranks always enter the all-gathers
 together.
@@ -36,6 +43,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
+from vllm.models.muse_spark.amd.mono.decoder import (
+    HEALTH_POLL_INTERVAL,
+    register_health_check,
+)
+from vllm.models.muse_spark.amd.mono.peer import PeerBuffer
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.draft_logits import draft_logits_row
@@ -209,6 +221,147 @@ def _cache_scatter_kernel(
     )
 
 
+@triton.jit
+def _bias_round_kernel(
+    base_ptr,
+    base_stride,
+    bias_ptr,
+    bias_stride,
+    out_ptr,
+    shard_size,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    mask = cols < shard_size
+    b = tl.load(base_ptr + row * base_stride + cols, mask=mask, other=0.0)
+    s = tl.load(bias_ptr + row * bias_stride + cols, mask=mask, other=0.0)
+    # `_shard_sample_kernel`'s logits before the output transform, widened.
+    v = (b.to(tl.float32) + s.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
+    tl.store(out_ptr + row * shard_size + cols, v, mask=mask)
+
+
+# One mailbox region a draft position: 16 B a (rank, row) record.
+_REGION_BYTES = 4096
+_COMBINE_WORLD = 4
+
+
+class _GreedyCombine:
+    """The fused combine's buffers and launches, built at load on every rank."""
+
+    def __init__(
+        self, kernel, group, rows: int, n_spec: int, shard: int, device
+    ) -> None:
+        self.rank = group.rank_in_group
+        self.peers = PeerBuffer(_REGION_BYTES * n_spec, group.cpu_group)
+        self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
+        self.health = torch.zeros(8 + 8 * rows, dtype=torch.int32, device=device)
+        self.out = torch.zeros(n_spec, rows, dtype=torch.int32, device=device)
+        self.logits = torch.empty(rows, shard, dtype=torch.float32, device=device)
+        self.shard = shard
+        self.launch = {
+            r: kernel.compile_combine(group.world_size, r, shard)
+            for r in range(1, rows + 1)
+        }
+        self._health_host = torch.zeros_like(self.health, device="cpu").pin_memory()
+        self._health_event: torch.cuda.Event | None = None
+        self._calls = 0
+
+    def run(
+        self, position: int, base: torch.Tensor, bias: torch.Tensor
+    ) -> torch.Tensor:
+        """The draft tokens of `position` (int32 `[rows]`)."""
+        rows = base.shape[0]
+        _bias_round_kernel[(rows, triton.cdiv(self.shard, 1024))](
+            base,
+            base.stride(0),
+            bias,
+            bias.stride(0),
+            self.logits,
+            self.shard,
+            BLOCK=1024,
+        )
+        pointers = [p + position * _REGION_BYTES for p in self.peers.pointers]
+        self.launch[rows](
+            self.logits.data_ptr(),
+            self.out[position].data_ptr(),
+            self.epoch.data_ptr(),
+            self.health.data_ptr(),
+            *pointers,
+            *([0] * (8 - len(pointers))),
+            self.shard,
+            self.rank,
+            torch.cuda.current_stream(),
+        )
+        return self.out[position, :rows]
+
+    def poll_health(self) -> None:
+        """Raise if a launch timed out waiting for a peer rank (an asynchronous
+        copy every HEALTH_POLL_INTERVAL calls, checked one interval later)."""
+        if torch.cuda.is_current_stream_capturing():
+            return
+        self._calls += 1
+        if self._health_event is not None and self._health_event.query():
+            self._health_event = None
+            if int(self._health_host[0]) != 0:
+                raise RuntimeError(
+                    f"DSpark fused greedy combine: rank {self.rank}: a launch "
+                    "timed out waiting for a peer rank"
+                )
+        if self._health_event is None and self._calls % HEALTH_POLL_INTERVAL == 0:
+            self._health_host.copy_(self.health, non_blocking=True)
+            self._health_event = torch.cuda.Event()
+            self._health_event.record()
+
+
+def _greedy_combine(model, shard: int) -> _GreedyCombine | None:
+    """The fused combine for greedy drafts at TP 4, or None. Collective over
+    the TP group: every rank calls it and all take the same answer."""
+    import torch.distributed as dist
+
+    group = get_tp_group()
+    config = model.vllm_config
+    rows = config.scheduler_config.max_num_seqs
+    n_spec = config.speculative_config.num_speculative_tokens
+    reasons = []
+    if group.world_size != _COMBINE_WORLD:
+        reasons.append(f"tp {group.world_size} (kernel: {_COMBINE_WORLD})")
+    if not 1 <= rows <= 56 or 16 * group.world_size * rows > _REGION_BYTES:
+        reasons.append(f"max_num_seqs {rows}")
+    if shard % 4 != 0:
+        reasons.append(f"vocab shard {shard}")
+    if not model.output_multiplier > 0:
+        reasons.append("an output transform that is not increasing")
+    kernel = None
+    if not reasons:
+        from vllm.models.muse_spark.amd.mono import _ensure_writable_flydsl_cache
+
+        _ensure_writable_flydsl_cache()
+        try:
+            from vllm.models.muse_spark.amd.mono.kernels import markov_combine
+
+            kernel = markov_combine
+        except ImportError as e:
+            reasons.append(f"needs FlyDSL and AITER's FlyDSL helpers ({e})")
+    verdict = torch.tensor([0 if reasons else 1], dtype=torch.int32)
+    dist.all_reduce(verdict, op=dist.ReduceOp.MIN, group=group.cpu_group)
+    if int(verdict.item()) == 0:
+        logger.info(
+            "DSpark fused greedy combine off: %s",
+            "; ".join(reasons) or "a peer rank refused it",
+        )
+        return None
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    combine = _GreedyCombine(kernel, group, rows, n_spec, shard, device)
+    register_health_check(id(combine), combine.poll_health)
+    logger.info(
+        "DSpark fused greedy combine engaged: %d positions, shard %d.",
+        n_spec,
+        shard,
+    )
+    return combine
+
+
 def _all_gather_last(local: torch.Tensor) -> torch.Tensor:
     """`[M, N]` a rank -> `[M, tp * N]` in rank order."""
     local = local.contiguous()
@@ -285,6 +438,7 @@ class MarkovVocabShard:
         )
         # The step to hand back to: the --monokernel Markov rounds or vLLM's loop.
         self.fallback = fallback
+        self.combine = _greedy_combine(model, self.shard_size) if self.greedy else None
         self.keys: torch.Tensor | None = None
         self.stage: torch.Tensor | None = None
         self.embeds: torch.Tensor | None = None
@@ -360,9 +514,18 @@ class MarkovVocabShard:
         markov_embed = model.markov_embed(prev)
         if spec.use_confidence_head:
             embeds[0].copy_(markov_embed)
+        combine = self.combine
+        if combine is not None:
+            combine.poll_health()
+            combine.epoch.add_(1)
         for i in range(n_spec):
             # `markov_bias` on this rank's rows of markov_w2.
             bias = model.logits_processor._apply_head(self.w2_shard, markov_embed, None)
+            if combine is not None:
+                tokens = combine.run(i, base[:, i], bias)
+                embeds[i + 1] = torch.index_select(self.w1, 0, tokens.long())
+                markov_embed = embeds[i + 1]
+                continue
             _shard_sample_kernel[(num_reqs, self.num_blocks)](
                 keys,
                 keys.stride(0),
@@ -409,6 +572,8 @@ class MarkovVocabShard:
                 RANK_BLOCK=triton.next_power_of_2(self.w1.shape[1]),
             )
             markov_embed = embeds[i + 1]
+        if combine is not None:
+            out_tokens.copy_(combine.out[:n_spec, :num_reqs].t())
         if stage is not None:
             full = _all_gather_last(stage.reshape(num_sample, self.shard_size))
             values = spec.draft_logits.values

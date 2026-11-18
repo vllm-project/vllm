@@ -7,7 +7,8 @@ shard of the base logits and of markov_w2, exchanging the per-block keys
 through the TP all-gather. vLLM's `DSparkSpeculator._sample_sequential` runs
 on the full vocabulary on every rank. With a bias that does not depend on the
 order of its sum (weights k / 16), both give the same draft tokens and, for
-probabilistic drafts, the same draft logits cache bits.
+probabilistic drafts, the same draft logits cache bits. Greedy drafts also
+run the fused combine launch (`mono/kernels/markov_combine.py`), here at TP 2.
 """
 
 import functools
@@ -47,7 +48,11 @@ class _ShardedLogits:
 
 def _sharded(spec, rank: int, world_size: int, greedy: bool):
     """The speculator's model as the vocab-sharded chain sees it on `rank`."""
-    from tests.kernels.models.amd.test_muse_spark_fused_markov import VOCAB
+    from tests.kernels.models.amd.test_muse_spark_fused_markov import (
+        MAX_REQS,
+        N_SPEC,
+        VOCAB,
+    )
 
     model = spec.model
     shard = VOCAB // world_size
@@ -60,9 +65,11 @@ def _sharded(spec, rank: int, world_size: int, greedy: bool):
         ),
     )
     model.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_seqs=MAX_REQS),
         speculative_config=SimpleNamespace(
-            draft_sample_method="greedy" if greedy else "probabilistic"
-        )
+            draft_sample_method="greedy" if greedy else "probabilistic",
+            num_speculative_tokens=N_SPEC,
+        ),
     )
     model.logits_processor = _ShardedLogits(model.base, start, end)
     return model
@@ -73,27 +80,30 @@ def _hand_back(handed: list[int], spec, num_reqs: int, head_hidden) -> bool:
     return True
 
 
-def vocab_shard_matches_vllm_loop(env: dict[str, str], world_size: int) -> None:
+def vocab_shard_matches_vllm_loop(
+    env: dict[str, str], world_size: int, combine: bool
+) -> None:
     set_env_vars_and_device(env)
     with set_current_vllm_config(VllmConfig()):
         ensure_model_parallel_initialized(world_size, 1)
+    if combine:
+        pytest.importorskip("flydsl")
     from tests.kernels.models.amd.test_muse_spark_fused_markov import (
         MAX_REQS,
         N_SPEC,
         _speculator,
     )
-    from vllm.models.muse_spark.amd.ops.markov_vocab_shard import MarkovVocabShard
+    from vllm.models.muse_spark.amd.ops import markov_vocab_shard
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
     rank = get_tensor_model_parallel_rank()
     hidden = torch.zeros(MAX_REQS * N_SPEC, 8, device="cuda")
-    cases = [
-        (True, False, 1),
-        (True, False, 8),
-        (False, False, 1),
-        (False, False, 16),
-        (False, True, 3),
-    ]
+    # The fused combine's kernel is built for any of 2, 4 and 8 ranks; the
+    # model engages it at TP 4 only.
+    markov_vocab_shard._COMBINE_WORLD = world_size if combine else 0
+    cases = [(True, False, 1), (True, False, 8)]
+    if not combine:
+        cases += [(False, False, 1), (False, False, 16), (False, True, 3)]
     for greedy, fp64, num_reqs in cases:
         s = _speculator(1.0, seed=40 + num_reqs, greedy=greedy, fp64=fp64, exact=True)
         s.max_num_reqs, s.device = MAX_REQS, torch.device("cuda")
@@ -104,7 +114,10 @@ def vocab_shard_matches_vllm_loop(env: dict[str, str], world_size: int) -> None:
         if not greedy:
             s.draft_logits.values.zero_()
 
-        shard = MarkovVocabShard(_sharded(s, rank, world_size, greedy), None)
+        shard = markov_vocab_shard.MarkovVocabShard(
+            _sharded(s, rank, world_size, greedy), None
+        )
+        assert (shard.combine is not None) == combine
         assert shard.sample_sequential(s, num_reqs, hidden)
         torch.accelerator.synchronize()
         case = f"greedy={greedy} fp64={fp64} num_reqs={num_reqs} rank={rank}"
@@ -126,5 +139,6 @@ def vocab_shard_matches_vllm_loop(env: dict[str, str], world_size: int) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
-def test_muse_spark_markov_vocab_shard() -> None:
-    distributed_run(vocab_shard_matches_vllm_loop, 2)
+@pytest.mark.parametrize("combine", [False, True], ids=["all-gather", "combine"])
+def test_muse_spark_markov_vocab_shard(combine: bool) -> None:
+    distributed_run(vocab_shard_matches_vllm_loop, 2, combine)
