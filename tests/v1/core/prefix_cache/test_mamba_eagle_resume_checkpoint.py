@@ -354,7 +354,7 @@ def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         assert manager.mamba_shared_prefix_checkpoint == (
-            shared_prefix_checkpoint and lookahead > 0 and num_prefill_lookahead <= 1
+            shared_prefix_checkpoint and lookahead > 0
         )
         stub = _stub(manager, block_size, hash_block_size)
         _orphaned_full_attention_tail(manager, stub, 2020)
@@ -369,7 +369,7 @@ def test_enabling_never_reduces_reuse(lookahead, num_prefill_lookahead):
         return _sibling_hit(manager, 2017, [-2] * 583, hash_block_size)
 
     on, off = sibling_hit(True), sibling_hit(False)
-    if lookahead > 0 and num_prefill_lookahead <= 1:
+    if lookahead > 0:
         assert on > off
     else:
         assert on == off

@@ -549,15 +549,15 @@ class Scheduler(SchedulerInterface):
         )
         last_cache_position = get_reusable_prefix_length(
             request.num_tokens,
-            block_size,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            alignment_tokens=block_size,
         )
 
         end = start + num_new_tokens
         checkpoint_position = get_reusable_prefix_length(
             prefill_end,
-            ckpt_block_size,
             num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+            alignment_tokens=ckpt_block_size,
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -591,8 +591,8 @@ class Scheduler(SchedulerInterface):
         tail_boundary = (
             get_reusable_prefix_length(
                 request.num_prompt_tokens,
-                self.hash_block_size,
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+                alignment_tokens=self.hash_block_size,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0

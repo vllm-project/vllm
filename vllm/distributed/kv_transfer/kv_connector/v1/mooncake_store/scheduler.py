@@ -88,8 +88,8 @@ def _partial_tail_non_mamba_puts(
     hash_block_size = coord.hash_block_size
     boundary = get_reusable_prefix_length(
         prompt_tokens,
-        hash_block_size,
         num_hash_lookahead_tokens=coord.num_hash_lookahead_tokens,
+        alignment_tokens=hash_block_size,
     )
     if not req_meta.publish_partial_tail and boundary not in mamba_tails:
         return []

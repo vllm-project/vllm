@@ -4419,25 +4419,6 @@ def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
     assert num_computed_tokens == (64 if lookahead == 1 else 48)
 
 
-def test_multi_module_mtp_caches_draft_kv_after_reprefill():
-    """Re-prefill rewrites the drafter's attention KV; recurrent state is final."""
-    manager = make_kv_cache_manager(
-        make_kv_cache_config_hybrid_model(16, 64, 2, "mamba"),
-        max_model_len=1024,
-        enable_caching=True,
-        hash_block_size=16,
-        num_prefill_lookahead=3,
-        num_hash_lookahead_tokens=3,
-    )
-    coordinator = manager.coordinator
-    # Attention caches 33 - 2 = 31 finalized tokens, aligned to 16.
-    assert [coordinator.get_num_cacheable_tokens(33, g) for g in range(3)] == [
-        16,
-        32,
-        32,
-    ]
-
-
 @pytest.mark.parametrize("lookahead", [1, 2])
 def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     block_size = 2

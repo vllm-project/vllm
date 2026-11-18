@@ -56,6 +56,11 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     def num_lookahead_tokens(self) -> int:
         return self.num_speculative_tokens
 
+    @property
+    def num_hash_lookahead_tokens(self) -> int:
+        # Draft KV depends on the tokens the drafter reads ahead.
+        return self.num_prefill_lookahead_tokens
+
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):
     base_method = "eagle3"

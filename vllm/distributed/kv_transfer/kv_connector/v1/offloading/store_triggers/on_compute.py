@@ -101,6 +101,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         for config_group_idx, (group_config, group_state) in enumerate(
             zip(self._config.kv_group_configs, req_status.group_states)
         ):
+            # max(): the finish-time clamp can lower num_offloadable_tokens, and
+            # the index must not move back past chunks already stored.
             next_idxs[config_group_idx] = max(
                 next_idxs[config_group_idx],
                 req_status.storable_chunks(

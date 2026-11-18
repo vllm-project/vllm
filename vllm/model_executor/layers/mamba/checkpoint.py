@@ -25,7 +25,7 @@ def compute_mamba_prefill_checkpoints(
     mamba_block_size: int,
     checkpoint_alignment: int | None,
     cache_hit_alignment_tokens: int,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -45,8 +45,8 @@ def compute_mamba_prefill_checkpoints(
         query_start = seq_len - query_len
         position = get_reusable_prefix_length(
             seq_len,
-            cache_hit_alignment_tokens,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            alignment_tokens=cache_hit_alignment_tokens,
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,

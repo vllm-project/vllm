@@ -61,7 +61,7 @@ def _validate_prefix_cache_retention_interval(
 
 def replay_boundaries(
     num_prompt_tokens: int,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
 ) -> tuple[int, int]:
     """Prompt positions that sparse retention keeps reachable.
 
@@ -316,9 +316,7 @@ class KVCacheCoordinator(ABC):
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
         """Return the prefix eligible for hashing in this group."""
-        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-        # tokens can be re-prefilled during multi-module MTP.
-        return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+        return num_computed_tokens
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
@@ -706,16 +704,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
         """Largest finalized prefix a future cache hit could match."""
-        num_tokens = num_computed_tokens
-        # Multi-module MTP may still rewrite the trailing drafter KV; Mamba state
-        # is final at the chunk end.
-        if not isinstance(self.single_type_managers[kv_cache_group_id], MambaManager):
-            num_tokens = max(0, num_tokens - self.num_reprefillable_tokens)
         # Hits are scheduler-block aligned, except partial hits: their sub-block
         # Mamba tails publish only at the exact chunk end, so keep it unrounded.
         if self.enable_partial_hash_hits:
-            return num_tokens
-        return round_down(num_tokens, self.scheduler_block_size)
+            return num_computed_tokens
+        return round_down(num_computed_tokens, self.scheduler_block_size)
 
     def find_longest_cache_hit(
         self,

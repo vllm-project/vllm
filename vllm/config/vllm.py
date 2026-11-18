@@ -700,11 +700,13 @@ class VllmConfig:
 
     def _resolve_num_hash_lookahead_tokens(self) -> int:
         """Resolve the hash lookahead after the relevant configs are finalized."""
-        speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_hash_lookahead():
+        if self.speculative_config is None:
             return 0
+        lookahead = self.speculative_config.speculator_config.num_hash_lookahead_tokens
         kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
+        if kv_transfer_config is None:
+            return lookahead if self.cache_config.enable_prefix_caching else 0
+        if lookahead:
             from vllm.distributed.kv_transfer.kv_connector.factory import (
                 KVConnectorFactory,
             )
@@ -716,9 +718,7 @@ class VllmConfig:
                     "may drop.",
                     kv_transfer_config.kv_connector,
                 )
-        elif not self.cache_config.enable_prefix_caching:
-            return 0
-        return self.num_prefill_lookahead_tokens
+        return lookahead
 
     @property
     def uniform_decode_query_len(self) -> int:

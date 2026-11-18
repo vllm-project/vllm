@@ -26,6 +26,11 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     def matches(cls, spec: "SpeculativeConfig") -> bool:
         return "dflash" in spec.draft_model_config.model.lower()
 
+    @property
+    def num_hash_lookahead_tokens(self) -> int:
+        # Context KV comes from the target's hidden state alone.
+        return 0
+
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         assert cls.base_method is not None

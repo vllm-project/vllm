@@ -148,8 +148,8 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             assert cache_hit_alignment is not None
             boundary = get_reusable_prefix_length(
                 req.num_prompt_tokens,
-                cache_hit_alignment,
                 num_hash_lookahead_tokens=self._config.num_hash_lookahead_tokens,
+                alignment_tokens=cache_hit_alignment,
             )
             entries = [entry for entry in entries if entry[2] == boundary]
             if not entries:

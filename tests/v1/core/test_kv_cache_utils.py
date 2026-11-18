@@ -1977,8 +1977,8 @@ def test_group_kind_covers_every_layer_spec():
     assert _group_kind(mixed_group) == KVCacheSpecKind.FULL_ATTENTION
 
 
-def test_prefix_lookup_groups_batch_only_equal_layouts():
-    # Only groups with equal layouts are batched; packed groups never are.
+def test_prefix_lookup_groups_batch_across_layouts():
+    # The hit logic reads no layout, so layouts do not split lookups.
     spec = new_kv_cache_spec()
     wide = new_kv_cache_spec(num_kv_heads=4)
     packed = {"x": full_layer(spec), "y": full_layer(wide)}
@@ -1989,12 +1989,7 @@ def test_prefix_lookup_groups_batch_only_equal_layouts():
         KVCacheGroup.from_layers(packed),
         KVCacheGroup.from_layers({f"{k}2": v for k, v in packed.items()}),
     ]
-    assert [g.group_ids for g in prefix_lookup_groups(groups)] == [
-        [0, 1],
-        [2],
-        [3],
-        [4],
-    ]
+    assert [g.group_ids for g in prefix_lookup_groups(groups)] == [[0, 1, 2, 3, 4]]
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

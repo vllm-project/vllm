@@ -753,8 +753,8 @@ class OffloadingConnectorScheduler:
         max_boundary = min(
             get_reusable_prefix_length(
                 req_status.req.num_prompt_tokens,
-                tokens_per_hash,
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
+                alignment_tokens=tokens_per_hash,
             ),
             len(req_status.req.block_hashes) * tokens_per_hash,
             block_end - 1,

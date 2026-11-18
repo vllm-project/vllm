@@ -2113,17 +2113,6 @@ class SpeculativeConfig:
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
-    def use_hash_lookahead(self) -> bool:
-        """Whether draft KV at a position depends on the next token.
-
-        EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, and Gemma4 MTP's Q-only drafter reads the target's KV without
-        writing its own, so only EAGLE/EAGLE3/MTP require lookahead-aware KV
-        hashes.
-        """
-        return self.method in ("eagle", "eagle3", "mtp") and not self.use_gemma4_mtp()
-
     def use_dflash(self) -> bool:
         return self.method == "dflash"
 

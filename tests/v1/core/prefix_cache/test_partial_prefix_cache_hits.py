@@ -850,7 +850,8 @@ def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
     assert manager.allocate_slots(request, request.num_tokens) is not None
     checkpoint_position = get_reusable_prefix_length(
         prompt_len,
-        hash_block_size,
+        num_hash_lookahead_tokens=0,
+        alignment_tokens=hash_block_size,
     )
     checkpoint_hash = request.block_hashes[checkpoint_position // hash_block_size - 1]
     hit = manager.block_pool.get_cached_block(checkpoint_hash, [1])

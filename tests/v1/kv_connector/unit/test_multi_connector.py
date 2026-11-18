@@ -1144,19 +1144,6 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
             )
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "kv_connector",
-    ["ExampleConnector", "HF3FSKVConnector", "LMCacheConnectorV1", "FlexKVConnectorV1"],
-)
-def test_token_keyed_connectors_do_not_support_lookahead_hashes(kv_connector: str):
-    """Token-keyed external hits ignore hash lookahead, so these connectors
-    report no support and trigger the acceptance warning."""
-    config = KVTransferConfig(kv_connector=kv_connector, kv_role="kv_both")
-    connector_cls = KVConnectorFactory.get_connector_class(config)
-    assert not connector_cls.supports_lookahead_block_hashes(config)
-
-
 def test_multi_connector_worker_metadata(mc):
     class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         def __init__(self, data: set[str]):

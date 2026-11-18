@@ -1348,8 +1348,8 @@ class SimpleCPUOffloadScheduler:
         boundary_tokens = min(
             get_reusable_prefix_length(
                 request.num_prompt_tokens,
-                self.hash_block_size,
                 num_hash_lookahead_tokens=self.cpu_block_pool.num_hash_lookahead_tokens,
+                alignment_tokens=self.hash_block_size,
             ),
             len(request.block_hashes) * self.hash_block_size,
         )

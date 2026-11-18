@@ -179,13 +179,10 @@ class KVCacheManager:
         # One predicate, read by both sides of the feature, so the scheduler
         # cannot end a chunk at a junction the manager would refuse -- a refused
         # junction costs a forward pass and displaces the block-boundary stop.
-        # Multi-module MTP is excluded because ``cache_blocks`` then hands the
-        # manager ``num_computed - num_reprefillable`` rather than the chunk end.
         self.mamba_shared_prefix_checkpoint = (
             enable_mamba_shared_prefix_checkpoint
             and self.coordinator.block_pool.num_hash_lookahead_tokens > 0
             and self.coordinator.enable_partial_hash_hits
-            and self.coordinator.num_reprefillable_tokens == 0
         )
         if self.mamba_shared_prefix_checkpoint:
             for manager in self.coordinator.single_type_managers:

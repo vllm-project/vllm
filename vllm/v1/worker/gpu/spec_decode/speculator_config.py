@@ -136,6 +136,13 @@ class SpeculatorConfig:
         return 1 if self.uses_target_hidden_states else 0
 
     @property
+    def num_hash_lookahead_tokens(self) -> int:
+        """Next tokens the drafter's own KV at a position depends on, which
+        prefix-cache block hashes must cover. 0 when the drafter writes no KV
+        that reads past its position."""
+        return 0
+
+    @property
     def max_num_new_slots_for_drafting(self) -> int:
         """See `SpeculativeConfig.max_num_new_slots_for_drafting`."""
         return 0

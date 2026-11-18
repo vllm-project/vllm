@@ -244,7 +244,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
-        # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
+        # by ``KVCacheManager``; only a Mamba "align" group ever gets it.
         self.shared_prefix_checkpoint = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -991,8 +991,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         boundary_tokens = min(
             get_reusable_prefix_length(
                 request.num_prompt_tokens,
-                hash_block_size,
                 num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                alignment_tokens=hash_block_size,
             ),
             len(request.block_hashes) * hash_block_size,
         )
@@ -2257,8 +2257,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # is kept, so `prefill_end` skips reserving blocks for the others.
             checkpoint_position = get_reusable_prefix_length(
                 num_tokens,
-                self.cache_hit_alignment_tokens,
                 num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                alignment_tokens=self.cache_hit_alignment_tokens,
             )
             if not self._needs_internal_checkpoint(
                 request_id,
@@ -2593,8 +2593,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # checkpoint is the prompt's reusable boundary, not a transient one.
             is_prompt_checkpoint = checkpoint_position == get_reusable_prefix_length(
                 request.num_prompt_tokens,
-                self.cache_hit_alignment_tokens,
                 num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                alignment_tokens=self.cache_hit_alignment_tokens,
             )
             is_retained_checkpoint = False
             if checkpoint_position % self.block_size == 0:
@@ -2631,8 +2631,8 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         latest_prompt_hash_boundary = get_reusable_prefix_length(
             request.num_prompt_tokens,
-            hash_block_size,
             num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+            alignment_tokens=hash_block_size,
         )
         # The junction is the other position a sibling resumes at: where one was
         # observed to stop, and where the scheduler already ends a chunk. Bounded

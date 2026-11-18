@@ -65,8 +65,22 @@ from vllm.transformers_utils.config import (
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.eagle.config import (
+    Eagle3SpeculatorConfig,
+    EagleSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
+    MultiModuleMTPSpeculatorConfig,
+)
+from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -4836,35 +4850,31 @@ def test_draft_sample_method_probabilistic_is_accepted():
 
 
 @pytest.mark.parametrize(
-    ("method", "draft_model_type", "needs_lookahead"),
+    ("speculator_config_cls", "num_hash_lookahead_tokens"),
     [
-        ("eagle", None, True),
-        ("eagle3", None, True),
-        ("mtp", None, True),
-        ("mtp", "gemma4_mtp", False),
-        ("dflash", None, False),
-        ("dspark", None, False),
+        (EagleSpeculatorConfig, 1),
+        (Eagle3SpeculatorConfig, 1),
+        (MTPSpeculatorConfig, 1),
+        (MultiModuleMTPSpeculatorConfig, 3),
+        (Gemma4MTPSpeculatorConfig, 0),
+        (DFlashSpeculatorConfig, 0),
+        (DSparkSpeculatorConfig, 0),
+        (DFlash2SpeculatorConfig, 0),
+        (DSpineSpeculatorConfig, 0),
+        (XPressSpeculatorConfig, 0),
+        (LiLiCorrSpeculatorConfig, 0),
+        (NgramSpeculatorConfig, 0),
     ],
 )
 def test_draft_kv_lookahead_dependency(
-    method: str,
-    draft_model_type: str | None,
-    needs_lookahead: bool,
+    speculator_config_cls: type, num_hash_lookahead_tokens: int
 ):
-    # Start from an ngram config to avoid loading model metadata: these predicates
-    # depend only on the speculative method and the draft model type.
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=3,
+    """Hashes look ahead as far as the drafter's own KV reads."""
+    spec = SimpleNamespace(num_speculative_tokens=3)
+    assert (
+        speculator_config_cls(spec).num_hash_lookahead_tokens
+        == num_hash_lookahead_tokens
     )
-    speculative_config.method = method
-    if draft_model_type is not None:
-        speculative_config.draft_model_config = SimpleNamespace(
-            hf_config=SimpleNamespace(model_type=draft_model_type)
-        )
-
-    assert speculative_config.use_eagle()
-    assert speculative_config.use_hash_lookahead() is needs_lookahead
 
 
 def test_draft_sample_method_gumbel_is_rejected():
@@ -5543,14 +5553,6 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
-
-
-@pytest.mark.parametrize(
-    "option", ["disable_eagle_block_drop", "disable_lookahead_block_hashes"]
-)
-def test_removed_eagle_hash_options_are_rejected(option):
-    with pytest.raises(ValidationError, match="Unexpected keyword argument"):
-        SpeculativeConfig(method="ngram", num_speculative_tokens=1, **{option: True})
 
 
 def test_layer_range_with_prefill_context_parallel(monkeypatch):

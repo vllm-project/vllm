@@ -588,8 +588,8 @@ class MambaSpec(KVCacheSpec):
 
 def get_reusable_prefix_length(
     num_tokens: int,
+    num_hash_lookahead_tokens: int,
     alignment_tokens: int = 1,
-    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
 
@@ -813,10 +813,7 @@ def prefix_lookup_groups(
     for i, g in enumerate(groups):
         if not g.prefix_cacheable:
             continue
-        # Only groups with equal layouts share a lookup.
-        # TODO: batch differing layouts.
-        layout = g.distinct_specs[0] if len(g.distinct_specs) == 1 else i
-        key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
+        key = (g.manager_config, g.block_size, g.dcp_sharded)
         lookup = lookups.setdefault(
             key, PrefixLookupGroup(g.manager_config, g.block_size, [])
         )

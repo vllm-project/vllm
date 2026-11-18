@@ -11,3 +11,8 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
     supported_options = MTPSpeculatorConfig.supported_options - {
         "draft_lm_head_quantization"
     }
+
+    @property
+    def num_hash_lookahead_tokens(self) -> int:
+        # The Q-only drafter reads the target's KV and writes none of its own.
+        return 0
