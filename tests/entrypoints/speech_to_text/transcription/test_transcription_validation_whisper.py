@@ -310,6 +310,21 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_word_timestamps_need_model_support(mary_had_lamb, whisper_client):
+    # Whisper has no word timestamp aligner, so the request must fail instead
+    # of returning `words: null`.
+    with pytest.raises(openai.BadRequestError, match="word timestamps"):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
+            temperature=0.0,
+        )
+
+
+@pytest.mark.asyncio
 async def test_audio_with_max_tokens(whisper_client, mary_had_lamb):
     transcription = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
