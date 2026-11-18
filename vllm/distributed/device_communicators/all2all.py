@@ -4,7 +4,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -430,6 +430,10 @@ class _NixlEPBufferState:
     max_num_ep_ranks: int
     connected_ep_size: int
     active_ep_size: int
+    # FT scale-down disconnects ranks but preserves their slots and size bounds.
+    ft_disconnected_ranks: set[int] = field(default_factory=set)
+    # Connected during prepare; remain masked until commit.
+    pending_activation_ranks: set[int] = field(default_factory=set)
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
@@ -504,15 +508,33 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
         assert NixlEPAll2AllManager._buffer is not None
         state = NixlEPAll2AllManager._buffer
-        if ep_size <= state.connected_ep_size:
+        ranks = set(range(state.connected_ep_size, ep_size))
+        # Include disconnected slots inside the target group.
+        for rank in state.ft_disconnected_ranks:
+            if rank < ep_size:
+                ranks.add(rank)
+        ranks_to_connect = sorted(ranks)
+        if not ranks_to_connect:
             return
 
         state.buffer.set_tcp_store_group(self.tcp_store_group.store)
-        ranks_to_connect = list(range(state.connected_ep_size, ep_size))
         state.buffer.connect_ranks(ranks_to_connect, activate=make_active)
-        state.connected_ep_size = ep_size
+        state.ft_disconnected_ranks.difference_update(ranks_to_connect)
+        state.connected_ep_size = max(state.connected_ep_size, ep_size)
         if make_active:
             state.active_ep_size = ep_size
+        else:
+            state.pending_activation_ranks.update(ranks_to_connect)
+
+    def disconnect_ranks(self, ranks: list[int]) -> None:
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            assert state is not None
+            disconnected = sorted(set(ranks) - state.ft_disconnected_ranks)
+            if disconnected:
+                state.buffer.disconnect_ranks(disconnected)
+                state.ft_disconnected_ranks.update(disconnected)
+                state.pending_activation_ranks.difference_update(disconnected)
 
     def _disconnect_to_ep_size(self, ep_size: int) -> None:
         assert NixlEPAll2AllManager._buffer is not None
@@ -521,8 +543,13 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             return
 
         state.buffer.set_tcp_store_group(self.tcp_store_group.store)
-        ranks_to_disconnect = list(range(ep_size, state.connected_ep_size))
-        state.buffer.disconnect_ranks(ranks_to_disconnect)
+        ranks_to_disconnect = sorted(
+            set(range(ep_size, state.connected_ep_size)) - state.ft_disconnected_ranks
+        )
+        if ranks_to_disconnect:
+            state.buffer.disconnect_ranks(ranks_to_disconnect)
+        state.ft_disconnected_ranks.intersection_update(range(ep_size))
+        state.pending_activation_ranks.intersection_update(range(ep_size))
         state.connected_ep_size = ep_size
         state.active_ep_size = min(state.active_ep_size, ep_size)
 
@@ -530,24 +557,28 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is not None
         state = NixlEPAll2AllManager._buffer
         state.buffer.set_tcp_store_group(self.tcp_store_group.store)
-        if target_ep_size <= state.active_ep_size:
+        ranks_to_activate = sorted(
+            set(range(state.active_ep_size, target_ep_size))
+            | state.pending_activation_ranks
+        )
+        if not ranks_to_activate:
             return
         assert state.connected_ep_size >= target_ep_size
 
-        for rank in range(state.active_ep_size, target_ep_size):
+        for rank in ranks_to_activate:
             state.buffer.update_mask_buffer(rank, mask=False)
         torch.accelerator.synchronize()
+        state.pending_activation_ranks.clear()
         state.active_ep_size = target_ep_size
+        NixlEPAll2AllManager._last_mask = None
 
     def _stage_ep_size(self) -> None:
         assert NixlEPAll2AllManager._buffer is not None
-        state = NixlEPAll2AllManager._buffer
         target_ep_size = self.world_size
 
         # Scale-up can safely connect standby ranks while leaving them masked.
         # Scale-down must not disconnect active ranks until commit.
-        if target_ep_size > state.connected_ep_size:
-            self._connect_to_ep_size(target_ep_size, make_active=False)
+        self._connect_to_ep_size(target_ep_size, make_active=False)
 
     def stage_ep_size(self) -> None:
         with NixlEPAll2AllManager._lock:
@@ -562,7 +593,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
             if target_ep_size < state.connected_ep_size:
                 self._disconnect_to_ep_size(target_ep_size)
-            elif target_ep_size > state.connected_ep_size:
+            else:
                 self._connect_to_ep_size(target_ep_size, make_active=True)
 
             self._unmask_connected_ranks(target_ep_size)

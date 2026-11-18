@@ -80,7 +80,8 @@ class DPCoordinator:
         logging_config: LoggingConfig | None = None,
     ):
         dp_size = parallel_config.data_parallel_size
-        assert dp_size > 1, "Coordinator only used for data parallel"
+        # An elastic deployment may temporarily shrink to a single survivor.
+        assert dp_size > 1 or parallel_config.enable_elastic_ep
 
         host = parallel_config.data_parallel_master_ip
 

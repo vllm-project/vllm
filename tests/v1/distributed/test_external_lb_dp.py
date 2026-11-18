@@ -53,6 +53,7 @@ def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
             parallel_config=SimpleNamespace(
                 data_parallel_master_port=12345,
                 _data_parallel_master_port_list=[12346, 12347],
+                _data_parallel_master_rank=0,
             )
         )
     )
@@ -62,7 +63,9 @@ def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
     monkeypatch.setattr(
         coordinator, "_setup_reconfig_bootstrap", lambda: ("127.0.0.1", 12348)
     )
-    epoch, bootstrap = coordinator._prepare_reconfig_bootstrap(control_store, 2, 3)
+    epoch, bootstrap = coordinator._prepare_reconfig_bootstrap(
+        control_store, 2, 3, [0, 1]
+    )
 
     for store in (control_store, reconfig_store):
         # DictStore preserves insertion order: metadata must precede the epoch.
@@ -78,7 +81,8 @@ def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
         assert coordinator.get_status()["requested_data_parallel_size"] == 3
 
 
-def test_external_elastic_ep_calculates_target_expert_redundancy():
+@pytest.mark.parametrize("old_size,new_size,expected", [(2, 3, 64), (4, 3, None)])
+def test_external_elastic_ep_expert_capacity(old_size, new_size, expected):
     client = SimpleNamespace(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(get_num_experts=lambda: 128),
@@ -89,7 +93,13 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
     )
     coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
 
-    assert coordinator._calculate_num_redundant_experts(2, 3) == 64
+    if expected is None:
+        with pytest.raises(ValueError, match="cannot retain all model experts"):
+            coordinator._calculate_num_redundant_experts(old_size, new_size)
+    else:
+        assert (
+            coordinator._calculate_num_redundant_experts(old_size, new_size) == expected
+        )
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,10 @@ class All2AllManagerBase:
         """Set the mask for a specific EP rank. Used during scale-down."""
         raise NotImplementedError
 
+    def disconnect_ranks(self, ranks: list[int]) -> None:
+        """Release dead peer connections while workers are paused for recovery."""
+        pass
+
     def set_num_sms(self, num_sms: int):
         pass
 

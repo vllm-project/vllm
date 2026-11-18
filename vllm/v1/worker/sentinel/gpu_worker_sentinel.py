@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
@@ -16,6 +17,7 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
+from vllm.distributed.eplb.eplb_communicator import NixlEplbCommunicator
 from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
 from vllm.distributed.utils import (
     allocate_group_ports,
@@ -81,6 +83,41 @@ def _reinit_cpu_group(
     group.cpu_group = new_group
 
 
+def _retire_nccl_communicators(groups: Sequence["GroupCoordinator"]) -> None:
+    # Slot identities stay frozen, but these NCCL groups still include
+    # dead peers. Keep the FT all2all buffers and TP/PP groups intact.
+    for group in groups:
+        communicator = getattr(group.device_communicator, "pynccl_comm", None)
+        if (
+            communicator is not None
+            and communicator.available
+            and not communicator.disabled
+        ):
+            logger.info(
+                "[FT] Retiring %s PyNCCL communicator: original ranks=%s",
+                group.unique_name,
+                group.ranks,
+            )
+            communicator.destroy()
+
+        # EPLB profiling also initializes a separate PyTorch NCCL communicator.
+        # Abort only that backend, preserving group metadata and Gloo backends.
+        device_group = group.device_group
+        if device_group is None:
+            continue
+        for device in device_group._device_types:
+            if device.type != "cuda":
+                continue
+            backend = device_group._get_backend(device)
+            if isinstance(backend, torch.distributed.ProcessGroupNCCL):
+                logger.info(
+                    "[FT] Aborting %s PyTorch NCCL backend: original ranks=%s",
+                    group.unique_name,
+                    group.ranks,
+                )
+                backend.abort()
+
+
 class WorkerSentinel:
     """Holds FT state for a single worker (mask tensors, DP config).
 
@@ -112,6 +149,7 @@ class WorkerSentinel:
                 "(VLLM_USE_V2_MODEL_RUNNER=1)."
             )
 
+    @torch.inference_mode()
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
         with set_current_vllm_config(self.worker.vllm_config):
@@ -207,8 +245,16 @@ class WorkerSentinel:
         # group reinit; placement is fixed by the redistribution below.
         model_runner.eep_eplb_suppressed = True
         self.retry(ft_request)
+        get_ep_all2all_manager().disconnect_ranks(sorted(dead_ep_ranks))
 
         self._redistribute_experts(dead_ep_ranks)
+
+        for model_state in model_runner.eplb_state.model_states.values():
+            communicator = model_state.communicator
+            if isinstance(communicator, NixlEplbCommunicator):
+                communicator.retire_peers(dead_ep_ranks)
+
+        _retire_nccl_communicators((get_dp_group(), get_ep_group(), get_eplb_group()))
 
         logger.info(
             "[FT] Worker scale_down complete: dp_group_size=%d, "

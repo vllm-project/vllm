@@ -16,6 +16,7 @@ from prometheus_client import CollectorRegistry
 
 from vllm.entrypoints.launchers.api_server.entry import build_app
 from vllm.exceptions import (
+    EngineFaultedError,
     VLLMNotFoundError,
     VLLMServerError,
     VLLMValidationError,
@@ -97,6 +98,10 @@ def app(registry):
         # terminate_if_errored and need engine/server state.
         raise VLLMServerError("internal server failure")
 
+    @app.get("/raise_engine_faulted")
+    async def raise_engine_faulted():
+        raise EngineFaultedError()
+
     @app.get("/raise_value_error")
     async def raise_value_error():
         raise ValueError("invalid input value")
@@ -153,6 +158,7 @@ def _get_http_requests_total(registry, method: str, handler: str):
         ("/raise_vllm_validation_error", "4xx", 400, {}),
         ("/raise_vllm_not_found_error", "4xx", 404, {}),
         ("/raise_vllm_server_error", "5xx", 500, {}),
+        ("/raise_engine_faulted", "5xx", 503, {}),
         ("/raise_value_error", "4xx", 400, {}),
         ("/raise_type_error", "4xx", 400, {}),
         ("/raise_overflow_error", "4xx", 400, {}),
@@ -167,6 +173,7 @@ def _get_http_requests_total(registry, method: str, handler: str):
         "VLLMValidationError->4xx",
         "VLLMNotFoundError->4xx",
         "VLLMServerError->5xx",
+        "EngineFaultedError->503",
         "ValueError->4xx",
         "TypeError->4xx",
         "OverflowError->4xx",

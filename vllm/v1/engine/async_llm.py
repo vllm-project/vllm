@@ -6,6 +6,7 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from typing import Any
 
 import vllm.envs as envs
@@ -91,6 +92,14 @@ class InputStreamError(Exception):
         super().__init__(str(cause))
 
 
+@dataclass
+class _ScaleDownRecovery:
+    request_id: str
+    removed_ranks: frozenset[int]
+    result: FaultToleranceResult
+    frontend_synced: bool = False
+
+
 class AsyncLLM(EngineClient):
     """An asynchronous wrapper for the vLLM engine."""
 
@@ -143,6 +152,9 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
+        self._ft_frontend_sync_status: dict[str, Any] | None = None
+        self._ft_scale_down_recovery: _ScaleDownRecovery | None = None
+        parallel_config = vllm_config.parallel_config
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
@@ -200,6 +212,8 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
             renderer=renderer,
         )
+        self._ft_active_dp_ranks = list(range(parallel_config.data_parallel_size))
+        self._ft_baseline_dp_size = parallel_config.data_parallel_size
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -1330,7 +1344,25 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        assert (
+            new_data_parallel_size <= old_data_parallel_size
+            or old_data_parallel_size >= self._ft_baseline_dp_size
+            or parallel_config.all2all_backend == "nixl_ep"
+        )
+
+        if old_data_parallel_size < new_data_parallel_size < self._ft_baseline_dp_size:
+            raise ValueError(
+                "Partial scale-up after fault recovery is not supported; "
+                f"restore at least {self._ft_baseline_dp_size} DP ranks."
+            )
+
+        if parallel_config.data_parallel_external_lb:
+            await self.engine_core.prepare_elastic_ep(
+                new_data_parallel_size,
+                existing_dp_ranks=self._ft_active_dp_ranks.copy(),
+            )
+        else:
+            await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1365,6 +1397,10 @@ class AsyncLLM(EngineClient):
         try:
             await self.engine_core.commit_elastic_ep()
             parallel_config.data_parallel_size = new_data_parallel_size
+            # The committed topology becomes the next fault-recovery baseline.
+            self._ft_active_dp_ranks = list(range(new_data_parallel_size))
+            self._ft_baseline_dp_size = new_data_parallel_size
+            self._ft_scale_down_recovery = None
             commit_succeeded = True
             if rank_will_retire:
                 logger.info(
@@ -1387,11 +1423,125 @@ class AsyncLLM(EngineClient):
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
-        """Send fault tolerance instruction to the engine."""
-        return await self.engine_core.handle_fault(fault_tolerance_request)
+        """Recover the engine and synchronize its frontend topology."""
+        if fault_tolerance_request.instruction != "scale_down":
+            result = await self.engine_core.handle_fault(fault_tolerance_request)
+            cached = self._ft_scale_down_recovery
+            if result.success and (cached is None or cached.frontend_synced):
+                self._ft_frontend_sync_status = None
+            return result
+        async with self._elastic_ep_lock:
+            self._ft_frontend_sync_status = {
+                "ft_state": "recovering",
+                "last_ft_request_id": fault_tolerance_request.request_id,
+            }
+            try:
+                result = await self._handle_scale_down(fault_tolerance_request)
+            except Exception as exc:
+                self._ft_frontend_sync_status.update(
+                    ft_state="failed", ft_error=str(exc) or type(exc).__name__
+                )
+                raise
+            if result.success:
+                self._ft_frontend_sync_status = None
+            else:
+                self._ft_frontend_sync_status.update(
+                    ft_state="failed", ft_error=result.reason
+                )
+            return result
+
+    async def _handle_scale_down(
+        self, request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        parallel = self.vllm_config.parallel_config
+        params = request.params
+        removed_ranks = params.get("removed_dp_ranks")
+        if (
+            not isinstance(removed_ranks, list)
+            or not removed_ranks
+            or any(type(rank) is not int for rank in removed_ranks)
+        ):
+            raise ValueError(
+                "'removed_dp_ranks' must be a non-empty list of integer rank IDs."
+            )
+        removed = set(removed_ranks)
+        cached = self._ft_scale_down_recovery
+        recovered = None
+        if cached is not None:
+            same_request = (
+                cached.request_id == request.request_id
+                and cached.removed_ranks == removed
+            )
+            if not cached.frontend_synced and not same_request:
+                raise ValueError(
+                    "Frontend migration is pending; retry the same scale_down "
+                    "request_id and removed_dp_ranks."
+                )
+            if same_request:
+                if cached.frontend_synced:
+                    return cached.result
+                recovered = cached.result
+        migrate_store = (
+            parallel.enable_elastic_ep
+            and parallel.data_parallel_external_lb
+            and parallel._data_parallel_master_rank in removed
+        )
+        if migrate_store:
+            port = params.get("coord_store_port")
+            # Reject invalid migration metadata before recovering EngineCore.
+            if (
+                not params.get("dp_master_ip")
+                or type(port) is not int
+                or not 0 < port < 65536
+                or port == params.get("dp_store_port")
+                or not request.request_id
+            ):
+                raise ValueError(
+                    "Removing the external Elastic EP master requires dp_master_ip, "
+                    "a shared coord_store_port distinct from dp_store_port, and "
+                    "a non-empty request_id."
+                )
+        result = recovered or await self.engine_core.handle_fault(request)
+        if not result.success:
+            return result
+        recovery = _ScaleDownRecovery(request.request_id, frozenset(removed), result)
+        self._ft_scale_down_recovery = recovery
+
+        active = [rank for rank in self._ft_active_dp_ranks if rank not in removed]
+
+        if migrate_store:
+            await self.engine_core.recover_elastic_ep_coord_store(
+                params["dp_master_ip"],
+                params["coord_store_port"],
+                active.index(parallel.data_parallel_rank),
+                len(active),
+                request.request_id,
+            )
+            parallel._data_parallel_master_rank = active[0]
+        if parallel.enable_eplb:
+            num_logical = self.model_config.get_num_experts()
+            num_local_experts = (
+                num_logical + parallel.eplb_config.num_redundant_experts
+            ) // parallel.data_parallel_size
+            parallel.eplb_config.num_redundant_experts = (
+                num_local_experts * len(active) - num_logical
+            )
+        parallel.data_parallel_size = len(active)
+        self._ft_active_dp_ranks = active
+        recovery.frontend_synced = True
+        logger.info("[FT] Frontend topology synchronized: active_dp_ranks=%s", active)
+        return result
 
     async def get_status(self):
-        return await self.engine_core.get_status()
+        status = await self.engine_core.get_status()
+        if self._ft_frontend_sync_status is not None:
+            # EngineCore can be healthy before the frontend store migration ends.
+            status = dict(status)
+            status["engines"] = [
+                {**engine, **self._ft_frontend_sync_status}
+                for engine in status["engines"]
+            ]
+        return status
 
     @property
     def is_running(self) -> bool:

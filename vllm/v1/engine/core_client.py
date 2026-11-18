@@ -273,10 +273,19 @@ class EngineCoreClient(ABC):
     async def commit_elastic_ep(self) -> None:
         raise NotImplementedError
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        existing_dp_ranks: list[int] | None = None,
+    ) -> None:
         raise NotImplementedError
 
     async def abort_external_elastic_ep(self, error: str) -> None:
+        raise NotImplementedError
+
+    async def recover_elastic_ep_coord_store(
+        self, master_ip: str, port: int, rank: int, size: int, request_id: str
+    ) -> None:
         raise NotImplementedError
 
     async def get_external_elastic_ep_status(
@@ -921,6 +930,9 @@ class MPClient(EngineCoreClient):
 
         parallel_config = vllm_config.parallel_config
         if response.coord_store_port:
+            parallel_config._data_parallel_master_rank = (
+                response.data_parallel_master_rank
+            )
             if parallel_config._coord_store_port:
                 assert response.coord_store_port == parallel_config._coord_store_port
             else:
@@ -1189,7 +1201,7 @@ class AsyncMPClient(MPClient):
         self._engine_status: dict[int, dict] = {}
         if self.vllm_config.parallel_config.enable_fault_tolerance:
             self._engine_status = {
-                rank: {"id": rank, "status": "healthy"}
+                rank: {"id": rank, "dp_rank": rank, "status": "healthy"}
                 for rank in self.engine_ranks_managed
             }
         try:
@@ -1602,7 +1614,7 @@ class DPAsyncMPClient(AsyncMPClient):
                         parallel_config = self.vllm_config.parallel_config
                         dp_size = parallel_config.data_parallel_size
                         dp_rank = parallel_config.data_parallel_rank
-                        assert dp_rank == 0
+                        assert dp_rank == parallel_config._data_parallel_master_rank
                         assert dp_size == new_engine_count
                         assert not parallel_config.data_parallel_hybrid_lb
                         # External LB clients continue to manage only local ranks.
@@ -1726,7 +1738,11 @@ class DPAsyncMPClient(AsyncMPClient):
         assert coordinator is not None
         return coordinator
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        existing_dp_ranks: list[int] | None = None,
+    ) -> None:
         cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
 
         assert new_data_parallel_size != cur_data_parallel_size, (
@@ -1734,7 +1750,9 @@ class DPAsyncMPClient(AsyncMPClient):
             f"different from cur_data_parallel_size {cur_data_parallel_size}"
         )
         await self._get_external_eep_coordinator().prepare(
-            cur_data_parallel_size, new_data_parallel_size
+            cur_data_parallel_size,
+            new_data_parallel_size,
+            existing_dp_ranks=existing_dp_ranks,
         )
 
     async def commit_elastic_ep(self) -> None:
@@ -1742,6 +1760,53 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def abort_external_elastic_ep(self, error: str) -> None:
         self._get_external_eep_coordinator().abort(error)
+
+    async def reconnect_dp_coordinator(
+        self, input_address: str, output_address: str, stats_address: str
+    ) -> None:
+        """When scale-up restores rank 0's coordinator, reconnect the engine and
+        frontend to restore stats updates and idle-request wakeups.
+        """
+        await asyncio.wait_for(
+            self.call_utility_async(
+                "reconnect_dp_coordinator",
+                input_address,
+                output_address,
+                stats_address,
+            ),
+            timeout=300,
+        )
+        if self.stats_update_address != stats_address:
+            task = self.resources.stats_update_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            self.resources.stats_update_task = None
+            self.resources.stats_update_socket = None
+            self.resources.scale_rcv_socket = None
+            # Recreate both ends: an inproc PAIR cannot replace only its peer.
+            self.scale_send_socket.close(linger=0)
+            self.scale_sock_addr = get_open_zmq_inproc_path()
+            self.scale_send_socket = self.resources.scale_send_socket = make_zmq_socket(
+                self.ctx, self.scale_sock_addr, zmq.PAIR, bind=True
+            )
+            self.stats_update_address = stats_address
+            self._ensure_stats_update_task()
+        self.coordinator_input_address = input_address
+        self.coordinator_output_address = output_address
+
+    async def recover_elastic_ep_coord_store(
+        self, master_ip: str, port: int, rank: int, size: int, request_id: str
+    ) -> None:
+        """Migrate Elastic EP coordination after fault recovery removes its owner.
+
+        Recreate the control store on a survivor. The DP coordinator stays on
+        rank 0 and is recreated when that rank returns during scale-up.
+        """
+        await self._get_external_eep_coordinator().migrate_coord_store(
+            master_ip, port, rank, size, request_id
+        )
 
     async def get_external_elastic_ep_status(
         self,
@@ -1980,7 +2045,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         self._prepared_elastic_ep = None
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def prepare_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        existing_dp_ranks: list[int] | None = None,
+    ) -> None:
         """Prepare elastic EP scaling without routing requests to new engines."""
         if (prepared := self._prepared_elastic_ep) is not None:
             if prepared[0] == new_data_parallel_size:

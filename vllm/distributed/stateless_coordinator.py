@@ -24,6 +24,7 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import get_ip
 
 logger = init_logger(__name__)
 
@@ -89,16 +90,26 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
                 key = f"{group_name}_{idx}"
                 if self.rank_in_group == 0:
+                    # Rank ordering can place the group leader on a different
+                    # node from the coordination master supplied as `host`.
+                    group_host = get_ip()
+                    if group_host in ("0.0.0.0", "::"):
+                        raise ValueError(
+                            "Stateless group rendezvous requires a reachable local "
+                            "IP; set VLLM_HOST_IP to this node's communication IP."
+                        )
+                    coord_store.set(f"{key}/host", group_host.encode())
                     ports, socks = allocate_group_ports(
-                        coord_store, key, host, _NUM_GROUP_PORTS
+                        coord_store, key, group_host, _NUM_GROUP_PORTS
                     )
                 else:
+                    group_host = coord_store.get(f"{key}/host").decode()
                     ports = fetch_group_ports(coord_store, key, _NUM_GROUP_PORTS)
                     socks = []
                 device_port, cpu_port, tcp_store_port = ports
 
                 device_group = stateless_init_torch_distributed_process_group(
-                    host=host,
+                    host=group_host,
                     port=device_port,
                     rank=self.rank_in_group,
                     world_size=self.world_size,
@@ -108,7 +119,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     timeout=device_timeout,
                 )
                 cpu_group = stateless_init_torch_distributed_process_group(
-                    host=host,
+                    host=group_host,
                     port=cpu_port,
                     rank=self.rank_in_group,
                     world_size=self.world_size,
@@ -118,7 +129,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     timeout=self.cpu_timeout,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
-                    host=host,
+                    host=group_host,
                     port=tcp_store_port,
                     rank=self.rank_in_group,
                     world_size=self.world_size,
@@ -136,6 +147,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
         self.tcp_store_group = self_tcp_store_group
+        self.dead_dp_ranks: set[int] = set()
 
         if current_platform.is_cuda_alike():
             visible_device_index = (

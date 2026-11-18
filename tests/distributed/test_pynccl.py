@@ -20,6 +20,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
     init_distributed_environment,
+    init_model_parallel_group,
 )
 from vllm.utils.system_utils import update_environment_variables
 
@@ -79,6 +80,40 @@ def worker_fn():
 )
 def test_pynccl():
     distributed_run(worker_fn, 2)
+
+
+@worker_fn_wrapper
+def retire_faulted_nccl_worker_fn():
+    from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
+        _retire_nccl_communicators,
+    )
+
+    world = get_world_group()
+    group = init_model_parallel_group(
+        [world.ranks], world.local_rank, "nccl", group_name="dp"
+    )
+    try:
+        torch.distributed.all_reduce(
+            torch.ones(1, device=world.device), group=group.device_group
+        )
+        torch.accelerator.synchronize()
+        # Isolate native NCCL allocations from the separately owned PyNCCL comm.
+        group.device_communicator.pynccl_comm.destroy()
+        torch.distributed.barrier(group=group.cpu_group)
+        free_before = torch.accelerator.memory.get_memory_info(world.device)[0]
+        _retire_nccl_communicators([group])
+        torch.distributed.barrier(group=group.cpu_group)
+        if torch.accelerator.memory.get_memory_info(world.device)[0] <= free_before:
+            raise AssertionError("Native NCCL allocations remained after retirement")
+    finally:
+        group.destroy()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_retire_faulted_nccl_releases_device_memory():
+    distributed_run(retire_faulted_nccl_worker_fn, 2)
 
 
 @worker_fn_wrapper

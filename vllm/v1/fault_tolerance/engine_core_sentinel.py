@@ -4,12 +4,16 @@
 
 import threading
 from collections.abc import Callable
+from concurrent.futures import Future
+from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import msgspec
 import torch
 import torch.distributed as dist
+import zmq
 from torch.distributed import PrefixStore, TCPStore
 from torch.distributed.distributed_c10d import Backend, _get_default_timeout
 
@@ -21,6 +25,7 @@ from vllm.distributed.utils import (
     set_gloo_backend_timeout,
 )
 from vllm.logger import init_logger
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
@@ -36,7 +41,7 @@ from vllm.v1.fault_tolerance.utils import (
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.serial_utils import UtilityResult, run_method
+from vllm.v1.serial_utils import MsgpackEncoder, UtilityResult, run_method
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
@@ -49,6 +54,81 @@ FT_UTILITY_METHOD = "handle_fault_tolerance"
 # same recovery round. This covers orchestrator dispatch skew (the
 # apply POSTs are fired concurrently),.
 _ROUND_CHECKIN_TIMEOUT_SEC = 10
+
+
+@dataclass
+class DPCoordinatorOutputUpdate:
+    address: str
+
+    def apply(
+        self,
+        engine: "EngineCoreProc",
+        stack: ExitStack,
+        ctx: zmq.Context,
+        socket: zmq.Socket | None,
+        encoder: MsgpackEncoder,
+    ) -> zmq.Socket:
+        """Replace the coordinator socket on its owning output thread."""
+        if socket is not None:
+            socket.close(linger=0)
+        socket = stack.enter_context(
+            make_zmq_socket(ctx, self.address, zmq.PUSH, bind=False, linger=4000)
+        )
+        # FT survivors keep stepping until scale-up commits. Seed the
+        # replacement coordinator with their existing wave.
+        dp_engine = cast("DPEngineCoreProc", engine)
+        state = (
+            EngineCoreOutputs(start_wave=dp_engine.current_wave)
+            if dp_engine.engines_running
+            else EngineCoreOutputs(wave_complete=dp_engine.current_wave - 1)
+        )
+        state.engine_index = engine.engine_index
+        socket.send_multipart(encoder.encode(state))
+        return socket
+
+
+@dataclass
+class DPCoordinatorConnection:
+    """Coordinator reconnection state, owned by the engine input thread."""
+
+    engine: "EngineCoreProc"
+    ctx: zmq.Context
+    stack: ExitStack
+    poller: zmq.Poller
+    socket: zmq.Socket | None
+    input_address: str | None
+    ready: Future[None] | None = None
+
+    def reconnect(
+        self, input_address: str, output_address: str, stats_address: str
+    ) -> Future[None] | None:
+        if input_address == self.input_address:
+            return self.ready
+        identity = self.engine.engine_index.to_bytes(length=2, byteorder="little")
+        new_socket = self.stack.enter_context(
+            make_zmq_socket(
+                self.ctx, input_address, zmq.XSUB, identity=identity, bind=False
+            )
+        )
+        new_socket.send(b"\x01")
+        if self.socket is not None:
+            self.poller.unregister(self.socket)
+            self.socket.close(linger=0)
+        self.socket = new_socket
+        self.input_address = input_address
+        self.poller.register(new_socket, zmq.POLLIN)
+        self.ready = Future()
+        self.engine.output_queue.put_nowait(DPCoordinatorOutputUpdate(output_address))
+        self.engine.addresses.coordinator_input = input_address
+        self.engine.addresses.coordinator_output = output_address
+        self.engine.addresses.frontend_stats_publish_address = stats_address
+        self.engine.frontend_stats_publish_address = stats_address
+        return self.ready
+
+    def acknowledge_ready(self, socket: zmq.Socket) -> None:
+        assert socket == self.socket
+        if self.ready is not None and not self.ready.done():
+            self.ready.set_result(None)
 
 
 class EngineCoreSentinel:
@@ -72,10 +152,7 @@ class EngineCoreSentinel:
 
     @property
     def coordinator_disabled(self) -> bool:
-        """True once any scale_down has committed dead ranks. The DP wave
-        wake-up path depends on the DP coordinator, which has no failover;
-        after a scale_down the engine never idle-pauses and keeps stepping
-        dummy batches instead."""
+        """Whether to bypass coordinator-driven idle waiting after fault recovery."""
         return bool(self._dead_dp_ranks)
 
     def activate_cpu_group_timeouts(self) -> None:
@@ -96,6 +173,19 @@ class EngineCoreSentinel:
                     instruction="activate_cpu_group_timeouts", params={}
                 ),
             ),
+        )
+
+    def reset_after_scale_reconfiguration(self):
+        """Start a new FT baseline after committing the replacement topology."""
+        self._initial_dp_size = self.parallel_config.data_parallel_size
+        self._dead_dp_ranks.clear()
+        self.fault_info = None
+        self._push_status()
+        logger.info(
+            "[FT] Engine %d reset after scale reconfiguration: dp_rank=%d, dp_size=%d",
+            self.engine_index,
+            self.parallel_config.data_parallel_rank,
+            self._initial_dp_size,
         )
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
@@ -290,16 +380,15 @@ class EngineCoreSentinel:
                 f"dead_dp_ranks={sorted(self._dead_dp_ranks)})"
             )
 
-        # Removing the store master (the lowest alive rank) requires the new
-        # store location in the request.
-        alive_before = sorted(set(range(self._initial_dp_size)) - self._dead_dp_ranks)
-        if alive_before[0] in newly_dead and (
+        # Removing the store master requires the new store location in the request.
+        master_rank = self.parallel_config._data_parallel_master_rank
+        if master_rank in newly_dead and (
             ft_request.params.get("dp_store_port") is None
             or ft_request.params.get("dp_master_ip") is None
         ):
             raise ValueError(
                 "dp_store_port and dp_master_ip required when the store "
-                f"master (rank {alive_before[0]}) is removed"
+                f"master (rank {master_rank}) is removed"
             )
 
         new_dead = self._dead_dp_ranks | newly_dead
@@ -332,21 +421,22 @@ class EngineCoreSentinel:
         # the frozen original values.
         alive = sorted(set(range(self._initial_dp_size)) - dead)
         master_ip = self.parallel_config.data_parallel_master_ip
-        if self._initial_dp_size > 1 and dead_ranks is not None:
-            # The lowest alive rank hosts the TCPStore master; rebuild the
-            # store if that rank was just removed.
-            alive_before = sorted(
-                set(range(self._initial_dp_size)) - self._dead_dp_ranks
+        master_rank = self.parallel_config._data_parallel_master_rank
+        if (
+            self._initial_dp_size > 1
+            and dead_ranks is not None
+            and master_rank in dead_ranks - self._dead_dp_ranks
+        ):
+            master_rank = alive[0]
+            master_ip = params["dp_master_ip"]
+            self._rebuild_dp_store(
+                master_ip,
+                params["dp_store_port"],
+                is_master=(self.parallel_config.data_parallel_rank == alive[0]),
+                num_clients=len(alive),
             )
-            if alive_before[0] in dead_ranks - self._dead_dp_ranks:
-                master_ip = params["dp_master_ip"]
-                self._rebuild_dp_store(
-                    master_ip,
-                    params["dp_store_port"],
-                    is_master=(self.parallel_config.data_parallel_rank == alive[0]),
-                    num_clients=len(alive),
-                )
         params["dp_master_ip"] = master_ip
+        params["dp_master_rank"] = master_rank
         params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
         params["dp_group_size"] = len(alive)
         recovery_round = ft_request.request_id
@@ -407,7 +497,10 @@ class EngineCoreSentinel:
         recovery_round = params["recovery_round"]
         master_ip = params["dp_master_ip"]
         params["recovery_store_port"] = self._coordinate_recovery_store_port(
-            master_ip, recovery_round, is_master=params["dp_group_rank"] == 0
+            master_ip,
+            recovery_round,
+            is_master=self.parallel_config.data_parallel_rank
+            == params["dp_master_rank"],
         )
         self._reinit_engine_groups(
             params["dp_group_rank"], params["dp_group_size"], recovery_round
@@ -415,6 +508,7 @@ class EngineCoreSentinel:
         # Commit the master IP only after the group reinit succeeded, so a
         # failed recovery leaves a consistent state that can be retried.
         self.parallel_config.data_parallel_master_ip = master_ip
+        self.parallel_config._data_parallel_master_rank = params["dp_master_rank"]
 
     def _recover_and_vote(
         self,

@@ -3,8 +3,11 @@
 import enum
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import copy
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+import msgspec
 import torch.distributed
 
 from vllm.config import ParallelConfig
@@ -14,7 +17,7 @@ from vllm.distributed import (
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
-from vllm.distributed.utils import get_cached_tcp_store_client
+from vllm.distributed.utils import get_cached_tcp_store_client, set_gloo_backend_timeout
 from vllm.logger import init_logger
 from vllm.v1.engine import (
     EEPNotificationType,
@@ -199,7 +202,22 @@ class ElasticEPScalingState:
         assert self.new_dp_group is not None and self.new_dp_store is not None
 
         if state == ScaleUpNewEngineState.PRE_KV_INIT:
-            self._collective_rpc("elastic_ep_execute", args=("prepare_new_worker",))
+            parallel = self.new_parallel_config
+            if self.reconfig_request is None and parallel.data_parallel_external_lb:
+                store = get_cached_tcp_store_client(
+                    parallel.data_parallel_master_ip, parallel._coord_store_port
+                )
+                key = ExternalElasticEPScaleCoordinator.key
+                # Bind EngineCore and Workers to the same operation before preparation.
+                epoch = store.get(key("current_epoch")).decode()
+                self.reconfig_request = msgspec.msgpack.decode(
+                    store.get(key(epoch, "bootstrap")),
+                    type=ReconfigureDistributedRequest,
+                )
+            self._collective_rpc(
+                "elastic_ep_execute",
+                args=("prepare_new_worker", self.reconfig_request),
+            )
             self.engine_core.available_gpu_memory_for_kv_cache = (
                 ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
             )
@@ -313,7 +331,10 @@ class ElasticEPScalingState:
         )
 
     def _init_new_dp_group(self) -> tuple[Any, Any]:
-        return self.new_parallel_config.stateless_init_dp_group(return_store=True)
+        # Joining ranks may still be starting; use the default group-init timeout.
+        prepare_config = copy(self.new_parallel_config)
+        prepare_config.cpu_distributed_timeout_seconds = None
+        return prepare_config.stateless_init_dp_group(return_store=True)
 
     def _ensure_new_dp_group(self) -> bool:
         if self.new_dp_group is not None:
@@ -395,6 +416,11 @@ class ElasticEPScalingState:
         self.engine_core.engines_running = bool(data[0])
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
+        # Preparation may use the default long timeout. Once the replacement
+        # group is active, restore fault detection before resuming inference.
+        timeout_seconds = self.new_parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            set_gloo_backend_timeout(new_dp_group, timedelta(seconds=timeout_seconds))
         if new_dp_group.rank() == 0:
             logger.info("[Elastic EP] Switched to new setup")
 
@@ -448,3 +474,10 @@ class ElasticEPScalingState:
             reconfig_request.new_data_parallel_master_port_list
         )
         parallel_config._coord_store_port = reconfig_request.coord_store_port
+        parallel_config._data_parallel_master_rank = (
+            reconfig_request.data_parallel_master_rank
+        )
+
+        ft_sentinel = getattr(self.engine_core, "ft_sentinel", None)
+        if ft_sentinel is not None:
+            ft_sentinel.reset_after_scale_reconfiguration()
