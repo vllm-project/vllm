@@ -1061,6 +1061,42 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
 
 
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", None])
+def test_weight_cache_key_tracks_online_quantization_under_direct_reload(
+    tmp_path, quantization
+):
+    """Direct reload quantizes online layers through checkpoint methods, so a
+    daemon without weight updates must not serve an engine with them."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization=quantization,
+        quantization_config=None,
+        revision=None,
+        hf_text_config=SimpleNamespace(),
+        hf_config=SimpleNamespace(architectures=["LlamaForCausalLM"]),
+    )
+    daemon, engine = (
+        WeightCacheKey.from_model_config(
+            model_config,
+            tp_size=1,
+            tp_rank=0,
+            cache_config=CacheConfig(),
+            direct_reload=direct_reload,
+        )
+        for direct_reload in (False, True)
+    )
+    expected = ["direct_reload"] if quantization else []
+    assert daemon.mismatched_fields(engine) == expected
+
+
 @pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
 def test_weight_cache_key_distinguishes_nvfp4_activation_override(
     tmp_path, hf_quant_config

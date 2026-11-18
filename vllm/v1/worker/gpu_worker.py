@@ -79,8 +79,9 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.direct import (
-    check_direct_reload,
-    direct_reload_enabled,
+    direct_reload_refusals,
+    refusal_message,
+    reloads_directly,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
@@ -1704,13 +1705,35 @@ class Worker(WorkerBase):
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
         # refuse before the trainer sends anything
-        if self.weight_transfer_engine.reloads_through_start_reload:
-            check_direct_reload(self.model_runner.get_model())
+        self._check_direct_reload()
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        # init checks the reload mode (e.g. for a load plan)
         with set_current_vllm_config(self.vllm_config):
             self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+        # an engine may know whether it reloads only once initialized (M2N)
+        self._check_direct_reload()
+
+    def _check_direct_reload(self) -> None:
+        """Raise on every rank if direct reload refuses an updatable model on
+        any pipeline stage, before an update could leave it half-updated."""
+        engine = self.weight_transfer_engine
+        assert engine is not None
+        reasons: list[str] = []
+        if engine.reloads_through_start_reload:
+            reasons += direct_reload_refusals(self.model_runner.get_model())
+            draft = self.get_draft_model()
+            if draft is not None and self.supports_draft_weight_updates():
+                reasons += direct_reload_refusals(draft)
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # stages hold different modules: one refusing stage refuses all
+            pp_group = get_pp_group()
+            gathered: list[list[str]] = [[] for _ in range(pp_group.world_size)]
+            torch.distributed.all_gather_object(
+                gathered, reasons, group=pp_group.cpu_group
+            )
+            reasons = list(dict.fromkeys(r for rank in gathered for r in rank))
+        if reasons:
+            raise RuntimeError(refusal_message(reasons))
 
     def shutdown_weight_transfer_engine(self) -> None:
         """Release a trainer connection without shutting down inference."""
@@ -1857,7 +1880,7 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if direct_reload_enabled(self.vllm_config):
+                if reloads_directly(self.weight_transfer_engine.model):
                     # a failed direct finish cannot be retried: end the
                     # session so that a new full update can start
                     self._end_weight_update(refresh=False)

@@ -517,6 +517,12 @@ class NemotronParseMultiModalProcessor(
         ]
 
 
+class _SumProj(ColumnParallelLinear):
+    # `RadioWithNeck.load_weights` loads it with `default_weight_loader`,
+    # bypassing its weight loader.
+    writes_outside_weight_loaders = True
+
+
 class RadioWithNeck(nn.Module):
     """Vision encoder using RADIO model with custom neck."""
 
@@ -550,7 +556,7 @@ class RadioWithNeck(nn.Module):
         self.layer_norm2 = nn.LayerNorm(
             last_hidden_state, eps=1e-06, elementwise_affine=True
         )
-        self.sum_proj = ColumnParallelLinear(
+        self.sum_proj = _SumProj(
             3840,
             last_hidden_state,
             quant_config=quant_config,

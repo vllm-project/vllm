@@ -42,11 +42,15 @@ __all__ = [
     "begin_direct_reload",
     "check_direct_reload",
     "direct_reload_active",
+    "direct_reload_applies",
     "direct_reload_enabled",
+    "direct_reload_refusals",
     "finish_direct_reload",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
+    "refusal_message",
+    "reloads_directly",
     "track_loaded_params",
 ]
 
@@ -73,6 +77,19 @@ def direct_reload_enabled(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
         vllm_config = get_current_vllm_config_or_none()
     return uses_direct_reload(getattr(vllm_config, "weight_transfer_config", None))
+
+
+def direct_reload_applies(vllm_config: VllmConfig | None = None) -> bool:
+    """Whether cold start prepares the model for direct reload: it is enabled
+    and the configuration does not refuse it."""
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+    return direct_reload_enabled(vllm_config) and not _config_refusals(vllm_config)
+
+
+def reloads_directly(model: torch.nn.Module) -> bool:
+    """Whether `model`'s updates reload directly, as fixed at its cold start."""
+    return model.__dict__.get("_reloads_directly", False)
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -161,8 +178,10 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         )
 
 
-def _config_refusals(vllm_config: VllmConfig) -> list[str]:
+def _config_refusals(vllm_config: VllmConfig | None) -> list[str]:
     """Reasons a configuration cannot reload directly."""
+    if vllm_config is None:
+        return []
     reasons = []
     offload = vllm_config.offload_config
     if (
@@ -173,6 +192,10 @@ def _config_refusals(vllm_config: VllmConfig) -> list[str]:
         # CPU/UVA offload gives parameters new storage on every post-load
         # processing; prefetch offload shares one buffer between layers
         reasons.append("weight offloading")
+    load_config = getattr(vllm_config, "load_config", None)
+    if getattr(load_config, "load_format", None) == "ipc_cache":
+        # the weight cache's runtime-layout weights have no checkpoint layout
+        reasons.append("pre-processed weights")
     model_config = vllm_config.model_config
     if model_config is not None and model_config.quantization == "torchao":
         # its load_weights runs a layerwise reload, and its post-load
@@ -216,30 +239,39 @@ def _module_refusal(model: torch.nn.Module) -> str | None:
 
 def _refusals(model: torch.nn.Module) -> list[str]:
     """Reasons direct reload cannot update `model` under the current config."""
-    config = get_current_vllm_config_or_none()
-    reasons = _config_refusals(config) if config is not None else []
+    reasons = _config_refusals(get_current_vllm_config_or_none())
     if (module_reason := _module_refusal(model)) is not None:
         reasons.append(module_reason)
-    if is_weights_pre_processed():
-        # the weight cache's runtime-layout weights have no checkpoint layout
+    if is_weights_pre_processed() and "pre-processed weights" not in reasons:
         reasons.append("pre-processed weights")
-    if any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model)):
-        # e.g. a draft sharing a refused target's lm_head: it would write there
-        reasons.append("tensors shared with a model direct reload refuses")
     return reasons
 
 
-def _refusal_message(reasons: list[str]) -> str:
+def refusal_message(reasons: list[str]) -> str:
+    """The error for a model direct reload refuses for `reasons`."""
     return (
         f"direct reload does not support {'; '.join(reasons)}. Set "
         "VLLM_RELOAD_MODE=layerwise to update this model's weights."
     )
 
 
+def direct_reload_refusals(model: torch.nn.Module) -> list[str]:
+    """Why `model` cannot reload directly: as found at its cold start, or
+    because it holds tensors of a model that was refused."""
+    if not reloads_directly(model):
+        return []
+    reasons = list(getattr(model, "_direct_reload_refusals", []))
+    # e.g. a refused target's lm_head, shared into a draft after the draft's
+    # cold start: the draft's update would write there
+    if any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model)):
+        reasons.append("tensors shared with a model direct reload refuses")
+    return reasons
+
+
 def check_direct_reload(model: torch.nn.Module) -> None:
-    """Raise if cold start found that `model` cannot reload directly."""
-    if reasons := getattr(model, "_direct_reload_refusals", None):
-        raise RuntimeError(_refusal_message(reasons))
+    """Raise if `model` cannot reload directly."""
+    if reasons := direct_reload_refusals(model):
+        raise RuntimeError(refusal_message(reasons))
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
@@ -250,10 +282,11 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_direct_reload_refusals"):
         return
+    model._reloads_directly = True
     # neither the configuration nor the modules change after cold start
     reasons = model._direct_reload_refusals = _refusals(model)
     if reasons:
-        logger.info("%s", _refusal_message(reasons))
+        logger.info("%s", refusal_message(reasons))
         for _, t in loadable_tensors(model):
             t._ckpt_refused = True  # a model sharing it refuses too
         return

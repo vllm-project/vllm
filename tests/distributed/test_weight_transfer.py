@@ -319,6 +319,7 @@ class TestNCCLEngineParsing:
 
         monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
         engine = self._make_engine()
+        engine.model._reloads_directly = True  # as a direct cold start fixes
         engine.init_transfer_engine(
             NCCLWeightTransferInitInfo(
                 master_address="127.0.0.1",
@@ -378,14 +379,15 @@ class TestNCCLEngineParsing:
             record_checkpoint_layout,
         )
 
-        if refusal == "layerwise":
-            monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
         group = MagicMock()
         monkeypatch.setattr(
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
         )
         model = _module_with(("w", torch.arange(6.0).view(2, 3)))
-        record_checkpoint_layout(model)
+        if refusal == "layerwise":
+            model._reloads_directly = False  # as a layerwise cold start fixes
+        else:
+            record_checkpoint_layout(model)
         model.w.data = model.w.data.t()  # post-load processing re-laid it out
         if refusal == "eplb":
             parallel = SimpleNamespace(enable_eplb=True)

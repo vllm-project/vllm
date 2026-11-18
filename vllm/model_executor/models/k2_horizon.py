@@ -703,6 +703,12 @@ class K2HorizonAttention(nn.Module):
         return output
 
 
+class _VExpertProj(ColumnParallelLinear):
+    # `K2HorizonModel.load_weights` loads it with `default_weight_loader`,
+    # bypassing its weight loader.
+    writes_outside_weight_loaders = True
+
+
 class K2HorizonMoVAAttention(nn.Module):
     def __init__(
         self,
@@ -778,7 +784,7 @@ class K2HorizonMoVAAttention(nn.Module):
 
         self.v_experts = nn.ModuleList(
             [
-                ColumnParallelLinear(
+                _VExpertProj(
                     hidden_size,
                     self.kv_size * tp_size,
                     bias=False,

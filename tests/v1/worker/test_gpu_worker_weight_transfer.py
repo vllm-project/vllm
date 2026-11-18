@@ -37,6 +37,7 @@ class _RecordingEngine:
         self.reset_count = 0
         self.supports_draft_weight_update = False
         self.reloads_through_start_reload = True
+        self.model = nn.Module()
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
 
@@ -313,8 +314,8 @@ def test_update_resets_active_on_error():
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
 def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     engine = _RecordingEngine(raise_on_finish=True)
+    engine.model._reloads_directly = mode == "direct"  # as cold start fixed it
     worker = _make_worker(engine)
     Worker.start_weight_update(worker)
 
@@ -334,28 +335,43 @@ def test_missing_engine_raises():
         Worker.start_weight_update(worker)
 
 
-@pytest.mark.parametrize("reloads", [True, False], ids=["nccl", "sparse_nccl"])
-def test_init_engine_refuses_an_unsupported_model(monkeypatch, reloads):
-    # refused before a trainer sends anything; an engine that never reloads
-    # through `start_reload` is not, and inits under the worker's config
+@pytest.mark.parametrize(
+    "case,refused_before_init",
+    [("nccl", True), ("sparse_nccl", None), ("m2n", False), ("draft", True)],
+)
+def test_init_engine_refuses_an_unsupported_model(
+    monkeypatch, case, refused_before_init
+):
+    # refused before a trainer sends anything, or once init shows the engine
+    # reloads (an M2N plan with `load_weights` fallbacks); an engine that
+    # never reloads through `start_reload` is not refused
     engine = _RecordingEngine()
-    engine.reloads_through_start_reload = reloads
+    engine.reloads_through_start_reload = case != "sparse_nccl" and case != "m2n"
     seen: list[VllmConfig] = []
+
+    def init_transfer_engine(info):
+        seen.append(get_current_vllm_config())
+        if case == "m2n":
+            engine.reloads_through_start_reload = True
+
     monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
     monkeypatch.setattr(
-        engine,
-        "init_transfer_engine",
-        lambda info: seen.append(get_current_vllm_config()),
-        raising=False,
+        engine, "init_transfer_engine", init_transfer_engine, raising=False
     )
     worker = _make_worker(engine)
-    model = nn.Module()
-    model._direct_reload_refusals = ["LoRA"]  # as cold start records
-    monkeypatch.setattr(worker.model_runner, "get_model", lambda: model)
-    if reloads:
-        with pytest.raises(RuntimeError, match="LoRA"):
-            Worker.init_weight_transfer_engine(worker, {})
-        assert not seen
+    refused = nn.Module()
+    refused._reloads_directly = True  # as cold start records
+    refused._direct_reload_refusals = ["humming"]
+    if case == "draft":
+        engine.supports_draft_weight_update = True
+        monkeypatch.setattr(worker.model_runner, "get_draft_model", lambda: refused)
+        monkeypatch.setattr(worker, "supports_draft_weight_updates", lambda: True)
     else:
+        monkeypatch.setattr(worker.model_runner, "get_model", lambda: refused)
+    if refused_before_init is None:
         Worker.init_weight_transfer_engine(worker, {})
-        assert [c is worker.vllm_config for c in seen] == [True]
+    else:
+        with pytest.raises(RuntimeError, match="humming"):
+            Worker.init_weight_transfer_engine(worker, {})
+    assert len(seen) == int(not refused_before_init)
+    assert all(c is worker.vllm_config for c in seen)

@@ -752,11 +752,13 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
     with pytest.raises(RuntimeError, match=match) as err:
         start_reload(model)
     assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
-    # a draft sharing its tensors (e.g. the lm_head) is refused too
+    # a draft sharing its tensors (e.g. the lm_head) is refused too, though
+    # they are shared in after its cold start
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", _config)
+    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: False)
     with _DEVICE:
         draft = _ToyModel()
-    draft.proj = model.proj
     record_checkpoint_layout(draft)
+    draft.proj = model.proj
     with pytest.raises(RuntimeError, match="shared with a model"):
         check_direct_reload(draft)

@@ -136,6 +136,12 @@ class Step3TextMLP(nn.Module):
         return output
 
 
+class _Step3QKVProj(ReplicatedLinear):
+    # `Step3TextModel.load_weights` writes q/k/v with `narrow().copy_`,
+    # bypassing the weight loaders.
+    writes_outside_weight_loaders = True
+
+
 class Step3TextAttention(nn.Module):
     def __init__(
         self,
@@ -169,7 +175,7 @@ class Step3TextAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.q_size = share_q_dim if share_q_dim else self.head_dim
 
-        self.qkv_proj = ReplicatedLinear(
+        self.qkv_proj = _Step3QKVProj(
             hidden_size,
             self.q_size + self.kv_size * 2,
             bias=False,

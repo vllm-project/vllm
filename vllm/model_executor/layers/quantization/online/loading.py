@@ -132,6 +132,27 @@ def _block_shapes_fit(layer: torch.nn.Module) -> bool:
     return True
 
 
+def _moe_block_shapes_fit(moe: Any) -> bool:
+    """Whether the block FP8 checkpoint MoE method accepts these experts'
+    tensor-parallel shards, refining its scale blocks if needed."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        refine_fp8_moe_block_shape,
+    )
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        validate_fp8_block_shape_moe,
+    )
+
+    if refine_fp8_moe_block_shape(moe, list(_FP8_BLOCK)) is not None:
+        return True
+    try:
+        validate_fp8_block_shape_moe(
+            moe.intermediate_size_per_partition, list(_FP8_BLOCK)
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     """The pre-quantized checkpoint method that `spec` stands for, if any."""
     from compressed_tensors.quantization import QuantizationArgs
@@ -158,7 +179,9 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
         return None
     weight, ckpt = spec.weight, modelopt.CkptCtx()
     block = weight == qu.kFp8Static128BlockSym
-    if block and not is_moe and not _block_shapes_fit(layer):
+    if block and not (
+        _moe_block_shapes_fit(moe) if is_moe else _block_shapes_fit(layer)
+    ):
         return None  # the block checkpoint method would refuse these shapes
     if weight in (qu.kFp8StaticTensorSym, qu.kFp8Static128BlockSym):
         cfg = fp8.Fp8Config(weight_block_size=list(_FP8_BLOCK) if block else None)

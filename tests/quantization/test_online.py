@@ -2722,6 +2722,28 @@ def test_online_resolve_quant_method_lm_head(default_vllm_config) -> None:
         resolve_quant_method(quant_config, _TestLMHead(), "lm_head")
 
 
+@pytest.mark.parametrize("offload", [False, True], ids=["direct", "offload"])
+def test_weight_updates_quantize_on_load_unless_refused(
+    default_vllm_config, offload: bool
+) -> None:
+    """With weight updates, online FP8 quantizes on load through the checkpoint
+    method, unless the configuration refuses direct reload."""
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    default_vllm_config.model_config = SimpleNamespace(
+        dtype=torch.bfloat16, quantization=None
+    )
+    default_vllm_config.weight_transfer_config = WeightTransferConfig()
+    if offload:
+        default_vllm_config.offload_config.uva.cpu_offload_gb = 1
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear=QuantSpec(weight=kFp8StaticTensorSym))
+    )
+    method = config.get_quant_method(_TestLinear(), "linear")
+    expected = Fp8PerTensorOnlineLinearMethod if offload else Fp8LinearMethod
+    assert type(method) is expected
+
+
 def test_online_ptpc_activation_override(default_vllm_config) -> None:
     """PTPC accepts `activation: null` (weight-only) and nothing but per-token."""
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)

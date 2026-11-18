@@ -770,8 +770,8 @@ def test_overlapping_writes_fall_back():
 
 def test_layerwise_mode_is_refused(monkeypatch):
     make, shapes = _single(None)
-    model = _cold_start(make, _checkpoint(shapes, 0))
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    model = _cold_start(make, _checkpoint(shapes, 0))
     with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
         plan_loads(model, _metadata(shapes))
 

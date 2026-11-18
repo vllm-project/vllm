@@ -29,6 +29,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
+from vllm.config.quantization import ONLINE_QUANT_SHORTHAND_NAMES
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -359,6 +360,9 @@ class WeightCacheKey:
     repacked), so weights processed for one backend are wrong for another."""
     linear_backend: str = "auto"
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
+    direct_reload: bool = False
+    """Online quantization quantizes on load through checkpoint methods (direct
+    reload), whose processed weights differ from the online methods'."""
 
     @classmethod
     def from_model_config(
@@ -376,6 +380,7 @@ class WeightCacheKey:
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
         kernel_config: KernelConfig | None = None,
+        direct_reload: bool = False,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -395,6 +400,10 @@ class WeightCacheKey:
         kernel_config = kernel_config or KernelConfig()
         linear_backend_per_quant = tuple(
             sorted((kernel_config.linear_backend_per_quant or {}).items())
+        )
+        online = (
+            model_config.quantization in ONLINE_QUANT_SHORTHAND_NAMES
+            or model_config.quantization_config is not None
         )
         return cls(
             checkpoint=checkpoint,
@@ -423,6 +432,7 @@ class WeightCacheKey:
             expert_placement_strategy=expert_placement_strategy,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
+            direct_reload=direct_reload and online,
             linear_backend_per_quant=linear_backend_per_quant,
         )
 

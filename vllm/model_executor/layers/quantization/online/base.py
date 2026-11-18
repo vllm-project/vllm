@@ -517,12 +517,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
             assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
             default = getattr(quant_method_cls, "activation_quant_key", None)
             from vllm.model_executor.model_loader.reload.direct import (
-                direct_reload_enabled,
+                direct_reload_applies,
             )
 
             # direct reload quantizes on load through the matching checkpoint
             # method, if any; requantization keeps the online method
-            if not requantize and direct_reload_enabled():
+            if not requantize and direct_reload_applies():
                 method = checkpoint_method(layer, quant_spec, default)
                 if method is not None:
                     return method
