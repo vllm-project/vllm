@@ -562,7 +562,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             self.model_config, self.renderer.default_cmpl_tok_params
         )
         chat_tok_params = request.build_tok_params(
-            self.model_config, self.renderer.default_cmpl_tok_params
+            self.model_config, self.renderer.default_chat_tok_params
         )
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
