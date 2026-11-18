@@ -18,6 +18,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
@@ -354,6 +355,42 @@ def test_tiering_spec_aligns_row_size():
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == alignment
     assert spec.num_chunks == 3
+
+
+def test_cpu_spec_gives_store_when_to_the_manager():
+    spec = _create_spec(extra_config={"store_when": ["on_overwrite"]})
+    assert spec.get_manager().store_triggers == (StoreTrigger.ON_OVERWRITE,)
+
+
+def test_cpu_spec_stores_on_compute_by_default():
+    spec = _create_spec()
+    assert spec.get_manager().store_triggers == (StoreTrigger.ON_COMPUTE,)
+
+
+@pytest.mark.parametrize("store_when", [["fast"], "on_overwrite"])
+def test_cpu_spec_rejects_a_bad_store_when(store_when):
+    with pytest.raises(ValueError, match="store_when"):
+        _create_spec(extra_config={"store_when": store_when})
+
+
+def test_tiering_spec_rejects_a_lazy_store():
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        extra_config={"store_when": ["on_overwrite"]},
+    )
+    with pytest.raises(ValueError, match="store_when"):
+        spec.get_manager()
+
+
+def test_tiering_spec_allows_the_handoff_trigger():
+    """The layout adds on_handoff, so the config may name it too."""
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        extra_config={"store_when": ["on_compute", "on_handoff"]},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert spec.store_triggers == (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_HANDOFF)
+    spec._check_store_triggers()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

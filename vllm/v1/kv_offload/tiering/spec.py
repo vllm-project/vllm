@@ -64,6 +64,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -394,6 +395,24 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # region.
         self._engine_id = config.engine_id
 
+    def _check_store_triggers(self) -> None:
+        """Refuse a trigger that the multi-tier manager cannot serve.
+
+        The layout adds the handoff trigger when it needs one, so listing it is
+        allowed and inert. Every other trigger but the eager one has no
+        multi-tier support.
+        """
+        unsupported = [
+            trigger.value
+            for trigger in self.store_triggers
+            if trigger not in (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_HANDOFF)
+        ]
+        if unsupported:
+            raise ValueError(
+                "TieringOffloadingSpec supports store_when ['on_compute'] and "
+                f"['on_handoff'], got {unsupported}"
+            )
+
     @override
     def get_manager(self) -> OffloadingManager:
         """Get the TieringOffloadingManager.
@@ -411,6 +430,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
+            self._check_store_triggers()
 
             scheduler_mmap: SharedOffloadRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None

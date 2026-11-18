@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadingSpec,
     OffloadingWorker,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
@@ -45,6 +46,24 @@ def _all_workers_barrier() -> None:
     except AssertionError:
         group = get_world_group()
     group.barrier()
+
+
+def parse_store_triggers(extra_config: dict[str, Any]) -> tuple[StoreTrigger, ...]:
+    """Resolve the store_when key into the triggers that offload a chunk.
+
+    Resolves the names only. An empty or repeated set, or a trigger that the KV
+    cache layout owns, is refused by StoreHandlerFactory.
+    """
+    store_when = extra_config.get("store_when", ["on_compute"])
+    if isinstance(store_when, str):
+        raise ValueError(f"store_when must be a list, not the string {store_when!r}")
+    try:
+        return tuple(StoreTrigger(value) for value in store_when)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"store_when must be a subset of "
+            f"{[trigger.value for trigger in StoreTrigger]}, got {store_when!r}"
+        ) from None
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -178,6 +197,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
         )
+        self.store_triggers = parse_store_triggers(self.extra_config)
 
     @classmethod
     @override
@@ -205,6 +225,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
                 info=self.cpu_info,
+                store_triggers=self.store_triggers,
             )
         return self._manager
 

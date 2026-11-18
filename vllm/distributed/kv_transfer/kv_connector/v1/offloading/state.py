@@ -10,7 +10,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import eagle_proof_margin, is_mamba_align_group
+from vllm.v1.core.kv_cache_utils import (
+    eagle_proof_margin,
+    is_mamba_align_group,
+    partial_hash_hits_enabled,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -33,6 +38,7 @@ class GroupOffloadConfig(NamedTuple):
     tokens_per_block: int
     tokens_per_chunk: int
     hashes_per_chunk: int
+    hashes_per_block: int
     # KV cache spec metadata propagated onto emitted BlockStored events so
     # KV-aware consumers can classify and filter the group.
     kv_event_group_spec: OffloadingEventGroupSpec
@@ -114,6 +120,9 @@ class SchedulerOffloadConfig(NamedTuple):
     num_hash_lookahead_tokens: int = 0
     cache_hit_alignment_tokens: int | None = None
     drop_eagle_checkpoint_block: bool = False
+    # A prefix-cache hit can end inside a KV cache block, so core copies the
+    # shared block with CoW before the request writes to it.
+    partial_hash_hits_enabled: bool = False
 
     @property
     def supports_handoff(self) -> bool:
@@ -219,6 +228,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
+                    hashes_per_block=tokens_per_block // spec.tokens_per_hash,
                     sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
                     block_size=kv_cache_group.block_size,
                     manager_config=kv_cache_group.manager_config,
@@ -299,6 +309,12 @@ class SchedulerOffloadConfig(NamedTuple):
                         f"tokens_per_chunk ({config.tokens_per_chunk})."
                     )
 
+        hash_block_size = kv_cache_config.hash_block_size
+        if hash_block_size is None:
+            _, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
+
         return cls(
             num_workers=vllm_config.parallel_config.world_size,
             kv_group_configs=kv_group_configs,
@@ -323,6 +339,12 @@ class SchedulerOffloadConfig(NamedTuple):
             cache_hit_alignment_tokens=cache_hit_alignment,
             drop_eagle_checkpoint_block=(
                 use_eagle_block_drop and vllm_config.num_hash_lookahead_tokens == 0
+            ),
+            partial_hash_hits_enabled=partial_hash_hits_enabled(
+                kv_cache_config.kv_cache_groups,
+                hash_block_size,
+                vllm_config.parallel_config.decode_context_parallel_size,
+                [config.manager_cls for config in kv_group_configs],
             ),
         )
 
