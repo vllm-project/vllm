@@ -314,27 +314,25 @@ class StructuredOutputManager:
         if num_spec_tokens <= 0:
             return _NO_SPEC_TOKENS
 
-        # Parsers that know their end tokens also report whether one is content.
-        if reasoner.reasoning_end_token_ids:
-            end = reasoner.find_reasoning_end(spec_tokens)
-            if end is not None:
-                constraint_start = end.offset + 1
-                if end.implicit:
-                    return ConstraintBounds(end.offset, constraint_start)
-                return ConstraintBounds(constraint_start, constraint_start)
+        # Parsers may locate multi-token ends too. None requires the
+        # context-aware fallback (e.g. a marker split across decode steps).
+        end = reasoner.find_reasoning_end(spec_tokens)
+        if end is not None:
+            constraint_start = end.offset + 1
+            if end.implicit:
+                return ConstraintBounds(end.offset, constraint_start)
+            return ConstraintBounds(constraint_start, constraint_start)
 
         # Keep the earliest ended prefix even if a later draft reopens reasoning.
-        # Reuse the token view while checking every nonempty draft prefix.
+        # Check each token with its preceding context, without copying prefixes.
         input_ids = TokenIdsView(
             request._all_token_ids, () if spec_tokens_committed else spec_tokens
         )
-        delta_ids = list(spec_tokens)
         constraint_start = num_spec_tokens + 1
         for i in range(num_spec_tokens, 0, -1):
-            if reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+            if reasoner.is_reasoning_end_streaming(input_ids, (spec_tokens[i - 1],)):
                 constraint_start = i
             input_ids.pop()
-            delta_ids.pop()
         return ConstraintBounds(constraint_start, constraint_start)
 
     def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
