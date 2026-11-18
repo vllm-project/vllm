@@ -3213,6 +3213,22 @@ class Scheduler(SchedulerInterface):
                 # schedule-ahead step's output after the failure is known;
                 # suppress it until the repair verdict restores the request.
                 continue
+            if scheduler_output.repair_works is not None and (
+                req_id in scheduler_output.repair_works
+            ):
+                # A repair-only step produces no tokens by contract. Any
+                # output arriving for its requests came from a runner
+                # that ignored repair_works (possible only for an
+                # out-of-tree platform runner); suppress it loudly -- the
+                # request's real output continues on the next ordinary
+                # step, after the verdict settled the plan.
+                logger.error_once(
+                    "Suppressing output delivered for req=%s on its "
+                    "repair-only step: a repair step produces no tokens "
+                    "(a runner ignored repair_works)",
+                    req_id,
+                )
+                continue
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
@@ -6353,18 +6369,13 @@ class Scheduler(SchedulerInterface):
                 plan.restored_extent if healthy_above_span else plan.repair_span[1]
             )
             # The result is untrusted input: an aborted verdict reaching
-            # the commit arm or a negative layer count must never
-            # advance the frontier -- reject loudly with the fail-safe
-            # recompute fallback.
-            # An over-stated executed count must never
-            # reach the commit arm's logging/diagnostics as if it were a
-            # clean run (structural_check is the gate; this bounds the
-            # diagnostic field to the plan's own layer range).
-            malformed = (
-                result.aborted
-                or result.executed_layers < 0
-                or result.executed_layers > plan.layer_end
-            )
+            # the commit arm, or an executed count that does not EXACTLY
+            # equal the plan's layer range, must never advance the
+            # frontier -- reject loudly with the fail-safe recompute
+            # fallback (the worker's structural_check implies layer
+            # coverage; this keeps the arm safe against forged
+            # summaries too).
+            malformed = result.aborted or result.executed_layers != plan.layer_end
             if malformed:
                 logger.warning(
                     "Malformed repair result for req=%s plan_id=%d: "

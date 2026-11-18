@@ -835,6 +835,146 @@ def test_rewound_flag_rides_repair_moves_and_drains():
     assert out4.rewound_req_ids == set()
 
 
+def test_speculative_decoding_coexists_with_repair_steps():
+    """Speculative decoding is not refused under the repair policy, but a
+    repair-only step must never carry drafts: the span arithmetic yields
+    none for a rewound request, the repair-work construction pins it, and
+    the repair still commits while the worker's drafter skips the step."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    vllm_config = create_vllm_config(
+        model="facebook/opt-125m",
+        hf_overrides={"num_hidden_layers": 16, "max_position_embeddings": 8192},
+        max_num_batched_tokens=4096,
+        kv_load_failure_policy="repair",
+        num_speculative_tokens=3,
+    )
+    # The fixture default resolves async_scheduling on, which the repair
+    # policy refuses at init (same pin as make_scheduler).
+    vllm_config.scheduler_config.async_scheduling = False
+    scheduler = create_scheduler(vllm_config)
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+    plan = scheduler.recovery_plans[r1.request_id]
+
+    out2 = scheduler.schedule()
+    assert out2.repair_works is not None
+    # The repair step carries no drafts for the rewound request.
+    assert r1.request_id not in out2.scheduled_spec_decode_tokens
+    drive_repair_result(
+        scheduler, r1, out2, structural_check=True, plan=plan, span=plan.repair_span
+    )
+    out3 = scheduler.schedule()
+    assert r1.request_id in out3.num_scheduled_tokens
+    assert r1.request_id in out3.rewound_req_ids
+    out4 = scheduler.schedule()
+    assert out4.rewound_req_ids == set()
+
+
+def test_intra_span_permutation_refused():
+    """The fence validates ORDER, not just membership: a metadata bug
+    that permutes the span's slot rows or positions inside the
+    authorized block passes every multiset and boundary check while
+    writing each token's KV into a neighboring row of the same request.
+    The ordered comparisons must refuse both shapes."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+
+    # (a) permuted slot rows: the multiset is intact, the order is not.
+    half = BS // 2
+    swapped = meta.slot_mapping.clone()
+    swapped[:half] = meta.slot_mapping[half:]
+    swapped[half:] = meta.slot_mapping[:half]
+    meta_a = _cpu_meta([torch.tensor([2])], swapped)
+    ra = _run_repair(
+        _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta_a
+    )[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert not ra.structural_check
+
+    # (b) permuted positions: the boundaries are intact, the order is not.
+    permuted = positions.clone()
+    permuted[[10, 117]] = permuted[[117, 10]]
+    rb = _run_repair(
+        _FakeModel(n_layers=4),
+        works,
+        tokens,
+        permuted,
+        input_ids,
+        _meta(_span_slots(2)),
+    )[0]
+    assert rb.executed_layers == 0
+    assert rb.aborted
+    assert not rb.structural_check
+
+
+def test_forged_understated_layer_count_never_commits():
+    """The commit arm treats the verdict as untrusted input: a green
+    structural_check with an executed count below the plan's layer range
+    (impossible from the worker, forgeable in transit) must fall back to
+    recompute, not restore the extent."""
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+    plan = scheduler.recovery_plans[r1.request_id]
+
+    out2 = scheduler.schedule()
+    drive_repair_result(
+        scheduler,
+        r1,
+        out2,
+        structural_check=True,
+        plan=plan,
+        span=plan.repair_span,
+        executed_layers=0,
+    )
+    # Not committed: the malformed gate sends the forged verdict to the
+    # recompute fallback (truncated to the span start).
+    assert r1.num_computed_tokens == plan.repair_span[0]
+
+
+def test_repair_step_output_tokens_suppressed():
+    """A repair-only step produces no tokens by contract. If a runner
+    ignored repair_works and returned sampled tokens for the repair
+    request anyway (possible only for an out-of-tree platform runner),
+    the scheduler must suppress them: the request's real output
+    continues on the next ordinary step, after the verdict settled."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+    plan = scheduler.recovery_plans[r1.request_id]
+
+    out2 = scheduler.schedule()
+    assert out2.repair_works is not None
+    # A non-conforming runner: the repair step returns sampled tokens
+    # and no repair verdicts.
+    output = create_model_runner_output(reqs=[r1], use_eos=False)
+    output.kv_connector_output = None
+    scheduler.update_from_output(out2, output)
+    # The plan is consumed by the missing-verdict synthesis (abort) ...
+    assert scheduler.recovery_plans.get(r1.request_id) is None
+    assert r1.num_computed_tokens == plan.repair_span[0]
+    # ... and the spurious token never reaches the request's output.
+    assert r1.num_output_tokens == 0
+
+
 def test_rewound_flag_rides_repair_abort():
     """The abort truncation (a failed verdict rolls the request back to
     the repair span start for the recompute fallback) flags the request
