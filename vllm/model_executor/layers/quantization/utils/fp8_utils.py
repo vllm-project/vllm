@@ -1613,6 +1613,7 @@ def dequantize_fp8_moe_weights(
     weight_key: QuantKey,
     num_w13_shards: int,
     weight_block_size: Sequence[int] | None,
+    static_input_scales: bool,
     out_dtype: torch.dtype,
 ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
     """Dequantize FP8 MoE weights for online requantization.
@@ -1629,6 +1630,9 @@ def dequantize_fp8_moe_weights(
         num_w13_shards: 2 for gated (w1, w3), else 1. Shards of a fused w13 with a
             single tensor scale are handled through the scale shape.
         weight_block_size: The `[bn, bk]` block shape, required for block scales.
+        static_input_scales: Whether the checkpoint has static activation scales,
+            which are not supported: w1 and w3 share one input-scale slot, which
+            the layerwise loader counts twice.
         out_dtype: The dequantized dtype.
 
     Returns:
@@ -1636,6 +1640,11 @@ def dequantize_fp8_moe_weights(
         staging memory.
 
     """
+    if static_input_scales:
+        raise NotImplementedError(
+            "MoE requantization from FP8 checkpoints with static activation scales "
+            "is not supported. Please open an issue."
+        )
     group_shape = weight_key.scale.group_shape
     if group_shape.is_per_tensor():
         strategy = "tensor"

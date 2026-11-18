@@ -3189,7 +3189,10 @@ def test_nvfp4_moe_dequantization_and_fp8_requantization_numerics(
 
 
 def _fp8_moe_source_method(
-    source: str, block_size: list[int] | None, channel: bool = False
+    source: str,
+    block_size: list[int] | None,
+    channel: bool = False,
+    static: bool = False,
 ):
     """A checkpoint FP8 MoE method with only the state `dequantize_weight` reads."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
@@ -3224,6 +3227,11 @@ def _fp8_moe_source_method(
         "weight_scale_inv" if source == "fp8" and block_size else "weight_scale"
     )
     method.weight_scale_name = method.scale_name
+    method.scale_block_size = block_size
+    method.static_input_scales = static
+    method.quant_config = SimpleNamespace(
+        activation_scheme="static" if static else "dynamic"
+    )
     return method
 
 
@@ -3232,7 +3240,13 @@ def _fp8_moe_source_method(
     [
         (source, scheme)
         for source in ("fp8", "compressed_tensors", "quark")
-        for scheme in ("block_partial", "block_small", "per_tensor", "per_channel")
+        for scheme in (
+            "block_partial",
+            "block_small",
+            "per_tensor",
+            "per_channel",
+            "static_activation",
+        )
         # `Fp8MoEMethod` only supports per-tensor and block scales.
         if not (source == "fp8" and scheme == "per_channel")
     ],
@@ -3255,7 +3269,9 @@ def test_fp8_moe_dequantize_weight_numerics(
     num_experts = 4
     expert_bytes = (2 * inter * hidden + hidden * inter) * (4 + 4 + 2)
     monkeypatch.setattr(fp8_utils, "_DEQUANT_CHUNK_BYTES", chunk_experts * expert_bytes)
-    method = _fp8_moe_source_method(source, block_size, scheme == "per_channel")
+    method = _fp8_moe_source_method(
+        source, block_size, scheme == "per_channel", scheme == "static_activation"
+    )
 
     torch.manual_seed(5)
     w13 = torch.randn(num_experts, 2 * inter, hidden).to(torch.float8_e4m3fn)
@@ -3303,6 +3319,11 @@ def test_fp8_moe_dequantize_weight_numerics(
             f"w2_{method.scale_name}": w2_scale,
         },
     )
+    if scheme == "static_activation":
+        # w1 and w3 share one input-scale slot, which the loader counts twice.
+        with pytest.raises(NotImplementedError, match="static activation"):
+            list(method.dequantize_weight(layer))
+        return
     chunks = list(method.dequantize_weight(layer))
 
     assert len(chunks) == -(-num_experts // min(chunk_experts, num_experts))
@@ -3321,10 +3342,11 @@ def test_fp8_moe_dequantize_weight_numerics(
     )
 
 
+@pytest.mark.parametrize("defer_processing", [False, True])
 @pytest.mark.parametrize("requantization_source", [True, False])
 @pytest.mark.skip_global_cleanup
 def test_finalize_rejects_partially_loaded_requantization_source(
-    requantization_source, monkeypatch
+    requantization_source, defer_processing, monkeypatch
 ) -> None:
     """A missing serialized tensor would be materialized as zeros and silently
     requantized: only padded full-precision weights may be partially loaded."""
@@ -3341,6 +3363,7 @@ def test_finalize_rejects_partially_loaded_requantization_source(
     info = get_layerwise_info(layer)
     info.load_numel_total = 10
     info.load_numel = 4
+    info.defer_processing = defer_processing
     model = torch.nn.Sequential(layer)
 
     if requantization_source:
@@ -3377,8 +3400,11 @@ def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
+# 192 is not a multiple of the 128 block: the source then allocates its scales on a
+# refined block grid, which `dequantize_weight` must follow.
+@pytest.mark.parametrize("intermediate_size", [256, 192])
 def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
-    default_vllm_config, dist_init, monkeypatch
+    intermediate_size, default_vllm_config, dist_init, monkeypatch
 ) -> None:
     """A block-FP8 checkpoint requantized to MXFP4 by online quantization
     (`--quantization-config.moe mxfp4`, which replaces
@@ -3394,7 +3420,7 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         moe="mxfp4"
     )
 
-    num_experts, hidden_size, intermediate_size = 4, 256, 256
+    num_experts, hidden_size = 4, 256
     block = [128, 128]
     device = current_platform.device_type
 
@@ -3415,7 +3441,8 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         reference_layer = make_layer("bf16_layer")
 
         # The FP8 checkpoint method only creates and loads the FP8 parameters.
-        fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
+        with skip_checkpoint_backend_selection():
+            fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
         online_method = Mxfp4OnlineMoEMethod(
             moe=source_layer.moe_config, activation_quant_key=activation_key
         )
@@ -3481,12 +3508,12 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         replace_parameter(
             reference_layer,
             "w13_weight",
-            _naive_block_fp8_dequant(w13_fp8, w13_scale, block),
+            _naive_block_fp8_dequant(w13_fp8, w13_scale, fp8_method.scale_block_size),
         )
         replace_parameter(
             reference_layer,
             "w2_weight",
-            _naive_block_fp8_dequant(w2_fp8, w2_scale, block),
+            _naive_block_fp8_dequant(w2_fp8, w2_scale, fp8_method.scale_block_size),
         )
         reference_method.process_weights_after_loading(reference_layer)
 

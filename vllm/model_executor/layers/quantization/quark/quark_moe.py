@@ -878,6 +878,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             weight_key=self.weight_quant_key,
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.weight_block_size,
+            static_input_scales=self.static_input_scales,
             out_dtype=layer.orig_dtype,
         )
 

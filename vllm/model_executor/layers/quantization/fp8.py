@@ -633,6 +633,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 (intermediate_size_per_partition + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
+        # The block grid the scales were allocated on, which is the refined one when
+        # the TP shard is not block aligned.
+        self.scale_block_size = [block_n, block_k] if self.block_quant else None
         w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
         w2_weight_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
         # Note: name is weight_scale for tensor, weight_scale_inv for block.
@@ -726,7 +729,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             getattr(layer, f"w2_{self.weight_scale_name}"),
             weight_key=self.weight_quant_key,
             num_w13_shards=self.moe.w13_num_shards,
-            weight_block_size=self.weight_block_size,
+            weight_block_size=self.scale_block_size,
+            static_input_scales=self.quant_config.activation_scheme == "static",
             out_dtype=layer.orig_dtype,
         )
 

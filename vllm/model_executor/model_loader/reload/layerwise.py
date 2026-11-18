@@ -323,9 +323,7 @@ def _check_requantization_source_fully_loaded(
     else:
         return
     if (
-        info.defer_processing
-        or info.load_numel <= 0
-        or info.load_numel >= info.load_numel_total  # type: ignore[operator]
+        info.load_numel <= 0 or info.load_numel >= info.load_numel_total  # type: ignore[operator]
     ):
         return
     raise ValueError(
