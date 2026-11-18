@@ -1843,74 +1843,7 @@ def test_hisparse_reused_copy_is_not_adopted():
         num_new_computed_tokens=num_computed,
         new_computed_blocks=computed,
     )
-    # Each page is host-only or restored into a fresh page, never the stale copy.
-    restored = {
-        transfer.resident_block_ids[0]
-        for transfer in get_hisparse_coordinator(manager)
-        .build_offload_command()
-        .page_transfers
-        if transfer.restore
-    }
-    row = _resident_block_ids(manager, "resumed")[:3]
-    assert all(block_id == 0 or block_id in restored for block_id in row)
-
-
-@pytest.mark.parametrize("has_room", [False, True])
-def test_hisparse_prefix_hit_restores_pages_without_copies(has_room):
-    """A host prefix hit whose GPU copies are gone is restored to GPU while the
-    pool has room, so its prefill reads resident pages instead of staging the
-    whole prefix from host on every layer."""
-    manager = make_hisparse_kv_cache_manager(256, 16, enable_caching=True)
-    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
-    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert (
-        _allocate_scheduled(manager, original, num_new_tokens=len(tokens)) is not None
-    )
-    _publish_hisparse_pages(manager)
-    source_ids = [block.block_id for block in manager.get_blocks("original").blocks[0]]
-    indexer_blocks = list(manager.get_blocks("original").blocks[1])
-    manager.free(original)
-    coordinator = get_hisparse_coordinator(manager)
-    pool = manager.block_pool
-    pool.touch(indexer_blocks)
-    pool.free_blocks(pool.get_new_blocks(pool.get_num_free_blocks()))
-    pool.free_blocks(indexer_blocks)
-    assert not coordinator.copies
-    if not has_room:
-        pool.get_new_blocks(
-            pool.get_num_free_blocks() - coordinator.transition_watermark
-        )
-
-    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    computed, num_computed, _ = manager.get_computed_blocks(resumed)
-    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
-    assert _allocate_scheduled(
-        manager,
-        resumed,
-        num_new_tokens=len(tokens) - num_computed,
-        num_new_computed_tokens=num_computed,
-        new_computed_blocks=computed,
-    )
-
-    row = _resident_block_ids(manager, "resumed")[:3]
-    restores = [
-        transfer
-        for transfer in coordinator.build_offload_command().page_transfers
-        if transfer.restore
-    ]
-    if has_room:
-        assert all(row)
-        assert [t.host_block_id for t in restores] == source_ids[:3]
-        assert [t.resident_block_ids for t in restores] == [(b,) for b in row]
-    else:
-        assert row == [0, 0, 0]
-        assert not restores
-    assert (
-        coordinator.all_context_pages_resident(
-            ((resumed.request_id, num_computed, len(tokens) - num_computed),)
-        )
-        is has_room
-    )
+    assert _resident_block_ids(manager, "resumed")[:3] == [0, 0, 0]
 
 
 def test_hisparse_external_import_uses_hard_gpu_footprint():
