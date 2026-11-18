@@ -193,6 +193,7 @@ class RocmOctaveMetadata:
     # Per query token: its request and its causal K length (0 for padding).
     q_to_req: torch.Tensor
     q_to_klen: torch.Tensor
+    max_seq_len: int = 0
 
 
 class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
@@ -247,6 +248,7 @@ class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
             num_decode_tokens=num_decode_tokens,
             q_to_req=self._q_to_req[:n],
             q_to_klen=self._q_to_klen[:n],
+            max_seq_len=cm.max_seq_len,
         )
         self._fill_query_maps(md)
         return md

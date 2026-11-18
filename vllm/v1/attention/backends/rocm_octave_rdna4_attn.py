@@ -3,6 +3,7 @@
 """Independent gfx1200/gfx1201 Octave kernels and vLLM serving adapter."""
 
 from functools import lru_cache
+from math import prod
 
 import torch
 
@@ -138,10 +139,88 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         )
 
     def _run(
-        self, out, query, cache, table, mapping, lengths, *, key=None, value=None
+        self,
+        out,
+        query,
+        cache,
+        table,
+        mapping,
+        lengths,
+        *,
+        key=None,
+        value=None,
+        context_capacity=None,
+        max_query_len=None,
     ) -> None:
+        if (
+            key is not None
+            and self.num_heads // self.num_kv_heads == 6
+            and query.shape[0] >= 256
+            and context_capacity is not None
+            and context_capacity > 0
+            and max_query_len is not None
+            and max_query_len > 32
+        ):
+            capacity = min(context_capacity, table.shape[1] * cache.shape[2])
+            blocks = (capacity + 127) // 128
+            dense_shape = (
+                table.shape[0] * blocks,
+                128,
+                self.num_kv_heads,
+                self.head_size,
+            )
+            temporary = (
+                (dense_shape, torch.float16),
+                (dense_shape, torch.float16),
+                (tuple(query.shape), torch.float16),
+                ((table.shape[0], blocks), torch.int32),
+            )
+            temporary_bytes = sum(
+                ((prod(shape) * dtype.itemsize + 255) // 256) * 256
+                for shape, dtype in temporary
+            )
+            if temporary_bytes <= DEFAULT_WORKSPACE_BYTES:
+                logger.info_once(
+                    "ROCM_OCTAVE (RDNA4) prefill uses temporary FP16 KV and "
+                    "Triton attention within the existing bounded workspace"
+                )
+                shapes = ((tuple(query.shape), torch.float32), *temporary)
+                if is_workspace_manager_initialized():
+                    buffers = current_workspace_manager().get_simultaneous(*shapes)
+                else:
+                    buffers = [
+                        torch.empty(shape, dtype=dtype, device=query.device)
+                        for shape, dtype in shapes
+                    ]
+                fp32, key_tmp, value_tmp, query_tmp, table_tmp = buffers
+                self.engine.prefill_expanded(
+                    query,
+                    key,
+                    value,
+                    cache,
+                    table,
+                    mapping,
+                    lengths,
+                    self._signs(query.device),
+                    self.kv_cache_dtype,
+                    key_tmp=key_tmp,
+                    value_tmp=value_tmp,
+                    query_tmp=query_tmp,
+                    table_tmp=table_tmp,
+                    out=fp32,
+                    max_query_len=max_query_len,
+                    scale=self.scale,
+                )
+                out.copy_(fp32)
+                out.record_stream(torch.cuda.current_stream(query.device))
+                return
         splits = self.engine.suggest_splits(
-            query, cache, table, self.kv_cache_dtype, prefill=key is not None
+            query,
+            cache,
+            table,
+            self.kv_cache_dtype,
+            prefill=key is not None,
+            context_capacity=context_capacity if key is not None else None,
         )
         shape = (*query.shape[:2], splits, self.head_size + 2)
         scratch_shape = shape if splits > 1 else (0,)
@@ -229,5 +308,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 md.seq_lens[nd:reqs],
                 key=key[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
                 value=value[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
+                context_capacity=md.max_seq_len,
+                max_query_len=md.max_query_len,
             )
         return output

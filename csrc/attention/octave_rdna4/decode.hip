@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "split_merge.cuh"
+
 __device__ __forceinline__ uint32_t octave_xor_var(uint32_t value, int mask) {
   uint32_t selector = (uint32_t(threadIdx.x) ^ uint32_t(mask)) & 15u;
   if (mask & 16)
@@ -63,6 +65,32 @@ constexpr int kRope = 64;
 constexpr int kWave = 32;
 constexpr int kLaneValues = kHead / kWave;
 constexpr int kPartialSize = kHead + 2;
+
+__device__ __forceinline__ int ceil_pow2_device(int value) {
+  int power = 1;
+  while (power < value && power < 1024) power <<= 1;
+  return power;
+}
+
+// Keep the host-planned grid/scratch stride stable for graph replay, but avoid
+// launching useful work for context partitions beyond the live query length.
+__device__ __forceinline__ int active_decode_splits(int length, int maximum,
+                                                     int query_tokens,
+                                                     int kv_heads) {
+  if (length <= 0) return 1;
+  const int query_ctas = max(1, query_tokens * kv_heads);
+  const int occupancy_floor =
+      ceil_pow2_device((128 - 1) / query_ctas + 1);
+  const int context_segment = query_tokens >= 8 ? 4096 :
+                              query_tokens >= 4 ? 2048 : 1024;
+  const int context_floor =
+      ceil_pow2_device((length - 1) / context_segment + 1);
+  const int minimum_partition = query_tokens <= 2 ? 64 : 128;
+  const int minimum_tile_cap =
+      ceil_pow2_device((length - 1) / minimum_partition + 1);
+  return max(1, min(maximum, min(minimum_tile_cap,
+                                 max(occupancy_floor, context_floor))));
+}
 
 #if defined(__HIP_DEVICE_COMPILE__) && !defined(__GFX12__)
   #error "Octave RDNA4 requires a gfx12 target"
@@ -591,7 +619,7 @@ __device__ __forceinline__ void attention_row(
     Activation value, PagedCache cache, const int32_t* table,
     int64_t table_stride, const int32_t* map_or_starts, const int32_t* lengths,
     int requests, const uint32_t* signs, float scale, int q, int head,
-    int split, int heads, int splits, int lane) {
+    int split, int heads, int splits, int lane, int query_tokens) {
   int req = 0, prefix = 0, length = 0, chunk_start = 0;
   if constexpr (Prefill) {
     req = request_for_query(map_or_starts, requests, q);
@@ -604,7 +632,12 @@ __device__ __forceinline__ void attention_row(
     if (length > 0) req = map_or_starts[q];
   }
 
-  int tokens_per_split = (length + splits - 1) / splits;
+  int active_splits =
+      (Prefill || heads / cache.heads != 6)
+          ? splits
+          : active_decode_splits(length, splits, query_tokens, cache.heads);
+  if (split >= active_splits) return;
+  int tokens_per_split = (length + active_splits - 1) / active_splits;
   int begin = split * tokens_per_split;
   int end = min(begin + tokens_per_split, length);
   int kv_head = head / (heads / cache.heads);
@@ -822,382 +855,234 @@ __device__ __forceinline__ uint32_t staged_four(uint32_t lo, uint32_t hi,
 }
 
 template <typename F>
-__device__ __forceinline__ void stage_wire_tile(
-    uint32_t (&lo)[4], uint32_t (&hi)[4], int first, int last, int prefix,
-    int wave, int lane, PagedCache cache, const int32_t* table,
-    int64_t table_stride, int req, int head, int begin0, int end0, int begin1,
-    int end1) {
-  if (first >= last) return;
+__device__ __forceinline__ void stage_decode_tile(
+    uint32_t (&lo)[4], uint32_t (&hi)[4], int count, int wave, int lane,
+    PagedCache cache, const int32_t* pages, int page_index, int offset,
+    const uint8_t* page, int head) {
+  const bool page_local = count <= cache.page_size - offset;
+  const uint8_t* tile = page + offset * cache.token_stride;
 #pragma unroll
   for (int r = 0; r < 4; ++r) {
-    int pos = first + wave + 4 * r;
+    const int token = wave + 4 * r;
     lo[r] = hi[r] = 0;
-    bool live =
-        pos < last && pos < prefix &&
-        ((pos >= begin0 && pos < end0) || (pos >= begin1 && pos < end1));
-    if (live) {
-      int page = table[req * table_stride + pos / cache.page_size];
-      const auto* words = reinterpret_cast<const uint32_t*>(
-          cache.at(page, head, pos % cache.page_size));
+    if (token < count) {
+      const uint8_t* slot;
+      if (page_local) {
+        slot = tile + token * cache.token_stride;
+      } else {
+        const int position = offset + token;
+        const int next = position / cache.page_size;
+        slot = cache.at(pages[page_index + next], head,
+                        position - next * cache.page_size);
+      }
+      const auto* words = reinterpret_cast<const uint32_t*>(slot);
       lo[r] = words[lane];
       if (lane + 32 < F::slot_bytes / 4) hi[r] = words[lane + 32];
     }
   }
 }
 
+// Only LDS is exchanged by the waves during the tile loop.
+__device__ inline __attribute__((convergent)) void oneq_lds_barrier() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup", "local");
+  __builtin_amdgcn_s_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
+}
+
 // Two half elements of row padding avoid the 256-column LDS bank stride.
-template <bool Prefill, bool CompactRows = false>
-struct WmmaShared {
-  // Decode and selected long-prefill launches store only the twelve live rows.
-  static constexpr int kQueryRows = Prefill && !CompactRows ? 16 : 12;
-  union QueryOrOutput {
-    struct Operands {
-      _Float16 raw[Prefill ? kQueryRows : 1][kHead + 2];
-      uint32_t rotated[16][kHead / 4 + 2];
-      float scales[16][kQkGroups];
-      uint32_t residual[16][kHead / 4 + 2];
-    } operands;
-    float chunk[kQueryRows][kHead];
-  } query;
-  union KvOrOutput {
-    struct Tile {
-      union KeyTile {
-        _Float16 raw[16][kHead + 2];
-        struct IntegerKey {
-          uint32_t words[16][kHead / 4 + 2];
-          float scales[16][4];
-        } packed;
-      } k;
-      _Float16 v[16][kHead + 2];
-    } tile;
-    float packed[16][kHead];
-  } kv;
+// Four waves unpack each KV tile and compute disjoint QK shards and PV
+// columns. Wave zero combines the QK shards and updates FP32 softmax.
+struct Fp16OneqShared {
+  union Workspace {
+    _Float16 prepare[16][258];
+    struct {
+      float partial[4][16][16];
+      _Float16 key[16][258], value[16][258];
+    } loop;
+    float output[16][256];
+  } work;
   _Float16 probability[16][16];
   float rescale[16], maximum[16], mass[16];
-  int req[2], length[2], prefix[2], chunk_start[2], begin[2], end[2];
-  int integer_fallback;
+  int fallback;
 };
-static_assert(sizeof(WmmaShared<false>) <= 32 * 1024,
-              "two decode workgroups fit the LDS budget");
-static_assert(sizeof(WmmaShared<true>) <= 64 * 1024,
-              "gfx12 workgroup LDS limit");
+static_assert(sizeof(Fp16OneqShared) == 21316, "expected FP16 one-query LDS");
 
-// Two query tokens and six adjacent GQA heads form twelve active matrix rows.
-// Four waves cooperatively unpack each 16-token KV tile, wave zero computes
-// QK and FP32 softmax, and all four waves compute disjoint 64-column PV tiles.
-// Packed and raw outputs keep one common FP32 max/mass but separate FP32
-// accumulators, so the whole-head inverse transform occurs before combining.
-template <typename T, typename F, bool Prefill, bool CompactRows = false>
-__global__ __launch_bounds__(128) void attention_wmma_decode_oneq(
-    float* out, float* partials, Activation query, Activation key,
-    Activation value, PagedCache cache, const int32_t* table,
-    int64_t table_stride, const int32_t* map_or_starts, const int32_t* lengths,
-    int requests, const uint32_t* signs, float scale, int tokens, int heads) {
-  __shared__ WmmaShared<Prefill, CompactRows> shared;
+template <typename T, typename F>
+__global__ __launch_bounds__(128) void attention_wmma_fp16_oneq(
+    float* out, float* partials, Activation query, PagedCache cache,
+    const int32_t* table, int64_t table_stride, const int32_t* mapping,
+    const int32_t* lengths, const uint32_t* signs, float scale,
+    int tokens, int heads) {
+  const int q = blockIdx.x, kv_head = blockIdx.y;
+  const int split = blockIdx.z, splits = gridDim.z;
+  const int length = max(0, lengths[q]);
+  const int active = active_decode_splits(length, splits, tokens, cache.heads);
+  if (split >= active || length == 0) return;
+  const int req = mapping[q];
+  const int per_split = (length + active - 1) / active;
+  const int begin = split * per_split, end = min(begin + per_split, length);
   const int tid = threadIdx.x, lane = tid % kWave, wave = tid / kWave;
   const int column = lane % 16, half_wave = lane / 16;
-  const int q_base = blockIdx.x, kv_head = blockIdx.y;
-  const int split = blockIdx.z, splits = gridDim.z;
-  if (tid == 0) shared.integer_fallback = 0;
-  if (tid < 2) {
-    int q = tid == 0 ? q_base : tokens, req = 0, prefix = 0, length = 0,
-        chunk_start = 0;
-    if (q < tokens) {
-      if constexpr (Prefill) {
-        req = request_for_query(map_or_starts, requests, q);
-        chunk_start = map_or_starts[req];
-        prefix = lengths[req] - (map_or_starts[req + 1] - chunk_start);
-        length = prefix + q - chunk_start + 1;
-      } else {
-        length = max(0, lengths[q]);
-        prefix = length;
-        if (length > 0) req = map_or_starts[q];
-      }
-    }
-    int per_split = (length + splits - 1) / splits;
-    shared.req[tid] = req;
-    shared.length[tid] = length;
-    shared.prefix[tid] = prefix;
-    shared.chunk_start[tid] = chunk_start;
-    shared.begin[tid] = split * per_split;
-    shared.end[tid] = min((split + 1) * per_split, length);
-  }
+  __shared__ Fp16OneqShared shared;
+  if (tid == 0) shared.fallback = 0;
   if (tid < 16) {
     shared.maximum[tid] = -INFINITY;
     shared.mass[tid] = 0;
   }
   __syncthreads();
-
-  if (shared.length[0] == 0) return;
-
-  // Arbitrary decode maps and request boundaries cannot share KV. Retain the
-  // original FP32 row algorithm for this workgroup, without touching an invalid
-  // request ID on a zero-length/padding row.
-  if (shared.length[0] > 0 && shared.length[1] > 0 &&
-      shared.req[0] != shared.req[1]) {
+  for (int row = wave; row < 16; row += 4) {
+    float rotated[kLaneValues] = {};
+    if (row < 6)
+      load_activation<T>(rotated, query, q, kv_head * 6 + row, lane);
+    flip_signs(rotated, signs, lane);
+    hadamard<F::compact>(rotated, lane);
+    bool safe = true;
+    float maxima[2] = {};
+#pragma unroll
+    for (int i = 0; i < kLaneValues; ++i) {
+      maxima[i / 4] = fmaxf(maxima[i / 4], fabsf(rotated[i]));
+      safe &= __builtin_isfinite(rotated[i]);
+    }
+#pragma unroll
+    for (int delta = 1; delta < kQkGroup / 4; delta *= 2) {
+      maxima[0] = fmaxf(maxima[0], octave_xor<false>(maxima[0], delta, kWave));
+      maxima[1] = fmaxf(maxima[1], octave_xor<false>(maxima[1], delta, kWave));
+    }
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+      safe &= maxima[i] == 0 ||
+              (maxima[i] >= 1e-30f && maxima[i] <= 65504.f &&
+               maxima[i] * fabsf(scale) <= 2.f);
+    if (!__all(safe) && lane == 0 && row < 6)
+      atomicOr(&shared.fallback, 1 << row);
+#pragma unroll
+    for (int i = 0; i < kLaneValues; ++i)
+      shared.work.prepare[row][dim_at(lane, i)] = (_Float16)rotated[i];
+  }
+  __syncthreads();
+  if (shared.fallback == 63) {
     for (int row = wave; row < 6; row += 4) {
-      int q = q_base + row / 6;
-      if (q < tokens) {
-        attention_row<T, F, Prefill>(
-            out, partials, query, key, value, cache, table, table_stride,
-            map_or_starts, lengths, requests, signs, scale, q,
-            kv_head * 6 + row % 6, split, heads, splits, lane);
-      }
+      int64_t output_row = int64_t(q) * heads + kv_head * 6 + row;
+      float* dst = splits == 1 ? out + output_row * kHead
+                              : partials + (output_row * splits + split) * kPartialSize;
+      if (lane == 0) dst[0] = __builtin_nanf("");
     }
     return;
   }
-
-  const bool packed_queries =
-      !Prefill || shared.prefix[shared.length[0] > 0 ? 0 : 1] > 0;
-  for (int row = wave; row < 16; row += 4) {
-    float raw[kLaneValues] = {}, rotated[kLaneValues];
-    int q = q_base + row / 6;
-    if (row < 6 && q < tokens)
-      load_activation<T>(raw, query, q, kv_head * 6 + row % 6, lane);
+  WmmaHalf8 query_fragment[4];
 #pragma unroll
-    for (int i = 0; i < kLaneValues; ++i) rotated[i] = raw[i];
-    if (packed_queries) {
-      flip_signs(rotated, signs, lane);
-      hadamard<F::compact>(rotated, lane);
-    }
-    if constexpr (Prefill) {
-      if (row < WmmaShared<Prefill, CompactRows>::kQueryRows) {
+  for (int step = 0; step < 4; ++step) {
 #pragma unroll
-        for (int i = 0; i < kLaneValues; ++i)
-          shared.query.operands.raw[row][dim_at(lane, i)] = (_Float16)raw[i];
-      }
-    }
-    if (packed_queries) {
-      float maxima[2] = {};
-      bool safe = true;
-#pragma unroll
-      for (int i = 0; i < kLaneValues; ++i) {
-        maxima[i / 4] = fmaxf(maxima[i / 4], fabsf(rotated[i]));
-        safe &= __builtin_isfinite(rotated[i]);
-      }
-#pragma unroll
-      for (int delta = 1; delta < kQkGroup / 4; delta *= 2) {
-        maxima[0] =
-            fmaxf(maxima[0], octave_xor<false>(maxima[0], delta, kWave));
-        maxima[1] =
-            fmaxf(maxima[1], octave_xor<false>(maxima[1], delta, kWave));
-      }
-#pragma unroll
-      for (int i = 0; i < 2; ++i) {
-        safe &= maxima[i] == 0 ||
-                (maxima[i] >= 1e-30f && maxima[i] * fabsf(scale) <= 2.f);
-      }
-      if (!__all(safe) && lane == 0)
-        atomicOr(&shared.integer_fallback, 1 << row);
-      if (lane % (kQkGroup / 4) == 0) {
-        shared.query.operands.scales[row][4 * lane / kQkGroup] =
-            maxima[0] / 127.f;
-        shared.query.operands.scales[row][(4 * lane + 128) / kQkGroup] =
-            maxima[1] / 127.f;
-      }
-      float inv0 = maxima[0] >= 1e-30f ? 127.f / maxima[0] : 0;
-      float inv1 = maxima[1] >= 1e-30f ? 127.f / maxima[1] : 0;
-      uint32_t words[2] = {}, residual_words[2] = {};
-#pragma unroll
-      for (int i = 0; i < kLaneValues; ++i) {
-        int value = max(
-            -127, min(127, __float2int_rn(rotated[i] * (i < 4 ? inv0 : inv1))));
-        words[i / 4] |= uint32_t(uint8_t(value)) << (8 * (i % 4));
-        float residual = fmaf(-float(value), maxima[i / 4] / 127.f, rotated[i]);
-        int rvalue = max(
-            -127,
-            min(127, __float2int_rn(residual * (i < 4 ? inv0 : inv1) * 254.f)));
-        residual_words[i / 4] |= uint32_t(uint8_t(rvalue)) << (8 * (i % 4));
-      }
-      shared.query.operands.rotated[row][lane] = words[0];
-      shared.query.operands.rotated[row][lane + 32] = words[1];
-      shared.query.operands.residual[row][lane] = residual_words[0];
-      shared.query.operands.residual[row][lane + 32] = residual_words[1];
-    }
+    for (int e = 0; e < 8; ++e)
+      query_fragment[step][e] =
+          shared.work.prepare[column][wave * 64 + step * 16 + half_wave * 8 + e];
   }
   __syncthreads();
-  if (shared.integer_fallback == 63) return;
-
-  int first = 0x7fffffff, last = 0;
-#pragma unroll
-  for (int i = 0; i < 2; ++i) {
-    if (shared.begin[i] < shared.end[i]) {
-      first = min(first, shared.begin[i]);
-      last = max(last, shared.end[i]);
-    }
-  }
-  int owner = shared.length[0] > 0 ? 0 : 1;
-  int req = shared.req[owner], prefix = shared.prefix[owner];
-  int chunk_start = shared.chunk_start[owner];
-  WmmaFloat8 packed[4] = {}, chunk[4] = {};
-  WmmaFloat8 running_max, running_mass = {};
+  WmmaFloat8 packed[4] = {}, running_max, running_mass = {};
 #pragma unroll
   for (int e = 0; e < 8; ++e) running_max[e] = -INFINITY;
-
-  // Each wave retains its own 64-D query fragments. The residual operand LDS
-  // can then hold exact integer QK partials for the lifetime of every KV tile.
-  WmmaInt2 query_main[4] = {}, query_residual[4] = {};
-  if (packed_queries) {
-#pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int word = wave * 16 + step * 4 + half_wave * 2;
-      query_main[step][0] = int(shared.query.operands.rotated[column][word]);
-      query_main[step][1] =
-          int(shared.query.operands.rotated[column][word + 1]);
-      query_residual[step][0] =
-          int(shared.query.operands.residual[column][word]);
-      query_residual[step][1] =
-          int(shared.query.operands.residual[column][word + 1]);
-    }
-  }
-
+  // Keep the page lookup and division out of the common in-page tile.
+  const int32_t* pages = table + int64_t(req) * table_stride;
+  int page_index = begin / cache.page_size;
+  int offset = begin - page_index * cache.page_size;
+  const uint8_t* page =
+      begin < end ? cache.at(pages[page_index], kv_head, 0) : nullptr;
   uint32_t staged_lo[4], staged_hi[4];
-
-  for (int pos_base = first; pos_base < last;) {
-    bool is_packed = !Prefill || pos_base < prefix;
-    int count = min(16, last - pos_base);
-    if constexpr (Prefill) {
-      if (is_packed) count = min(count, prefix - pos_base);
-    }
-    stage_wire_tile<F>(staged_lo, staged_hi, pos_base, last,
-                       Prefill ? prefix : last, wave, lane, cache, table,
-                       table_stride, req, kv_head, shared.begin[0],
-                       shared.end[0], shared.begin[1], shared.end[1]);
+  if (begin < end)
+    stage_decode_tile<F>(staged_lo, staged_hi, min(16, end - begin), wave, lane,
+                         cache, pages, page_index, offset, page, kv_head);
+  for (int pos_base = begin; pos_base < end; pos_base += 16) {
+    const int count = min(16, end - pos_base);
 #pragma unroll
     for (int r = 0; r < 4; ++r) {
-      int t = wave + 4 * r;
-      int pos = pos_base + t;
-      bool live =
-          t < count && ((pos >= shared.begin[0] && pos < shared.end[0]) ||
-                        (pos >= shared.begin[1] && pos < shared.end[1]));
+      const int t = wave + 4 * r;
       float k[kLaneValues] = {}, v[kLaneValues] = {};
-      uint32_t a = 0, b = 0;
-      float sa = 0, sb = 0;
-      if (live) {
-        if (is_packed) {
-          uint32_t lo = staged_lo[r], hi = staged_hi[r];
-          constexpr int scale_word = F::scale_offset / 4;
-          uint32_t scale0 =
-              staged_word<scale_word, scale_word>(lo, hi, scale_word);
-          if constexpr (F::compact) {
-            a = staged_four<3, 0, kHead>(lo, hi, lane);
-            b = staged_four<3, 0, kHead>(lo, hi, lane + kWave);
-            sa = sb = scale_half(scale0, 0) / 64.f;
-          } else {
-            uint32_t a4 = staged_four<4, 0, kRope>(lo, hi, lane % 16);
-            uint32_t a3 =
-                staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane % 16);
-            a = lane < 16 ? a4 : a3;
-            b = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane + 16);
-            uint32_t scale1 = staged_word<scale_word + 1, scale_word + 1>(
-                lo, hi, scale_word + 1);
-            sa = scale_half(scale0, lane / 16) / 64.f;
-            sb = scale_half(scale1, lane / 16) / 64.f;
-          }
-          constexpr int value_scale_word = scale_word + F::v_scale / 2;
-          uint32_t scales = staged_word<value_scale_word, value_scale_word>(
-              lo, hi, value_scale_word);
-          float sv = scale_half(scales, F::v_scale % 2) / 64.f;
-          uint32_t va =
-              staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane);
-          uint32_t vb = staged_four<F::v_bits, F::v_offset / 4, kHead>(
-              lo, hi, lane + kWave);
+      if (t < count) {
+        uint32_t lo = staged_lo[r], hi = staged_hi[r];
+        constexpr int scale_word = F::scale_offset / 4;
+        uint32_t scale0 = staged_word<scale_word, scale_word>(lo, hi, scale_word);
+        uint32_t a, b;
+        float sa, sb;
+        if constexpr (F::compact) {
+          a = staged_four<3, 0, kHead>(lo, hi, lane);
+          b = staged_four<3, 0, kHead>(lo, hi, lane + kWave);
+          sa = sb = scale_half(scale0, 0) / 64.f;
+        } else {
+          uint32_t a4 = staged_four<4, 0, kRope>(lo, hi, lane % 16);
+          uint32_t a3 = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane % 16);
+          a = lane < 16 ? a4 : a3;
+          b = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane + 16);
+          uint32_t scale1 = staged_word<scale_word + 1, scale_word + 1>(lo, hi, scale_word + 1);
+          sa = scale_half(scale0, lane / 16) / 64.f;
+          sb = scale_half(scale1, lane / 16) / 64.f;
+        }
+        constexpr int value_scale_word = scale_word + F::v_scale / 2;
+        uint32_t scales = staged_word<value_scale_word, value_scale_word>(lo, hi, value_scale_word);
+        float sv = scale_half(scales, F::v_scale % 2) / 64.f;
+        uint32_t va = staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane);
+        uint32_t vb = staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane + kWave);
 #pragma unroll
-          for (int i = 0; i < 4; ++i) {
-            v[i] = signed_byte(va, i) * sv;
-            v[i + 4] = signed_byte(vb, i) * sv;
-          }
-        } else if constexpr (Prefill) {
-          int token = chunk_start + pos - prefix;
-          load_activation<T>(k, key, token, kv_head, lane);
-          load_activation<T>(v, value, token, kv_head, lane);
+        for (int i = 0; i < 4; ++i) {
+          k[i] = signed_byte(a, i) * sa;
+          k[i + 4] = signed_byte(b, i) * sb;
+          v[i] = signed_byte(va, i) * sv;
+          v[i + 4] = signed_byte(vb, i) * sv;
         }
       }
 #pragma unroll
       for (int i = 0; i < kLaneValues; ++i) {
-        int d = dim_at(lane, i);
-        if (!is_packed) {
-          shared.kv.tile.k.raw[t][d] = (_Float16)k[i];
-        }
-        shared.kv.tile.v[t][d] = (_Float16)v[i];
-      }
-      if (is_packed) {
-        shared.kv.tile.k.packed.words[t][lane] = a;
-        shared.kv.tile.k.packed.words[t][lane + 32] = b;
-      }
-      if (is_packed && lane % 16 == 0) {
-        shared.kv.tile.k.packed.scales[t][lane / 16] = sa;
-        shared.kv.tile.k.packed.scales[t][2 + lane / 16] = sb;
+        shared.work.loop.key[t][dim_at(lane, i)] = (_Float16)k[i];
+        shared.work.loop.value[t][dim_at(lane, i)] = (_Float16)v[i];
       }
     }
-    __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
-
-    if (is_packed) {
-      WmmaInt8 dots = {}, residual_dots = {};
+    oneq_lds_barrier();
+    // The current tile is in LDS, so its wire registers can hold the next
+    // tile while QK, softmax, and PV consume the expanded operands.
+    const int next_pos = pos_base + 16;
+    if (next_pos < end) {
+      offset += 16;
+      if (offset >= cache.page_size) {
+        const int crossed = cache.page_size >= 16 ? 1 : offset / cache.page_size;
+        page_index += crossed;
+        offset -= crossed * cache.page_size;
+        page = cache.at(pages[page_index], kv_head, 0);
+      }
+      stage_decode_tile<F>(staged_lo, staged_hi, min(16, end - next_pos),
+                           wave, lane, cache, pages, page_index, offset,
+                           page, kv_head);
+    }
+    WmmaFloat8 dots = {};
 #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int word = wave * 16 + step * 4 + half_wave * 2;
-        WmmaInt2 b;
-        b[0] = int(shared.kv.tile.k.packed.words[column][word]);
-        b[1] = int(shared.kv.tile.k.packed.words[column][word + 1]);
-        dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(
-            true, query_main[step], true, b, dots, false);
-        residual_dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(
-            true, query_residual[step], true, b, residual_dots, false);
+    for (int step = 0; step < 4; ++step) {
+      WmmaHalf8 b;
+#pragma unroll
+      for (int e = 0; e < 8; ++e)
+        b[e] = shared.work.loop.key[column][wave * 64 + step * 16 + half_wave * 8 + e];
+      dots = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(query_fragment[step], b, dots);
+    }
+#pragma unroll
+    for (int e = 0; e < 8; ++e)
+      shared.work.loop.partial[wave][half_wave * 8 + e][column] = dots[e];
+    oneq_lds_barrier();
+    if (wave == 0) {
+      WmmaFloat8 score = {};
+#pragma unroll
+      for (int shard = 0; shard < 4; ++shard) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e)
+          score[e] += shared.work.loop.partial[shard][half_wave * 8 + e][column];
       }
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
         int row = half_wave * 8 + e;
-        int combined = dots[e] * 254 + residual_dots[e];
-        shared.query.operands.residual[row][wave * 16 + column] =
-            uint32_t(combined);
-      }
-      __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
-    }
-
-    if (wave == 0) {
-      WmmaFloat8 score = {};
-      if (is_packed) {
-#pragma unroll 1
-        for (int group = 0; group < kQkGroups; ++group) {
-          float ks = shared.kv.tile.k.packed.scales[column][group];
-#pragma unroll
-          for (int e = 0; e < 8; ++e) {
-            int row = half_wave * 8 + e;
-            float qs = shared.query.operands.scales[row][group];
-            int combined =
-                int(shared.query.operands.residual[row][group * 16 + column]);
-            score[e] = fmaf(float(combined), qs * ks * (1.f / 254.f), score[e]);
-          }
-        }
-      } else {
-#pragma unroll
-        for (int d = 0; d < kHead; d += 16) {
-          WmmaHalf8 a, b;
-#pragma unroll
-          for (int e = 0; e < 8; ++e) {
-            int dim = d + half_wave * 8 + e;
-            a[e] = column < 6 ? shared.query.operands.raw[column][dim]
-                              : (_Float16)0;
-            b[e] = shared.kv.tile.k.raw[column][dim];
-          }
-          score = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, score);
-        }
-      }
-#pragma unroll
-      for (int e = 0; e < 8; ++e) {
-        int row = half_wave * 8 + e, qi = row / 6;
-        int pos = pos_base + column;
-        bool live = row < 6 && q_base + qi < tokens && column < count &&
-                    pos >= shared.begin[qi] && pos < shared.end[qi];
+        bool live = row < 6 && column < count;
         float s = live ? score[e] * scale : -INFINITY;
         float m = s;
 #pragma unroll
         for (int delta = 8; delta; delta /= 2)
           m = fmaxf(m, octave_xor<false>(m, delta, kWave));
         float next_max = fmaxf(running_max[e], m);
-        float rescale =
-            running_mass[e] > 0 ? __expf(running_max[e] - next_max) : 0;
+        float rescale = running_mass[e] > 0 ? __expf(running_max[e] - next_max) : 0;
         float weight = live ? __expf(s - next_max) : 0;
         float tile_mass = weight;
 #pragma unroll
@@ -1213,8 +1098,7 @@ __global__ __launch_bounds__(128) void attention_wmma_decode_oneq(
         }
       }
     }
-    __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
-
+    oneq_lds_barrier();
 #pragma unroll
     for (int d = 0; d < 4; ++d) {
       WmmaHalf8 a, b;
@@ -1222,60 +1106,39 @@ __global__ __launch_bounds__(128) void attention_wmma_decode_oneq(
       for (int e = 0; e < 8; ++e) {
         int row = half_wave * 8 + e;
         packed[d][e] *= shared.rescale[row];
-        chunk[d][e] *= shared.rescale[row];
         a[e] = shared.probability[column][half_wave * 8 + e];
-        b[e] = shared.kv.tile.v[half_wave * 8 + e][wave * 64 + d * 16 + column];
+        b[e] = shared.work.loop.value[half_wave * 8 + e][wave * 64 + d * 16 + column];
       }
-      if (is_packed) {
-        packed[d] =
-            __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, packed[d]);
-      } else if constexpr (Prefill) {
-        chunk[d] =
-            __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, chunk[d]);
-      }
+      packed[d] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, packed[d]);
     }
-    __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
-    pos_base += count;
+    oneq_lds_barrier();
   }
-
-  // Reuse dead operand storage for the FP32 output layout conversion.
 #pragma unroll
   for (int d = 0; d < 4; ++d) {
 #pragma unroll
-    for (int e = 0; e < 8; ++e) {
-      int row = half_wave * 8 + e, dim = wave * 64 + d * 16 + column;
-      shared.kv.packed[row][dim] = packed[d][e];
-      if constexpr (Prefill && !CompactRows) {
-        shared.query.chunk[row][dim] = chunk[d][e];
-      } else if (row < 6) {
-        shared.query.chunk[row][dim] = chunk[d][e];
-      }
-    }
+    for (int e = 0; e < 8; ++e)
+      shared.work.output[half_wave * 8 + e][wave * 64 + d * 16 + column] = packed[d][e];
   }
   __syncthreads();
   for (int row = wave; row < 6; row += 4) {
-    int q = q_base + row / 6;
-    if (q >= tokens) continue;
-    if (shared.integer_fallback & (1 << row)) continue;
-    float packed_out[kLaneValues];
+    int64_t output_row = int64_t(q) * heads + kv_head * 6 + row;
+    float* dst = splits == 1 ? out + output_row * kHead
+                            : partials + (output_row * splits + split) * kPartialSize;
+    if (shared.fallback & (1 << row)) {
+      if (lane == 0) dst[0] = __builtin_nanf("");
+      continue;
+    }
+    float result[kLaneValues];
 #pragma unroll
     for (int i = 0; i < kLaneValues; ++i)
-      packed_out[i] = shared.kv.packed[row][dim_at(lane, i)];
-    hadamard<true>(packed_out, lane);
-    flip_signs(packed_out, signs, lane);
-    int64_t output_row = int64_t(q) * heads + kv_head * 6 + row % 6;
+      result[i] = shared.work.output[row][dim_at(lane, i)];
+    hadamard<true>(result, lane);
+    flip_signs(result, signs, lane);
     float mass = shared.mass[row];
-    float inv_mass =
-        mass > 0 && __builtin_isfinite(mass) ? 1.f / mass : __builtin_nanf("");
-    float* dst = splits == 1
-                     ? out + output_row * kHead
-                     : partials + (output_row * splits + split) * kPartialSize;
+    float inv_mass = mass > 0 && __builtin_isfinite(mass) ? 1.f / mass : __builtin_nanf("");
 #pragma unroll
-    for (int i = 0; i < kLaneValues; ++i) {
-      int dim = dim_at(lane, i);
-      float result = packed_out[i] + shared.query.chunk[row][dim];
-      dst[dim] = splits == 1 ? result * inv_mass : result;
-    }
+    for (int i = 0; i < kLaneValues; ++i)
+      dst[dim_at(lane, i)] = splits == 1 ? result[i] * inv_mass : result[i];
     if (splits > 1 && lane == 0) {
       dst[kHead] = shared.maximum[row];
       dst[kHead + 1] = mass;
@@ -1283,20 +1146,23 @@ __global__ __launch_bounds__(128) void attention_wmma_decode_oneq(
   }
 }
 
-template <bool Prefill, bool CompactRows, int Pairs>
-struct WmmaReuseShared {
-  using Base = WmmaShared<Prefill, CompactRows>;
-  typename Base::QueryOrOutput query[Pairs];
-  typename Base::KvOrOutput kv;
-  _Float16 probability[Pairs][16][16];
-  float rescale[Pairs][16], maximum[Pairs][16], mass[Pairs][16];
-  int req[2 * Pairs], length[2 * Pairs], prefix[2 * Pairs],
-      chunk_start[2 * Pairs];
-  int begin[2 * Pairs], end[2 * Pairs];
-  int integer_fallback[Pairs];
+
+// Six-query prefill with four-wave FP16 QK and a single staged KV workspace.
+struct Fp16ReuseShared {
+  union Workspace {
+    _Float16 prepare[3][16][258];
+    struct {
+      float partial[3][4][16][16];
+      _Float16 key[16][258], value[16][258];
+    } loop;
+    struct { float packed[16][256], chunk[12][256]; } output;
+  } work;
+  _Float16 probability[3][16][16];
+  float rescale[3][16], maximum[3][16], mass[3][16];
+  int req[6], length[6], prefix[6], chunk_start[6], begin[6], end[6];
+  int fallback[3];
 };
-static_assert(sizeof(WmmaReuseShared<true, true, 3>) <= 65536,
-              "three query pairs fit LDS");
+static_assert(sizeof(Fp16ReuseShared) == 31068, "expected FP16 reuse layout");
 
 template <int Rows>
 __device__ __forceinline__ bool reuse_live(int pos, const int* begins,
@@ -1329,19 +1195,19 @@ __device__ __forceinline__ void stage_reuse_tile(
   }
 }
 
-template <typename T, typename F, bool Prefill, bool CompactRows = false>
-__global__ __launch_bounds__(384) void attention_wmma_reuse(
+template <typename T, typename F, bool Prefill>
+__global__ __launch_bounds__(384) void attention_wmma_fp16_reuse(
     float* out, float* partials, Activation query, Activation key,
     Activation value, PagedCache cache, const int32_t* table,
     int64_t table_stride, const int32_t* map_or_starts, const int32_t* lengths,
     int requests, const uint32_t* signs, float scale, int tokens, int heads) {
-  __shared__ WmmaReuseShared<Prefill, CompactRows, 3> shared;
+  __shared__ Fp16ReuseShared shared;
   const int tid = threadIdx.x, lane = tid % kWave, wave = (tid / kWave) % 4;
   const int pair = tid / 128, local_tid = tid % 128;
   const int column = lane % 16, half_wave = lane / 16;
   const int q_base = 6 * blockIdx.x + 2 * pair, kv_head = blockIdx.y;
   const int split = blockIdx.z, splits = gridDim.z;
-  if (tid < 3) shared.integer_fallback[tid] = 0;
+  if (tid < 3) shared.fallback[tid] = 0;
   if (tid < 6) {
     int q = 6 * blockIdx.x + tid, req = 0, prefix = 0, length = 0,
         chunk_start = 0;
@@ -1385,7 +1251,7 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
         attention_row<T, F, Prefill>(
             out, partials, query, key, value, cache, table, table_stride,
             map_or_starts, lengths, requests, signs, scale, q,
-            kv_head * 6 + row % 6, split, heads, splits, lane);
+            kv_head * 6 + row % 6, split, heads, splits, lane, tokens);
     }
     return;
   }
@@ -1403,73 +1269,45 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
       flip_signs(rotated, signs, lane);
       hadamard<F::compact>(rotated, lane);
     }
-    if constexpr (Prefill) {
-      if (row < WmmaShared<Prefill, CompactRows>::kQueryRows) {
+    float maxima[2] = {};
+    bool safe = true;
 #pragma unroll
-        for (int i = 0; i < kLaneValues; ++i)
-          shared.query[pair].operands.raw[row][dim_at(lane, i)] =
-              (_Float16)raw[i];
-      }
+    for (int i = 0; i < kLaneValues; ++i) {
+      float x = packed_queries ? rotated[i] : raw[i];
+      maxima[i / 4] = fmaxf(maxima[i / 4], fabsf(x));
+      safe &= __builtin_isfinite(x);
     }
-    if (packed_queries) {
-      float maxima[2] = {};
-      bool safe = true;
 #pragma unroll
-      for (int i = 0; i < kLaneValues; ++i) {
-        maxima[i / 4] = fmaxf(maxima[i / 4], fabsf(rotated[i]));
-        safe &= __builtin_isfinite(rotated[i]);
-      }
+    for (int delta = 1; delta < kQkGroup / 4; delta *= 2) {
+      maxima[0] = fmaxf(maxima[0], octave_xor<false>(maxima[0], delta, kWave));
+      maxima[1] = fmaxf(maxima[1], octave_xor<false>(maxima[1], delta, kWave));
+    }
 #pragma unroll
-      for (int delta = 1; delta < kQkGroup / 4; delta *= 2) {
-        maxima[0] =
-            fmaxf(maxima[0], octave_xor<false>(maxima[0], delta, kWave));
-        maxima[1] =
-            fmaxf(maxima[1], octave_xor<false>(maxima[1], delta, kWave));
-      }
+    for (int i = 0; i < 2; ++i) {
+      safe &= maxima[i] == 0 ||
+              (maxima[i] >= 1e-30f && maxima[i] <= 65504.f &&
+               maxima[i] * fabsf(scale) <= 2.f);
+    }
+    if (!__all(safe) && lane == 0 && row < 12)
+      atomicOr(&shared.fallback[pair], 1 << row);
 #pragma unroll
-      for (int i = 0; i < 2; ++i) {
-        safe &= maxima[i] == 0 ||
-                (maxima[i] >= 1e-30f && maxima[i] * fabsf(scale) <= 2.f);
-      }
-      if (!__all(safe) && lane == 0)
-        atomicOr(&shared.integer_fallback[pair], 1 << row);
-      if (lane % (kQkGroup / 4) == 0) {
-        shared.query[pair].operands.scales[row][4 * lane / kQkGroup] =
-            maxima[0] / 127.f;
-        shared.query[pair].operands.scales[row][(4 * lane + 128) / kQkGroup] =
-            maxima[1] / 127.f;
-      }
-      float inv0 = maxima[0] >= 1e-30f ? 127.f / maxima[0] : 0;
-      float inv1 = maxima[1] >= 1e-30f ? 127.f / maxima[1] : 0;
-      uint32_t words[2] = {}, residual_words[2] = {};
-#pragma unroll
-      for (int i = 0; i < kLaneValues; ++i) {
-        int value = max(
-            -127, min(127, __float2int_rn(rotated[i] * (i < 4 ? inv0 : inv1))));
-        words[i / 4] |= uint32_t(uint8_t(value)) << (8 * (i % 4));
-        float residual = fmaf(-float(value), maxima[i / 4] / 127.f, rotated[i]);
-        int rvalue = max(
-            -127,
-            min(127, __float2int_rn(residual * (i < 4 ? inv0 : inv1) * 254.f)));
-        residual_words[i / 4] |= uint32_t(uint8_t(rvalue)) << (8 * (i % 4));
-      }
-      shared.query[pair].operands.rotated[row][lane] = words[0];
-      shared.query[pair].operands.rotated[row][lane + 32] = words[1];
-      shared.query[pair].operands.residual[row][lane] = residual_words[0];
-      shared.query[pair].operands.residual[row][lane + 32] = residual_words[1];
+    for (int i = 0; i < kLaneValues; ++i) {
+      int d = dim_at(lane, i);
+      float x = packed_queries ? rotated[i] : raw[i];
+      shared.work.prepare[pair][row][d] = (_Float16)x;
     }
   }
   __syncthreads();
-  if (shared.integer_fallback[0] == 4095 &&
-      shared.integer_fallback[1] == 4095 &&
-      shared.integer_fallback[2] == 4095) {
+  if (shared.fallback[0] == 4095 &&
+      shared.fallback[1] == 4095 &&
+      shared.fallback[2] == 4095) {
     for (int row = wave; row < 12; row += 4) {
       int q = q_base + row / 6;
       if (q < tokens)
         attention_row<T, F, Prefill>(
             out, partials, query, key, value, cache, table, table_stride,
             map_or_starts, lengths, requests, signs, scale, q,
-            kv_head * 6 + row % 6, split, heads, splits, lane);
+            kv_head * 6 + row % 6, split, heads, splits, lane, tokens);
     }
     return;
   }
@@ -1490,31 +1328,44 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
 #pragma unroll
   for (int e = 0; e < 8; ++e) running_max[e] = -INFINITY;
 
-  // Each wave retains its own 64-D query fragments. The residual operand LDS
-  // can then hold exact integer QK partials for the lifetime of every KV tile.
-  WmmaInt2 query_main[4] = {}, query_residual[4] = {};
-  if (packed_queries) {
+  // Cache four 16-D steps for this wave's contiguous 64-D QK shard.
+  WmmaHalf8 query_fragment[4] = {};
 #pragma unroll
-    for (int step = 0; step < 4; ++step) {
-      int word = wave * 16 + step * 4 + half_wave * 2;
-      query_main[step][0] =
-          int(shared.query[pair].operands.rotated[column][word]);
-      query_main[step][1] =
-          int(shared.query[pair].operands.rotated[column][word + 1]);
-      query_residual[step][0] =
-          int(shared.query[pair].operands.residual[column][word]);
-      query_residual[step][1] =
-          int(shared.query[pair].operands.residual[column][word + 1]);
+  for (int step = 0; step < 4; ++step) {
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      int dim = wave * 64 + step * 16 + half_wave * 8 + e;
+      query_fragment[step][e] = shared.work.prepare[pair][column][dim];
     }
   }
+  __syncthreads();
 
   uint32_t staged_lo[4], staged_hi[4];
+  bool raw_queries_loaded = false;
 
   for (int pos_base = first; pos_base < last;) {
     bool is_packed = !Prefill || pos_base < prefix;
     int count = min(16, last - pos_base);
     if constexpr (Prefill) {
       if (is_packed) count = min(count, prefix - pos_base);
+    }
+    if (!is_packed && !raw_queries_loaded) {
+#pragma unroll
+      for (int step = 0; step < 4; ++step) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          int dim = wave * 64 + step * 16 + half_wave * 8 + e;
+          int q = q_base + column / 6;
+          if (column < 12 && q < tokens) {
+            const auto* query_row = static_cast<const T*>(query.data) +
+                q * query.token_stride + (kv_head * 6 + column % 6) * query.head_stride;
+            query_fragment[step][e] = (_Float16)query_row[dim];
+          } else {
+            query_fragment[step][e] = (_Float16)0;
+          }
+        }
+      }
+      raw_queries_loaded = true;
     }
     if (pair == 0) {
       stage_reuse_tile<F, 3>(staged_lo, staged_hi, pos_base, last, prefix, wave,
@@ -1532,34 +1383,29 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
           if (is_packed) {
             uint32_t lo = staged_lo[r], hi = staged_hi[r];
             constexpr int scale_word = F::scale_offset / 4;
-            uint32_t scale0 =
-                staged_word<scale_word, scale_word>(lo, hi, scale_word);
+            uint32_t scale0 = staged_word<scale_word, scale_word>(lo, hi, scale_word);
             if constexpr (F::compact) {
               a = staged_four<3, 0, kHead>(lo, hi, lane);
               b = staged_four<3, 0, kHead>(lo, hi, lane + kWave);
               sa = sb = scale_half(scale0, 0) / 64.f;
             } else {
               uint32_t a4 = staged_four<4, 0, kRope>(lo, hi, lane % 16);
-              uint32_t a3 = staged_four<3, F::k3_offset / 4, F::k3_dims>(
-                  lo, hi, lane % 16);
+              uint32_t a3 = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane % 16);
               a = lane < 16 ? a4 : a3;
-              b = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi,
-                                                               lane + 16);
-              uint32_t scale1 = staged_word<scale_word + 1, scale_word + 1>(
-                  lo, hi, scale_word + 1);
+              b = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane + 16);
+              uint32_t scale1 = staged_word<scale_word + 1, scale_word + 1>(lo, hi, scale_word + 1);
               sa = scale_half(scale0, lane / 16) / 64.f;
               sb = scale_half(scale1, lane / 16) / 64.f;
             }
             constexpr int value_scale_word = scale_word + F::v_scale / 2;
-            uint32_t scales = staged_word<value_scale_word, value_scale_word>(
-                lo, hi, value_scale_word);
+            uint32_t scales = staged_word<value_scale_word, value_scale_word>(lo, hi, value_scale_word);
             float sv = scale_half(scales, F::v_scale % 2) / 64.f;
-            uint32_t va =
-                staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane);
-            uint32_t vb = staged_four<F::v_bits, F::v_offset / 4, kHead>(
-                lo, hi, lane + kWave);
+            uint32_t va = staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane);
+            uint32_t vb = staged_four<F::v_bits, F::v_offset / 4, kHead>(lo, hi, lane + kWave);
 #pragma unroll
             for (int i = 0; i < 4; ++i) {
+              k[i] = signed_byte(a, i) * sa;
+              k[i + 4] = signed_byte(b, i) * sb;
               v[i] = signed_byte(va, i) * sv;
               v[i + 4] = signed_byte(vb, i) * sv;
             }
@@ -1572,74 +1418,40 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
 #pragma unroll
         for (int i = 0; i < kLaneValues; ++i) {
           int d = dim_at(lane, i);
-          if (!is_packed) {
-            shared.kv.tile.k.raw[t][d] = (_Float16)k[i];
-          }
-          shared.kv.tile.v[t][d] = (_Float16)v[i];
-        }
-        if (is_packed) {
-          shared.kv.tile.k.packed.words[t][lane] = a;
-          shared.kv.tile.k.packed.words[t][lane + 32] = b;
-        }
-        if (is_packed && lane % 16 == 0) {
-          shared.kv.tile.k.packed.scales[t][lane / 16] = sa;
-          shared.kv.tile.k.packed.scales[t][2 + lane / 16] = sb;
+          shared.work.loop.key[t][d] = (_Float16)k[i];
+          shared.work.loop.value[t][d] = (_Float16)v[i];
         }
       }
     }
     __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
 
-    if (is_packed) {
-      WmmaInt8 dots = {}, residual_dots = {};
+    WmmaFloat8 dots = {};
 #pragma unroll
-      for (int step = 0; step < 4; ++step) {
-        int word = wave * 16 + step * 4 + half_wave * 2;
-        WmmaInt2 b;
-        b[0] = int(shared.kv.tile.k.packed.words[column][word]);
-        b[1] = int(shared.kv.tile.k.packed.words[column][word + 1]);
-        dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(
-            true, query_main[step], true, b, dots, false);
-        residual_dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12(
-            true, query_residual[step], true, b, residual_dots, false);
-      }
+    for (int step = 0; step < 4; ++step) {
+      WmmaHalf8 b;
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
-        int row = half_wave * 8 + e;
-        int combined = dots[e] * 254 + residual_dots[e];
-        shared.query[pair].operands.residual[row][wave * 16 + column] =
-            uint32_t(combined);
+        int dim = wave * 64 + step * 16 + half_wave * 8 + e;
+        b[e] = shared.work.loop.key[column][dim];
       }
-      __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
+      dots = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+          query_fragment[step], b, dots);
     }
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      int row = half_wave * 8 + e;
+      shared.work.loop.partial[pair][wave][row][column] = dots[e];
+    }
+    __work_group_barrier(__CLK_LOCAL_MEM_FENCE);
 
     if (wave == 0) {
       WmmaFloat8 score = {};
-      if (is_packed) {
-#pragma unroll 1
-        for (int group = 0; group < kQkGroups; ++group) {
-          float ks = shared.kv.tile.k.packed.scales[column][group];
 #pragma unroll
-          for (int e = 0; e < 8; ++e) {
-            int row = half_wave * 8 + e;
-            float qs = shared.query[pair].operands.scales[row][group];
-            int combined = int(
-                shared.query[pair].operands.residual[row][group * 16 + column]);
-            score[e] = fmaf(float(combined), qs * ks * (1.f / 254.f), score[e]);
-          }
-        }
-      } else {
-// Bound live LDS fragments; fully unrolling spills VGPRs on ROCm 7.2.
-#pragma unroll 1
-        for (int d = 0; d < kHead; d += 16) {
-          WmmaHalf8 a, b;
+      for (int shard = 0; shard < 4; ++shard) {
 #pragma unroll
-          for (int e = 0; e < 8; ++e) {
-            int dim = d + half_wave * 8 + e;
-            a[e] = column < 12 ? shared.query[pair].operands.raw[column][dim]
-                               : (_Float16)0;
-            b[e] = shared.kv.tile.k.raw[column][dim];
-          }
-          score = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, score);
+        for (int e = 0; e < 8; ++e) {
+          int row = half_wave * 8 + e;
+          score[e] += shared.work.loop.partial[pair][shard][row][column];
         }
       }
 #pragma unroll
@@ -1683,7 +1495,7 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
         packed[d][e] *= shared.rescale[pair][row];
         chunk[d][e] *= shared.rescale[pair][row];
         a[e] = shared.probability[pair][column][half_wave * 8 + e];
-        b[e] = shared.kv.tile.v[half_wave * 8 + e][wave * 64 + d * 16 + column];
+        b[e] = shared.work.loop.value[half_wave * 8 + e][wave * 64 + d * 16 + column];
       }
       if (is_packed) {
         packed[d] =
@@ -1705,12 +1517,8 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
 #pragma unroll
         for (int e = 0; e < 8; ++e) {
           int row = half_wave * 8 + e, dim = wave * 64 + d * 16 + column;
-          shared.kv.packed[row][dim] = packed[d][e];
-          if constexpr (Prefill && !CompactRows) {
-            shared.query[pair].chunk[row][dim] = chunk[d][e];
-          } else if (row < 12) {
-            shared.query[pair].chunk[row][dim] = chunk[d][e];
-          }
+          shared.work.output.packed[row][dim] = packed[d][e];
+          if (row < 12) shared.work.output.chunk[row][dim] = chunk[d][e];
         }
       }
     }
@@ -1719,17 +1527,17 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
       for (int row = wave; row < 12; row += 4) {
         int q = q_base + row / 6;
         if (q >= tokens) continue;
-        if (shared.integer_fallback[pair] & (1 << row)) {
+        if (shared.fallback[pair] & (1 << row)) {
           attention_row<T, F, Prefill>(
               out, partials, query, key, value, cache, table, table_stride,
               map_or_starts, lengths, requests, signs, scale, q,
-              kv_head * 6 + row % 6, split, heads, splits, lane);
+              kv_head * 6 + row % 6, split, heads, splits, lane, tokens);
           continue;
         }
         float packed_out[kLaneValues];
 #pragma unroll
         for (int i = 0; i < kLaneValues; ++i)
-          packed_out[i] = shared.kv.packed[row][dim_at(lane, i)];
+          packed_out[i] = shared.work.output.packed[row][dim_at(lane, i)];
         hadamard<true>(packed_out, lane);
         flip_signs(packed_out, signs, lane);
         int64_t output_row = int64_t(q) * heads + kv_head * 6 + row % 6;
@@ -1743,7 +1551,7 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
 #pragma unroll
         for (int i = 0; i < kLaneValues; ++i) {
           int dim = dim_at(lane, i);
-          float result = packed_out[i] + shared.query[pair].chunk[row][dim];
+          float result = packed_out[i] + shared.work.output.chunk[row][dim];
           dst[dim] = splits == 1 ? result * inv_mass : result;
         }
         if (splits > 1 && lane == 0) {
@@ -1756,7 +1564,109 @@ __global__ __launch_bounds__(384) void attention_wmma_reuse(
   }
 }
 
-// Two half elements of row padding avoid the 256-column LDS bank stride.
+// One uniform kernel entrypoint embeds six format/dtype-specialized bodies.
+// The runtime branches are CTA-uniform and retain the typed math exactly.
+template <typename T, typename F>
+__device__ __forceinline__ void dequantize_prefill_body(
+    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    const int32_t* starts, const int32_t* lengths, int requests,
+    const uint32_t* signs, int capacity, int req, int kv_head, int pos,
+    int lane) {
+  if (pos >= capacity) return;
+  const int chunk_len = starts[req + 1] - starts[req];
+  const int length = lengths[req];
+  const int prefix = length - chunk_len;
+  if (pos >= length) return;
+
+  float k[kLaneValues] = {}, v[kLaneValues] = {};
+  if (pos < prefix) {
+    const int page = table[int64_t(req) * table_stride + pos / cache.page_size];
+    const auto* slot = cache.at(page, kv_head, pos % cache.page_size);
+    const auto* words = reinterpret_cast<const uint32_t*>(slot);
+    const uint32_t lo = words[lane];
+    const uint32_t hi = lane + 32 < F::slot_bytes / 4 ? words[lane + 32] : 0;
+    constexpr int scale_word = F::scale_offset / 4;
+    const uint32_t scale0 = staged_word<scale_word, scale_word>(lo, hi, scale_word);
+    uint32_t ka, kb;
+    float ska, skb;
+    if constexpr (F::compact) {
+      ka = staged_four<3, 0, kHead>(lo, hi, lane);
+      kb = staged_four<3, 0, kHead>(lo, hi, lane + kWave);
+      ska = skb = scale_half(scale0, 0) / 64.f;
+    } else {
+      const uint32_t ka4 = staged_four<4, 0, kRope>(lo, hi, lane % 16);
+      const uint32_t ka3 = staged_four<3, F::k3_offset / 4, F::k3_dims>(
+          lo, hi, lane % 16);
+      ka = lane < 16 ? ka4 : ka3;
+      kb = staged_four<3, F::k3_offset / 4, F::k3_dims>(lo, hi, lane + 16);
+      const uint32_t scale1 =
+          staged_word<scale_word + 1, scale_word + 1>(lo, hi, scale_word + 1);
+      ska = scale_half(scale0, lane / 16) / 64.f;
+      skb = scale_half(scale1, lane / 16) / 64.f;
+    }
+    constexpr int value_scale_word = scale_word + F::v_scale / 2;
+    const uint32_t value_scales = staged_word<value_scale_word,
+                                               value_scale_word>(
+        lo, hi, value_scale_word);
+    const float sv = scale_half(value_scales, F::v_scale % 2) / 64.f;
+    const uint32_t va = staged_four<F::v_bits, F::v_offset / 4, kHead>(
+        lo, hi, lane);
+    const uint32_t vb = staged_four<F::v_bits, F::v_offset / 4, kHead>(
+        lo, hi, lane + kWave);
+#pragma unroll
+    for (int i = 0; i < kLaneValues / 2; ++i) {
+      k[i] = signed_byte(ka, i) * ska;
+      k[i + 4] = signed_byte(kb, i) * skb;
+      v[i] = signed_byte(va, i) * sv;
+      v[i + 4] = signed_byte(vb, i) * sv;
+    }
+    hadamard<F::compact>(k, lane);
+    flip_signs(k, signs, lane);
+    hadamard<true>(v, lane);
+    flip_signs(v, signs, lane);
+  } else {
+    const int token = starts[req] + pos - prefix;
+    load_activation<T>(k, key, token, kv_head, lane);
+    load_activation<T>(v, value, token, kv_head, lane);
+  }
+
+  const int64_t row =
+      (int64_t(req) * capacity + pos) * cache.heads + kv_head;
+#pragma unroll
+  for (int i = 0; i < kLaneValues; ++i) {
+    const int dim = dim_at(lane, i);
+    key_out[row * kHead + dim] = (_Float16)k[i];
+    value_out[row * kHead + dim] = (_Float16)v[i];
+  }
+}
+
+
+__global__ __launch_bounds__(128) void dequantize_prefill_cache_uniform(
+    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    const int32_t* starts, const int32_t* lengths, int requests,
+    const uint32_t* signs, int capacity, int dtype, int format) {
+  const int req = blockIdx.z, kv_head = blockIdx.y;
+  const int wave = threadIdx.x / kWave, lane = threadIdx.x % kWave;
+  const int pos = blockIdx.x * 4 + wave;
+  if (req >= requests) return;
+#define DEQUANT_CASE(T, COMPACT, BITS) \
+  dequantize_prefill_body<T, Format<COMPACT, BITS>>(key_out, value_out, key, value, cache, \
+      table, table_stride, starts, lengths, requests, signs, capacity, req, \
+      kv_head, pos, lane)
+  if (dtype == 0) {
+    if (format == 3) DEQUANT_CASE(__half, false, 3);
+    else if (format == 4) DEQUANT_CASE(__half, false, 4);
+    else DEQUANT_CASE(__half, true, 3);
+  } else {
+    if (format == 3) DEQUANT_CASE(hip_bfloat16, false, 3);
+    else if (format == 4) DEQUANT_CASE(hip_bfloat16, false, 4);
+    else DEQUANT_CASE(hip_bfloat16, true, 3);
+  }
+#undef DEQUANT_CASE
+}
+
 template <bool Prefill, bool CompactRows = false>
 struct Fp16WmmaShared {
   // Decode and selected long-prefill launches store only the twelve live rows.
@@ -1836,7 +1746,7 @@ __global__ __launch_bounds__(128) void attention_wmma_fp16(
         attention_row<T, F, Prefill>(
             out, partials, query, key, value, cache, table, table_stride,
             map_or_starts, lengths, requests, signs, scale, q,
-            kv_head * 6 + row % 6, split, heads, splits, lane);
+            kv_head * 6 + row % 6, split, heads, splits, lane, tokens);
       }
     }
     return;
@@ -2354,15 +2264,35 @@ __global__ __launch_bounds__(128) void attention_wmma_grouped(
   }
 }
 
-__global__ void merge_splits(float* out, const float* partials, int splits) {
+template <bool Prefill>
+__global__ __launch_bounds__(256) void merge_splits(
+    float* out, const float* partials, const int32_t* lengths, int tokens,
+    int kv_heads, int splits) {
   int64_t row = int64_t(blockIdx.x) * gridDim.y + blockIdx.y;
   int lane = threadIdx.x;
+  const int q = blockIdx.x;
+  const int active =
+      (Prefill || gridDim.y / kv_heads != 6)
+          ? splits
+          : active_decode_splits(max(0, lengths[q]), splits, tokens, kv_heads);
   partials += row * splits * kPartialSize;
+  if (!Prefill && lengths[q] <= 0) {
+    for (int d = lane; d < kHead; d += blockDim.x)
+      out[row * kHead + d] = 0.f;
+    return;
+  }
+  extern __shared__ float shared[];
+  if (blockDim.x > kWave && active >= octave_rdna4::kParallelMergeMinSplits) {
+    octave_rdna4::merge_parallel<kHead, false>(out + row * kHead, partials,
+                                              active, shared);
+    return;
+  }
+  if (lane >= kWave) return;
   float m = -INFINITY;
-  for (int s = 0; s < splits; ++s)
+  for (int s = 0; s < active; ++s)
     m = fmaxf(m, partials[s * kPartialSize + kHead]);
   float mass = 0, result[kLaneValues] = {};
-  for (int s = 0; s < splits; ++s) {
+  for (int s = 0; s < active; ++s) {
     const float* partial = partials + s * kPartialSize;
     if (partial[kHead + 1] == 0) continue;
     float weight = __expf(partial[kHead] - m);
@@ -2380,7 +2310,7 @@ __global__ void merge_splits(float* out, const float* partials, int splits) {
 
 // Repair only native WMMA work; scalar paths keep their original launch count.
 template <typename T, typename F, bool P>
-__global__ __launch_bounds__(32) void merge_splits_safe(
+__global__ __launch_bounds__(256) void merge_splits_safe(
     float* out, const float* partials, int splits, Activation query,
     Activation key, Activation value, PagedCache cache, const int32_t* table,
     int64_t stride, const int32_t* map, const int32_t* lengths, int requests,
@@ -2388,6 +2318,30 @@ __global__ __launch_bounds__(32) void merge_splits_safe(
   const int q = blockIdx.x, head = blockIdx.y, heads = gridDim.y,
             lane = threadIdx.x;
   const int64_t row = int64_t(q) * heads + head;
+  const int active =
+      (P || heads / cache.heads != 6)
+          ? splits
+          : active_decode_splits(max(0, lengths[q]), splits, gridDim.x,
+                                 cache.heads);
+  if constexpr (!P) {
+    if (lengths[q] <= 0) {
+      for (int d = lane; d < kHead; d += blockDim.x)
+        out[row * kHead + d] = 0.f;
+      return;
+    }
+  }
+  extern __shared__ float shared[];
+  if (blockDim.x > kWave && active >= octave_rdna4::kParallelMergeMinSplits) {
+    const float* partial = partials + row * splits * kPartialSize;
+    const bool safe = octave_rdna4::merge_parallel<kHead, true>(
+        out + row * kHead, partial, active, shared);
+    if (!safe && lane < kWave)
+      attention_row<T, F, P>(out, nullptr, query, key, value, cache, table,
+                             stride, map, lengths, requests, signs, scale, q,
+                             head, 0, heads, 1, lane, gridDim.x);
+    return;
+  }
+  if (lane >= kWave) return;
   if (splits == 1) {
     bool safe = true;
     float largest = 0;
@@ -2402,29 +2356,30 @@ __global__ __launch_bounds__(32) void merge_splits_safe(
     if (__all(safe) && largest >= 1.e-4f) return;
     attention_row<T, F, P>(out, nullptr, query, key, value, cache, table,
                            stride, map, lengths, requests, signs, scale, q,
-                           head, 0, heads, 1, lane);
+                           head, 0, heads, 1, lane, gridDim.x);
     return;
   }
   const float* src = partials + row * splits * kPartialSize;
   bool safe = true;
   float m = -INFINITY;
-  for (int s = 0; s < splits; ++s) {
-    float pm = src[s * kPartialSize + kHead],
+  for (int s = 0; s < active; ++s) {
+    const float* partial = src + s * kPartialSize;
+    float marker = partial[0], pm = partial[kHead],
           mass = src[s * kPartialSize + kHead + 1];
     // Native tiles may partition at their longest query; empty splits are
     // valid.
-    safe &= __builtin_isfinite(mass) && mass >= 0 &&
+    safe &= __builtin_isfinite(marker) && __builtin_isfinite(mass) && mass >= 0 &&
             (mass == 0 || __builtin_isfinite(pm));
     m = fmaxf(m, pm);
   }
   if (!safe) {
     attention_row<T, F, P>(out, nullptr, query, key, value, cache, table,
                            stride, map, lengths, requests, signs, scale, q,
-                           head, 0, heads, 1, lane);
+                           head, 0, heads, 1, lane, gridDim.x);
     return;
   }
   float mass = 0, result[kLaneValues] = {};
-  for (int s = 0; s < splits; ++s) {
+  for (int s = 0; s < active; ++s) {
     const float* p = src + s * kPartialSize;
     if (p[kHead + 1] == 0) continue;
     float weight = __expf(p[kHead] - m);
@@ -2446,7 +2401,7 @@ __global__ __launch_bounds__(32) void merge_splits_safe(
   if (!__all(safe) || (mass > 0 && largest < 1.e-4f)) {
     attention_row<T, F, P>(out, nullptr, query, key, value, cache, table,
                            stride, map, lengths, requests, signs, scale, q,
-                           head, 0, heads, 1, lane);
+                           head, 0, heads, 1, lane, gridDim.x);
     return;
   }
 #pragma unroll
@@ -2479,6 +2434,38 @@ __global__ void attention(float* out, float* partials, Activation query,
                           const int32_t* map_or_starts, const int32_t* lengths,
                           int requests, const uint32_t* signs, float scale,
                           bool repair_only = false) {
+  // FP32 Triton candidates can leave unsafe, non-finite, or tiny rows for
+  // this existing scalar attention path to repair from the original cache.
+  if constexpr (Prefill && Path == DecodePath::Scalar) {
+    if (repair_only) {
+      const int q = blockIdx.x, head = blockIdx.y, lane = threadIdx.x;
+      float query_max = 0.f, output_max = 0.f;
+      bool query_finite = true, output_finite = true;
+#pragma unroll
+      for (int i = 0; i < kLaneValues; ++i) {
+        const float qv = float(static_cast<const T*>(query.data)[
+            int64_t(q) * query.token_stride + int64_t(head) * query.head_stride +
+            dim_at(lane, i)]);
+        const float ov = out[(int64_t(q) * gridDim.y + head) * kHead +
+                             dim_at(lane, i)];
+        query_finite &= __builtin_isfinite(qv);
+        output_finite &= __builtin_isfinite(ov);
+        query_max = fmaxf(query_max, fabsf(qv));
+        output_max = fmaxf(output_max, fabsf(ov));
+      }
+#pragma unroll
+      for (int delta = 1; delta < kWave; delta *= 2) {
+        query_max = fmaxf(query_max, octave_xor<false>(query_max, delta, kWave));
+        output_max = fmaxf(output_max, octave_xor<false>(output_max, delta, kWave));
+      }
+      const bool query_safe = query_max == 0.f ||
+          (query_max >= 1.e-4f && query_max <= 65504.f &&
+           query_max * fabsf(scale) <= 2.f);
+      if (__all(query_finite && output_finite && query_safe &&
+                output_max >= 1.e-4f))
+        return;
+    }
+  }
   // The decode guard and the scalar fallback share the same row calculation.
   if constexpr (!Prefill && Path == DecodePath::Scalar) {
     if (repair_only) {
@@ -2513,7 +2500,7 @@ __global__ void attention(float* out, float* partials, Activation query,
   attention_row<T, F, Prefill, Path>(
       out, partials, query, key, value, cache, table, table_stride,
       map_or_starts, lengths, requests, signs, scale, blockIdx.x, blockIdx.y,
-      blockIdx.z, gridDim.y, gridDim.z, threadIdx.x);
+      blockIdx.z, gridDim.y, gridDim.z, threadIdx.x, gridDim.x);
 }
 
 // Keep the prefill guard separate: combining it with attention slows ragged
@@ -2549,7 +2536,7 @@ __global__ void attention_prefill_unsafe(
   }
   attention_row<T, F, true>(out, partials, query, key, value, cache, table,
                             table_stride, starts, lengths, requests, signs,
-                            scale, q, head, split, heads, splits, lane);
+                            scale, q, head, split, heads, splits, lane, tokens);
 }
 
 template <typename Launch>
@@ -2581,26 +2568,10 @@ int launch_attention(float* out, float* partials, Activation query,
   int status = dispatch(dtype, format, [&](auto scalar, auto layout) {
     using T = decltype(scalar);
     using F = decltype(layout);
-    if constexpr (!Prefill && F::compact) {
-      if (single_query_gqa6 && capacity_hint >= 4096 && splits >= 16) {
-        attention<T, F, false, DecodePath::Blockwise>
-            <<<dim3(tokens, heads, splits), kWave, 0, stream>>>(
-                out, partials, query, key, value, cache, table, table_stride,
-                map_or_starts, lengths, requests, signs, scale);
-        return;
-      }
-    }
     if constexpr (!Prefill && !F::compact && F::v_bits == 3) {
       if (single_query_gqa6 && splits == 1 && capacity_hint > 0 &&
           capacity_hint <= 512) {
         attention<T, F, false, DecodePath::Cooperative>
-            <<<dim3(tokens, heads, splits), kWave, 0, stream>>>(
-                out, partials, query, key, value, cache, table, table_stride,
-                map_or_starts, lengths, requests, signs, scale);
-        return;
-      }
-      if (single_query_gqa6 && capacity_hint >= 16384 && splits >= 128) {
-        attention<T, F, false, DecodePath::Dot4>
             <<<dim3(tokens, heads, splits), kWave, 0, stream>>>(
                 out, partials, query, key, value, cache, table, table_stride,
                 map_or_starts, lengths, requests, signs, scale);
@@ -2646,40 +2617,26 @@ int launch_attention(float* out, float* partials, Activation query,
         return;
       }
     }
-    if constexpr (Prefill && !F::compact && F::v_bits == 4) {
+    if constexpr (Prefill) {
       if (heads / cache.heads == 6 && tokens >= 256 &&
           capacity_hint >= (int64_t(tokens) + requests - 1) / requests + 1024 &&
           (requests == 1 || tokens / requests >= 128)) {
         used_wmma = true;
-        attention_wmma_reuse<T, F, true, true>
+        attention_wmma_fp16_reuse<T, F, true>
             <<<dim3((tokens + 5) / 6, cache.heads, splits), 384, 0, stream>>>(
                 out, partials, query, key, value, cache, table, table_stride,
                 map_or_starts, lengths, requests, signs, scale, tokens, heads);
         return;
       }
     }
-    if constexpr (!Prefill && !F::compact && F::v_bits == 4) {
-      if (heads / cache.heads == 6 && tokens == 4 && capacity_hint >= 1024) {
-        used_wmma = true;
-        attention_wmma_fp16<T, F, false>
-            <<<dim3((tokens + 1) / 2, cache.heads, splits), 128, 0, stream>>>(
-                out, partials, query, key, value, cache, table, table_stride,
-                map_or_starts, lengths, requests, signs, scale, tokens, heads);
-        return;
-      }
-    }
     if constexpr (!Prefill) {
-      if (heads / cache.heads == 6 && tokens >= 8 && capacity_hint >= 128 &&
+      if (heads / cache.heads == 6 && tokens >= 1 && capacity_hint >= 128 &&
           (tokens >= 32 || capacity_hint >= 512)) {
         used_wmma = true;
-        attention_wmma_decode_oneq<T, F, false>
+        attention_wmma_fp16_oneq<T, F>
             <<<dim3(tokens, cache.heads, splits), 128, 0, stream>>>(
-                out, partials, query, key, value, cache, table, table_stride,
-                map_or_starts, lengths, requests, signs, scale, tokens, heads);
-        attention<T, F, false>
-            <<<dim3(tokens, heads, splits), kWave, 0, stream>>>(
-                out, partials, query, key, value, cache, table, table_stride,
-                map_or_starts, lengths, requests, signs, scale, true);
+                out, partials, query, cache, table, table_stride,
+                map_or_starts, lengths, signs, scale, tokens, heads);
         return;
       }
     }
@@ -2688,18 +2645,24 @@ int launch_attention(float* out, float* partials, Activation query,
         map_or_starts, lengths, requests, signs, scale);
   });
   if (status != hipSuccess) return status;
+  const int merge_threads = octave_rdna4::merge_threads(
+      int64_t(tokens) * heads, splits, Prefill && used_wmma);
+  const int merge_shared =
+      octave_rdna4::merge_shared_bytes<kHead>(merge_threads, splits);
   if (!used_wmma) {
     if (splits > 1)
-      merge_splits<<<dim3(tokens, heads), kWave, 0, stream>>>(out, partials,
-                                                              splits);
+      merge_splits<Prefill><<<dim3(tokens, heads), merge_threads, merge_shared,
+                             stream>>>(
+          out, partials, lengths, tokens, cache.heads, splits);
     return hipGetLastError();
   }
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
     using T = decltype(scalar);
     using F = decltype(layout);
-    merge_splits_safe<T, F, Prefill><<<dim3(tokens, heads), 32, 0, stream>>>(
-        out, partials, splits, query, key, value, cache, table, table_stride,
-        map_or_starts, lengths, requests, signs, scale);
+    merge_splits_safe<T, F, Prefill>
+        <<<dim3(tokens, heads), merge_threads, merge_shared, stream>>>(
+            out, partials, splits, query, key, value, cache, table, table_stride,
+            map_or_starts, lengths, requests, signs, scale);
   });
 }
 
@@ -2737,4 +2700,38 @@ extern "C" int octave_rdna4_prefill(
                                 table_stride, query_starts, seq_lens, requests,
                                 signs, tokens, heads, splits, scale, dtype,
                                 format, stream);
+}
+
+extern "C" int octave_rdna4_dequantize_prefill(
+    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    const int32_t* starts, const int32_t* lengths, int requests, int capacity,
+    const uint32_t* signs, int dtype, int format, hipStream_t stream) {
+  if (requests <= 0 || capacity <= 0 || capacity % 128 != 0)
+    return hipErrorInvalidValue;
+  if (dtype != 0 && dtype != 1) return hipErrorInvalidValue;
+  if (format != 3 && format != 4 && format != 19)
+    return hipErrorInvalidValue;
+  dequantize_prefill_cache_uniform
+      <<<dim3((capacity + 3) / 4, cache.heads, requests), 128, 0, stream>>>(
+          key_out, value_out, key, value, cache, table, table_stride, starts,
+          lengths, requests, signs, capacity, dtype, format);
+  return hipGetLastError();
+}
+
+extern "C" int octave_rdna4_prefill_repair(
+    float* out, Activation query, Activation key, Activation value,
+    PagedCache cache, const int32_t* table, int64_t table_stride,
+    const int32_t* starts, const int32_t* lengths, int requests,
+    const uint32_t* signs, int tokens, int heads, float scale, int dtype,
+    int format, hipStream_t stream) {
+  if (!tokens) return hipSuccess;
+  return dispatch(dtype, format, [&](auto scalar, auto layout) {
+    using T = decltype(scalar);
+    using F = decltype(layout);
+    attention<T, F, true, DecodePath::Scalar>
+        <<<dim3(tokens, heads), kWave, 0, stream>>>(
+            out, nullptr, query, key, value, cache, table, table_stride, starts,
+            lengths, requests, signs, scale, true);
+  });
 }

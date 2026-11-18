@@ -89,12 +89,7 @@ def recommend_splits(
         if prefix < page_size:
             splits = 1
         else:
-            native_reuse = (
-                group == 6
-                and cache_dtype == "octave_k3v4"
-                and tokens >= 256
-                and prefix >= 1000
-            )
+            native_reuse = group == 6 and tokens >= 256 and prefix >= 1000
             tile_queries = (
                 (6 if per_request >= 128 else 2)
                 if native_reuse

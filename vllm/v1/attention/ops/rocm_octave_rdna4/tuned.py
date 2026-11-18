@@ -4,6 +4,7 @@
 
 from .geometry import OctaveGeometry
 from .hip import HipOctave, get_geometry_engine, load_library
+from .prefill import ExpandedPrefill
 from .splits import recommend_splits
 
 
@@ -14,6 +15,10 @@ class TunedHipOctave(HipOctave):
         geometry = OctaveGeometry(head_dim, rope_dim)
         super().__init__(load_library("decode", arch), geometry, sparse=False)
         self._geometry_backend = get_geometry_engine(head_dim, rope_dim, arch)
+        self._expanded_prefill = ExpandedPrefill(self)
+
+    def prefill_expanded(self, *args, **kwargs):
+        return self._expanded_prefill(*args, **kwargs)
 
     def _use_geometry(self, query, cache, table, prefill):
         heads, kv_heads = query.shape[1], cache.shape[1]
@@ -36,7 +41,6 @@ class TunedHipOctave(HipOctave):
             if (
                 group == 6
                 and tokens >= 256
-                and cache.shape[-1] == self.layout("octave_k3v4").slot_bytes
                 and capacity >= (tokens + requests - 1) // requests + 1024
                 and (requests == 1 or tokens // requests >= 128)
             ):
@@ -67,14 +71,6 @@ class TunedHipOctave(HipOctave):
             ):
                 return True
             return group not in (1, 2, 4, 6, 8)
-        if group == 6 and 2 <= query.shape[0] <= 4:
-            paired_verify = (
-                query.shape[0] == 4
-                and table.shape[0] == 1
-                and table.shape[1] * cache.shape[2] >= 1024
-                and cache.shape[-1] == self.layout("octave_k3v4").slot_bytes
-            )
-            return not paired_verify
         if group in (1, 2, 3, 6):
             return False
         capacity = table.shape[1] * cache.shape[2]
@@ -99,6 +95,7 @@ class TunedHipOctave(HipOctave):
         cache_dtype,
         *,
         prefill=False,
+        context_capacity=None,
     ):
         if query.ndim != 3 or cache.ndim != 4 or block_table.ndim != 2:
             raise ValueError("Expected 3D query, 4D cache and 2D page table")
@@ -107,7 +104,9 @@ class TunedHipOctave(HipOctave):
             heads=query.shape[1],
             kv_heads=cache.shape[1],
             requests=block_table.shape[0],
-            capacity=block_table.shape[1] * cache.shape[2],
+            capacity=min(block_table.shape[1] * cache.shape[2], context_capacity)
+            if context_capacity is not None and context_capacity > 0
+            else block_table.shape[1] * cache.shape[2],
             page_size=cache.shape[2],
             cache_dtype=cache_dtype,
             prefill=prefill,

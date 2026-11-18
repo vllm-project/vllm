@@ -218,6 +218,91 @@ def test_decode_matches_reference(
     assert out[-1].abs().max().item() == 0
 
 
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 live split count")
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("batch,page", [(1, 3264), (4, 3264), (1, 7)])
+def test_rdna4_decode_graph_replays_with_poisoned_inactive_splits(
+    cache_dtype, dtype, batch, page, kernel
+):
+    """Follow live lengths over shuffled pages and ignore inactive scratch."""
+    torch.manual_seed(17)
+    dev, fmt, context, splits = "cuda", _format(cache_dtype), 2048, 256
+    signs = sq.sign_bits(HEAD).to(dev)
+    pages_per_request = math.ceil(context / page)
+    pages = batch * pages_per_request
+    cache = torch.zeros(
+        pages + 1, 1, page, fmt.slot_bytes, dtype=torch.uint8, device=dev
+    )
+    table = torch.zeros(
+        batch, max(82, pages_per_request), dtype=torch.int32, device=dev
+    )
+    blocks = torch.arange(pages, 0, -1, device=dev).view(batch, pages_per_request)
+    table[:, :pages_per_request] = blocks
+    positions = torch.arange(context, device=dev)
+    for request in range(batch):
+        key = torch.randn(context, 1, HEAD, device=dev).to(dtype)
+        value = torch.randn_like(key)
+        slots = blocks[request, positions // page] * page + positions % page
+        _store(key, value, cache, slots, signs, signs, fmt, kernel)
+    query = torch.randn(batch, 6, HEAD, device=dev).to(dtype)
+    normal_query = query.clone()
+    mapping = torch.arange(batch, dtype=torch.int32, device=dev)
+    lengths = torch.full((batch,), context, dtype=torch.int32, device=dev)
+    output = torch.empty(query.shape, dtype=torch.float32, device=dev)
+    scratch = torch.empty(batch, 6, splits, HEAD + 2, device=dev)
+
+    def decode():
+        kernel.decode(
+            query,
+            cache,
+            table,
+            mapping,
+            lengths,
+            signs,
+            cache_dtype,
+            scale=1 / 16,
+            splits=splits,
+            out=output,
+            scratch=scratch,
+        )
+
+    decode()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        decode()
+    for length, unsafe in (
+        (context, False),
+        (127, False),
+        (128, False),
+        (1, False),
+        (0, False),
+        (context, True),
+        (context, False),
+    ):
+        lengths.fill_(length)
+        query.copy_(normal_query)
+        if unsafe:
+            query[0].fill_(1000)
+        mapping.copy_(torch.arange(batch, dtype=torch.int32, device=dev))
+        if length == 0:
+            mapping.fill_(batch + 10)  # Padding must not dereference a request.
+        output.fill_(float("nan"))
+        scratch.fill_(float("nan"))
+        graph.replay()
+        if length == 0:
+            assert torch.count_nonzero(output).item() == 0
+            continue
+        reference = sq.reference_attention(
+            query.float(), cache, table, mapping, lengths, fmt, 1 / 16
+        )
+        assert torch.isfinite(output).all()
+        error = (output - reference).flatten(1).norm(dim=1)
+        norm = reference.flatten(1).norm(dim=1)
+        assert (error / norm.clamp_min(1e-20)).max().item() < 1e-3
+
+
 @pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4 MTP decode path")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_splits", [1, 37])
@@ -275,19 +360,30 @@ def test_rdna4_geometry_rejects_unsupported_head_and_rope(head_dim, rope_dim):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "cache_dtype,query_lens,group",
+    "cache_dtype,query_lens,group,expanded",
     [
-        (cache_dtype, query_lens, group)
+        (cache_dtype, query_lens, group, False)
         for cache_dtype in CACHE_DTYPES
         for query_lens in ([256], [512], [129, 1, 517])
         for group in (1, 2, 6)
     ]
     + [
-        ("octave_k3v3_compact", [256], 4),
-        ("octave_k3v3_compact", [256], 8),
-    ],
+        ("octave_k3v3_compact", [256], 4, False),
+        ("octave_k3v3_compact", [256], 8, False),
+    ]
+    + (
+        [
+            (fmt, lens, 6, True)
+            for fmt in CACHE_DTYPES
+            for lens in ([256], [129, 1, 517])
+        ]
+        if ARCH == "rdna4"
+        else []
+    ),
 )
-def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, kernel):
+def test_prefill_matches_reference(
+    cache_dtype, query_lens, dtype, group, expanded, kernel
+):
     """Chunked prefill: each request's chunk attends causally to itself
     (unquantized K/V) and to its cached prefix (packed cache), in the rotated
     space the backend runs it in."""
@@ -329,6 +425,7 @@ def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, kernel
         ksg,
         fmt,
         kernel,
+        expanded=expanded,
     )
 
     ref = torch.empty(total, hkv * group, HEAD, device=dev)
@@ -349,8 +446,8 @@ def test_prefill_matches_reference(cache_dtype, query_lens, dtype, group, kernel
         )
         p = torch.softmax(s.masked_fill(mask, float("-inf")), -1)
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
-    # Only the kernel's int8 query and fp16 P/V rounding differ.
-    assert _rel(out, ref) < 2e-2
+    # Only attention arithmetic and output rounding differ.
+    assert _rel(out, ref) < (1e-3 if expanded else 2e-2)
 
 
 def _decode(
@@ -403,9 +500,63 @@ def _decode(
     return out
 
 
-def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt, kernel=None):
+def _prefill(
+    cache,
+    q,
+    k,
+    v,
+    block_table,
+    qsl,
+    seq_lens,
+    signs,
+    fmt,
+    kernel=None,
+    *,
+    expanded=False,
+):
     if kernel is not None:
         cache_dtype = _cache_dtype(fmt)
+        if expanded:
+            blocks = (block_table.shape[1] * cache.shape[2] + 127) // 128
+            requests, heads = block_table.shape[0], cache.shape[1]
+            shape = (requests * blocks, 128, heads, HEAD)
+            key_tmp = torch.empty(shape, device=q.device, dtype=torch.float16)
+            value_tmp = torch.empty_like(key_tmp)
+            query_tmp = torch.empty_like(q, dtype=torch.float16)
+            table_tmp = torch.empty(
+                requests, blocks, device=q.device, dtype=torch.int32
+            )
+            out = torch.empty_like(q, dtype=torch.float32)
+
+            def run():
+                return kernel.prefill_expanded(
+                    q,
+                    k,
+                    v,
+                    cache,
+                    block_table,
+                    qsl,
+                    seq_lens,
+                    signs,
+                    cache_dtype,
+                    key_tmp=key_tmp,
+                    value_tmp=value_tmp,
+                    query_tmp=query_tmp,
+                    table_tmp=table_tmp,
+                    out=out,
+                    max_query_len=q.shape[0],
+                    scale=1 / 16,
+                )
+
+            run()
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run()
+            out.fill_(float("nan"))
+            graph.replay()
+            torch.accelerator.synchronize()
+            return out
         return kernel.prefill(
             q,
             k,
@@ -493,7 +644,7 @@ def test_rdna4_concurrent_decode_has_per_call_state(kernel):
 
 @pytest.mark.skipif(ARCH != "rdna4", reason="precompiled loader targets RDNA4")
 def test_rdna4_precompiled_runtime_never_invokes_a_compiler(monkeypatch):
-    """Store, attention, prefill and graph replay work with compilers disabled."""
+    """Native store/attention/prefill and replay work with compilers disabled."""
     import subprocess
 
     from vllm.v1.attention.ops.rocm_octave_rdna4 import TunedHipOctave
@@ -660,7 +811,12 @@ def _window_tables(entries, hkv, dev, dtype=torch.float16):
         for window in ("off", "on", "evicted")
     ]
     + (
-        [(1, 12, 32, "on", torch.bfloat16), (1, 12, 1, "evicted", torch.bfloat16)]
+        [
+            (1, 12, 32, "on", torch.bfloat16),
+            (1, 12, 1, "evicted", torch.bfloat16),
+            (1, 6, 1024, "off", torch.bfloat16),
+            (1, 12, 1024, "on", torch.bfloat16),
+        ]
         if ARCH == "rdna4"
         else []
     ),

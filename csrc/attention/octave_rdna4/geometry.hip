@@ -6,6 +6,9 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+
+#include "split_merge.cuh"
+
 namespace {
 constexpr int LD = 256, LR = 64, W = 32, Partial = LD + 2;
 struct Activation {
@@ -772,72 +775,30 @@ __global__ __launch_bounds__(32 * F::Waves) void matrix(
   }
 }
 __global__ void merge(float* out, const float* partial, int splits) {
-  int q = blockIdx.x, h = blockIdx.y, heads = gridDim.y, lane = threadIdx.x;
-  const float* src = partial + (int64_t(q) * heads + h) * splits * Partial;
-  float m = -INFINITY;
-  for (int s = lane; s < splits; s += 32) m = fmaxf(m, src[s * Partial + LD]);
-  m = maximum(m);
-  float mass = 0;
-  for (int s = lane; s < splits; s += 32)
-    if (src[s * Partial + LD + 1] > 0)
-      mass += src[s * Partial + LD + 1] * __expf(src[s * Partial + LD] - m);
-  mass = sum(mass);
-  for (int d = lane; d < LD; d += 32) {
-    float v = 0;
-    for (int s = 0; s < splits; ++s)
-      if (src[s * Partial + LD + 1] > 0)
-        v = fmaf(src[s * Partial + d], __expf(src[s * Partial + LD] - m), v);
-    out[(int64_t(q) * heads + h) * LD + d] = mass > 0 ? v / mass : 0;
-  }
+  const int64_t row = int64_t(blockIdx.x) * gridDim.y + blockIdx.y;
+  octave_rdna4::merge_wave<LD>(
+      out + row * LD, partial + row * splits * Partial, splits);
 }
 
-// Small output grids otherwise serialize hundreds of split vectors in one wave.
 __global__ __launch_bounds__(256) void merge_parallel(float* out,
                                                       const float* partial,
                                                       int splits) {
-  constexpr int Waves = 8, Values = (LD + 31) / 32;
-  __shared__ float work[Waves][Partial];
-  const int lane = threadIdx.x & 31, wave = threadIdx.x / 32;
+  extern __shared__ float shared[];
   const int64_t row = int64_t(blockIdx.x) * gridDim.y + blockIdx.y;
-  const float* src = partial + row * splits * Partial;
-  float m = -INFINITY;
-  for (int part = wave; part < splits; part += Waves)
-    m = fmaxf(m, src[part * Partial + LD]);
-  if (lane == 0) work[wave][LD] = m;
-  matrix_lds_barrier();
-  m = -INFINITY;
-#pragma unroll
-  for (int w = 0; w < Waves; ++w) m = fmaxf(m, work[w][LD]);
-  float mass = 0, result[Values] = {};
-  for (int part = wave; part < splits; part += Waves) {
-    const float* p = src + part * Partial;
-    if (p[LD + 1] > 0) {
-      float weight = __expf(p[LD] - m);
-      mass = fmaf(weight, p[LD + 1], mass);
-#pragma unroll
-      for (int i = 0; i < Values; ++i)
-        if (lane + 32 * i < LD)
-          result[i] = fmaf(weight, p[lane + 32 * i], result[i]);
-    }
-  }
-  if (lane == 0) work[wave][LD + 1] = mass;
-#pragma unroll
-  for (int i = 0; i < Values; ++i)
-    if (lane + 32 * i < LD) work[wave][lane + 32 * i] = result[i];
-  matrix_lds_barrier();
-  if (wave == 0) {
-    mass = 0;
-#pragma unroll
-    for (int w = 0; w < Waves; ++w) mass += work[w][LD + 1];
-#pragma unroll
-    for (int i = 0; i < Values; ++i)
-      if (lane + 32 * i < LD) {
-        float value = 0;
-#pragma unroll
-        for (int w = 0; w < Waves; ++w) value += work[w][lane + 32 * i];
-        out[row * LD + lane + 32 * i] = mass > 0 ? value / mass : 0;
-      }
-  }
+  octave_rdna4::merge_parallel<LD, false, true>(
+      out + row * LD, partial + row * splits * Partial, splits, shared);
+}
+
+void launch_merge(float* out, const float* partial, int tokens, int heads,
+                  int splits, hipStream_t stream) {
+  const dim3 grid(tokens, heads);
+  const int threads = octave_rdna4::merge_threads(int64_t(tokens) * heads, splits);
+  if (threads > W)
+    merge_parallel
+        <<<grid, threads, octave_rdna4::merge_shared_bytes<LD>(threads, splits),
+           stream>>>(out, partial, splits);
+  else
+    merge<<<grid, W, 0, stream>>>(out, partial, splits);
 }
 
 template <class T, class Fn>
@@ -924,11 +885,7 @@ int attention(float* out, float* partial, Activation q, Activation k,
       launch_scalar();
   });
   if (rc != hipSuccess || splits == 1) return rc;
-  if (splits >= 32 && int64_t(tokens) * heads <= 256)
-    merge_parallel<<<dim3(tokens, heads), 256, 0, stream>>>(out, partial,
-                                                            splits);
-  else
-    merge<<<dim3(tokens, heads), 32, 0, stream>>>(out, partial, splits);
+  launch_merge(out, partial, tokens, heads, splits, stream);
   return hipGetLastError();
 }
 }  // namespace
@@ -1378,10 +1335,6 @@ extern "C" int octave_rdna4_decode_sparse(
             sinks, heads, scale, use_wmma);
   });
   if (rc != hipSuccess || splits == 1) return rc;
-  if (use_wmma && splits >= 32 && int64_t(tokens) * heads <= 256)
-    merge_parallel<<<dim3(tokens, heads), 256, 0, stream>>>(out, partial,
-                                                            splits);
-  else
-    merge<<<dim3(tokens, heads), 32, 0, stream>>>(out, partial, splits);
+  launch_merge(out, partial, tokens, heads, splits, stream);
   return hipGetLastError();
 }
