@@ -143,6 +143,8 @@ class ParserEngine(Parser):
     complete output format for a model (reasoning + tool calls).
     """
 
+    _streaming_engine_cls: type[StreamingParserEngine] = StreamingParserEngine
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -164,7 +166,7 @@ class ParserEngine(Parser):
         self._reasoning_parser = None
         self._tool_parser = None
         self.parser_engine_config = parser_engine_config
-        self._engine = StreamingParserEngine(
+        self._engine = self._streaming_engine_cls(
             parser_engine_config, tokenizer, vocab=self.vocab
         )
 
