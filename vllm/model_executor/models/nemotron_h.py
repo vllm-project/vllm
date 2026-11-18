@@ -54,7 +54,10 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    MAMBA2_IN_PROJ_SLICES,
+    MambaMixer2,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -405,8 +408,13 @@ class NemotronHMambaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
             # Optional per-slice checkpoints: z/x/B/C/dt_proj tensors instead of one
-            # in_proj, so each slice can use its own quantization format.
+            # in_proj, and low-rank slices with ranks mamba_<slice>_rank.
             split_in_proj=getattr(config, "mamba_split_in_proj", False),
+            low_rank={
+                name: rank
+                for name in (*MAMBA2_IN_PROJ_SLICES, "out")
+                if (rank := getattr(config, f"mamba_{name}_rank", None)) is not None
+            },
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
