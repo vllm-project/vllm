@@ -1785,9 +1785,7 @@ async def test_responses_per_request_metrics_follow_server_flag():
     enabled_response = await _make_full_metrics_response(True)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
-    assert enabled_response.metrics.time_to_first_content_token_ms == pytest.approx(
-        500.0
-    )
+    assert enabled_response.metrics.time_to_first_content_token_ms is None
 
 
 @pytest.mark.asyncio
@@ -1816,6 +1814,9 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert events[-1].response.metrics.time_to_first_content_token_ms == pytest.approx(
+        500.0
+    )
 
 
 async def _stream_truncated_by_length(serving: OpenAIServingResponses):
@@ -2477,7 +2478,10 @@ async def _harmony_stream_events(
         ChunkResult(segments=segments, reasoning_token_count=0)
         for segments in segment_chunks
     ]
-    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+    request = ResponsesRequest(input="hi", stream=True, store=False)
+    context = HarmonyContext(
+        [], [], frozenset({"get_weather"}), parser, request=request
+    )
 
     async def result_generator():
         for token_id in range(len(segment_chunks)):
@@ -2498,7 +2502,7 @@ async def _harmony_stream_events(
     return [
         event
         async for event in serving.responses_stream_generator(
-            request=ResponsesRequest(input="hi", stream=True, store=False),
+            request=request,
             sampling_params=SamplingParams(max_tokens=16),
             result_generator=result_generator(),
             context=context,

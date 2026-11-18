@@ -151,11 +151,9 @@ async def client(request, server, server_with_auto_reasoning_config):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
-async def test_thinking_token_budget_mixed_requests_with_metrics(
-    client: openai.AsyncOpenAI,
-):
+async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
     """Test that mixed requests (some with thinking_token_budget, some without)
-    complete successfully with per-request metrics."""
+    complete successfully without errors."""
     response_with_budget = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -174,14 +172,12 @@ async def test_thinking_token_budget_mixed_requests_with_metrics(
     assert msg_with.content or getattr(msg_with, "reasoning", None)
     assert msg_without.content or getattr(msg_without, "reasoning", None)
 
-    metrics = response_with_budget.model_extra.get("metrics")
-    assert metrics is not None
-    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
-async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
+async def test_thinking_token_budget_limits_reasoning_with_metrics(
+    client: openai.AsyncOpenAI,
+):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
     Counts reasoning decode tokens by id, which is robust to how tokens are
@@ -194,14 +190,19 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
     prompt_token_ids: list[int] = []
     decode_token_ids: list[int] = []
+    metrics = None
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
+        temperature=0,
         stream=True,
+        stream_options={"include_usage": True},
         extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
+        if chunk.usage is not None:
+            metrics = chunk.model_extra.get("metrics")
         if not chunk.choices:
             continue
         if getattr(chunk, "prompt_token_ids", None):
@@ -218,6 +219,8 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
         f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
+    assert metrics is not None
+    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
 
 
 @pytest.mark.asyncio

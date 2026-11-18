@@ -280,7 +280,6 @@ def _assert_complete_timing_metrics(metrics: object) -> None:
     assert isinstance(metrics, dict)
     timing_fields = {
         "time_to_first_token_ms",
-        "time_to_first_content_token_ms",
         "generation_time_ms",
         "queue_time_ms",
         "mean_itl_ms",
@@ -288,9 +287,6 @@ def _assert_complete_timing_metrics(metrics: object) -> None:
     }
     assert timing_fields <= metrics.keys()
     assert all(metrics[field] >= 0 for field in timing_fields)
-    assert (
-        metrics["time_to_first_content_token_ms"] == metrics["time_to_first_token_ms"]
-    )
 
 
 @pytest.mark.asyncio
@@ -303,7 +299,9 @@ async def test_per_request_metrics_non_streaming(client: openai.AsyncOpenAI):
         extra_body={"min_tokens": 4},
     )
 
-    _assert_complete_timing_metrics(response.model_extra.get("metrics"))
+    metrics = response.model_extra.get("metrics")
+    _assert_complete_timing_metrics(metrics)
+    assert metrics["time_to_first_content_token_ms"] is None
 
 
 @pytest.mark.asyncio
@@ -330,6 +328,9 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
     metrics = (usage_chunk.model_extra or {}).get("metrics")
     assert isinstance(metrics, dict)
     assert metrics["time_to_first_token_ms"] >= 0
+    assert (
+        metrics["time_to_first_content_token_ms"] == metrics["time_to_first_token_ms"]
+    )
     assert metrics["generation_time_ms"] >= 0
     assert metrics["queue_time_ms"] >= 0
     assert metrics["tokens_per_second"] >= 0

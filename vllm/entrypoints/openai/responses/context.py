@@ -195,10 +195,8 @@ class SimpleContext(ConversationContext):
         tokenizer: TokenizerLike | None = None,
         request: ResponsesRequest | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
-        content_timing_parser: Parser | None = None,
     ):
         self.last_output = None
-        self.request = request
         self.response_parser = response_parser or (
             parser_cls(
                 tokenizer,
@@ -208,7 +206,6 @@ class SimpleContext(ConversationContext):
             if parser_cls is not None and tokenizer is not None and request is not None
             else None
         )
-        self.content_timing_parser = content_timing_parser
         self.first_content_token_ts = None
 
         # Accumulated final output for streaming mode
@@ -737,7 +734,11 @@ class HarmonyContext(ConversationContext):
             if output.finished:
                 self._current_message_logprobs = []
 
-        if any(segment.delta and segment.is_content for segment in segments):
+        if (
+            self.request is not None
+            and self.request.stream
+            and any(segment.delta and segment.is_content for segment in segments)
+        ):
             self.record_first_content_token(output.metrics)
 
         self.last_append_segments = segments

@@ -69,7 +69,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.gc_utils import untracked_list
@@ -382,18 +382,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     self.default_sampling_params,
                 )
 
-                # A final-only engine output cannot locate the boundary between
-                # hidden reasoning and final content. Request deltas so the
-                # parser can timestamp the first content-bearing output batch;
-                # the full generator aggregates them before building the reply.
-                if (
-                    not request.stream
-                    and self.enable_per_request_metrics
-                    and parser is not None
-                    and (request.n or 1) == 1
-                ):
-                    sampling_params.output_kind = RequestOutputKind.DELTA
-
             self._log_inputs(
                 sub_request_id,
                 engine_input,
@@ -460,16 +448,6 @@ class OpenAIServingChat(GenerateBaseServing):
             tokenizer,
             request_metadata,
             parser=parser,
-            content_timing_parser=(
-                self._make_parser(request, tokenizer, chat_template_kwargs)
-                if (
-                    self.enable_per_request_metrics
-                    and parser is not None
-                    and not request.use_beam_search
-                    and (request.n or 1) == 1
-                )
-                else None
-            ),
             mm_token_counts=mm_token_counts,
         )
 
@@ -1021,41 +999,14 @@ class OpenAIServingChat(GenerateBaseServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         parser: Parser | None = None,
-        content_timing_parser: Parser | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-        first_content_token_ts: float | None = None
 
         try:
             async for res in result_generator:
-                if content_timing_parser is not None:
-                    for output in res.outputs:
-                        delta_message = content_timing_parser.parse_delta(
-                            delta_text=output.text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
-                        if (
-                            first_content_token_ts is None
-                            and delta_message is not None
-                            and delta_message.content
-                            and res.metrics is not None
-                            and res.metrics.last_token_ts > 0
-                        ):
-                            first_content_token_ts = res.metrics.last_token_ts
-
-                if final_res is None:
-                    final_res = res
-                elif content_timing_parser is not None:
-                    final_res.add(res, aggregate=True)
-                    if res.metrics is not None:
-                        final_res.metrics = res.metrics
-                else:
-                    final_res = res
+                final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
@@ -1202,17 +1153,7 @@ class OpenAIServingChat(GenerateBaseServing):
         if (request.n or 1) == 1:
             if self.enable_per_request_metrics:
                 per_request_metrics = build_per_request_timing_metrics(
-                    final_res.metrics,
-                    num_generated_tokens,
-                    first_content_token_ts=(
-                        first_content_token_ts
-                        if parser is not None
-                        else (
-                            final_res.metrics.first_token_ts
-                            if final_res.metrics is not None
-                            else None
-                        )
-                    ),
+                    final_res.metrics, num_generated_tokens
                 )
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
