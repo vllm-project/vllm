@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Merging the per-choice streams of a request with `n > 1` choices.
+//! Merging the per-choice streams or responses of a request with `n > 1`
+//! choices.
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt as _, TryStreamExt as _, stream};
@@ -19,6 +20,21 @@ pub(crate) trait ChoiceChunk {
 
     /// Drop the per-request metrics.
     fn clear_metrics(&mut self);
+}
+
+/// The non-streaming response of a single choice.
+pub(crate) trait ChoiceResponse {
+    /// Stamp the index of the choice this response holds.
+    fn set_choice_index(&mut self, index: u32);
+
+    /// The usage of this response, if it reports one.
+    fn usage_mut(&mut self) -> Option<&mut Usage>;
+
+    /// Drop the per-request metrics.
+    fn clear_metrics(&mut self);
+
+    /// Move the choices of `other` after the choices of this response.
+    fn append_choices(&mut self, other: Self);
 }
 
 /// Merge the chunk streams of a request's choices, in the order the choices
@@ -64,4 +80,24 @@ pub(crate) async fn merge_choice_chunk_streams<C: ChoiceChunk + Send + 'static>(
         y.yield_ok(chunk).await;
     }
     Ok(())
+}
+
+/// Merge the responses of a request's choices, in index order.
+///
+/// Like Python's non-streaming response for `n > 1`, the prompt-level fields
+/// come from the first choice, usage adds up per [`Usage::add_choice`], and
+/// per-request metrics, which describe a single sample, are reported only for
+/// `n = 1`.
+pub(crate) fn merge_choice_responses<R: ChoiceResponse>(responses: Vec<R>) -> R {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, mut response) in (1..).zip(responses) {
+        merged.clear_metrics();
+        if let (Some(usage), Some(other)) = (merged.usage_mut(), response.usage_mut()) {
+            usage.add_choice(other);
+        }
+        response.set_choice_index(index);
+        merged.append_choices(response);
+    }
+    merged
 }
