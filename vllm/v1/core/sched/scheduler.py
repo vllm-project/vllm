@@ -252,6 +252,9 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
+        # Preemptions since the last make_stats(), for the preemption counter.
+        self._num_preempted_reqs = 0
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -1249,13 +1252,15 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
-                    # Include encoder inputs needed to replay the prefix tail.
-                    ec_computed_tokens = num_computed_tokens
+                    # Computed tokens after the replay rewind applied later by
+                    # _mark_prefix_replay; must match its calculation.
+                    # Used for the encoder-input and prefill-deferral checks.
+                    effective_computed_tokens = num_computed_tokens
                     if not window_loaded:
-                        ec_computed_tokens = max(
+                        effective_computed_tokens = max(
                             0, num_computed_tokens - self.prefix_replay_tokens
                         )
-                    if self._ec_transfer_pending(request, ec_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1278,8 +1283,9 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+                    effective_computed_tokens = num_computed_tokens
 
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    if self._ec_transfer_pending(request, effective_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -1312,7 +1318,10 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                elif (
+                    defer_prefills
+                    and effective_computed_tokens < request.num_tokens - 1
+                ):
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
                     break
@@ -1851,6 +1860,7 @@ class Scheduler(SchedulerInterface):
         request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
+            self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
@@ -2689,6 +2699,7 @@ class Scheduler(SchedulerInterface):
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
+            stats.iteration_records = model_runner_output.iteration_records
             eco.scheduler_stats = stats
 
         return engine_core_outputs
@@ -3369,10 +3380,12 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
+            num_preempted_reqs=num_preempted_reqs,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,

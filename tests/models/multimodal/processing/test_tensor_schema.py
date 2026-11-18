@@ -182,6 +182,12 @@ def test_model_tensor_schema(model_id: str):
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
 
+    if (
+        model_id == "thinkingmachines/Inkling-2-Small"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("Inkling 2 Small is only supported on CUDA")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
 
     model_arch = next(

@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -419,6 +420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
+            log_layer_backends(self.model, self.vllm_config.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -435,6 +437,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 with self.draft_context(), self.jit_warmup_registry.activate():
                     self.speculator.load_model(self.model)
                     assert self.speculative_config is not None
+                    log_layer_backends(
+                        self.speculator.model,
+                        self.speculative_config.draft_model_config,
+                    )
                     # The drafter never runs its MoE layers in this mode.
                     if not self.speculative_config.prefill_context_kv_only:
                         eplb_models_added = self.eplb.maybe_register_speculator(
@@ -627,6 +633,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if draft_model is not None:
             with set_current_vllm_config(self.vllm_config):
                 refresh_quantized_lm_heads(draft_model)
+                # Drafts that precompute weights from the target's (e.g. a
+                # folded LM head) re-derive them in place.
+                refresh = getattr(draft_model, "refresh_derived_weights", None)
+                if refresh is not None:
+                    refresh()
 
     def reload_weights(
         self,
@@ -921,15 +932,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
             assert self.speculative_config is not None
-            num_reqs = min(
-                num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
-            )
-            # Keep room for each request's draft slots.
-            num_tokens = min(
-                num_tokens,
-                self.max_num_tokens
-                - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
-            )
+            draft_slots = self.speculative_config.max_num_new_slots_for_drafting
+            # Every request needs its query tokens plus its draft slots.
+            tokens_per_req = self.speculator.num_query_per_req + draft_slots
+            num_reqs = min(num_reqs, self.max_num_tokens // tokens_per_req)
+            num_tokens = min(num_tokens, self.max_num_tokens - num_reqs * draft_slots)
         # The block tables only fit max_model_len tokens per request, but
         # max_num_batched_tokens can exceed num_reqs * max_model_len (e.g.
         # after auto-fit lowers max_model_len).
@@ -1318,7 +1325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
             if self.speculator is not None:
-                self.speculator.add_request(req_index)
+                self.speculator.add_request(req_index, new_req_data)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
@@ -2561,9 +2568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # time LLMEngine's finalizer runs, the top-level model may be gone.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
-            if draft_model := getattr(speculator, "model", None):
-                clear_layer_kv_caches(draft_model.modules())
-                remove_bytecode_hooks(draft_model)
+            speculator.shutdown()
             self.speculator = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
