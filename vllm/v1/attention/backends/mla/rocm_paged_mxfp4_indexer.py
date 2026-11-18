@@ -211,8 +211,8 @@ class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     decode_native: RocmMxfp4NativeDecode | None = None
     """The same rows as next_n-row sequences, for the dense launches."""
     decode_varlen: RocmMxfp4VarlenDecode | None = None
-    """The same rows as varlen sequences, for the dense launches, on every
-    decode step under adaptive verification."""
+    """The same rows as varlen sequences, for the dense launches, on decode
+    steps under adaptive verification that are not row-sharded across TP."""
     decode_schedule: torch.Tensor | None = None
     """The dense decode launches' work schedule, built once for the step."""
     decode_shard: DecodeRowShard | None = None
@@ -427,7 +427,8 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         # Ragged steps take a row per query token, as do the candidate
         # consumers' gathers. Without adaptive verification, uniform steps also
         # launch the dense layers on next_n-row sequences (native_decode); with
-        # it, every decode step launches them as varlen sequences.
+        # it, decode steps that are not row-sharded launch them as varlen
+        # sequences.
         self.use_flattening = True
         # A two-level (candidate block) indexer's builder sets these.
         self.candidate_block_size = 0
@@ -513,12 +514,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 context_lens,
             )
             decode_shard = None
-            # A shard is a contiguous range of whole next_n-row requests, which
-            # would cut apart a varlen step's requests of 1 to next_n rows, so
-            # those steps keep every row on every rank.
-            if self.varlen_next_n <= 1 and not step_has_prefill(
-                cm, self.decode_threshold
-            ):
+            if not step_has_prefill(cm, self.decode_threshold):
                 decode_shard = DecodeRowShard.plan(
                     lengths.shape[0],
                     1 if native is None else native.next_n,
@@ -542,7 +538,10 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 torch.add(lengths, block - 1, out=ends)
                 ends.floor_divide_(block)
                 metadata.decode_block_ends = ends
-            if self.varlen_next_n > 1:
+            # A shard is a contiguous range of rows, which would cut apart a
+            # varlen step's requests of 1 to next_n rows, so sharded steps keep
+            # the per-row launch on their rows.
+            if self.varlen_next_n > 1 and decode_shard is None:
                 metadata.decode_varlen = RocmMxfp4VarlenDecode(
                     self.varlen_next_n,
                     cm.query_start_loc[: base.num_decodes + 1],

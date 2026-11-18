@@ -246,10 +246,19 @@ def test_decode_row_shard_skips_steps_with_prefill(
     assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
 
 
-def test_decode_row_shard_skips_varlen_steps(monkeypatch):
-    # Adaptive verification: every decode step launches its requests as varlen
-    # sequences, which a shard of whole next_n-row requests would cut apart.
+def test_decode_row_shard_keeps_per_row_launch_on_varlen_steps(monkeypatch):
+    # Adaptive verification at TP4: a step the row shard cuts keeps the per-row
+    # launch on its rank's rows, since the shard would cut varlen sequences
+    # apart; a step it leaves whole launches its requests as varlen sequences.
     rows = 128
+    metadata = _build_decode_step(monkeypatch, rows, 7, [False] * rows, varlen_next_n=7)
+    assert metadata.decode_shard is not None
+    assert (metadata.decode_shard.start, metadata.decode_shard.stop) == (32, 64)
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == 32
+    assert metadata.decode_varlen is None
+
+    rows = 32
     metadata = _build_decode_step(monkeypatch, rows, 7, [False] * rows, varlen_next_n=7)
     assert metadata.decode_shard is None
     assert metadata.decode_row_lens is not None
