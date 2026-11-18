@@ -22,7 +22,7 @@ Run one ad-hoc scenario:
         --fs-dir /mnt/nvme run --concurrency 16 --offload-block-size 1024 \
         --prefix-tokens 20000
 
-List scenarios with their estimated KV footprint:
+List scenarios:
     python benchmarks/kv_offload/benchmark_tiering.py list
 
 Compare two session dirs:
@@ -817,29 +817,31 @@ class BenchmarkSession:
             print(f"{spec.name}: {result['status']}")
             for m in METRICS:
                 print(f"  {m}: {result.get(m, 'n/a')}")
-        self._write_table()
         print(f"\nAll runs complete. Results in {self.session_dir}/")
         return self.results
 
     def _write_table(self) -> None:
-        """Save scenarios x metrics as CSV."""
+        """Atomically save scenarios x metrics as CSV."""
         csv_path = self.session_dir / "results.csv"
-        with csv_path.open("w", newline="") as f:
+        tmp_path = csv_path.with_name(csv_path.name + ".tmp")
+        with tmp_path.open("w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["scenario"] + METRICS)
             for r in self.results:
                 writer.writerow([r["name"]] + [_cell(r.get(m)) for m in METRICS])
-        print(f"Results table saved to {csv_path}")
+        tmp_path.replace(csv_path)
 
     def _checkpoint(self) -> None:
         (self.session_dir / "results.json").write_text(
-            json.dumps(self.results, indent=2)
+            json.dumps({"mode": self.mode, "results": self.results}, indent=2)
         )
+        self._write_table()
 
 
 def compare(session_a: Path, session_b: Path) -> None:
     def load(d: Path) -> dict:
-        results = json.loads((d / "results.json").read_text())
+        data = json.loads((d / "results.json").read_text())
+        results = data["results"] if isinstance(data, dict) else data
         return {r.get("name") or Scenario(**r["spec"]).name: r for r in results}
 
     a, b = load(session_a), load(session_b)
@@ -954,7 +956,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--phase", choices=sorted(PHASES), help="prefill or mixed (default: prefill)"
     )
 
-    subparsers.add_parser("list", help="list scenarios and estimated footprints")
+    subparsers.add_parser("list", help="list scenarios")
 
     compare_parser = subparsers.add_parser("compare", help="compare two session dirs")
     compare_parser.add_argument("session_a", type=Path, metavar="MAIN_DIR")
@@ -994,8 +996,14 @@ def _main() -> None:
                 concurrency=args.concurrency,
                 offload_block_size=args.offload_block_size,
                 prefix_tokens=args.prefix_tokens,
-                cpu=Capacity(args.cpu_requests, args.cpu_gib),
-                gpu=Capacity(args.gpu_requests, args.gpu_gib),
+                cpu=Capacity(
+                    args.cpu_requests,
+                    gib(args.cpu_gib) if args.cpu_gib is not None else None,
+                ),
+                gpu=Capacity(
+                    args.gpu_requests,
+                    gib(args.gpu_gib) if args.gpu_gib is not None else None,
+                ),
                 isl_tokens=args.isl_tokens or BENCH_PROMPT_TOKENS,
                 phase=args.phase or "prefill",
             )
