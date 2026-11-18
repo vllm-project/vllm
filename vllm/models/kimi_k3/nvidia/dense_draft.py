@@ -15,9 +15,9 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> None:
-    """Default an EAGLE3/DSpark draft's attention backend and KV dtype on a
-    KDA-hybrid DSA target: dense MLA + fp8 for MLA drafts (DFlash ones too),
-    FLASH_ATTN + model dtype for GQA drafts. MTP is unchanged."""
+    """Default an EAGLE3/DSpark/MLA DFlash draft's attention backend and KV
+    dtype on a KDA-hybrid DSA target: dense MLA + fp8 for MLA drafts, FLASH_ATTN
+    + model dtype for GQA drafts. GQA DFlash drafts and MTP are unchanged."""
     if (
         spec_config.method not in ("eagle3", "dspark", "dflash")
         or getattr(text_config, "linear_attn_config", None) is None

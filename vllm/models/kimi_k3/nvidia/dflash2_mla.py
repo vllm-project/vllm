@@ -99,8 +99,9 @@ class K3DFlash2Attention(K3DSparkAttention):
     def __init__(self, *, sliding_window: int | None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.sliding_window = sliding_window
+        # Read by the DFlash speculator (`get_draft_attn_causal`).
         self.causal = True
-        # Set by the model: one index build serves every layer of a step.
+        # The model replaces this with one instance shared by all its layers.
         self.window_rows = _WindowRows()
         if sliding_window is None:
             return
@@ -109,16 +110,17 @@ class K3DFlash2Attention(K3DSparkAttention):
                 "Sliding-window Kimi-K3 DFlash2 layers do not support decode "
                 "context parallelism."
             )
+        # The sparse decode reads fp8 rows with an fp8 query.
         if (
             not is_quantized_kv_cache(self.kv_cache_dtype)
             or self.kv_cache_dtype == "fp8_ds_mla"
+            or not self.impl.supports_quant_query_input
         ):
             raise NotImplementedError(
                 "Sliding-window Kimi-K3 DFlash2 layers need a per-tensor fp8 "
-                f"draft KV cache; got {self.kv_cache_dtype!r}."
+                "draft KV cache on a backend that takes an fp8 query; got "
+                f"{self.kv_cache_dtype!r} on {self.attn_backend.get_name()}."
             )
-        # The sparse decode reads fp8 rows with an fp8 query.
-        self.impl.supports_quant_query_input = True
 
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         layer_config = super().get_kv_cache_config(vllm_config)

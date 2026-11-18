@@ -62,8 +62,94 @@ def _duplicate_context_kv_weights(
         yield f"context_kv_proj.{param_name}", fused_weight
 
 
+class K3DSparkAttention(MultiHeadLatentAttention):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        # DFlash derives the slots of every draft KV write from the block table.
+        layer_config = super().get_kv_cache_config(vllm_config)
+        return replace(
+            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
+        )
+
+
+class K3DSparkDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config,
+        layer_idx: int,
+        start_layer_id: int,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        quant_config = get_draft_quant_config(vllm_config)
+        self.self_attn = K3DSparkAttention(
+            config=config,
+            hidden_size=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            qk_nope_head_dim=config.qk_nope_head_dim,
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
+            q_lora_rank=config.q_lora_rank,
+            kv_lora_rank=config.kv_lora_rank,
+            cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(
+                prefix, f"layers.{start_layer_id + layer_idx}.self_attn"
+            ),
+            use_rope=True,
+            non_causal_multi_token_decode=True,
+        )
+        # Both row-parallel outputs stay un-reduced; their all-reduces are fused
+        # into the RMSNorm that follows via fused_allreduce_rms_norm.
+        self.self_attn.o_proj.reduce_results = False
+        self.mlp = KimiMLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            reduce_results=False,
+            prefix=maybe_prefix(prefix, f"layers.{start_layer_id + layer_idx}.mlp"),
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            # First layer: hidden_states is the (already reduced) embedding.
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = fused_allreduce_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
+
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+        hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual, self.post_attention_layernorm
+        )
+        # The MLP output is reduced by the next layer's input_layernorm (or by
+        # the model's final_norm).
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+
 class K3DraftContextKV(nn.Module):
-    """Fused write of the target-derived context K/V of every MLA draft layer."""
+    """Fused write of the target-derived context K/V of every MLA draft layer.
+
+    Subclasses set `layers` (each with a K3 MLA `self_attn`), `context_kv_proj`
+    (every layer's KV rows of the fused A projection) and
+    `_max_num_context_tokens`."""
 
     layers: nn.ModuleList
     context_kv_proj: MergedColumnParallelLinear
@@ -247,88 +333,6 @@ class K3DraftContextKV(nn.Module):
             )
             self._context_cache_ptrs = cache_ptrs
         return self._context_cache_ptrs
-
-
-class K3DSparkAttention(MultiHeadLatentAttention):
-    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
-        # DFlash derives the slots of every draft KV write from the block table.
-        layer_config = super().get_kv_cache_config(vllm_config)
-        return replace(
-            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
-        )
-
-
-class K3DSparkDecoderLayer(nn.Module):
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        config,
-        layer_idx: int,
-        start_layer_id: int,
-        prefix: str,
-    ) -> None:
-        super().__init__()
-        quant_config = get_draft_quant_config(vllm_config)
-        self.self_attn = K3DSparkAttention(
-            config=config,
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
-            cache_config=vllm_config.cache_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(
-                prefix, f"layers.{start_layer_id + layer_idx}.self_attn"
-            ),
-            use_rope=True,
-            non_causal_multi_token_decode=True,
-        )
-        # Both row-parallel outputs stay un-reduced; their all-reduces are fused
-        # into the RMSNorm that follows via fused_allreduce_rms_norm.
-        self.self_attn.o_proj.reduce_results = False
-        self.mlp = KimiMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            reduce_results=False,
-            prefix=maybe_prefix(prefix, f"layers.{start_layer_id + layer_idx}.mlp"),
-        )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            # First layer: hidden_states is the (already reduced) embedding.
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = fused_allreduce_rms_norm(
-                hidden_states, residual, self.input_layernorm
-            )
-
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-        hidden_states, residual = fused_allreduce_rms_norm(
-            hidden_states, residual, self.post_attention_layernorm
-        )
-        # The MLP output is reduced by the next layer's input_layernorm (or by
-        # the model's final_norm).
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
 
 
 class K3DSparkModel(K3DraftContextKV):
