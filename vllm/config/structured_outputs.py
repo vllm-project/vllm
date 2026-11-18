@@ -3,7 +3,7 @@
 
 from typing import Literal, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
@@ -41,6 +41,11 @@ class StructuredOutputsConfig:
     reasoning_parser_plugin: str = ""
     """Path to a dynamically reasoning parser plugin that can be dynamically
     loaded and registered."""
+    max_grammar_recoveries: int = Field(default=0, ge=0)
+    """Experimental xgrammar recovery budget per request. On rejection, retain
+    the valid prefix, re-prefill, and disable speculation for that request.
+    Zero preserves fail-on-rejection behavior. Recovery adds recomputation
+    and does not preserve the original sampling trajectory."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
@@ -55,6 +60,8 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
+        if self.max_grammar_recoveries and self.backend not in ("auto", "xgrammar"):
+            raise ValueError("max_grammar_recoveries requires xgrammar")
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "

@@ -16,6 +16,7 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    StructuredOutputsConfig,
     VllmConfig,
 )
 from vllm.config.model import RunnerOption
@@ -98,6 +99,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    structured_outputs_config: StructuredOutputsConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -227,6 +229,8 @@ def create_scheduler(
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        structured_outputs_config=structured_outputs_config
+        or StructuredOutputsConfig(),
         diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
         lora_config=lora_config,

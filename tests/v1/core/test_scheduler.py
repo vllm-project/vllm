@@ -19,6 +19,7 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    StructuredOutputsConfig,
     VllmConfig,
 )
 from vllm.config.watermarking import WatermarkConfig
@@ -9044,3 +9045,147 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def _xgrammar_recovery_request(async_scheduling, budget):
+    """Run real admission, KV allocation and grammar compilation without weights."""
+    scheduler = create_scheduler(
+        model="gpt2",
+        max_num_seqs=1,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        async_scheduling=async_scheduling,
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="xgrammar",
+            max_grammar_recoveries=budget,
+        ),
+    )
+    manager = scheduler.structured_output_manager
+    tokenizer = manager.tokenizer
+    params = SamplingParams(
+        max_tokens=32,
+        structured_outputs=StructuredOutputsParams(json={"type": "object"}),
+    )
+    params.verify(
+        scheduler.vllm_config.model_config,
+        None,
+        scheduler.vllm_config.structured_outputs_config,
+        tokenizer,
+    )
+    params.update_from_generation_config({}, tokenizer.eos_token_id)
+    request = Request(
+        request_id="recovery",
+        prompt_token_ids=tokenizer.encode("Return JSON:"),
+        sampling_params=params,
+        pooling_params=None,
+    )
+    manager.grammar_init(request)
+    from tests.v1.structured_output.test_structured_output_manager import (
+        _wait_for_grammar,
+    )
+
+    _wait_for_grammar(request)
+    scheduler.add_request(request)
+    return scheduler, request, tokenizer
+
+
+def _deliver_recovery_tokens(scheduler, request, tokens):
+    scheduled = scheduler.schedule()
+    assert request.request_id in scheduled.num_scheduled_tokens
+    result = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[tokens]),
+    )
+    return scheduled, result
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("prefix", ["", "{"], ids=["empty", "json-prefix"])
+def test_xgrammar_recovery_reschedules_and_finishes(async_scheduling, prefix):
+    """A rejected main-model token must never enter output or resumed context."""
+    import xgrammar as xgr
+
+    scheduler, request, tokenizer = _xgrammar_recovery_request(async_scheduling, 1)
+    manager = scheduler.structured_output_manager
+    try:
+        for token in tokenizer.encode(prefix):
+            _deliver_recovery_tokens(scheduler, request, [token])
+        retained = list(request.all_token_ids)
+        invalid = tokenizer.encode("x")
+        assert len(invalid) == 1
+        _, result = _deliver_recovery_tokens(scheduler, request, invalid)
+        assert request.status == RequestStatus.PREEMPTED
+        assert list(request.all_token_ids) == retained
+        assert not result or not result[0].outputs
+        assert request.num_computed_tokens == request.num_output_placeholders == 0
+        assert request.structured_output_request.num_grammar_recoveries == 1
+        scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [invalid]))
+        assert request.spec_token_ids == []
+        resumed = scheduler.schedule()
+        assert request.request_id in resumed.preempted_req_ids
+        assert resumed.scheduled_new_reqs[0].prefill_token_ids == retained
+        assert resumed.scheduled_new_reqs[0].num_computed_tokens == 0
+        assert not resumed.scheduled_spec_decode_tokens
+        legal = tokenizer.encode("}" if prefix else "{}")
+        mask = manager.grammar_bitmask(scheduler.requests, [request.request_id], {})
+        logits = torch.full((1, len(tokenizer)), -float("inf"))
+        logits[0, invalid[0]], logits[0, legal[0]] = 100, 0
+        xgr.apply_token_bitmask_inplace(logits, torch.from_numpy(mask))
+        assert torch.isneginf(logits[0, invalid[0]])
+        token = torch.multinomial(
+            logits.softmax(-1), 1, generator=torch.Generator().manual_seed(42)
+        ).item()
+        assert token == legal[0]
+        scheduler.update_from_output(
+            resumed,
+            ModelRunnerOutput(
+                req_ids=[request.request_id], sampled_token_ids=[[token]]
+            ),
+        )
+        for token in legal[1:] + [tokenizer.eos_token_id]:
+            _, result = _deliver_recovery_tokens(scheduler, request, [token])
+        assert request.status == RequestStatus.FINISHED_STOPPED
+        assert list(request.output_token_ids) == tokenizer.encode(prefix) + legal + [
+            tokenizer.eos_token_id
+        ]
+    finally:
+        manager.clear_backend()
+
+
+@pytest.mark.parametrize("budget", [0, 1])
+def test_xgrammar_recovery_is_bounded(budget):
+    scheduler, request, tokenizer = _xgrammar_recovery_request(False, budget)
+    try:
+        invalid = tokenizer.encode("x")
+        _deliver_recovery_tokens(scheduler, request, invalid)
+        if budget:
+            assert request.status == RequestStatus.PREEMPTED
+            _deliver_recovery_tokens(scheduler, request, invalid)
+        assert request.status == RequestStatus.FINISHED_ERROR
+    finally:
+        scheduler.structured_output_manager.clear_backend()
+
+
+def test_xgrammar_recovery_discards_inflight_output():
+    scheduler, request, tokenizer = _xgrammar_recovery_request(True, 1)
+    try:
+        first = scheduler.schedule()
+        stale = scheduler.schedule()
+        assert request.request_id in stale.num_scheduled_tokens
+        invalid = tokenizer.encode("x")
+        output = ModelRunnerOutput(
+            req_ids=[request.request_id], sampled_token_ids=[invalid]
+        )
+        scheduler.update_from_output(first, output)
+        assert request.status == RequestStatus.PREEMPTED
+        assert request.num_stale_output_tokens > 0
+        result = scheduler.update_from_output(stale, output)
+        assert not result or not result[0].outputs
+        assert list(request.output_token_ids) == []
+        assert request.num_stale_output_tokens == request.num_in_flight_tokens == 0
+        resumed = scheduler.schedule()
+        assert (
+            resumed.scheduled_new_reqs[0].prefill_token_ids == request.prompt_token_ids
+        )
+    finally:
+        scheduler.structured_output_manager.clear_backend()

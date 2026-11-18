@@ -19,7 +19,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend, XgrammarGrammar
 from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.token_buffer import TokenIdsView
 
@@ -511,6 +511,31 @@ class StructuredOutputManager:
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def get_recovery_prefix(
+        self, request: "Request", new_token_ids: list[int]
+    ) -> int | None:
+        """Probe actual worker output before appending it to request history.
+
+        Return the prefix to keep on FSM rejection, or None to retain the
+        normal commit/error path. This does not change draft boundary logic.
+        """
+        structured_req = request.structured_output_request
+        budget = self.vllm_config.structured_outputs_config.max_grammar_recoveries
+        if (
+            not new_token_ids
+            or structured_req is None
+            or structured_req.num_grammar_recoveries >= budget
+            or not isinstance(structured_req.grammar, XgrammarGrammar)
+        ):
+            return None
+        start = self._get_constraint_bounds(request, new_token_ids).grammar_start
+        if start >= len(new_token_ids):
+            return None
+        valid = structured_req.grammar.validate_generated_tokens(new_token_ids[start:])
+        if start + valid == len(new_token_ids):
+            return None
+        return start + valid
 
     def accept_tokens(self, request: "Request", new_token_ids: list[int]) -> bool:
         """Advance grammar with accepted tokens. Returns False on rejection."""
