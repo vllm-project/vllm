@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import contextlib
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -372,7 +373,7 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    # Max output tokens per second and concurrent requests at that peak
+    # Peak output token rate and peak number of concurrent successful requests
     max_output_tokens_per_s: float | None
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
@@ -719,47 +720,30 @@ def calculate_metrics(
             print(f"Error {i}: {err.error}")
 
     if successful_outputs:
-        min_start_time = min(output.start_time for output in successful_outputs)
-        max_end_time = max(
-            output.start_time + output.latency for output in successful_outputs
+        starts = np.sort([output.start_time for output in successful_outputs])
+        ends = np.sort(
+            [output.start_time + output.latency for output in successful_outputs]
         )
+        # Concurrency can only increase at a start. Exclude requests that ended
+        # at or before it, including a previous request on the same client slot.
+        active_at_start = np.arange(1, len(starts) + 1) - np.searchsorted(
+            ends, starts, side="right"
+        )
+        max_concurrent_requests = int(active_at_start.max())
+        min_start_time, max_end_time = starts[0], ends[-1]
 
         # Create second buckets (ceiling to ensure we capture all time)
         duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
-        tokens_per_second = np.zeros(duration_seconds)
-        concurrent_requests_per_second = np.zeros(duration_seconds)
-
-        for output in successful_outputs:
-            request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
-            )
-            concurrent_requests_per_second[
-                request_start_second : request_end_second + 1
-            ] += 1
-
-            if not token_timestamps_available:
-                continue
-            # Calculate token generation timestamp using
-            # start_time, ttft, and itl
-            token_times = [output.start_time + output.ttft]
-            current_time = token_times[0]
-            for itl_value in output.itl:
-                current_time += itl_value
-                token_times.append(current_time)
-
-            # Add tokens to second buckets
-            for token_time in token_times:
-                second_bucket = int(token_time - min_start_time)
-                if 0 <= second_bucket < duration_seconds:
-                    tokens_per_second[second_bucket] += 1
-
-        # Find the maximum tokens per second and corresponding
-        # concurrent requests
-        if len(tokens_per_second) > 0:
-            if token_timestamps_available:
-                max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
+        if token_timestamps_available:
+            tokens_per_second = np.zeros(duration_seconds)
+            for output in successful_outputs:
+                token_time = output.start_time + output.ttft
+                for interval in itertools.chain((0.0,), output.itl):
+                    token_time += interval
+                    second_bucket = int(token_time - min_start_time)
+                    if 0 <= second_bucket < duration_seconds:
+                        tokens_per_second[second_bucket] += 1
+            max_output_tokens_per_s = float(np.max(tokens_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
@@ -771,11 +755,14 @@ def calculate_metrics(
                     tokens_per_second,
                     title="Output tokens per second",
                 )
-            fig.plot(
-                np.arange(len(concurrent_requests_per_second)),
-                concurrent_requests_per_second,
-                title="Concurrent requests per second",
+            seconds = np.arange(duration_seconds)
+            boundaries = min_start_time + seconds
+            # Include requests already active when a new second begins.
+            peaks = np.searchsorted(starts, boundaries, side="right") - np.searchsorted(
+                ends, boundaries, side="right"
             )
+            np.maximum.at(peaks, (starts - min_start_time).astype(int), active_at_start)
+            fig.plot(seconds, peaks, title="Peak concurrent requests per second")
             fig.show()
         else:
             print("tip: install termplotlib and gnuplot to plot the metrics")

@@ -293,10 +293,10 @@ def test_diarized_audio_stream(monkeypatch: pytest.MonkeyPatch, complete: bool) 
     assert metrics.request_goodput == pytest.approx(1 / 6)
 
 
-@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
-def test_fragmented_diarized_transcript(monkeypatch, separator):
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_fragmented_diarized_transcript(monkeypatch, newline):
     text = "测试ab" * 512
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "transcript.text.delta", "delta": text},
         {"type": "transcript.text.segment", "text": text, "speaker": "A"},
         {
@@ -305,9 +305,16 @@ def test_fragmented_diarized_transcript(monkeypatch, separator):
             "usage": {"type": "tokens", "input_tokens": 7, "output_tokens": 9},
         },
     ]
+    separator = newline * 2
     wire = (
-        separator.join(
-            b"data: " + json.dumps(event, ensure_ascii=False).encode()
+        b": keep-alive"
+        + separator
+        + separator.join(
+            b"event: "
+            + event["type"].encode()
+            + newline
+            + b"data:"
+            + json.dumps(event, ensure_ascii=False).encode()
             for event in events
         )
         + separator
@@ -337,6 +344,19 @@ def test_fragmented_diarized_transcript(monkeypatch, separator):
         9,
     )
     assert parsed_chars <= len(wire)
+
+
+@pytest.mark.parametrize("token_timestamps_available", [False, True])
+def test_peak_concurrency_counts_overlapping_requests(token_timestamps_available):
+    # Three requests touch the same second. One ends exactly as another begins.
+    outputs = [
+        RequestFuncOutput(success=True, start_time=start, latency=0.5, output_tokens=1)
+        for start in (10.0, 10.25, 10.5)
+    ]
+    metrics, _ = calculate_metrics(
+        [], outputs, 1.0, None, [99], {}, token_timestamps_available
+    )
+    assert metrics.max_concurrent_requests == 2
 
 
 def _run(

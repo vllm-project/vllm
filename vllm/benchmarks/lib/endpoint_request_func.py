@@ -546,7 +546,7 @@ def _extract_sse_data(message: str) -> str | None:
     # U+2028, U+2029 and U+0085. Those are legal inside a JSON string and the
     # server emits them unescaped, so splitlines() would truncate the payload.
     data_lines = [
-        line.removeprefix("data:").removeprefix(" ")
+        line.removeprefix("data:").removeprefix(" ").removesuffix("\r")
         for line in message.split("\n")
         if line.startswith("data:")
     ]
@@ -805,10 +805,12 @@ async def async_request_openai_audio(
 
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            if type(message) is bytes:
-                                message = message.decode("utf-8")
-                            chunk = message.removeprefix("data: ")
-                            if chunk != "[DONE]":
+                            chunk = (
+                                _extract_sse_data(message)
+                                if diarized
+                                else message.removeprefix("data: ")
+                            )
+                            if chunk and chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
