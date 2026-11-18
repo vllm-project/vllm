@@ -2646,8 +2646,8 @@ class VllmConfig:
             compilation_config.max_decode_cudagraph_capture_tokens = 8192
         # Breakable CUDA graphs have no compiled fallback, so a batch wider than
         # every graph runs eagerly. With speculative decoding on CDNA4 (gfx950),
-        # extend unset kinds to twice the widest decode batch, as the shared
-        # ceiling does below it.
+        # unset kinds keep the shared sizes and extend past their 512-token
+        # ceiling by the rule below it, 2 * max_num_seqs * (1 + K) tokens.
         extended_max_tokens = 0
         if (
             not legacy_sizes
@@ -2655,6 +2655,7 @@ class VllmConfig:
             and current_platform.is_rocm()
             and current_platform.is_device_capability(95)
             and compilation_config.use_breakable_cudagraph
+            and self.speculative_config is not None
             and self.uniform_decode_query_len > 1
         ):
             extended_max_tokens = min(
@@ -2662,17 +2663,7 @@ class VllmConfig:
                 _ROCM_BREAKABLE_MAX_CAPTURE_TOKENS,
                 max_num_tokens,
             )
-        extend = extended_max_tokens > shared_max
-        if (
-            extend
-            and compilation_config.max_decode_cudagraph_capture_tokens is None
-            and decode_sizes is None
-            and max_decode_requests is None
-        ):
-            # One-token draft decodes keep their graphs up to max_num_seqs.
-            compilation_config.max_decode_cudagraph_capture_tokens = max(
-                extended_max_tokens, min(max_num_seqs, max_num_tokens)
-            )
+        extend = extended_max_tokens > 512
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2745,9 +2736,16 @@ class VllmConfig:
                 }
             )
             if extend:
+                # Not a decode token budget, which would also cut the graphs the
+                # shared sizes give at other query lengths.
                 decode_sizes += [
                     n
-                    for n in decode_cudagraph_capture_grid(max_num_seqs)
+                    for n in decode_cudagraph_capture_grid(
+                        min(
+                            max_num_seqs,
+                            extended_max_tokens // self.uniform_decode_query_len,
+                        )
+                    )
                     if n > max(decode_sizes, default=0)
                 ]
         compilation_config.prefill_cudagraph_capture_token_sizes = prefill_sizes

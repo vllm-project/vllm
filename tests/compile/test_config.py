@@ -1017,24 +1017,24 @@ def _rocm_breakable_config(
     ("overrides", "expected"),
     [
         # 341 requests of 1 + 5 tokens fit the 2048-token bound.
-        ({}, (2048, 341, 2048)),
-        # Twice the widest decode batch: 2 * 64 * 6 = 768 tokens.
-        ({"max_num_seqs": 64}, (768, 64, 768)),
-        ({"max_num_batched_tokens": 1024}, (1024, 170, 1024)),
-        ({"num_speculative_tokens": 0}, (512, 512, None)),
-        ({"breakable": False}, (512, 83, None)),
+        ({}, (2048, 341)),
+        # 2 * 64 * 6 = 768 tokens.
+        ({"max_num_seqs": 64}, (768, 64)),
+        ({"max_num_batched_tokens": 1024}, (1024, 170)),
+        ({"num_speculative_tokens": 0}, (512, 512)),
+        ({"breakable": False}, (512, 83)),
         # CDNA3 (gfx942)
-        ({"capability": 94}, (512, 83, None)),
+        ({"capability": 94}, (512, 83)),
         # A set kind keeps its setting; the deprecated fields keep both.
-        ({"max_decode_cudagraph_capture_requests": 1024}, (2048, 1024, None)),
-        ({"max_cudagraph_capture_size": 512}, (512, 83, None)),
+        ({"max_decode_cudagraph_capture_requests": 1024}, (2048, 1024)),
+        ({"max_cudagraph_capture_size": 512}, (512, 83)),
     ],
 )
 def test_rocm_breakable_speculative_defaults(monkeypatch, overrides, expected):
     """Breakable CUDA graphs have no compiled fallback, so speculative decode
     and mixed batches above the shared sizes would run eagerly. On CDNA4 unset
-    kinds extend to twice the widest decode batch, at most 2048 tokens: the
-    widest prefill graph, decode graph (requests) and decode token budget."""
+    kinds extend to 2 * max_num_seqs * (1 + K) tokens, at most 2048: the widest
+    prefill graph (tokens) and decode graph (requests)."""
     config = _rocm_breakable_config(monkeypatch, **overrides)
     compilation_config = config.compilation_config
     widest_decode = _widest_covered_request_count(
@@ -1042,10 +1042,10 @@ def test_rocm_breakable_speculative_defaults(monkeypatch, overrides, expected):
         config.uniform_decode_query_len,
         config.scheduler_config.max_num_seqs,
     )
+    assert compilation_config.max_decode_cudagraph_capture_tokens is None
     assert (
         compilation_config.max_prefill_cudagraph_capture_tokens,
         widest_decode,
-        compilation_config.max_decode_cudagraph_capture_tokens,
     ) == expected
 
 
@@ -1077,6 +1077,119 @@ def test_rocm_breakable_speculative_defaults_keep_one_token_draft_decodes(
         decode_cudagraph_capture_max_tokens(config.compilation_config),
     )
     assert max(n for n, _ in shapes) == 8192
+
+
+def _cdna4_breakable_graphs(
+    monkeypatch,
+    capability: int,
+    max_num_seqs: int = 1024,
+    num_speculative_tokens: int = 5,
+    max_num_batched_tokens: int = 16384,
+    method: str = "ngram",
+    schedule: list[tuple[int, int, int]] | None = None,
+    diffusion_canvas_length: int | None = None,
+) -> tuple[set[int], set[tuple[int, int]]]:
+    """The prefill token sizes and the `(num_reqs, query_len)` decode graphs of
+    the target and one-token draft runners, on ROCm with breakable CUDA graphs
+    and `capability` standing in for the GPU's."""
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda cap, device_id=0: cap == capability,
+    )
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda *args, **kw: False
+    )
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, use_breakable_cudagraph=True
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=max_num_batched_tokens,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=schedule,
+        method=method,
+    )
+    if diffusion_canvas_length is not None:
+        config.diffusion_config = SimpleNamespace(canvas_length=diffusion_canvas_length)
+        config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
+        config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(
+            config
+        )
+    VllmConfig._set_cudagraph_sizes(config)
+    max_tokens = decode_cudagraph_capture_max_tokens(compilation_config)
+    decode = set(
+        decode_cudagraph_capture_shapes(
+            compilation_config.decode_cudagraph_capture_request_sizes,
+            config.get_decode_cudagraph_query_lens(config.uniform_decode_query_len),
+            max_tokens,
+        )
+    ) | set(
+        decode_cudagraph_capture_shapes(
+            config.get_draft_decode_cudagraph_request_sizes(),
+            {1: max_num_seqs},
+            max_tokens,
+        )
+    )
+    return set(compilation_config.prefill_cudagraph_capture_token_sizes), decode
+
+
+@pytest.mark.parametrize(
+    ("overrides", "extends"),
+    [
+        ({}, True),
+        ({"method": "eagle3", "max_num_seqs": 8192}, True),
+        ({"method": "draft_model", "num_speculative_tokens": 2}, True),
+        ({"max_num_batched_tokens": 1024}, True),
+        # 2 * 21 * 6 = 252 tokens, within the shared 512-token ceiling.
+        ({"max_num_seqs": 21}, False),
+        # Dynamic speculative decoding: K=5 up to 512 requests, then none.
+        ({"schedule": [(1, 512, 5), (513, 1024, 0)]}, True),
+        # A diffusion canvas without speculative decoding.
+        (
+            {
+                "num_speculative_tokens": 0,
+                "diffusion_canvas_length": 256,
+                "max_num_seqs": 8,
+            },
+            False,
+        ),
+    ],
+)
+def test_cdna4_breakable_speculative_defaults_only_add_graphs(
+    monkeypatch, overrides, extends
+):
+    """On CDNA4 the defaults keep every graph CDNA3 (main's sizes) captures,
+    and add graphs only where 2 * max_num_seqs * (1 + K) exceeds 512 tokens
+    with speculative decoding."""
+    prefill3, decode3 = _cdna4_breakable_graphs(monkeypatch, 94, **overrides)
+    prefill4, decode4 = _cdna4_breakable_graphs(monkeypatch, 95, **overrides)
+    assert prefill3 <= prefill4 and decode3 <= decode4
+    assert ((prefill4, decode4) != (prefill3, decode3)) == extends
+
+
+def test_cdna4_breakable_speculative_defaults_bound_target_decode_graphs(
+    monkeypatch,
+):
+    """New target decode graphs stay within 2048 tokens however many requests
+    one-token draft decodes, or narrower dynamic speculative decoding widths,
+    reach."""
+    _, decode = _cdna4_breakable_graphs(monkeypatch, 95, max_num_seqs=8192)
+    assert max(n * q for n, q in decode if q == 6) == 341 * 6
+    _, decode = _cdna4_breakable_graphs(
+        monkeypatch,
+        95,
+        method="eagle3",
+        max_num_seqs=8192,
+    )
+    assert max(n for n, q in decode if q == 1) == 8192
+    assert max(n * q for n, q in decode if q == 6) == 341 * 6
+    _, decode = _cdna4_breakable_graphs(
+        monkeypatch, 95, schedule=[(1, 512, 5), (513, 1024, 0)]
+    )
+    assert (512, 6) in decode
 
 
 def test_default_grids_capture_fewer_graphs_than_main():
