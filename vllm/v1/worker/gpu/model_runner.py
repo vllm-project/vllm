@@ -158,7 +158,10 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
-from vllm.v1.worker.gpu.repair_executor import execute_repair_only
+from vllm.v1.worker.gpu.repair_executor import (
+    execute_repair_only,
+    verify_replay_compatibility,
+)
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_vocab_shards,
@@ -601,6 +604,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         get_offloader().post_init()
+
+        if (
+            getattr(self.vllm_config.kv_transfer_config, "kv_load_failure_policy", None)
+            == "repair"
+        ):
+            # Fail fast on architectures the replay cannot reproduce
+            # faithfully (post-embed transforms, per-layer loop inputs):
+            # a silently-diverging replay would write wrong KV under a
+            # green verdict.
+            verify_replay_compatibility(self.model)
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             compile_model_with_stock_torch(self.model, self.vllm_config)

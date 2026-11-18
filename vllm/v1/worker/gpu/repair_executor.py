@@ -51,6 +51,105 @@ def _format_repair_exception(exc: BaseException) -> str:
     return text if len(text) <= 300 else text[:297] + "..."
 
 
+class _ReplayProbeAbort(BaseException):
+    """Stops the compatibility probe's forward at layer 0, before any
+    attention or KV write runs (BaseException so a model-internal
+    except-Exception cannot swallow it)."""
+
+
+def verify_replay_compatibility(model: Any) -> None:
+    """Refuse the repair policy unless the model's own forward reduces to
+    exactly what the replay executes: embed_input_ids feeding
+    layer(positions, hidden_states, residual).
+
+    Drives one tiny forward of the inner model with a pre-hook on layer
+    0 that captures the layer's actual arguments and aborts the call
+    before any attention or cache write runs, then checks that the
+    layer is called with exactly the replay's three positional arguments
+    (models whose loop supplies per-layer state -- e.g. per-layer-input
+    embeddings -- would silently diverge in the replay) and that the
+    hidden states fed to layer 0 equal embed_input_ids of the same
+    tokens (models that transform embeddings after the embed call --
+    e.g. muP input scaling -- would silently diverge too).
+
+    Raises:
+        RuntimeError: with the model-agnostic reason when either check
+            fails; the engine then refuses to start under
+            kv_load_failure_policy='repair'.
+
+    """
+    inner = model.model
+    layers = getattr(inner, "layers", None)
+    if not layers:
+        raise RuntimeError(
+            "kv_load_failure_policy='repair' requires a native model with "
+            "a layer stack (none found on the inner model)"
+        )
+    embed_fn = getattr(inner, "embed_input_ids", None)
+    if embed_fn is None:
+        raise RuntimeError(
+            "kv_load_failure_policy='repair' requires a model exposing "
+            "embed_input_ids (the replay's embedding seam); switch the "
+            "policy to 'recompute'"
+        )
+    try:
+        device = next(inner.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+    ids = torch.zeros(4, dtype=torch.long, device=device)
+    positions = torch.arange(4, dtype=torch.int64, device=device)
+    with torch.no_grad():
+        embed = embed_fn(ids)
+    captured: dict[str, Any] = {}
+
+    def _probe(_module, args, kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        raise _ReplayProbeAbort()
+
+    handle = layers[0].register_forward_pre_hook(_probe, with_kwargs=True)
+    try:
+        with torch.no_grad():
+            inner(input_ids=ids, positions=positions, intermediate_tensors=None)
+    except _ReplayProbeAbort:
+        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "kv_load_failure_policy='repair' cannot verify this model's "
+            "forward (the probe forward failed before layer 0: "
+            + _format_repair_exception(exc)
+            + "); switch the policy to 'recompute'"
+        ) from exc
+    finally:
+        handle.remove()
+    args = captured.get("args")
+    kwargs = captured.get("kwargs") or {}
+    if args is None or len(args) != 3 or kwargs:
+        n_args = len(args) if args is not None else 0
+        raise RuntimeError(
+            "kv_load_failure_policy='repair' requires native layers called "
+            "as layer(positions, hidden_states, residual) with no extra "
+            "per-layer inputs; this model's layer loop supplies "
+            f"{n_args} positional and {sorted(kwargs)} keyword arguments "
+            "the replay cannot reproduce -- switch the policy to "
+            "'recompute'"
+        )
+    hidden_states = args[1]
+    if (
+        not isinstance(hidden_states, torch.Tensor)
+        or hidden_states.shape != embed.shape
+        or hidden_states.dtype != embed.dtype
+        or not torch.equal(hidden_states, embed)
+    ):
+        raise RuntimeError(
+            "kv_load_failure_policy='repair' requires the hidden states "
+            "fed to layer 0 to equal embed_input_ids of the same tokens; "
+            "this model transforms the embedding after embed_input_ids "
+            "(e.g. muP input scaling) and the replay would write "
+            "silently-wrong KV -- switch the policy to 'recompute'"
+        )
+
+
 def execute_repair_only(
     model: Any,
     scheduler_output: "SchedulerOutput",
@@ -68,10 +167,12 @@ def execute_repair_only(
     preprocessed inputs; every scheduled request in the step is a repair
     work (the step is exclusive by construction).
 
-    Each work item's rows are its own window of the step's batch
-    (batch_req_ids is the row order), each item runs its own layer
-    range, and the validation battery (positions, slot ownership, write
-    coverage, layer coverage) applies per work item.
+    A v1 repair-only step carries exactly ONE work (the scheduler
+    admits one repair per step; the step-level validation refuses
+    more -- per-work attention-metadata slicing is unsupported). The
+    work's rows are its own window of the step's batch (batch_req_ids is
+    the row order), and the validation battery (positions, slot
+    ownership, write coverage, layer coverage) applies per work item.
     """
     works = scheduler_output.repair_works
     assert works is not None
@@ -87,6 +188,12 @@ def execute_repair_only(
         # there until the backend timeout (the process-group timeout, the
         # NCCL watchdog, or the executor RPC bound), and only then do the
         # failed verdicts and their collectives proceed.
+        assert len(works) == 1, (
+            "hole repair: a v1 repair-only step carries exactly one work "
+            "(the scheduler admits one repair per step); per-work "
+            "attention-metadata slicing is unsupported, so a multi-work "
+            "step cannot be fenced"
+        )
         assert set(works) == set(scheduler_output.num_scheduled_tokens), (
             "hole repair: a repair step must not carry ordinary work "
             f"({len(works)} repair works vs "

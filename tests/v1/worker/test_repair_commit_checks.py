@@ -110,7 +110,7 @@ def test_sync_profile_gate_defaults_off(monkeypatch):
     assert _repair_sync_profile_enabled()
 
 
-# ---- The multi-item repair-only step: one verdict per work ----
+# ---- The repair-only step shape and the pre-write ownership fence ----
 
 
 class _FakeLayer:
@@ -195,71 +195,74 @@ def _multi_work_setup():
     return works, tokens, positions, input_ids, meta
 
 
-def test_execute_repair_only_multi_item_executes_each_work():
-    """One repair-only step carrying two repair works executes each work
-    item -- its own row window, its own layer range, its own commit
-    battery -- and the results come back as a list, one verdict per
-    work."""
+def test_repair_step_refuses_multiple_works():
+    """A v1 repair-only step carries exactly ONE work: the scheduler
+    admits one repair per step, and per-work attention-metadata slicing
+    is unsupported (the whole-step metadata describes a single span).
+    A multi-work step is refused fail-closed: every work still gets its
+    failed verdict and its consensus collective, but zero layers
+    execute."""
     works, tokens, positions, input_ids, meta = _multi_work_setup()
-    sub = _sub_output(works, tokens)
-    model = _FakeModel(n_layers=4)
+    results = _run_repair(
+        _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta
+    )
 
+    assert [r.request_id for r in results] == ["req-a", "req-b"]
+    for r in results:
+        assert r.executed_layers == 0
+        assert r.aborted
+        assert not r.structural_check
+        assert "exactly one work" in (r.error_detail or "")
+
+
+def _single_work_setup():
+    """One repair work at rows [0, BS) with span [0, BS) and its own
+    block-table row (block 2) -- the only shape a v1 repair step
+    carries."""
+    works = {
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=(0, BS),
+            layer_end=1,
+            restored_extent=512,
+            plan_id=1,
+            epoch=7,
+            expected_write_block_ids=(2,),
+        )
+    }
+    tokens = {"req-a": BS}
+    positions = torch.arange(BS, dtype=torch.int64)
+    meta = _cpu_meta([torch.tensor([2])], _span_slots(2))
+    return works, tokens, positions, positions.clone(), meta
+
+
+def _run_repair(model, works, tokens, positions, input_ids, meta):
+    sub = _sub_output(works, tokens)
     with set_forward_context(
         {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
     ):
-        results = execute_repair_only(
-            model, sub, input_ids, positions, ["req-a", "req-b"]
-        )
-
-    assert [r.request_id for r in results] == ["req-a", "req-b"]
-    # Per-work layer ranges: req-a executed 1 layer, req-b executed 2.
-    assert results[0].executed_layers == 1
-    assert results[1].executed_layers == 2
-    assert [r.plan_id for r in results] == [1, 2]
-    assert [r.span for r in results] == [(0, BS), (BS, 2 * BS)]
-    # The commit battery applies per work item under the shared step.
-    assert all(r.structural_check for r in results)
-    assert results[0].commit_check is not None
-    assert results[1].commit_check is not None
+        return execute_repair_only(model, sub, input_ids, positions, list(works))
 
 
 def test_pre_write_gate_refuses_foreign_slot_before_any_layer():
     """A slot mapping whose window points at a FOREIGN block (not in the
     work's own block-table row) is refused BEFORE any layer executes --
-    zero cache-writing kernels run for that work, the verdict carries the
-    gate refusal, and the OTHER works in the step are unaffected."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
-    # Corrupt req-a's slot window: its 128 slots now target block 999
-    # (foreign -- not in either table row).
+    zero cache-writing kernels run, and the verdict carries the gate
+    refusal."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
     bad_slots = meta.slot_mapping.clone()
-    bad_slots[:BS] = 999 * BS + torch.arange(BS)
-    meta_bad = _cpu_meta(
-        block_rows=[torch.tensor([2]), torch.tensor([8, 3])],
-        slot_mapping=bad_slots,
+    bad_slots[:] = 999 * BS + torch.arange(BS)
+    meta_bad = _cpu_meta([torch.tensor([2])], bad_slots)
+    results = _run_repair(
+        _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta_bad
     )
-    sub = _sub_output(works, tokens)
-    model = _FakeModel(n_layers=4)
 
-    with set_forward_context(
-        {"model.layers.0": meta_bad}, create_vllm_config(model="facebook/opt-125m")
-    ):
-        results = execute_repair_only(
-            model, sub, input_ids, positions, ["req-a", "req-b"]
-        )
-
-    ra, rb = results
-    # req-a: the gate refused -- ZERO layers executed, aborted, the gate
-    # key in the commit check, structural_check False.
+    ra = results[0]
     assert ra.executed_layers == 0
     assert ra.aborted
     assert ra.commit_check["pre_write_geometry"] is False
     assert ra.commit_check["slot_ownership"] is False
     assert not ra.structural_check
-    # req-b: unaffected -- its own geometry was valid.
-    assert rb.executed_layers == 2
-    assert not rb.aborted
-    assert rb.commit_check["pre_write_geometry"] is True
-    assert rb.structural_check
 
 
 def test_layer_exception_contained_as_abort():
@@ -267,127 +270,73 @@ def test_layer_exception_contained_as_abort():
     the stream stops, the partial writes' layer count is reported, the
     verdict is ABORT with backend_ok False -- the engine does not crash
     and no success is fabricated."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
-    sub = _sub_output(works, tokens)
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    # Layer 0 runs clean; layer 1 raises on its first call.
+    works["req-a"].layer_end = 2
     model = _FakeModel(n_layers=4)
 
-    # Layer 1 raises for every caller; req-a (layer_end=1) never reaches
-    # it, req-b (layer_end=2) hits it on its second layer.
     class _BoomLayer(_FakeLayer):
         def __call__(self, positions, hidden_states, residual):
             raise RuntimeError("injected device-side failure")
 
     model.model.layers[1] = _BoomLayer("model.layers.1")
 
-    with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
-    ):
-        results = execute_repair_only(
-            model, sub, input_ids, positions, ["req-a", "req-b"]
-        )
+    results = _run_repair(model, works, tokens, positions, input_ids, meta)
 
-    ra, rb = results
-    assert ra.executed_layers == 1
-    assert not ra.aborted
-    assert ra.structural_check
-    assert rb.executed_layers == 1  # stopped at the raising layer
-    assert rb.aborted
-    assert rb.commit_check["backend_ok"] is False
-    assert not rb.structural_check
-
-
-def test_execute_repair_only_per_work_positions_validation():
-    """The per-work validation twin: work req-b's row window carries
-    positions that do not match its repair span. The failure envelope
-    contains the violated assert into req-b's failed verdict (aborted,
-    structural_check False, error_detail preserved) while req-a -- whose
-    geometry is valid -- still executes and commits."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
-    # Corrupt req-b's window: its positions no longer match [128, 256).
-    positions = positions.clone()
-    positions[BS:] = positions[BS:] + BS
-    sub = _sub_output(works, tokens)
-    model = _FakeModel(n_layers=4)
-
-    with set_forward_context(
-        {"model.layers.0": meta},
-        create_vllm_config(model="facebook/opt-125m"),
-    ):
-        results = execute_repair_only(
-            model, sub, input_ids, positions, ["req-a", "req-b"]
-        )
-
-    ra, rb = results
-    assert ra.executed_layers == 1
-    assert not ra.aborted
-    assert ra.structural_check
-    assert rb.executed_layers == 0
-    assert rb.aborted
-    assert not rb.structural_check
-    assert "req-b" in (rb.error_detail or "")
+    ra = results[0]
+    assert ra.executed_layers == 1  # stopped at the raising layer
+    assert ra.aborted
+    assert ra.commit_check["backend_ok"] is False
+    assert not ra.structural_check
 
 
 # ---- The ownership fence: the independent authorization battery ----
 
 
-def _run_two_works(model, works, tokens, positions, input_ids, meta):
-    sub = _sub_output(works, tokens)
-    with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
-    ):
-        return execute_repair_only(model, sub, input_ids, positions, ["req-a", "req-b"])
-
-
 def test_correlated_metadata_corruption_refused():
-    """BOTH of req-a's worker structures (the block-table row AND the
-    slot window) consistently point at req-b's physical block while the
-    work carries req-a's true scheduler authorization. The self-
-    referential gate accepts this geometry; the independent
-    authorization must refuse it before any repair layer runs, with
-    req-b unaffected."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
+    """BOTH worker structures (the block-table row AND the slot window)
+    consistently point at a foreign physical block while the work
+    carries the true scheduler authorization. The self-referential gate
+    accepts this geometry; the independent authorization must refuse it
+    before any repair layer runs."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
     corrupted = _cpu_meta(
-        block_rows=[torch.tensor([8]), torch.tensor([8, 3])],
-        slot_mapping=torch.cat([_span_slots(8), _span_slots(3)]),
+        block_rows=[torch.tensor([8])],
+        slot_mapping=_span_slots(8),
     )
-    results = _run_two_works(
+    results = _run_repair(
         _FakeModel(n_layers=4), works, tokens, positions, input_ids, corrupted
     )
-    ra, rb = results
+    ra = results[0]
     assert ra.executed_layers == 0
     assert ra.aborted
     assert ra.commit_check["authorized_ownership"] is False
     assert ra.commit_check["authorized_table"] is False
     assert ra.commit_check["pre_write_geometry"] is False
     assert not ra.structural_check
-    # The honest neighbor is unaffected.
-    assert rb.executed_layers == 2
-    assert rb.structural_check
 
 
 def test_swapped_authorization_refused():
-    """The swap: req-a's work carries REQ-B's authorization. The honest
-    req-a worker geometry cannot reproduce a foreign authorization's
-    slots -- refused, and req-b (whose own authorization is correct) is
-    unaffected."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
-    works["req-a"].expected_write_block_ids = (3,)  # req-b's block!
-    results = _run_two_works(
+    """The swap: the work carries a FOREIGN authorization. The honest
+    worker geometry cannot reproduce a foreign authorization's slots --
+    refused."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    works["req-a"].expected_write_block_ids = (3,)  # the foreign block
+    results = _run_repair(
         _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta
     )
-    ra, rb = results
+    ra = results[0]
     assert ra.executed_layers == 0
     assert ra.commit_check["authorized_ownership"] is False
     assert not ra.structural_check
-    assert rb.executed_layers == 2
 
 
 def test_missing_authorization_fail_closed():
     """The fail-closed default: a work with NO authorization snapshot (an
     unbuild/stale shape) is never executable."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
+    works, tokens, positions, input_ids, meta = _single_work_setup()
     works["req-a"].expected_write_block_ids = ()
-    results = _run_two_works(
+    results = _run_repair(
         _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta
     )
     ra = results[0]
@@ -400,39 +349,26 @@ def test_partial_write_set_authorization_refused():
     """A two-block repair span whose authorization omits the second
     (healthy, replayed-because-rollback-below) block: the expected slot
     multiset misses half the span -- refused."""
-    work = RepairWork(
-        request_id="req-a",
-        repair_span=(0, 2 * BS),
-        layer_end=1,
-        restored_extent=512,
-        plan_id=1,
-        epoch=7,
-        expected_write_block_ids=(2,),  # omits block 9!
-    )
-    meta = _cpu_meta(
-        # req-a's row covers blocks 0-1 (2, 9); req-b's row must cover
-        # its span's ABSOLUTE block index 2 (a 3-entry row: the row
-        # lists the request's blocks from ITS block 0).
-        block_rows=[torch.tensor([2, 9]), torch.tensor([11, 12, 3])],
-        slot_mapping=torch.cat([_span_slots(2), _span_slots(9), _span_slots(3)]),
-    )
     works = {
-        "req-a": work,
-        "req-b": RepairWork(
-            request_id="req-b",
-            repair_span=(2 * BS, 3 * BS),
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=(0, 2 * BS),
             layer_end=1,
             restored_extent=512,
-            plan_id=2,
+            plan_id=1,
             epoch=7,
-            expected_write_block_ids=(3,),
-        ),
+            expected_write_block_ids=(2,),  # omits block 9!
+        )
     }
-    tokens = {"req-a": 2 * BS, "req-b": BS}
-    positions = torch.arange(3 * BS, dtype=torch.int64)
-    input_ids = positions.clone()
-    results = _run_two_works(
-        _FakeModel(n_layers=4), works, tokens, positions, input_ids, meta
+    tokens = {"req-a": 2 * BS}
+    positions = torch.arange(2 * BS, dtype=torch.int64)
+    meta = _cpu_meta(
+        # The row covers the span's blocks 0-1 (2, 9).
+        block_rows=[torch.tensor([2, 9])],
+        slot_mapping=torch.cat([_span_slots(2), _span_slots(9)]),
+    )
+    results = _run_repair(
+        _FakeModel(n_layers=4), works, tokens, positions, positions.clone(), meta
     )
     ra = results[0]
     assert ra.executed_layers == 0
@@ -442,22 +378,103 @@ def test_partial_write_set_authorization_refused():
 
 def test_duplicated_slots_refused_under_authorization():
     """The slot window carries a duplicated slot and a displaced one (the
-    same length, all inside req-a's own authorized block): the multiset
-    comparison against the authorization must refuse."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
+    same length, all inside the work's own authorized block): the
+    multiset comparison against the authorization must refuse."""
+    works, tokens, positions, input_ids, meta = _single_work_setup()
     dup = _span_slots(2).clone()
     dup[5] = dup[4]  # duplicate; dup[5]'s expected slot goes missing
-    corrupted = _cpu_meta(
-        block_rows=[torch.tensor([2]), torch.tensor([8, 3])],
-        slot_mapping=torch.cat([dup, _span_slots(3)]),
-    )
-    results = _run_two_works(
+    corrupted = _cpu_meta([torch.tensor([2])], dup)
+    results = _run_repair(
         _FakeModel(n_layers=4), works, tokens, positions, input_ids, corrupted
     )
     ra = results[0]
     assert ra.executed_layers == 0
     assert ra.commit_check["authorized_ownership"] is False
     assert not ra.structural_check
+
+
+# ---- Replay-compatibility canary: the model's forward must match ----
+
+
+class _CanaryLayer(torch.nn.Module):
+    def forward(self, positions, hidden_states, residual):
+        return hidden_states, residual
+
+
+class _PlainInner(torch.nn.Module):
+    """A faithful native shape: embed_input_ids feeding
+    layer(positions, hidden_states, residual)."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_CanaryLayer()])
+
+    def embed_input_ids(self, input_ids):
+        return torch.ones(input_ids.shape[0], 8)
+
+    def forward(self, input_ids, positions, intermediate_tensors=None):
+        hidden_states = self.embed_input_ids(input_ids)
+        for layer in self.layers:
+            hidden_states, _residual = layer(positions, hidden_states, None)
+        return hidden_states
+
+
+def test_replay_canary_accepts_plain_native_shape():
+    """The canary passes exactly the shape the replay assumes:
+    embed_input_ids feeding a 3-positional-arg layer with no extras."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    verify_replay_compatibility(SimpleNamespace(model=_PlainInner()))
+
+
+def test_replay_canary_refuses_post_embed_transform():
+    """A model that scales hidden states AFTER embed_input_ids (the muP
+    input-scaling family: HyperClovAX embedding_multiplier, AFMoE
+    mup_enabled) would replay with silently-wrong KV -- the canary must
+    refuse it at init."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    class _ScalingInner(_PlainInner):
+        def forward(self, input_ids, positions, intermediate_tensors=None):
+            hidden_states = self.embed_input_ids(input_ids) * 3.0
+            for layer in self.layers:
+                hidden_states, _residual = layer(positions, hidden_states, None)
+            return hidden_states
+
+    with pytest.raises(RuntimeError, match="transforms the embedding"):
+        verify_replay_compatibility(SimpleNamespace(model=_ScalingInner()))
+
+
+def test_replay_canary_refuses_per_layer_extras():
+    """A model whose loop supplies extra per-layer inputs (the Gemma4
+    per-layer-input family) would replay with silently-wrong KV -- the
+    canary must refuse it at init."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    class _ExtraArgInner(_PlainInner):
+        def forward(self, input_ids, positions, intermediate_tensors=None):
+            hidden_states = self.embed_input_ids(input_ids)
+            for layer in self.layers:
+                hidden_states, _residual = layer(
+                    positions, hidden_states, None, per_layer_input=torch.zeros(1)
+                )
+            return hidden_states
+
+    with pytest.raises(RuntimeError, match="per-layer inputs"):
+        verify_replay_compatibility(SimpleNamespace(model=_ExtraArgInner()))
+
+
+def test_replay_canary_refuses_unprobeable_forward():
+    """A model whose forward cannot be driven to layer 0 (signature
+    drift, required extras) is unverifiable: refuse rather than assume."""
+    from vllm.v1.worker.gpu.repair_executor import verify_replay_compatibility
+
+    class _BrokenInner(_PlainInner):
+        def forward(self, input_ids, positions, intermediate_tensors=None):
+            raise ValueError("boom before layer 0")
+
+    with pytest.raises(RuntimeError, match="cannot verify"):
+        verify_replay_compatibility(SimpleNamespace(model=_BrokenInner()))
 
 
 # ---- Authorization-shape battery: aliasing and grid-range geometry ----
@@ -1044,11 +1061,11 @@ def test_abort_rezero_covers_the_raising_layer_partial_writes():
     abort re-zero must cover its partial writes too (defense in depth --
     the scheduler-side eviction remains the authoritative invalidation),
     leaving no partially written state readable."""
-    works, tokens, positions, input_ids, meta = _multi_work_setup()
-    model = _FakeModel(n_layers=4)
-    # req-a spans [0, 128) over block 2 with layer_end=2: layer 0 runs
-    # clean, layer 1 partially writes then raises.
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    # The work spans [0, 128) over block 2 with layer_end=2: layer 0
+    # runs clean, layer 1 partially writes then raises.
     works["req-a"].layer_end = 2
+    model = _FakeModel(n_layers=4)
     model.model.layers[1] = _PartialWriteBoomLayer("model.layers.1")
     # Pre-fill every layer's caches with a sentinel (AFTER the layer
     # replacement, so the boom layer's fresh caches are covered too) so
@@ -1057,32 +1074,23 @@ def test_abort_rezero_covers_the_raising_layer_partial_writes():
         for cache in layer.self_attn.attn.kv_cache:
             cache.fill_(3.25)
 
-    sub = _sub_output(works, tokens)
-    with set_forward_context(
-        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
-    ):
-        results = execute_repair_only(
-            model, sub, input_ids, positions, ["req-a", "req-b"]
-        )
-
-    ra, rb = results
+    results = _run_repair(model, works, tokens, positions, input_ids, meta)
+    ra = results[0]
     assert ra.aborted
     assert ra.executed_layers == 1
     assert not ra.structural_check
     assert "partial-write layer failure" in (ra.error_detail or "")
-    # req-b ran clean (its layer 1 call took the benign branch).
-    assert not rb.aborted and rb.structural_check
 
     layer0, layer1, layer2, layer3 = model.model.layers
-    # Layer 0 (fully executed by req-a): its span rows were re-zeroed.
+    # Layer 0 (fully executed): its span rows were re-zeroed.
     assert layer0.self_attn.attn.kv_cache[0][2].abs().max().item() == 0
     # Layer 1 (the RAISING layer): its partial writes (rows 0..63 of
     # block 2) must be re-zeroed too.
     assert layer1.self_attn.attn.kv_cache[0][2].abs().max().item() == 0
-    # Layers beyond req-a's layer_end never execute: untouched sentinels.
+    # Layers beyond the work's layer_end never execute: untouched.
     assert layer2.self_attn.attn.kv_cache[0][2, 0, 0].item() == 3.25
     assert layer3.self_attn.attn.kv_cache[0][2, 0, 0].item() == 3.25
-    # Neighbor state (req-b's block 3, any layer): untouched sentinels.
+    # A foreign block (3, named by no table row): untouched sentinels.
     for layer in model.model.layers:
         assert layer.self_attn.attn.kv_cache[0][3, 0, 0].item() == 3.25
 
