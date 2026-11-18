@@ -342,6 +342,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
         "nemotron_vl",
         "LlamaNemotronVLForSequenceClassification",
     ),
+    "ShieldGemma2ForImageClassification": (
+        "shieldgemma2",
+        "ShieldGemma2ForImageClassification",
+    ),
 }
 
 _MULTIMODAL_MODELS = {
