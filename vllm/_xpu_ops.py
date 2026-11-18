@@ -175,6 +175,10 @@ def _fused_add_nemotron_layer_norm_impl(
     torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
 
 
+# The SYCL GDN kernel processes prefills in 64-token chunks.
+SYCL_GDN_CHECKPOINT_ALIGNMENT = 64
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -230,6 +234,23 @@ def _gdn_attention_core_xpu_impl(
         self.conv1d.weight.size(0), self.conv1d.weight.size(2)
     )
 
+    # Only passed when set, so kernels without checkpoint support still work.
+    checkpoint_kwargs: dict[str, torch.Tensor] = {}
+    checkpoint = attn_metadata.checkpoint
+    if checkpoint is not None:
+        assert non_spec_query_start_loc is not None
+        num_pad_rows = (
+            non_spec_query_start_loc.numel() - 1 - checkpoint.checkpoint_offsets.numel()
+        )
+        checkpoint_kwargs = {
+            "checkpoint_offsets": torch.nn.functional.pad(
+                checkpoint.checkpoint_offsets, (0, num_pad_rows)
+            ),
+            "checkpoint_state_indices": torch.nn.functional.pad(
+                checkpoint.state_indices.to(torch.int32), (0, num_pad_rows)
+            ),
+        }
+
     torch.ops._xpu_C.gdn_attention(
         core_attn_out,
         z,
@@ -260,6 +281,7 @@ def _gdn_attention_core_xpu_impl(
         num_actual_tokens=num_actual_tokens,  # type: ignore[attr-defined]
         tp_size=self.tp_size,
         reorder_input=not self.gqa_interleaved_layout,
+        **checkpoint_kwargs,
     )
 
 
