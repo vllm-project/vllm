@@ -835,7 +835,7 @@ def init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -875,7 +875,7 @@ def init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -934,7 +934,7 @@ def init_int8_linear_kernel(
         activation_quant_key=_int8_activation_quant_key(config),
     )
 
-    logger.info_once(
+    logger.debug_once(
         "Selected %s for %s",
         kernel_type.__name__,
         module_name,
@@ -1015,7 +1015,7 @@ def choose_mp_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
-            logger.info_once("Using %s for mixed-precision linear", kernel.__name__)
+            logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
             failure_reasons.append(
@@ -1107,7 +1107,7 @@ def init_mxfp8_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1209,7 +1209,7 @@ def init_mxfp4_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1272,7 +1272,7 @@ def init_mxfp6_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1310,7 +1310,7 @@ def init_wfp8_a16_linear_kernel(
     )
 
     if module_name:
-        logger.info_once(
+        logger.debug_once(
             "Selected %s for %s",
             kernel_type.__name__,
             module_name,
@@ -1407,7 +1407,7 @@ def init_nvfp4_linear_kernel(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "
                 f"supported: {reason}"
             )
-        logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
         return force_kernel(config)
 
     # Auto-select from registry (or --linear-backend filtered).
@@ -1457,7 +1457,7 @@ def init_nvfp4_linear_kernel(
                 "\n - ".join(failure_reasons),
             )
 
-        logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
