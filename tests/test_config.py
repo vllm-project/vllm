@@ -5584,35 +5584,88 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
         )
 
 
-@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
-def test_quantized_replayssm_requires_replay_backend(state_dtype):
-    with pytest.raises(ValueError, match="requires --use-replayssm"):
-        VllmConfig(
-            cache_config=CacheConfig(replayssm_state_dtype=state_dtype),
-            device_config=DeviceConfig(device="cpu"),
-        )
-
-
-@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
-def test_quantized_replayssm_rejects_conflicting_checkpoint_dtype(state_dtype):
+@pytest.mark.parametrize("ssm_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize(
+    ("backend", "use_replayssm", "accepted"),
+    [
+        (MambaBackendEnum.TRITON, False, False),
+        (MambaBackendEnum.TRITON, True, False),
+        (MambaBackendEnum.FLASHINFER, False, False),
+        (MambaBackendEnum.FLASHINFER, True, True),
+    ],
+)
+def test_mamba_ssm_cache_dtype_requires_declaring_decode_backend(
+    monkeypatch, ssm_dtype, backend, use_replayssm, accepted
+):
+    """8-bit SSM state is accepted only by a decode backend that declares it."""
     from vllm.config.mamba import MambaConfig
 
-    with pytest.raises(ValueError, match="mamba-ssm-cache-dtype"):
-        VllmConfig(
+    # Keep the FP8 FlashInfer release gate out of the backend matrix.
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_replayssm_fp8_checkpoints", lambda: True
+    )
+
+    def make_config():
+        return VllmConfig(
             cache_config=CacheConfig(
-                use_replayssm=True,
-                replayssm_state_dtype=state_dtype,
-                mamba_ssm_cache_dtype="float32",
+                use_replayssm=use_replayssm, mamba_ssm_cache_dtype=ssm_dtype
             ),
-            mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            mamba_config=MambaConfig(backend=backend),
             device_config=DeviceConfig(device="cpu"),
         )
+
+    if accepted:
+        assert make_config().cache_config.mamba_ssm_cache_dtype == ssm_dtype
+    else:
+        with pytest.raises(ValueError, match="Mamba decode backend"):
+            make_config()
+
+
+def test_mamba_ssm_cache_dtype_backend_declarations():
+    """Only FlashInfer ReplaySSM decode and Triton prefill declare 8-bit state;
+    FlashInfer prefill writes the state itself and would skip the scales."""
+    from vllm.config.mamba import (
+        decode_backend_ssm_dtypes,
+        prefill_backend_ssm_dtypes,
+    )
+
+    for backend in MambaBackendEnum:
+        for use_replayssm in (False, True):
+            supported = decode_backend_ssm_dtypes(backend, use_replayssm)
+            expected = backend == MambaBackendEnum.FLASHINFER and use_replayssm
+            assert ("int8" in supported) == expected
+            assert ("fp8" in supported) == expected
+            assert "float16" in supported
+    assert "int8" in prefill_backend_ssm_dtypes(MambaBackendEnum.TRITON)
+    assert "int8" not in prefill_backend_ssm_dtypes(MambaBackendEnum.FLASHINFER)
+    assert "fp8" not in prefill_backend_ssm_dtypes(MambaBackendEnum.FLASHINFER)
+
+
+@pytest.mark.parametrize("ssm_dtype", ["fp8", "int8"])
+def test_mamba_ssm_cache_dtype_allows_stochastic_rounding(monkeypatch, ssm_dtype):
+    from vllm.config.mamba import MambaConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_replayssm_fp8_checkpoints", lambda: True
+    )
+    # The SR platform gate is unrelated; this checks the SSM dtype rule only.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = VllmConfig(
+        cache_config=CacheConfig(use_replayssm=True, mamba_ssm_cache_dtype=ssm_dtype),
+        mamba_config=MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER, enable_stochastic_rounding=True
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    assert config.mamba_config.enable_stochastic_rounding
 
 
 @pytest.mark.parametrize(
     ("flashinfer_version", "accepted"), [("0.7.4rc1", False), ("0.7.4", True)]
 )
-def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(
+def test_mamba_fp8_ssm_cache_requires_bounded_flashinfer_scales(
     monkeypatch, flashinfer_version, accepted
 ):
     """FlashInfer 0.7.4 is the first release that bounds FP8 checkpoint scales."""
@@ -5630,7 +5683,7 @@ def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(
 
     def make_config():
         return VllmConfig(
-            cache_config=CacheConfig(use_replayssm=True, replayssm_state_dtype="fp8"),
+            cache_config=CacheConfig(use_replayssm=True, mamba_ssm_cache_dtype="fp8"),
             mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
             device_config=DeviceConfig(device="cpu"),
         )
@@ -5639,7 +5692,7 @@ def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(
     has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
     try:
         if accepted:
-            assert make_config().cache_config.replayssm_state_dtype == "fp8"
+            assert make_config().cache_config.mamba_ssm_cache_dtype == "fp8"
         else:
             with pytest.raises(ValueError, match="bounds FP8 checkpoint scales"):
                 make_config()
@@ -5647,17 +5700,47 @@ def test_quantized_replayssm_fp8_requires_bounded_flashinfer_scales(
         has_flashinfer_replayssm_fp8_checkpoints.cache_clear()
 
 
-@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
-def test_quantized_replayssm_preserves_explicit_checkpoint_selection(state_dtype):
+@pytest.mark.parametrize("ssm_dtype", ["fp8", "int8"])
+def test_mamba_8bit_ssm_state_layout(ssm_dtype):
+    """Mamba2 adds an FP32 (heads, head_dim) scale page; other layers refuse."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
+        torch.bfloat16, "auto", ssm_dtype
+    )
+    assert dtypes[1:] == (
+        torch.int8 if ssm_dtype == "int8" else torch.float8_e4m3fn,
+        torch.float32,
+    )
+    shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=1,
+        intermediate_size=128 * 64,
+        n_groups=8,
+        num_heads=128,
+        head_dim=64,
+        state_size=128,
+        conv_kernel=4,
+        mamba_ssm_cache_dtype=ssm_dtype,
+    )
+    assert shapes[1:] == ((128, 64, 128), (128, 64))
+    with pytest.raises(ValueError, match="only for Mamba2"):
+        MambaStateDtypeCalculator.mamba1_state_dtype(torch.bfloat16, "auto", ssm_dtype)
+
+
+@pytest.mark.parametrize("ssm_dtype", ["fp8", "int8"])
+def test_nemotron_h_preserves_explicit_8bit_ssm_cache_dtype(ssm_dtype):
     from transformers import PreTrainedConfig
 
     from vllm.model_executor.models.config import NemotronHForCausalLMConfig
 
-    cache = CacheConfig(use_replayssm=True, replayssm_state_dtype=state_dtype)
+    cache = CacheConfig(use_replayssm=True, mamba_ssm_cache_dtype=ssm_dtype)
     NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
         cache_config=cache, hf_config=PreTrainedConfig(mamba_ssm_cache_dtype="float32")
     )
-    assert cache.mamba_ssm_cache_dtype == "auto"
+    assert cache.mamba_ssm_cache_dtype == ssm_dtype
 
 
 def test_layer_range_with_prefill_context_parallel(monkeypatch):

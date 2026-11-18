@@ -67,32 +67,30 @@ With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports spe
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
-### Shared 8-bit ReplaySSM checkpoints
+### 8-bit SSM state
 
-`--replayssm-state-dtype fp8` or `int8` stores one shared checkpoint for recurrence and readout.
-The default `auto` preserves floating-point checkpoint storage.
-FlashInfer stores FP8 E4M3FN or INT8 payloads with FP32 scales for each state row.
-The convolution cache and replay inputs remain in BF16.
+`--mamba-ssm-cache-dtype int8` or `fp8` stores the Mamba2 SSM state in 8 bits, with one FP32 scale for each state row.
+The convolution cache and ReplaySSM replay inputs remain in BF16.
+Each Mamba backend declares the SSM state dtypes it supports, and vLLM rejects other combinations at startup.
+Currently, only FlashInfer ReplaySSM decoding declares 8-bit state, with Triton prefill (the default `--mamba-prefill-backend`).
 
 ```bash
 vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
     --dtype bfloat16 \
     --mamba-cache-dtype bfloat16 \
-    --mamba-ssm-cache-dtype auto \
+    --mamba-ssm-cache-dtype int8 \
     --mamba-backend flashinfer \
     --use-replayssm \
-    --replayssm-state-dtype int8 \
     --enable-mamba-cache-stochastic-rounding \
     --mamba-cache-philox-rounds 5 \
     --enable-prefix-caching
 ```
 
-Replace `int8` with `fp8` for FP8 checkpoints.
-The existing stochastic-rounding options control decode checkpoint writes.
-Prefill conversion uses nearest rounding. Quantization can change model output.
-The path requires Mamba2 head dimension 64, state size 128, BF16 activations, and FlashInfer 0.7.2 or newer.
-FP8 requires FlashInfer 0.7.4 or newer, which bounds FP8 checkpoint scales for tiny state rows.
-Explicit SSU algorithm selection is unsupported for quantized checkpoints.
+Replace `int8` with `fp8` for FP8 E4M3FN state.
+The stochastic-rounding options control decode state writes. Prefill conversion uses nearest rounding.
+Quantization can change model output.
+The FlashInfer kernel requires Mamba2 head dimension 64, state size 128, BF16 activations, the automatic SSU algorithm, and FlashInfer 0.7.2 or newer.
+FP8 requires FlashInfer 0.7.4 or newer, which bounds FP8 scales for tiny state rows.
 
 ## Example workloads
 

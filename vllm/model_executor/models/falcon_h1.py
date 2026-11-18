@@ -540,7 +540,7 @@ class FalconH1ForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, ...], ...]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -570,6 +570,7 @@ class FalconH1ForCausalLM(
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
             num_spec=vllm_config.num_speculative_tokens,
+            mamba_ssm_cache_dtype=vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod

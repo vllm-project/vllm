@@ -709,23 +709,29 @@ def validate_mamba_state_copy_funcs(
         )
 
 
-def _validate_replayssm_read_state_spec(spec: MambaSpec) -> None:
-    """Require each shared quantized payload to have its FP32 scale page."""
-    if len(spec.shapes) not in (5, 6) or len(spec.dtypes) != len(spec.shapes):
-        raise ValueError("Invalid quantized ReplaySSM cache specification")
-    if len(spec.shapes) == 5:
-        if spec.dtypes[1] in (torch.float8_e4m3fn, torch.int8):
-            raise ValueError("Quantized ReplaySSM requires an FP32 scale page")
-        return
-    heads, dim, size = spec.shapes[1]
+def _mamba2_ssm_scale_pages(spec: MambaSpec) -> int:
+    """Return 1 when a Mamba2 spec stores 8-bit SSM state with its scale page.
+
+    The FP32 `(heads, head_dim)` scale page directly follows the SSM state and
+    must move with it.
+    """
     if (
-        (dim, size) != (64, 128)
-        or spec.dtypes[1] not in (torch.float8_e4m3fn, torch.int8)
-        or spec.dtypes[2:]
-        != (torch.bfloat16, torch.float32, torch.bfloat16, torch.float32)
-        or spec.shapes[5] != (heads, dim)
+        spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+        or len(spec.dtypes) < 2
+        or spec.dtypes[1] not in (torch.int8, torch.float8_e4m3fn)
     ):
-        raise ValueError("Invalid quantized ReplaySSM cache specification")
+        return 0
+    if (
+        len(spec.shapes) < 3
+        or len(spec.dtypes) != len(spec.shapes)
+        or spec.dtypes[2] != torch.float32
+        or tuple(spec.shapes[2]) != tuple(spec.shapes[1][:2])
+    ):
+        raise ValueError(
+            "8-bit Mamba2 SSM state requires an FP32 (heads, head_dim) scale "
+            "page right after it"
+        )
+    return 1
 
 
 def _get_mamba_gpu_state_copy_funcs(
@@ -734,20 +740,21 @@ def _get_mamba_gpu_state_copy_funcs(
     copy_funcs: MambaStateCopyFuncsByType,
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
+    scale_pages = _mamba2_ssm_scale_pages(spec)
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) not in (5, 6)
+            or len(spec.shapes) != 5 + scale_pages
             or len(spec.dtypes) != len(spec.shapes)
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
-                "ReplaySSM trackers require two canonical Mamba2 "
-                "states, three ring states, and an optional scale page"
+                "ReplaySSM trackers require two canonical Mamba2 states, an "
+                "optional SSM scale page, and three ring states"
             )
-        _validate_replayssm_read_state_spec(spec)
-        state_copy_funcs += (get_temporal_copy_spec,) * (len(spec.shapes) - 2)
-    return state_copy_funcs
+        # Scale page and x/dt/B rings are per-slot pages copied like the state.
+        return state_copy_funcs + (get_temporal_copy_spec,) * (3 + scale_pages)
+    return state_copy_funcs + (get_temporal_copy_spec,) * scale_pages
 
 
 @dataclasses.dataclass(slots=True)

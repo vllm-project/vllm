@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prefill conversion for FlashInfer shared quantized checkpoints."""
+"""Prefill conversion for 8-bit Mamba SSM state with FP32 per-row scales."""
 
 import torch
 
@@ -53,7 +53,7 @@ def _quantize_checkpoint(
     tl.store(scales + dst * scale_stride + row, 1.0 / encode)
 
 
-def quantize_replayssm_state(
+def quantize_ssm_state(
     states: torch.Tensor,
     state: torch.Tensor,
     state_scale: torch.Tensor,
@@ -62,7 +62,7 @@ def quantize_replayssm_state(
 ) -> None:
     """Store prefill states with per-row decode scales and nearest rounding."""
     if state.dtype not in (torch.float8_e4m3fn, torch.int8):
-        raise ValueError("Shared ReplaySSM requires FP8 or INT8 state")
+        raise ValueError("8-bit SSM state must be FP8 E4M3FN or INT8")
     rows = state.shape[1] * state.shape[2]
     _quantize_checkpoint[(state_indices.numel(), rows)](
         states,
@@ -104,7 +104,7 @@ def _dequantize_checkpoint(
     tl.store(output + batch * ROWS * N + row * N + cols, value * scale)
 
 
-def dequantize_replayssm_state(
+def dequantize_ssm_state(
     state: torch.Tensor,
     state_scale: torch.Tensor,
     state_indices: torch.Tensor,

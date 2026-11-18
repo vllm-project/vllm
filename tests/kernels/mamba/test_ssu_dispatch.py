@@ -36,7 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MambaSpec,
 )
-from vllm.v1.worker.mamba_utils import _validate_replayssm_read_state_spec
+from vllm.v1.worker.mamba_utils import _get_mamba_gpu_state_copy_funcs
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _compact_replayssm_requests_kernel,
@@ -739,7 +739,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_replayssm = True
     mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
-    mixer.replayssm_state_dtype = "auto"
+    mixer.ssm_state_quantized = False
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -871,8 +871,8 @@ def _source(dtype):
 def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
     """Tiny prefill rows must not overflow the encoder or produce zero scales."""
     _require_cuda()
-    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
-        quantize_replayssm_state,
+    from vllm.model_executor.layers.mamba.ops.ssm_state_quantization import (
+        quantize_ssm_state,
     )
 
     floor = 2.0**-117
@@ -884,7 +884,7 @@ def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
     source[0, 0, -1, 1::2] = 0
     state = torch.zeros(2, 1, 6, 128, dtype=torch.float8_e4m3fn, device="cuda")
     scales = torch.ones(2, 1, 6, device="cuda")
-    quantize_replayssm_state(
+    quantize_ssm_state(
         source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
     )
 
@@ -904,9 +904,9 @@ def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
 def test_shared_prefill_selected_slots_and_reuse(dtype):
     """Pack, gather, and replace prefill states without touching padding."""
     _require_cuda()
-    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
-        dequantize_replayssm_state,
-        quantize_replayssm_state,
+    from vllm.model_executor.layers.mamba.ops.ssm_state_quantization import (
+        dequantize_ssm_state,
+        quantize_ssm_state,
     )
 
     source, factors = _source(dtype)
@@ -922,7 +922,7 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
     scale_pages = torch.full((6, 16, 64), 7.0, device="cuda")
     payload, scale = payload_pages[::2], scale_pages[::2]
     ids = torch.tensor([2, 0, 1], dtype=torch.int32, device="cuda")
-    quantize_replayssm_state(
+    quantize_ssm_state(
         source,
         payload,
         scale,
@@ -933,7 +933,7 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
     _assert_rows(source[0], payload[1], scale[1])
     assert torch.all(payload[0].float() == 7)
     assert torch.all(scale[0] == 7)
-    decoded = dequantize_replayssm_state(
+    decoded = dequantize_ssm_state(
         payload,
         scale,
         torch.tensor([2, 1, 1, -1], dtype=torch.int32, device="cuda"),
@@ -948,7 +948,7 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
 
     source.mul_(4)
     ids.copy_(torch.tensor([2, -1, -1], dtype=torch.int32, device="cuda"))
-    quantize_replayssm_state(source, payload, scale, ids)
+    quantize_ssm_state(source, payload, scale, ids)
     _assert_rows(source[0], payload[2], scale[2])
     assert torch.equal(_bytes(payload[1]), preserved_payload)
     assert torch.equal(scale[1], preserved_scale)
@@ -963,8 +963,8 @@ def test_shared_prefill_selected_slots_and_reuse(dtype):
 def test_shared_graph_mixed_flush_checkpoint_bytes(dtype, philox_rounds):
     """Dispatch two graph flushes with changing scales and unchanged other slots."""
     _require_cuda()
-    from vllm.model_executor.layers.mamba.ops.replayssm_quantization import (
-        quantize_replayssm_state,
+    from vllm.model_executor.layers.mamba.ops.ssm_state_quantization import (
+        quantize_ssm_state,
     )
 
     initialize_mamba_ssu_backend(
@@ -979,7 +979,7 @@ def test_shared_graph_mixed_flush_checkpoint_bytes(dtype, philox_rounds):
     qmax = 127 if dtype == torch.int8 else 448
     payload = torch.zeros_like(source, dtype=dtype, device="cuda")
     scale = torch.ones(3, 16, 64, device="cuda")
-    quantize_replayssm_state(
+    quantize_ssm_state(
         source.cuda(), payload, scale, torch.tensor([-1, 1, 2], device="cuda")
     )
     initial_payload, initial_scale = payload.clone(), scale.clone()
@@ -1041,39 +1041,54 @@ def test_shared_graph_mixed_flush_checkpoint_bytes(dtype, philox_rounds):
         assert torch.equal(out[:2, 0].cpu(), expected_out)
 
 
-@pytest.mark.parametrize("state_dtype", ["fp8", "int8"])
-def test_replayssm_quantized_cache_spec_requires_matching_scale(state_dtype):
-    """A quantized cache specification requires an FP32 scale with matching rows."""
-    state_shape = (16, 64, 128)
-    spec = MambaSpec(
-        block_size=16,
-        shapes=(
-            (3, 64),
-            state_shape,
-            (16, 17, 64),
-            (16, 17),
-            (1, 17, 128),
-            *MambaStateShapeCalculator.replayssm_read_shapes(state_shape, state_dtype),
-        ),
-        dtypes=(
-            torch.bfloat16,
-            MambaStateDtypeCalculator.replayssm_checkpoint_dtype(state_dtype),
-            torch.bfloat16,
-            torch.float32,
-            torch.bfloat16,
-            *MambaStateDtypeCalculator.replayssm_read_dtypes(state_dtype),
-        ),
+@pytest.mark.parametrize("ssm_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize("use_replayssm_trackers", [False, True])
+def test_mamba2_8bit_state_copies_scale_page(ssm_dtype, use_replayssm_trackers):
+    """The FP32 scale page follows the 8-bit SSM state and moves with it."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_copy_spec,
+        get_temporal_copy_spec,
     )
-    _validate_replayssm_read_state_spec(spec)
-    with pytest.raises(ValueError, match="requires an FP32 scale page"):
-        _validate_replayssm_read_state_spec(
-            replace(spec, shapes=spec.shapes[:5], dtypes=spec.dtypes[:5])
+
+    shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=1,
+        intermediate_size=16 * 64,
+        n_groups=1,
+        num_heads=16,
+        head_dim=64,
+        state_size=128,
+        conv_kernel=4,
+        mamba_ssm_cache_dtype=ssm_dtype,
+    )
+    dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
+        torch.bfloat16, "auto", ssm_dtype
+    )
+    if use_replayssm_trackers:
+        shapes = MambaStateShapeCalculator.append_replayssm_ring(
+            base_shapes=shapes,
+            n_groups=1,
+            tp_world_size=1,
+            logical_window=16,
+            backend=MambaBackendEnum.FLASHINFER,
         )
-    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
-        _validate_replayssm_read_state_spec(
-            replace(spec, shapes=(*spec.shapes[:5], (16, 65)))
-        )
-    with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
-        _validate_replayssm_read_state_spec(
-            replace(spec, dtypes=(*spec.dtypes[:5], torch.float16))
-        )
+        dtypes = MambaStateDtypeCalculator.append_replayssm_ring(dtypes, torch.bfloat16)
+    spec = MambaSpec(block_size=16, shapes=shapes, dtypes=dtypes)
+    layer = MambaMixer2.__new__(MambaMixer2)
+    layer.use_replayssm_trackers = use_replayssm_trackers
+    copy_funcs = {
+        MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
+    }
+
+    funcs = _get_mamba_gpu_state_copy_funcs(spec, layer, copy_funcs)
+    assert len(funcs) == len(spec.shapes) == (6 if use_replayssm_trackers else 3)
+    assert spec.shapes[2] == (16, 64) and spec.dtypes[2] == torch.float32
+    assert funcs[2] is get_temporal_copy_spec
+
+    for bad in (
+        replace(spec, shapes=spec.shapes[:2], dtypes=spec.dtypes[:2]),
+        replace(spec, shapes=(*spec.shapes[:2], (16, 65), *spec.shapes[3:])),
+        replace(spec, dtypes=(*spec.dtypes[:2], torch.float16, *spec.dtypes[3:])),
+    ):
+        with pytest.raises(ValueError, match="scale"):
+            _get_mamba_gpu_state_copy_funcs(bad, layer, copy_funcs)

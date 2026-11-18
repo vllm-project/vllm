@@ -250,7 +250,7 @@ steps:
       kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
       kernels/mamba/test_ssu_dispatch.py::test_shared_fp8_prefill_tiny_rows_keep_valid_scales
       kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
-      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_spec_requires_matching_scale
+      kernels/mamba/test_ssu_dispatch.py::test_mamba2_8bit_state_copies_scale_page
   mirror:
     amd:
       automatic_shard: true

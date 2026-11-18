@@ -77,6 +77,7 @@ from vllm.config.cache import (
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
+    MambaSSMDType,
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
@@ -811,7 +812,7 @@ class EngineArgs:
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
-    mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    mamba_ssm_cache_dtype: MambaSSMDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode | None = None
@@ -819,9 +820,6 @@ class EngineArgs:
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
-    replayssm_state_dtype: Literal["auto", "fp8", "int8"] = (
-        CacheConfig.replayssm_state_dtype
-    )
     use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
@@ -1467,9 +1465,6 @@ class EngineArgs:
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
         )
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
-        cache_group.add_argument(
-            "--replayssm-state-dtype", **cache_kwargs["replayssm_state_dtype"]
-        )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -2355,7 +2350,6 @@ class EngineArgs:
                 self.enable_mamba_shared_prefix_checkpoint
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
-            replayssm_state_dtype=self.replayssm_state_dtype,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,

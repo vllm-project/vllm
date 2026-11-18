@@ -32,6 +32,33 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 
 MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
 
+_FLOAT_SSM_DTYPES = ("auto", "float32", "float16", "bfloat16")
+_SCALED_SSM_DTYPES = ("int8", "fp8")
+
+
+def decode_backend_ssm_dtypes(
+    backend: MambaBackendEnum, use_replayssm: bool
+) -> tuple[str, ...]:
+    """`--mamba-ssm-cache-dtype` values a Mamba decode backend can read and write.
+
+    Scaled 8-bit state needs a kernel that applies the per-row scale on every
+    read and write; only FlashInfer ReplaySSM has one.
+    """
+    if backend == MambaBackendEnum.FLASHINFER and use_replayssm:
+        return _FLOAT_SSM_DTYPES + _SCALED_SSM_DTYPES
+    return _FLOAT_SSM_DTYPES
+
+
+def prefill_backend_ssm_dtypes(backend: MambaBackendEnum) -> tuple[str, ...]:
+    """`--mamba-ssm-cache-dtype` values a Mamba2 prefill backend supports.
+
+    The Triton SSD scan works in FP32 and vLLM converts scaled 8-bit state
+    around it. FlashInfer's fused scan reads and writes the state itself.
+    """
+    if backend == MambaBackendEnum.TRITON:
+        return _FLOAT_SSM_DTYPES + _SCALED_SSM_DTYPES
+    return _FLOAT_SSM_DTYPES
+
 
 @config
 class MambaConfig:
@@ -41,8 +68,8 @@ class MambaConfig:
     """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to FP16 cache or
-    shared FP8/INT8 ReplaySSM checkpoints.
+    """Enable stochastic rounding when writing SSM state to an FP16, INT8 or
+    FP8 cache.
     Uses random bits to unbias the rounding error, which can improve
     numerical stability for long sequences. The Triton backend requires
     compute capability 10.0 on CUDA or gfx950 on ROCm."""

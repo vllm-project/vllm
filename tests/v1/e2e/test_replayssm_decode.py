@@ -277,7 +277,7 @@ def _check_replayssm_prefix_caching(
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
     tensor_parallel_size: int = 1,
-    replayssm_state_dtype: str = "auto",
+    ssm_dtype: str | None = None,
 ):
     common = dict(
         max_model_len=8192,
@@ -306,17 +306,20 @@ def _check_replayssm_prefix_caching(
             enable_mamba_cache_stochastic_rounding=True,
             mamba_cache_philox_rounds=5,
         )
-    if replayssm_state_dtype != "auto":
-        common.update(
-            dtype="bfloat16", mamba_cache_dtype="bfloat16", mamba_ssm_cache_dtype="auto"
-        )
+    if ssm_dtype is not None:
+        common.update(dtype="bfloat16", mamba_cache_dtype="bfloat16")
     outputs = []
     for use_replayssm in (False, True):
         with vllm_runner(
             model_name,
             use_replayssm=use_replayssm,
             replayssm_buffer_len=16,
-            replayssm_state_dtype=replayssm_state_dtype if use_replayssm else "auto",
+            # The baseline keeps floating-point state; ReplaySSM uses ssm_dtype.
+            **(
+                {"mamba_ssm_cache_dtype": ssm_dtype}
+                if use_replayssm and ssm_dtype is not None
+                else {}
+            ),
             # Shared prompts must not populate the baseline's cache.
             enable_prefix_caching=use_replayssm,
             **common,
@@ -368,10 +371,10 @@ def _check_replayssm_prefix_caching(
 @requires_flashinfer_replayssm_materialization
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 @pytest.mark.parametrize(
-    ("use_ngram", "state_dtype"),
+    ("use_ngram", "ssm_dtype"),
     [
-        pytest.param(True, "auto", id="align-ngram-t4"),
-        pytest.param(False, "auto", id="align-stp"),
+        pytest.param(True, None, id="align-ngram-t4"),
+        pytest.param(False, None, id="align-stp"),
         pytest.param(
             False,
             "fp8",
@@ -385,13 +388,13 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
     vllm_runner,
     model_name,
     use_ngram: bool,
-    state_dtype: str,
+    ssm_dtype: str | None,
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
         speculative_method="ngram" if use_ngram else None,
-        replayssm_state_dtype=state_dtype,
+        ssm_dtype=ssm_dtype,
     )
 
 

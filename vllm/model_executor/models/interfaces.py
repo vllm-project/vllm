@@ -103,14 +103,8 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
     ]
-    | tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-    ]
+    # Mamba2 with an 8-bit SSM state scale page and/or ReplaySSM rings.
+    | tuple[tuple[int, ...], ...]
 )
 
 
