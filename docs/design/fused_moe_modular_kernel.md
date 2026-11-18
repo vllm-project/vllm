@@ -137,27 +137,35 @@ class FusedMoEKernelModularImpl:
         self.fused_experts = fused_experts
 
     def apply(self, hidden_states, w1, w2, topk_weights, topk_ids, ...):
+        # allocate final output
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
-        Aq, A_scale, _, _, _ = self.prepare_finalize.prepare(hidden_states, ...)
+        # quantize and dispatch inputs
+        a1q, *_ = self._prepare(hidden_states, ...)
 
-        workspace13_shape, workspace2_shape, output_shape = \
-            self.fused_experts.workspace_shapes(...)
+        # allocate expert workspaces and fused-expert output
+        workspace13, workspace2, fused_out, _ = self._allocate_buffers(...)
 
-        # allocate workspaces
-        workspace_dtype = self.fused_experts.workspace_dtype(...)
-        workspace_13 = torch.empty(workspace13_shape, dtype=workspace_dtype, ...)
-        workspace_2 = torch.empty(workspace2_shape, dtype=workspace_dtype, ...)
+        # execute fused_experts; apply writes into fused_out
+        deferred = self.fused_experts.apply(
+            output=fused_out,
+            hidden_states=a1q,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            ...,
+        )
 
-        # execute fused_experts
-        fe_out = self.fused_experts.apply(Aq, A_scale, workspace13, workspace2, ...)
+        # return early if finalization was deferred to a fused consumer
+        if deferred is not None:
+            return deferred
 
-        # war_impl is TopKWeightAndReduceNoOP if the fused_experts implementation
-        # performs the TopK Weight Application and Reduction itself.
-        war_impl = self.fused_experts.finalize_weight_and_reduce_impl()
-
-        output = self.prepare_finalize.finalize(fe_out, war_impl, ...)
-
-        return output
+        # apply top-k weights, reduce, and combine into output
+        return self._finalize(output, fused_out, ...)
 ```
 
 ## How-To
@@ -213,7 +221,7 @@ FusedMoEExpertsModular performs the core of the fused MoE operations. The variou
 
 Kernel selection has been refactored into an **oracle** system under [`fused_moe/oracle/`](../../vllm/model_executor/layers/fused_moe/oracle/). Each quantization type has its own oracle module (e.g., `fp8.py`, `nvfp4.py`, `unquantized.py`, `int8.py`, `mxfp4.py`, `mxfp8.py`, `int_wna16.py`, `w4a8.py`, `w4a8_int8.py`).
 
-The target interface is `MoEKernelOracle` (in `oracle/base.py`). Currently only `UnquantizedMoEKernelOracle` uses this class; the remaining oracles use equivalent module-level free functions following the same convention. The `MoEKernelOracle` abstract class defines:
+`MoEKernelOracle` (in `oracle/base.py`) defines the target shared interface. Migration is incremental, so class-based implementations and module-level compatibility functions currently coexist. The base class exposes the target operations without yet enforcing all of them as abstract methods:
 
 * `get_priority_backends(moe_config)` — returns platform-appropriate backends in priority order
 * `backend_to_kernel_cls(backend)` — maps a backend enum to its concrete `FusedMoEExperts` subclasses
