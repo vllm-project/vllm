@@ -618,6 +618,16 @@ def dummy_hf_overrides(
     ):
         update_dict["num_hidden_layers"] = num_hidden_layers
 
+    if text_config.model_type == "hy_v4_flash":
+        # Flash validates per-layer metadata on every update.
+        for name in ("layer_types", "mlp_layer_types", "indexer_types"):
+            update_dict[name] = getattr(text_config, name)[:num_hidden_layers]
+        update_dict["engram_layer_ids"] = [
+            layer
+            for layer in text_config.engram_layer_ids or ()
+            if layer <= num_hidden_layers
+        ]
+
     text_config.update(update_dict)
 
     # Keep per-layer metadata consistent with the reduced layer count.

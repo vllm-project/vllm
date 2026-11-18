@@ -335,6 +335,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct"),
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview"),
+    "HYV4FlashForCausalLM": _HfExamplesInfo("tencent/Hy4-flash"),
     # Internal checkpoint, not publicly available yet.
     "HYV4ForCausalLM": _HfExamplesInfo("tencent/Hy4-preview"),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
@@ -956,6 +957,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
+    ),
+    "HYV4FlashVLForConditionalGeneration": _HfExamplesInfo(
+        "tencent/Hy4-flash",
+        max_model_len=4096,
     ),
     "HYV4VLForConditionalGeneration": _HfExamplesInfo(
         "tencent/Hy4",
