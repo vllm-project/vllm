@@ -37,6 +37,8 @@ class ExtractHiddenStatesSpeculatorConfig(SpeculatorConfig):
             hf_config = {}
 
         spec.draft_model_config = copy.copy(spec.target_model_config)
+        # `ExtractHiddenStatesModel` is native, ignore the target's `model_impl`
+        spec.draft_model_config.model_impl = "auto"
         spec.draft_model_config.hf_config = ExtractHiddenStatesConfig(
             spec.draft_model_config.hf_config, **hf_config
         )

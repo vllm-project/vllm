@@ -15,5 +15,5 @@ _ASM = """  gpu.module @kernels {
 
 
 def test_kernel_name_inference_still_selects_gpu_func_symbols():
-    """The monitor names the kernel, not the ``launch`` wrapper, from this."""
+    """The monitor names the kernel, not the `launch` wrapper, from this."""
     assert jit_function._infer_kernel_names_from_asm(_ASM) == ["gdn_h_s4096"]

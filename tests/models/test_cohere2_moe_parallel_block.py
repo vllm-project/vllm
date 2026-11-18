@@ -4,7 +4,7 @@
 
 Covers the single TP all-reduce of attention + MLP, the residual flow with the
 fused add + RMSNorm, and the attention / MLP dual stream. Decoder layers are
-built without ``__init__`` around stub branches, so the tests need no
+built without `__init__` around stub branches, so the tests need no
 checkpoint or GPU; the side-stream race test needs CUDA and is skipped
 elsewhere.
 """
@@ -46,7 +46,7 @@ class _PassthroughNorm(torch.nn.Module):
 
 class _FusedAddNorm(torch.nn.Module):
     """vLLM RMSNorm interface with an identity normalization: like the fused
-    kernel, it adds into ``residual`` in place."""
+    kernel, it adds into `residual` in place."""
 
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None = None
@@ -102,7 +102,7 @@ def _make_moe_stub(
 
 
 def _record_all_reduce(monkeypatch, tp_size: int = 4) -> list[torch.Tensor]:
-    """Replace the TP all-reduce with a sum over ``tp_size`` identical ranks."""
+    """Replace the TP all-reduce with a sum over `tp_size` identical ranks."""
     inputs: list[torch.Tensor] = []
 
     def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
@@ -444,8 +444,8 @@ class _SlowStreamRecordingMLP(torch.nn.Module):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA streams")
 def test_fork_overlaps_on_side_stream_and_join_waits(monkeypatch) -> None:
-    """Eager decode-sized batch through ``layer(...)``: the registered
-    ``cohere2_mlp_fork`` / ``cohere2_mlp_join`` ops find the layer through the
+    """Eager decode-sized batch through `layer(...)`: the registered
+    `cohere2_mlp_fork` / `cohere2_mlp_join` ops find the layer through the
     forward context, the MLP runs on the side stream, and the join makes the
     main stream wait, so the result matches the serial path."""
     hidden_states = torch.randn(8, 64, device="cuda")

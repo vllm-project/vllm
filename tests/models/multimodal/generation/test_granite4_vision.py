@@ -53,7 +53,7 @@ def test_mixed_tile_counts_across_requests(
         max_model_len=8192,
         limit_mm_per_prompt={"image": 2},
         # Two engines run one after the other in this process.
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=0.9,
     )
 
     with vllm_runner(MODEL, **runner_kwargs) as vllm_model:
