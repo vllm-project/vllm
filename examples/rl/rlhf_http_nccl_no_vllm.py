@@ -147,10 +147,8 @@ def main() -> None:
         for n in names:
             broadcast(weights[n].contiguous())
     else:
-        # The worker's chunk layout: the tensors back to back, each starting
-        # 16-byte aligned, cut every buffer size (rounded down to 16); a
-        # tensor crossing a cut is split. A chunk's trailing padding is not
-        # sent, nor is a chunk of no bytes.
+        # The worker's layout: tensors 16-byte aligned in one byte stream,
+        # cut every buffer size; trailing padding is not sent.
         cap = args.packed_buffer_size_bytes // 16 * 16
         buf = torch.empty(cap, dtype=torch.uint8, device=device)
         used = 0  # bytes of the current chunk taken

@@ -648,8 +648,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         assert self.model_update_group is not None
         device = self.model_update_group.device
         if self.packed:
-            # Nothing is kept: receive each chunk into one buffer, unread. A
-            # rank that lags here stalls the whole broadcast ring.
+            # Nothing is kept: receive every chunk into one reused buffer.
             buf: torch.Tensor | None = None  # the first chunk is the largest
             for nbytes, _ in chunks(
                 ((m.shape, m.dtype) for m in meta), self.packed_buffer_size_bytes

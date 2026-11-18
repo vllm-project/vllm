@@ -38,8 +38,8 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 
     `packed` is a must-agree wire param: the trainer ships it here at the init
     handshake so the worker decodes with the same setting the trainer encoded
-    with. The consumer takes the chunk size from the size of the shared buffer,
-    so it does not need the buffer size (producer-only)."""
+    with. The buffer size is producer-only: the consumer reads the shared
+    buffer's size."""
 
     packed: bool = False
 

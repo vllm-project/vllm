@@ -28,8 +28,7 @@ def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, 
 
 # ── NCCL packed broadcast ──────────────────────────────────────────────
 
-# Every tensor starts at a multiple of this in the stream, so a whole
-# tensor in a chunk can be viewed as its dtype.
+# Tensor alignment in the stream, so a whole tensor can be viewed as its dtype.
 ALIGN = 16
 
 
@@ -55,17 +54,11 @@ class Chunk(NamedTuple):
 def chunks(
     specs: Iterable[tuple[Sequence[int], torch.dtype]], buffer_size: int
 ) -> Iterator[Chunk]:
-    """The chunks `specs` travel as, lazily. The tensors form one byte
-    stream, each starting `ALIGN`-aligned, cut every `buffer_size` bytes
-    (rounded down to `ALIGN`). A tensor that crosses a cut is split there.
-    The producer and every consumer derive it from the metadata alone, so
-    they always agree. A chunk's `nbytes` ends at its last byte of data:
-    alignment padding at its end is not sent.
+    """Lazily cut the `ALIGN`-aligned byte stream of `specs` into chunks of
+    `buffer_size` bytes, splitting tensors that cross a cut.
 
-    A chunk is yielded as soon as it is full (no room left past the
-    alignment), before the next spec is pulled: the specs pulled by then are
-    exactly those with bytes in it or before it. The last chunk can have no
-    bytes, when the stream ends on a cut and only empty tensors follow."""
+    Both sides derive it from metadata alone. A full chunk is yielded before
+    the next spec is pulled; trailing padding is not counted in `nbytes`."""
     limit = round_down(buffer_size, ALIGN)
     if limit <= 0:
         raise ValueError(
@@ -93,12 +86,8 @@ def chunks(
 def _pack_copies(
     buf: torch.Tensor | None, pieces: list[Piece], tensors: dict[int, torch.Tensor]
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    """The copies that pack a chunk's `pieces` into `buf`, as the
-    destinations and sources of one `_foreach_copy_`. `tensors` holds the
-    tensors by position; each is dropped at its last piece. A whole tensor
-    is copied as is (strided) into a view of its dtype, which its aligned
-    offset allows; a split one is replaced by its contiguous bytes at its
-    first piece, and its pieces are copied from those."""
+    """Destinations and sources of one `_foreach_copy_` packing `pieces` into
+    `buf`. Each tensor is dropped from `tensors` at its last piece."""
     dsts, srcs = [], []
     for p in pieces:
         t = tensors[p.position].detach()  # a parameter: copy without autograd
@@ -126,9 +115,6 @@ def packed_nccl_broadcast_producer(
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
-
-    Each chunk (`chunks`) is one `_foreach_copy_` of its pieces into one of
-    `num_buffers` reused buffers, then one broadcast.
 
     Args:
         iterator: Iterator of model parameters. Returns a tuple of (name, tensor)
@@ -173,8 +159,7 @@ def packed_nccl_broadcast_producer(
         streams[slot].wait_stream(caller_stream)
         with torch.cuda.stream(streams[slot]):
             torch._foreach_copy_(dsts, srcs)
-            # the sources may be freed once dropped: not reissued until
-            # the copies end
+            # keep dropped sources alive until the copies end
             for t in srcs:
                 t.record_stream(streams[slot])
             del dsts, srcs
@@ -197,9 +182,8 @@ def packed_nccl_broadcast_consumer(
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
-    A tensor inside one chunk is handed out as a view of the received buffer;
-    one split across chunks is copied into a tensor of its own, handed out
-    once its last bytes arrive.
+    Whole tensors are views of the received buffer; split ones are copied
+    into their own storage.
 
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
@@ -223,21 +207,16 @@ def packed_nccl_broadcast_consumer(
         torch.accelerator.current_device_index(), num_buffers + 1
     )
     caller_stream = torch.accelerator.current_stream()
-    # Chunks are received on their slot's stream, and all unpacking and
-    # callbacks run on the unpack stream, in chunk order: after the work the
-    # caller queued before this call, and each after its chunk's receive. So
-    # a callback may keep tensors and read them from a later callback, and a
-    # split tensor's copies are ordered.
+    # Unpacking and callbacks run in chunk order on one stream, so a callback
+    # may keep tensors and read them from a later callback.
     unpack_stream.wait_stream(caller_stream)
     unpacked: list[torch.Event | None] = [None] * num_buffers  # per slot
     joined: dict[int, torch.Tensor] = {}  # a split tensor, filled as it arrives
 
     for k, (chunk_nbytes, pieces) in enumerate(chunks(specs, buffer_size_bytes)):
         slot = k % num_buffers
-        # At most `num_buffers` chunks in flight: wait for this slot's
-        # previous chunk to be unpacked. Not a stream's synchronize(): on
-        # ROCm, streams can share a hardware queue, and synchronizing one
-        # stream then also waits for work queued later on the others.
+        # Wait for this slot's previous chunk. Not a stream synchronize(): on
+        # ROCm, streams can share a hardware queue.
         done = unpacked[slot]
         if done is not None:
             done.synchronize()
@@ -247,8 +226,7 @@ def packed_nccl_broadcast_consumer(
                 group.broadcast(packed, src=src)
             received = torch.Event()
             received.record()
-        # Read on the unpack stream, and on the caller's after return: once
-        # freed, not reissued before those reads end.
+        # Read on the unpack stream and by the caller after return.
         packed.record_stream(unpack_stream)
         packed.record_stream(caller_stream)
         with torch.cuda.stream(unpack_stream):
@@ -286,9 +264,7 @@ def packed_nccl_broadcast_consumer(
 
 @dataclass(slots=True)
 class PackedIpcChunk:
-    """One chunk of a packed IPC transfer (layout: `chunks`, with the IPC
-    buffer's size). It names the tensors that start in it, so each
-    tensor's metadata is sent once, with the chunk holding its first bytes."""
+    """One chunk of a packed IPC transfer, naming the tensors that start in it."""
 
     names: list[str]
     shapes: list[list[int]]
@@ -304,11 +280,8 @@ def packed_ipc_producer(
 ) -> Iterator[PackedIpcChunk]:
     """Pack tensors into a reusable IPC buffer and yield handles.
 
-    Allocates a single GPU buffer of `buffer_size_bytes` (rounded down to
-    `ALIGN`), the chunk size, and registers it for IPC once via
-    `reduce_tensor`. Each chunk's pieces are copied into it before the chunk
-    is yielded, so only one IPC-shared allocation exists for the lifetime of
-    the transfer. A tensor larger than the buffer is split across chunks.
+    One buffer of `buffer_size_bytes` is shared for IPC once and refilled per
+    chunk; a tensor larger than it is split across chunks.
 
     Callers **must** ensure the consumer has finished reading the buffer
     (e.g. `ray.get` returned) before resuming the generator for the
@@ -397,14 +370,8 @@ class PackedBufferImporter:
 class PackedIpcConsumer:
     """Receives one packed IPC transfer, a chunk per `receive` call.
 
-    Each chunk names the tensors that start in it (`PackedIpcChunk`), so
-    the specs arrive in order and the layout (`chunks`) is derived as they
-    come. Every piece is copied out of the shared buffer into its tensor's
-    own storage, allocated at its first piece, and the tensor is handed out
-    at its last. Copying is required: the producer reuses its buffer for the
-    next chunk, while callers may keep the tensors (layerwise reload buffers
-    them for replay). A tensor split across chunks persists across calls,
-    so use one consumer per transfer.
+    Tensors are copied out of the shared buffer, since the producer reuses it
+    and callers may keep them. Use one consumer per transfer.
 
     Args:
         importer: Import cache that must be shared across all chunks of one
@@ -421,10 +388,8 @@ class PackedIpcConsumer:
         self._tensors: dict[int, torch.Tensor] = {}  # filled as pieces arrive
 
     def _received_specs(self) -> Iterator[tuple[list[int], torch.dtype]]:
-        # The producer yields a chunk as soon as it is full, before pulling
-        # the next spec, so a full chunk's layout needs no spec past those
-        # received; running out of specs means the producer's iterator
-        # ended, and this is its last chunk.
+        # A full chunk needs no spec past those received; running out means
+        # this is the last chunk.
         i = 0
         while i < len(self._specs):
             yield self._specs[i]

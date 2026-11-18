@@ -104,9 +104,8 @@ def roundtrip(
     buffer_size_bytes: int,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> MockCommunicationGroup:
-    """Send `params` through the producer and consumer (twice: the second
-    time behind a slow fill of the destinations) and check every tensor
-    arrives intact. Returns the producer's group."""
+    """Round-trip `params` (again behind a slow fill) and check they arrive
+    intact. Returns the producer's group."""
     producer_group = MockCommunicationGroup()
     packed_nccl_broadcast_producer(
         iterator=iter(params),
@@ -149,9 +148,8 @@ def roundtrip(
         return fill_pending_at_load[0]
 
     consume(sleep=False)
-    # The host waits for a slot's previous chunk before reusing it, so the
-    # first load can only be queued before the fill ends when the first
-    # tensor is complete within the first `num_buffers` chunks.
+    # The first load can only overlap the fill if the first tensor completes
+    # within the first `num_buffers` chunks.
     layout = chunks(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
     first_load = next(
         k
@@ -915,9 +913,7 @@ class TestChunkedRoundtrip:
         assert [t.numel() for t in group.broadcasted_tensors] == [16, 16]
 
     def test_unpack_waits_for_each_receive(self):
-        """Chunks are unpacked on another stream than they are received on,
-        each only once its receive ends, even a slow one: here the second,
-        which completes a tensor split across both."""
+        """Each chunk is unpacked only after its (slow) receive ends."""
         big = torch.randn(8, 64, device="cuda")  # 2048 B: chunks of 1024, 1024
         group = _ChunkGroup(_packed_chunks([big], 1024), delay=1)
         got: list[torch.Tensor] = []
@@ -974,9 +970,8 @@ class TestChunkedRoundtrip:
 
 
 class _ChunkGroup:
-    """Fills each receive with the next pre-packed chunk, on the current
-    stream; optionally the one at index `delay` only after a GPU sleep,
-    recording `filled` once it lands."""
+    """Fills each receive with the next pre-packed chunk, the one at `delay`
+    after a GPU sleep."""
 
     def __init__(self, chunks: list[torch.Tensor], delay: int | None = None):
         self.chunks, self.delay, self.calls = chunks, delay, 0
