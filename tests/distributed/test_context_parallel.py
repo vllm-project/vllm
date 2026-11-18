@@ -64,7 +64,7 @@ class CPTestOptions(NamedTuple):
     attn_backend: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]

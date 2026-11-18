@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, get_args
 
 import torch
 
@@ -19,7 +19,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -247,6 +247,12 @@ class Platform:
             return False
 
         return cumem_available
+
+    @classmethod
+    def is_confidential_compute(cls) -> bool:
+        """Whether the device runs in a confidential-computing mode that makes
+        host<->device copies host-synchronous and host mappings incoherent."""
+        return False
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
@@ -707,7 +713,13 @@ class Platform:
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends keep that preference only when they all ask
+        for the same size and all accept it. Differing preferences keep the
+        default. If any backend rejects the default, the LCM search is
+        unchanged.
 
         `supports_block_size` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -725,6 +737,18 @@ class Platform:
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Take a preference only when every backend asks for that same
+                # size. The max of disagreeing preferences would move
+                # DeepSeek-V4.1 from 64 to the SWA preference of 256.
+                preferences = [
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                ]
+                chosen = preferences[0]
+                if all(p == chosen for p in preferences) and all(
+                    b.supports_block_size(chosen) for b in backend_classes
+                ):
+                    return chosen
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
@@ -855,7 +879,7 @@ class Platform:
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
-        from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+        from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -865,7 +889,7 @@ class Platform:
 
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
-            spec = FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -961,7 +985,7 @@ class Platform:
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
+            AttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
@@ -980,6 +1004,7 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
             from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
 
             attn_page_size_1_token = MLAAttentionSpec(
@@ -989,8 +1014,13 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
-                state_content_bytes=DS_MLA_STATE_CONTENT_BYTES.get(
-                    cache_config.cache_dtype
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
                 ),
             ).page_size_bytes
         elif (
@@ -998,7 +1028,7 @@ class Platform:
             or cache_config.cache_dtype == "ultraquant_4bit"
         ):
             # TurboQuant and UltraQuant have packed K|V layouts; the standard
-            # FullAttentionSpec formula over-sizes them and trips
+            # AttentionSpec formula over-sizes them and trips
             # unify_kv_cache_spec_page_size when all attention layers are
             # packed. With mixed skip+packed the skip layers still use the
             # standard layout — take max so mamba padding covers the largest
@@ -1017,7 +1047,7 @@ class Platform:
 
                 _pack_backend = TurboQuantAttentionBackend
 
-            tq_spec = FullAttentionSpec(
+            tq_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -1026,7 +1056,7 @@ class Platform:
             )
             tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
-                skip_page = FullAttentionSpec(
+                skip_page = AttentionSpec(
                     block_size=1,
                     num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                     head_size=model_config.get_head_size(),
@@ -1039,7 +1069,7 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
-            attn_spec = FullAttentionSpec(
+            attn_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -1051,6 +1081,35 @@ class Platform:
                 attn_page_size_1_token = backend_cls.customize_spec(
                     attn_spec
                 ).page_size_bytes
+                # A drafter whose attention layers hold more KV per token than the
+                # target's (e.g. an EAGLE head with more KV heads) sets the common
+                # page; size the block for it too (lcm, as for the skip layers
+                # above), or every Mamba page is later padded up to the drafter's.
+                spec_config = vllm_config.speculative_config
+                if (
+                    spec_config is not None
+                    and (draft_config := spec_config.draft_model_config) is not None
+                    and not draft_config.use_mla
+                ):
+                    draft_parallel_config = (
+                        spec_config.draft_parallel_config or parallel_config
+                    )
+                    draft_spec = AttentionSpec(
+                        block_size=1,
+                        num_kv_heads=draft_config.get_num_kv_heads(
+                            draft_parallel_config
+                        ),
+                        head_size=draft_config.get_head_size(),
+                        dtype=kv_cache_dtype,
+                        kv_quant_mode=kv_quant_mode,
+                    )
+                    draft_page_size_1_token = backend_cls.customize_spec(
+                        draft_spec
+                    ).page_size_bytes
+                    if draft_page_size_1_token > attn_page_size_1_token:
+                        attn_page_size_1_token = lcm(
+                            attn_page_size_1_token, draft_page_size_1_token
+                        )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -1167,11 +1226,6 @@ class Platform:
             )
 
     @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """Register custom KVCacheSpec class on current platform."""
-        pass
-
-    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """Verify whether the current platform supports the specified model
         architecture.
@@ -1263,6 +1317,58 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB policy and communicator.
+
+        Out-of-tree overrides validate their own policy and communicator names.
+        """
+        eplb_config = parallel_config.eplb_config
+        from vllm.config.parallel import EPLBCommunicatorBackend, EPLBPolicyOption
+
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
+        if eplb_config.policy not in get_args(EPLBPolicyOption):
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+        if eplb_config.communicator is None:
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
+                eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.communicator not in get_args(EPLBCommunicatorBackend):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
@@ -1282,6 +1388,17 @@ class Platform:
         """Whether the current platform should enable multi-stream overlap
         for the given aux streams and attention metadata."""
         return False
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Set up per-stream library state before dual batch overlap runs its
+        microbatches on `streams` from `num_threads` new threads."""
+        return
 
     @classmethod
     def supports_mx(cls) -> bool:
@@ -1366,6 +1483,15 @@ class Platform:
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
+
+    @classmethod
+    def reset_global_graph_pool(cls) -> None:
+        """Make the next `get_global_graph_pool` call create a new pool.
+
+        Call this once all graphs in the pool are destroyed. Their outputs can
+        keep the old pool allocated, and capturing into it would fail.
+        """
+        cls._global_graph_pool = None
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

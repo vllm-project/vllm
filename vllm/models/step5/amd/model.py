@@ -203,7 +203,7 @@ def _num_attention_heads(config: Step5Config, layer_type: str) -> int:
 
 
 def _rope_parameters(config: Step5Config, layer_idx: int) -> dict:
-    rope_parameters = dict(_rope_scaling(config, layer_idx) or {})
+    rope_parameters = dict(_layer_rope_parameters(config, layer_idx) or {})
     rope_parameters.setdefault("rope_type", "default")
     theta = config.rope_theta
     rope_parameters["rope_theta"] = (
@@ -336,12 +336,12 @@ def _is_sparse_layer(config: Step5Config, layer_idx: int) -> bool:
     )
 
 
-def _rope_scaling(config: Step5Config, layer_idx: int) -> dict | None:
+def _layer_rope_parameters(config: Step5Config, layer_idx: int) -> dict | None:
     yarn_only = getattr(config, "yarn_only_types", None)
     layer_types = _layer_types(config)
     if yarn_only and layer_types and layer_types[layer_idx] not in yarn_only:
         return None
-    return getattr(config, "rope_scaling", None)
+    return getattr(config, "rope_parameters", None)
 
 
 class Step5Attention(nn.Module):

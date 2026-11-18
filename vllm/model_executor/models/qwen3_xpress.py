@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor, _topk
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
@@ -179,6 +180,7 @@ class XPressRefinerHead(nn.Module):
                     buf["wg_t"],
                     buf["wu_t"],
                     buf["wd_t"],
+                    buf.get("wgu_t"),
                 )
                 bias_c = torch.bmm(w2c, lat0.view(rows, self.rank, 1)).view(N, B - 1, c)
                 # One launch for add + argmax + the candidate-to-vocab gather.
@@ -207,6 +209,7 @@ class XPressRefinerHead(nn.Module):
                 buf["wg_t"],
                 buf["wu_t"],
                 buf["wd_t"],
+                buf.get("wgu_t"),
             )
             torch.mm(lat.view(rows, self.rank), buf["w2_t"], out=bias)
             kernels.fused_add_argmax_to_blk(base, bias, ov, oi, blk)
@@ -233,6 +236,8 @@ class XPressRefinerHead(nn.Module):
             "wd_t": self.mlp_down.weight.detach().t().contiguous(),
             "w2_t": self.w2.weight.detach().t().contiguous(),
         }
+        if current_platform.is_rocm():
+            fused["wgu_t"] = torch.cat([fused["wg_t"], fused["wu_t"]], dim=1)
         if self._fused_buf is None:
             self._fused_buf = fused
         else:
@@ -296,9 +301,7 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = Qwen3XPressModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

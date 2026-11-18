@@ -4,7 +4,7 @@ meta:
   provider: "vLLM Semantic Router"
   description: "Decision 3.0's 0.8B decision model: answers typed questions (choice, yes / no, score) about text, JSON, images and videos with a probability for every option, without generating text."
   date_added: 2026-10-15
-  date_updated: 2026-10-15
+  date_updated: 2026-11-17
   tasks:
     - embedding
     - multimodal
@@ -21,8 +21,7 @@ meta:
 
 model:
   model_id: "vllm-sr/d3-lite"
-  min_vllm_version: "nightly"
-  nightly_required: true
+  min_vllm_version: "0.33.0"
   install:
     pip:
       command: |
@@ -30,13 +29,12 @@ model:
         source .venv/bin/activate
 
         # NVIDIA GPUs (CUDA)
-        uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+        uv pip install -U vllm --torch-backend=auto
 
         # AMD GPUs (ROCm 7.2; glibc 2.39 or newer, as on Ubuntu 24.04)
         sudo apt install -y libopenmpi3t64 libdw1t64
-        export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | grep -oP 'rocm\d+' | head -1 | sed 's/%2B/+/g')
-        uv pip install --pre vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} --index-strategy unsafe-best-match
-      note: "Decision 3.0 is on vLLM main since 2026-10-14 (vllm-project/vllm#61565) and not in a release yet: install a nightly."
+        uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/rocm/
+      note: "Decision 3.0 support (vllm-project/vllm#61565) ships in vLLM 0.33.0."
     docker: false
   architecture: dense
   parameter_count: "0.85B"
@@ -90,9 +88,7 @@ guide: |
   ## Prerequisites
 
   - **Hardware**: one GPU. The BF16 weights take 1.7 GB; vLLM reserves 92 % of the GPU's memory by default.
-  - **vLLM**: a nightly build. Decision 3.0 support ([vllm-project/vllm#61565](https://github.com/vllm-project/vllm/pull/61565))
-    is on vLLM main since 2026-10-14 and not in a release yet (the latest, v0.31.0, does not include it).
-    Every nightly built since 2026-10-15 includes it.
+  - **vLLM**: 0.33.0 or newer, the first release with Decision 3.0 support ([vllm-project/vllm#61565](https://github.com/vllm-project/vllm/pull/61565)).
   - **ROCm**: Python 3.12, glibc 2.39 or newer (for example Ubuntu 24.04), and the system libraries
     `libopenmpi3t64` and `libdw1t64`, which the ROCm wheels load at import.
 
@@ -101,12 +97,11 @@ guide: |
   source .venv/bin/activate
 
   # NVIDIA GPUs (CUDA)
-  uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install -U vllm --torch-backend=auto
 
   # AMD GPUs (ROCm 7.2; glibc 2.39 or newer, as on Ubuntu 24.04)
   sudo apt install -y libopenmpi3t64 libdw1t64
-  export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | grep -oP 'rocm\d+' | head -1 | sed 's/%2B/+/g')
-  uv pip install --pre vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} --index-strategy unsafe-best-match
+  uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/rocm/
   ```
 
   ## Launch
