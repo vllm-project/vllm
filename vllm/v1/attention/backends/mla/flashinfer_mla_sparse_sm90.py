@@ -51,17 +51,19 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     FlashInferMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    SparseMLAPrefillRoute,
     align_blocks_to_rows,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -428,6 +430,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
     metadata_cls = FlashInferMLASparseSM90Metadata
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
+
     def __init__(
         self,
         kv_cache_spec: "AttentionSpec",
@@ -439,7 +449,6 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        self._attention_layer = attention_layer
         impl = attention_layer.impl
         if not isinstance(impl, FlashInferMLASparseSM90Impl):
             raise TypeError(
@@ -533,9 +542,10 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # refreshed buffers.
         num_rows, kv_lens, exact = self._kv_lens_host(common_attn_metadata)
         # MHA prefills are removed from q before forward_mqa. Plan only the
-        # decode prefix in that case, using the same routing decision as MLA.
-        if metadata.num_prefills > 0 and self._attention_layer._use_sparse_mha(
-            metadata
+        # decode prefix in that case.
+        if (
+            metadata.prefill is not None
+            and metadata.prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]

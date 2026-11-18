@@ -58,6 +58,7 @@ def _add_request(
     model_state.model = FakeMRoPEModel()
     model_state.rope_state = rope_state
     model_state.prompt_embeds_state = None
+    model_state.mm_prefix_ranges = None
     model_state.add_request(0, new_req_data)
     return rope_state.prefill_positions
 

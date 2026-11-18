@@ -9,7 +9,7 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -25,9 +25,7 @@ pytestmark = pytest.mark.skipif(
 def test_cpu_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
     device = torch.device("cpu")
     num_blocks, num_layers = 4, 2
-    spec = FullAttentionSpec(
-        block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32
-    )
+    spec = AttentionSpec(block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32)
     raw = torch.ones(
         num_blocks * num_layers * spec.page_size_bytes,
         dtype=torch.int8,
@@ -63,7 +61,7 @@ def test_cpu_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
 def test_cpu_zeroes_every_kernel_block_in_a_logical_block():
     device = torch.device("cpu")
     num_blocks = 4
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=4, num_kv_heads=2, head_size=8, dtype=torch.bfloat16
     )
     raw = torch.ones(num_blocks * spec.page_size_bytes, dtype=torch.int8)
