@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import json
-import os
-import subprocess
-import sys
 from contextlib import nullcontext
-from pathlib import Path
+from functools import lru_cache
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +30,7 @@ from vllm.config.compilation import (
     decode_cudagraph_capture_shapes,
     prefill_cudagraph_capture_grid,
 )
+from vllm.config.utils import replace
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -47,6 +44,13 @@ from ..utils import create_new_process_for_each_test
 from . import silly_attention  # noqa: F401
 
 DEVICE_TYPE = current_platform.device_type
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import RocmPlatform as NativePlatform
+elif current_platform.is_xpu():
+    from vllm.platforms.xpu import XPUPlatform as NativePlatform
+else:
+    from vllm.platforms.cuda import CudaPlatform as NativePlatform
 
 
 def test_version():
@@ -596,177 +600,125 @@ def test_cudagraph_sizes_post_init(
 
 
 @pytest.fixture
-def capture_grid_platform(tmp_path):
-    """Load a real platform plugin before any vLLM configuration is imported."""
-    distribution = tmp_path / "capture_grid_test-0.0.dist-info"
-    distribution.mkdir()
-    (distribution / "METADATA").write_text(
-        "Metadata-Version: 2.1\nName: capture-grid-test\nVersion: 0.0\n"
-    )
-    (distribution / "entry_points.txt").write_text(
-        "[vllm.platform_plugins]\n"
-        "capture_grid_test = "
-        "vllm_add_dummy_platform.capture_grid_platform:register\n"
-    )
-    plugin_path = Path(__file__).parents[1] / "plugins/vllm_add_dummy_platform"
-
-    def resolve(strategy, settings, method="ngram"):
-        env = dict(os.environ)
-        env["VLLM_PLUGINS"] = "capture_grid_test"
-        env["VLLM_TEST_CAPTURE_DEFAULTS"] = strategy
-        env["PYTHONPATH"] = os.pathsep.join(
-            (str(tmp_path), str(plugin_path), env.get("PYTHONPATH", ""))
-        )
-        return subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                _CAPTURE_PLATFORM_CONFIG,
-                json.dumps(settings),
-                method,
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+def capture_platform_config(monkeypatch):
+    def resolve(platform, settings=None):
+        monkeypatch.setattr("vllm.config.vllm.current_platform", platform)
+        return EngineArgs(
+            model="facebook/opt-125m",
+            max_model_len=256,
+            max_num_seqs=16,
+            max_num_batched_tokens=256,
+            speculative_config={
+                "method": "draft_model",
+                "model": "facebook/opt-125m",
+                "num_speculative_tokens": 2,
+            },
+            compilation_config={
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                **(settings or {}),
+            },
+        ).create_engine_config()
 
     return resolve
 
 
-_CAPTURE_PLATFORM_CONFIG = """
-import json
-import sys
-
-from vllm.config.utils import replace
-from vllm.engine.arg_utils import EngineArgs
-from vllm.platforms import current_platform
-
-assert type(current_platform).__module__ == (
-    "vllm_add_dummy_platform.capture_grid_platform"
-)
-speculative_config = {"method": sys.argv[2], "num_speculative_tokens": 2}
-if sys.argv[2] == "ngram":
-    speculative_config.update(prompt_lookup_min=1, prompt_lookup_max=1)
-else:
-    speculative_config["model"] = "facebook/opt-125m"
-config = EngineArgs(
-    model="facebook/opt-125m",
-    max_model_len=256,
-    max_num_seqs=16,
-    max_num_batched_tokens=256,
-    speculative_config=speculative_config,
-    compilation_config={
-        "cudagraph_mode": "FULL_AND_PIECEWISE", **json.loads(sys.argv[1]),
-    },
-).create_engine_config()
-
-def sizes(config):
-    c = config.compilation_config
-    return {
-        "prefill": c.prefill_cudagraph_capture_token_sizes,
-        "decode": c.decode_cudagraph_capture_request_sizes,
-        "tokens": c.cudagraph_capture_sizes,
-        "maximum": c.max_cudagraph_capture_size,
-        "budget": c.max_decode_cudagraph_capture_tokens,
-        "draft": config.get_draft_decode_cudagraph_request_sizes(),
-        "varlen": config.get_varlen_decode_cudagraph_token_sizes(
-            config.uniform_decode_query_len
-        ),
-    }
-
-result = json.dumps(sizes(config), sort_keys=True)
-assert result == json.dumps(sizes(replace(config)), sort_keys=True)
-print("CAPTURE_RESULT=" + result)
-"""
-
-
-@pytest.mark.parametrize("strategy", ["legacy", "split"])
 @pytest.mark.parametrize(
-    "settings,expected_prefill,expected_decode",
+    "split,settings,prefill,decode,maximum,budget",
     [
-        ({}, None, None),
-        ({"cudagraph_capture_sizes": [1, 6, 12]}, [1, 6, 12], [1, 2, 4]),
+        (False, {}, [1, 2, 3, 4, 6, 8, 12, 16, 24], [1, 2, 3, 4, 6, 8], 24, None),
+        (True, {}, [1, 5, 17], [1, 3, 7], 21, 21),
         (
+            True,
+            {"cudagraph_capture_sizes": [1, 6, 12]},
+            [1, 6, 12],
+            [1, 2, 4],
+            16,
+            None,
+        ),
+        (
+            True,
             {
                 "prefill_cudagraph_capture_token_sizes": [2, 10],
                 "decode_cudagraph_capture_request_sizes": [2, 6],
             },
             [2, 10],
             [2, 6],
+            18,
+            21,
         ),
-        ({"prefill_cudagraph_capture_token_sizes": [2, 10]}, [2, 10], None),
     ],
+    ids=["shared-default", "split-default", "legacy-override", "split-override"],
 )
-def test_platform_capture_grids_preserve_explicit_settings(
-    capture_grid_platform, strategy, settings, expected_prefill, expected_decode
+def test_platform_capture_policy_preserves_users_and_drafter(
+    capture_platform_config, split, settings, prefill, decode, maximum, budget
 ):
-    """Platform grids reach real config resolution without overriding users."""
-    completed = capture_grid_platform(strategy, settings)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    result = json.loads(
-        next(
-            line.removeprefix("CAPTURE_RESULT=")
-            for line in completed.stdout.splitlines()
-            if line.startswith("CAPTURE_RESULT=")
-        )
-    )
-    prefill = expected_prefill or (
-        [1, 3, 5, 15, 24] if strategy == "legacy" else [1, 5, 17]
-    )
-    decode = expected_decode or ([1, 2, 5, 8] if strategy == "legacy" else [1, 3, 7])
-    assert result["prefill"] == prefill
-    assert result["decode"] == decode
-    assert result["tokens"] == sorted(set(prefill) | {n * 3 for n in decode})
-    assert result["maximum"] == max(result["tokens"])
-    assert result["budget"] == (
-        21
-        if strategy == "split" and "cudagraph_capture_sizes" not in settings
-        else None
-    )
-    assert result["varlen"] == sorted({1, 7, max(decode) * 3})
+    """Custom policy preserves user overrides and one-token draft coverage."""
+
+    class CapturePlatform(NativePlatform):
+        def get_cudagraph_capture_defaults(self, vllm_config):
+            from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+            if not split:
+                return CUDAGraphCaptureDefaults(legacy_max_tokens=24)
+            return CUDAGraphCaptureDefaults(
+                max_prefill_tokens=17,
+                max_decode_requests=7,
+                max_decode_tokens=21,
+            )
+
+        @classmethod
+        def get_prefill_cudagraph_capture_grid(cls, max_tokens, dense_head=False):
+            sizes = {1, 5, max_tokens}
+            if dense_head:
+                sizes.update(range(1, min(max_tokens, 32) + 1))
+            return sorted(s for s in sizes if 1 <= s <= max_tokens)
+
+        @classmethod
+        def get_decode_cudagraph_capture_grid(cls, max_requests):
+            return sorted({s for s in (1, 3, max_requests) if 1 <= s <= max_requests})
+
+    config = capture_platform_config(CapturePlatform(), settings)
+    cc = config.compilation_config
+    assert cc.prefill_cudagraph_capture_token_sizes == prefill
+    assert cc.decode_cudagraph_capture_request_sizes == decode
+    assert cc.max_decode_cudagraph_capture_tokens == budget
+    assert cc.max_cudagraph_capture_size == maximum
+    assert config.get_draft_decode_cudagraph_request_sizes() == [1, 3, 16]
+    assert 16 in cc.cudagraph_capture_sizes
+    resolved = copy.deepcopy({name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS})
+    cc = replace(config).compilation_config
+    assert resolved == {name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS}
 
 
-@pytest.mark.parametrize("strategy", ["legacy", "split"])
-def test_platform_capture_grid_reaches_one_token_drafter(
-    capture_grid_platform, strategy
-):
-    """A draft model's later steps use the platform's request grid up to N."""
-    completed = capture_grid_platform(strategy, {}, method="draft_model")
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    result = json.loads(
-        next(
-            line.removeprefix("CAPTURE_RESULT=")
-            for line in completed.stdout.splitlines()
-            if line.startswith("CAPTURE_RESULT=")
-        )
-    )
-    assert result["draft"] == [1, 3, 16]
-    assert 16 in result["tokens"]
+def test_platform_capture_grid_cannot_exceed_its_limit(capture_platform_config):
+    """Reject invalid platform sizes before graph buffers are allocated."""
+
+    class InvalidGridPlatform(NativePlatform):
+        @classmethod
+        def get_decode_cudagraph_capture_grid(cls, max_requests):
+            return [max_requests + 1]
+
+    with pytest.raises(ValueError, match="Platform CUDA graph sizes must be integers"):
+        capture_platform_config(InvalidGridPlatform())
 
 
-def test_platform_capture_grid_cannot_exceed_its_limit(capture_grid_platform):
-    """Reject an invalid platform grid before graph buffers are allocated."""
-    completed = capture_grid_platform("invalid", {})
-    assert completed.returncode != 0
-    assert "Platform CUDA graph sizes must be integers in [1, 7]" in (
-        completed.stdout + completed.stderr
-    )
-
-
-def test_sm100_capture_defaults_are_cuda_only(capture_grid_platform):
+def test_sm100_capture_defaults_are_cuda_only(capture_platform_config):
     """Capability 10 on ROCm must not select NVIDIA SM100 capture defaults."""
-    completed = capture_grid_platform("capability10", {})
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    result = json.loads(
-        next(
-            line.removeprefix("CAPTURE_RESULT=")
-            for line in completed.stdout.splitlines()
-            if line.startswith("CAPTURE_RESULT=")
-        )
+    from vllm.platforms.interface import DeviceCapability
+
+    class Capability10Platform(NativePlatform):
+        @classmethod
+        @lru_cache(maxsize=8)
+        def get_device_capability(cls, device_id=0):
+            return DeviceCapability(10, 0)
+
+    cc = capture_platform_config(Capability10Platform()).compilation_config
+    assert cc.max_decode_cudagraph_capture_tokens == (
+        8192 if current_platform.is_cuda() else None
     )
-    assert result["budget"] == (8192 if current_platform.is_cuda() else None)
-    assert max(result["prefill"]) == (256 if current_platform.is_cuda() else 96)
+    assert cc.max_prefill_cudagraph_capture_tokens == (
+        256 if current_platform.is_cuda() else 96
+    )
 
 
 def _mock_config_for_cudagraph_sizes(
