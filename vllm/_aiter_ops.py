@@ -1453,10 +1453,11 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     """
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
-    m = input_.shape[0]
-    stage = None
-    if m < 32 and not envs.VLLM_BATCH_INVARIANT:
-        stage = aiter_ar.mxfp4_fused_ar_rms_stage(input_)
+    stage = (
+        aiter_ar.mxfp4_fused_ar_rms_stage(input_)
+        if input_.shape[0] < 32 and not envs.VLLM_BATCH_INVARIANT
+        else None
+    )
     if stage is None:
         norm_out, residual_out = _rocm_aiter_fused_allreduce_rmsnorm_impl(
             input_, residual, norm_weight, epsilon, gemma_norm

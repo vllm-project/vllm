@@ -1719,10 +1719,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "aiter past PR #2823 to enable the trailing per-group "
                 "FP8 quant fusion."
             )
-        supports_mxfp4_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_supported()
-            and ca_comm.build_supports_gemma_mxfp4_quant()
-        )
+        supports_mxfp4_gemm = rocm_aiter_ops.is_asm_fp4_gemm_supported()
 
         for epsilon in [1e-5, 1e-6]:
             # The MXFP4 linear patterns span the AR+RMS subgraph plus the
