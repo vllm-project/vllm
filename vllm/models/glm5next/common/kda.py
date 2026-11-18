@@ -234,13 +234,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
-        # KDA projections remain BF16 because fp8 checkpoints omit their scales.
-        saved_quant_config = vllm_config.quant_config
-        try:
-            vllm_config.quant_config = None
-            super().__init__(config, vllm_config, prefix)
-        finally:
-            vllm_config.quant_config = saved_quant_config
+        super().__init__(config, vllm_config, prefix)
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads

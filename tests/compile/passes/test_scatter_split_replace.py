@@ -7,6 +7,7 @@ import torch.nn as nn
 
 import vllm
 from tests.compile.backend import TestBackend
+from vllm import _custom_ops as ops
 from vllm.compilation.passes.utility.scatter_split_replace import (
     ScatterSplitReplacementPass,
 )
@@ -19,7 +20,9 @@ DEVICE_TYPE = current_platform.device_type
 
 
 class ScatterSplitReplacementModel(nn.Module):
-    """Model with a rope+getitem+slice_scatter+split_with_sizes sequence."""
+    """Model with a rope+getitem+slice_scatter+split_with_sizes sequence.
+    Calls the in-place `_C.rotary_embedding` directly, since `RotaryEmbedding`
+    now lowers to the functional IR op that produces no slice_scatter."""
 
     def __init__(
         self,
@@ -29,6 +32,7 @@ class ScatterSplitReplacementModel(nn.Module):
         dtype: torch.dtype,
     ):
         super().__init__()
+        self.head_size = head_size
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
 
@@ -45,7 +49,14 @@ class ScatterSplitReplacementModel(nn.Module):
         # Create copy so inplace ops do not modify the original tensors
         qkv = qkv.clone()
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        ops.rotary_embedding(
+            positions,
+            q,
+            k,
+            self.head_size,
+            self.rotary_emb.cos_sin_cache,
+            True,
+        )
         q = q + 1
         k = k + 2
         v = v + 3
@@ -75,7 +86,6 @@ def test_scatter_split_replace(dtype):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["+rotary_embedding"],
         ),
     )
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -106,5 +116,6 @@ def test_scatter_split_replace(dtype):
         for eager, compiled in zip(result_eager, result_compiled):
             torch.testing.assert_close(eager, compiled)
 
-        assert backend.op_count(torch.ops.aten.slice_scatter.default) == 0
+        backend.check_before_ops([torch.ops.aten.slice_scatter.default])
+        assert backend.op_count(torch.ops._C.rotary_embedding.default) == 1
         assert backend.op_count(torch.ops.aten.split_with_sizes.default) == 1

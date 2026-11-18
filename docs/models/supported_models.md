@@ -22,6 +22,7 @@ Currently, the Transformers modeling backend works for the following:
 - Modalities: embedding models, language models, vision-language models and audio-language models
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
+- [Speculative decoding](../features/speculative_decoding/README.md) methods: EAGLE-3, DFlash, DFlash2, DSpark, XPress and MTP (for models following the Transformers MTP standard)
 
 If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers modeling backend, it will be compatible with the following features of vLLM:
 
@@ -585,6 +586,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
+| `Inkling2ForConditionalGeneration` | Inkling 2 Small | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Small`, `thinkingmachines/Inkling-2-Small-MXFP8` | ✅︎ | |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
 | `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
 | `InternS2MobiusForConditionalGeneration` | Intern-S2-Mobius | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S2-Mobius` | ✅︎ | ✅︎ |
@@ -662,6 +664,11 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR-2 | T + I<sup>+</sup> | `baidu/Unlimited-OCR-2` | | |
 
+On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
+varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
+Select the DASH path explicitly with
+`attention_config={"backend": "ROCM_AITER_FA"}` when needed. NVIDIA defaults
+remain unchanged.
 Unlimited-OCR-2's optional page-count guard respects sampling constraints, preserving EOS
 when it is the only remaining permitted token.
 
