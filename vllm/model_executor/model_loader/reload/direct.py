@@ -15,8 +15,11 @@ the record and is not checked itself), except those level 2 sleep preserves
 (`--sleep-preserve-parameter-names`: the update does not rewrite them).
 `finish` checks it before rerunning PWAL, which would otherwise reprocess the
 kept runtime bytes of a parameter the update left out.
-A `padding_fill_params()` parameter must also be delivered whole: `begin`
-zero-fills it.
+A parameter flagged `fill_on_reload` must also be delivered whole: `begin`
+zero-fills each such tensor this model owns whole, as its checkpoint-layout
+view (padding the loaders skip or fill, and a load plan skips loader fills);
+a tensor shared with another model (draft and target) is zeroed only by its
+owner's `begin`.
 """
 
 from collections.abc import Iterator
@@ -202,13 +205,6 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
-    # Before PWAL, which may pad moe_config; by name, so a dropped param isn't kept.
-    model._ckpt_padding_fill = [
-        (module, name)
-        for module in model.modules()
-        if hasattr(module, "padding_fill_params")
-        for name in module.padding_fill_params()
-    ]
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -297,10 +293,9 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
-    # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
-    for module, name in model._ckpt_padding_fill:
-        t = module._parameters.get(name)
-        if t is not None and _owned(model, t):
+        if getattr(t, "fill_on_reload", False):
+            # Reset padding: loaders skip it or fill it, and a load plan skips
+            # loader fills. Erases the checkpoint region too.
             t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
