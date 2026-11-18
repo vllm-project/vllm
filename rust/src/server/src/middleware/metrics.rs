@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Instant;
 
-use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::{MatchedPath, Request};
 use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
-use http_body::{Frame, SizeHint};
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
+
+use super::body_guard::hold_until_body_dropped;
 
 /// Endpoints that will be excluded from HTTP metrics tracking.
 ///
@@ -72,15 +70,7 @@ pub async fn track_http_metrics(req: Request, next: Next) -> Response {
     };
     let response = next.run(req).await;
     guard.status = status_group(response.status().as_u16());
-
-    let (parts, body) = response.into_parts();
-    Response::from_parts(
-        parts,
-        Body::new(HttpMetricsBody {
-            inner: body,
-            _guard: guard,
-        }),
-    )
+    hold_until_body_dropped(response, guard)
 }
 
 struct HttpMetricsGuard {
@@ -113,31 +103,6 @@ impl Drop for HttpMetricsGuard {
             .observe(elapsed);
 
         metrics.http_request_duration_highr_seconds.observe(elapsed);
-    }
-}
-
-struct HttpMetricsBody {
-    inner: Body,
-    _guard: HttpMetricsGuard,
-}
-
-impl HttpBody for HttpMetricsBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
     }
 }
 
