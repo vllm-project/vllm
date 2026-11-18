@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,13 +20,18 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
+    LinearBase,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -242,15 +250,10 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj); unlike the
+        # rest of the indexer, wk may be block-FP8 in the checkpoint
+        init_indexer_wk_weights_proj(
+            self, hidden_size, vllm_config.quant_config, prefix
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
@@ -304,8 +307,9 @@ class Indexer(nn.Module):
         )
 
     def process_weights_after_loading(self) -> None:
-        """Build the fp32 head-gate projection from the loaded weights; reloads
-        refill it in place."""
+        """Build the fused wk + weights_proj weight and the fp32 head-gate
+        projection from the loaded weights; reloads refill them in place."""
+        fuse_indexer_wk_weights_proj(self)
         wp = (
             self.wk_weights_proj.weight.data[self.head_dim :, :]
             .t()
@@ -438,30 +442,43 @@ class Glm5NextMLAAttention(nn.Module):
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
 
+        def proj(build: Callable[..., LinearBase]) -> LinearBase:
+            # Without a quant_config, the model runs these projections in
+            # BF16; a quantized checkpoint may store them in FP8.
+            if quant_config is not None:
+                return build(quant_config=quant_config)
+            return bf16_linear(build, vllm_config.quant_config)
+
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
-                proj_input_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
+            self.fused_qkv_a_proj = proj(
+                partial(
+                    DeepSeekV2FusedQkvAProjLinear,
+                    proj_input_size,
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                )
             )
         else:
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                proj_input_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            self.kv_a_proj_with_mqa = proj(
+                partial(
+                    ReplicatedLinear,
+                    proj_input_size,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.kv_a_proj_with_mqa",
+                )
             )
 
         if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj",
+            self.q_b_proj = proj(
+                partial(
+                    ColumnParallelLinear,
+                    self.q_lora_rank,
+                    self.num_heads * self.qk_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.q_b_proj",
+                )
             )
         else:
             self.q_proj = ColumnParallelLinear(
@@ -479,12 +496,14 @@ class Glm5NextMLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
+        self.o_proj = proj(
+            partial(
+                RowParallelLinear,
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                prefix=f"{prefix}.o_proj",
+            )
         )
 
         # `Glm5NextTextConfig` is NoPE-only and so declares no `rope_parameters`;
