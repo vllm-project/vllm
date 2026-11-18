@@ -19,7 +19,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
 use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
@@ -41,6 +41,9 @@ pub struct RenderConfig {
     pub hf_config: Option<ModelSource>,
     /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
     pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
@@ -147,6 +150,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -365,6 +369,7 @@ mod tests {
                 tokenizer: None,
                 hf_config: None,
                 skip_tokenizer_init: false,
+                hf_token: None,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 skip_model_name_validation: false,
