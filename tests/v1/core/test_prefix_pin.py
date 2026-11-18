@@ -12,14 +12,10 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheGroup
 from vllm.v1.request import Request
+
+from .utils import new_kv_cache_group, new_mla_spec, sliding_window_layer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -32,21 +28,21 @@ def _init_hash():
     init_none_hash(sha256)
 
 
-def _full_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _full_spec() -> AttentionSpec:
+    return AttentionSpec(
         block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
 
 
 def make_manager(
-    groups: list[KVCacheGroupSpec] | None = None,
+    groups: list[KVCacheGroup] | None = None,
     enable_caching: bool = True,
     use_eagle: bool = False,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[],
-        kv_cache_groups=groups or [KVCacheGroupSpec(["layer"], _full_spec())],
+        kv_cache_groups=groups or [new_kv_cache_group(["layer"], _full_spec())],
     )
     return KVCacheManager(
         config,
@@ -297,20 +293,14 @@ def test_reset_prefix_cache_waits_for_pins_and_forgets_evictions():
 
 
 def test_unsupported_layouts_pin_nothing():
-    sliding = SlidingWindowSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=2 * BLOCK_SIZE,
-    )
+    sliding = sliding_window_layer(_full_spec(), 2 * BLOCK_SIZE)
     hybrid = make_manager(
         [
-            KVCacheGroupSpec(["full"], _full_spec()),
-            KVCacheGroupSpec(["swa"], sliding),
+            new_kv_cache_group(["full"], _full_spec()),
+            new_kv_cache_group(["swa"], sliding),
         ]
     )
-    window_only = make_manager([KVCacheGroupSpec(["swa"], sliding)])
+    window_only = make_manager([new_kv_cache_group(["swa"], sliding)])
     uncached = make_manager(enable_caching=False)
     hashes = make_request("a", tokens(2)).block_hashes
 
@@ -325,10 +315,8 @@ def test_unsupported_layouts_pin_nothing():
 
 
 def test_mla_is_supported():
-    mla = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32
-    )
-    manager = make_manager([KVCacheGroupSpec(["mla"], mla)])
+    mla = new_mla_spec(block_size=BLOCK_SIZE)
+    manager = make_manager([new_kv_cache_group(["mla"], mla)])
     assert manager.supports_prefix_pinning()
     cached = make_request("a", tokens(2))
     compute_and_free(manager, cached)

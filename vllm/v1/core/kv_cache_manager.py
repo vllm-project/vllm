@@ -30,9 +30,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    MLAAttentionSpec,
+    KVCacheSpecKind,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -279,10 +278,11 @@ class KVCacheManager:
         coordinator = self.coordinator
         self._supports_prefix_pinning = (
             isinstance(coordinator, UnitaryKVCacheCoordinator)
-            and all(
-                type(spec) in (FullAttentionSpec, MLAAttentionSpec)
-                for spec in kv_cache_config.kv_cache_groups[0].distinct_specs
+            and get_kv_cache_kind(
+                kv_cache_config.kv_cache_groups[0].manager_config,
+                kv_cache_config.kv_cache_groups[0].distinct_specs,
             )
+            in (KVCacheSpecKind.FULL_ATTENTION, KVCacheSpecKind.MLA_ATTENTION)
             and type(coordinator.single_type_managers[0]) is FullAttentionManager
             and coordinator.dcp_world_size == 1
             and coordinator.pcp_world_size == 1

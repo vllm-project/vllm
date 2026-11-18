@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NIXL peer lookup: the record a rank reports on `/kv_event_sources`."""
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,10 @@ def make_reporting_scheduler(**overrides):
     )
     sched.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="NixlConnector")
     sched._handshake_data = {}
+    # Do not bind a real listener socket: the thread only signals that it is ready.
+    sched._nixl_handshake_listener_t = None
+    sched._stop_event = threading.Event()
+    sched._nixl_handshake_listener = lambda _data, ready, *_: ready.set()
     sched.set_xfer_handshake_metadata({(0, 0): NixlHandshakePayload(COMPAT, b"x")})
     return sched
 
