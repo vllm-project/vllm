@@ -123,13 +123,6 @@ def _rocm_process_vram_bytes() -> int:
     return sum(vram_by_client.values())
 
 
-GPU_MEMORY_KINDS = (
-    ("allocated", "process")
-    if current_platform.is_rocm()
-    else ("allocated", "reserved")
-)
-
-
 def _gpu_memory_bytes() -> tuple[int, int]:
     # Process-local: device-wide used memory also counts other processes on
     # the GPU, and even a bare HIP context adds 2 MiB to it.
@@ -207,7 +200,7 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
             post_warmup_cpu_peak_samples.append(cpu_peak)
 
     gpu_threshold = GPU_GROWTH_THRESHOLD_MIB * MiB_bytes
-    for i, kind in enumerate(GPU_MEMORY_KINDS):
+    for i, kind in enumerate(("allocated", "reserved")):
         samples = [sample[i] for sample in post_warmup_gpu_samples]
         gpu_growth = max(samples) - warmup_gpu[i]
 
