@@ -813,12 +813,13 @@ class MaskedDiffusionSampler:
         self,
         logits_3d: torch.Tensor,
         canvas_rows: torch.Tensor,
+        wide_rows_np: np.ndarray,
         slots_np: np.ndarray,
         valid_len_np: np.ndarray,
         keep: torch.Tensor,
         num_logprobs: int,
     ) -> None:
-        """Compute the top-k of the wide requests that converged this step.
+        """Compute the top-k of the wide decode rows that converged this step.
 
         A per-slot stash for them would hold [CL, vocab] rows, and a top-k
         over all their rows every step is a full sort. So read back which of
@@ -826,7 +827,7 @@ class MaskedDiffusionSampler:
         """
         with gpu_sync_allowed():
             converged_np = keep.cpu().numpy()
-        for i in np.flatnonzero(converged_np).tolist():
+        for i in wide_rows_np[converged_np[wide_rows_np]].tolist():
             k = int(valid_len_np[i])
             self._wide_logprobs[int(slots_np[i])] = compute_topk_scores(
                 logits_3d[i, :k], num_logprobs, canvas_rows[i, :k]
@@ -1113,27 +1114,30 @@ class MaskedDiffusionSampler:
             if len(topk_rows_np) > 0:
                 # Which slots converged is only known on the device, so the
                 # stash write is masked instead of picked on the host.
-                topk_rows = async_tensor_h2d(
-                    topk_rows_np.astype(np.int64), device=device
-                )
+                topk_logits, topk_slots, keep = logits_3d, decode_slots, just_converged
+                if len(topk_rows_np) < num_decode:
+                    topk_rows = async_tensor_h2d(
+                        topk_rows_np.astype(np.int64), device=device
+                    )
+                    topk_logits = logits_3d[topk_rows]
+                    topk_slots = decode_slots[topk_rows]
+                    keep = just_converged[topk_rows]
                 self._stash_topk_logprobs(
-                    logits_3d[topk_rows],
-                    states.canvas[decode_slots[topk_rows]],
-                    decode_slots[topk_rows],
-                    just_converged[topk_rows],
+                    topk_logits,
+                    states.canvas[topk_slots],
+                    topk_slots,
+                    keep,
                     num_logprobs,
                 )
             lp_rows_np = np.flatnonzero(dec_num_logprobs_np >= 0)
             if len(wide_rows_np) > 0:
-                wide_rows = async_tensor_h2d(
-                    wide_rows_np.astype(np.int64), device=device
-                )
                 self._pend_wide_logprobs(
-                    logits_3d[wide_rows],
-                    states.canvas[decode_slots[wide_rows]],
-                    decode_slots_np[wide_rows_np],
-                    valid_canvas_len_np[wide_rows_np],
-                    just_converged[wide_rows],
+                    logits_3d,
+                    states.canvas[decode_slots],
+                    wide_rows_np,
+                    decode_slots_np,
+                    valid_canvas_len_np,
+                    just_converged,
                     int(dec_num_logprobs_np.max()),
                 )
                 logprobs_tensors = self._emitted_logprobs(
