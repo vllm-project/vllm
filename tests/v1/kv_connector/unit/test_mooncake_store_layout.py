@@ -239,6 +239,115 @@ def test_gdn_store_shard_segments_preserve_projection_boundaries(
     assert [addr - cache.data_ptr() for addr in shard1_addrs] == shard1_offsets
 
 
+@pytest.mark.parametrize("conv_layout", ["DS", "SD"])
+@pytest.mark.parametrize(
+    ("tp_sizes", "projections", "state_shape", "columns", "heads", "segment_sizes"),
+    [
+        pytest.param(
+            (1, 2),
+            (1, 1, 4),
+            (4, 1, 1),
+            ((0, 1, 2, 3), (0, 1, 4, 5)),
+            ((0, 1), (2, 3)),
+            ([3, 3, 6, 2], [1, 1, 2] * 3 + [2]),
+            id="replicated-qk",
+        ),
+        pytest.param(
+            (4, 4),
+            (2, 2, 2),
+            (1, 2, 2),
+            ((0, 1, 2, 3, 4, 5),),
+            ((0,),),
+            ([18, 4], [18, 4]),
+            id="single-shard",
+        ),
+        pytest.param(
+            (2, 4),
+            (4, 4, 4),
+            (2, 2, 2),
+            ((0, 1, 4, 5, 8, 9), (2, 3, 6, 7, 10, 11)),
+            ((0,), (1,)),
+            ([6, 6, 6, 4], [2] * 9 + [4]),
+            id="partitioned-qkv",
+        ),
+    ],
+)
+def test_gdn_state_views_preserve_projection_payloads(
+    monkeypatch,
+    conv_layout,
+    tp_sizes,
+    projections,
+    state_shape,
+    columns,
+    heads,
+    segment_sizes,
+):
+    """Replicated Q/K must not make shard templates ragged; padding stays local."""
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", conv_layout)
+    conv_shape = (sum(projections), 3)
+    axis = 0
+    if conv_layout == "SD":
+        conv_shape = conv_shape[::-1]
+        axis = 1
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(conv_shape, state_shape),
+        dtypes=(torch.uint8, torch.uint8),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    layout = MambaStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        block_size=16,
+        hash_block_size=16,
+        local_tp_size=tp_sizes[0],
+        store_tp_size=tp_sizes[1],
+        tp_rank=0,
+        layer_specs=(spec,),
+    )
+    conv_bytes = torch.Size(conv_shape).numel()
+    state_bytes = torch.Size(state_shape).numel()
+    conv_storage = torch.full((3, conv_bytes + 5), 211, dtype=torch.uint8)
+    state_storage = torch.full((3, state_bytes + 7), 223, dtype=torch.uint8)
+    conv = conv_storage[:, :conv_bytes].view(3, *conv_shape)
+    state = state_storage[:, :state_bytes].view(3, *state_shape)
+    conv.copy_(torch.arange(conv.numel(), dtype=torch.uint8).view_as(conv))
+    state.copy_(100 + torch.arange(state.numel(), dtype=torch.uint8).view_as(state))
+    original_conv, original_state = conv_storage.clone(), state_storage.clone()
+
+    layout.register_state_views(
+        [(conv, projections, axis), (state, (state_shape[0],), 0)], 3
+    )
+    addrs, sizes, selected_blocks = layout.prepare_values(
+        [(0, 16)] * len(columns), [1], layout.local_shard_ids
+    )
+    assert selected_blocks == [1] * len(columns)
+    assert sizes == [segment_sizes[axis]] * len(columns)
+    for shard_addrs, shard_sizes, cols, shard_heads in zip(
+        addrs, sizes, columns, heads, strict=True
+    ):
+        conv_storage.copy_(original_conv)
+        state_storage.copy_(original_state)
+        selected_conv = conv[1][list(cols), :] if axis == 0 else conv[1][:, list(cols)]
+        expected = bytes(selected_conv.flatten().tolist())
+        expected += bytes(state[1][list(shard_heads)].flatten().tolist())
+        assert _read_segments(shard_addrs, shard_sizes) == expected
+
+        expected_conv, expected_state = original_conv.clone(), original_state.clone()
+        expected_conv_view = expected_conv[:, :conv_bytes].view_as(conv)
+        if axis == 0:
+            expected_conv_view[1, list(cols), :] = 239
+        else:
+            expected_conv_view[1, :, list(cols)] = 239
+        expected_state[:, :state_bytes].view_as(state)[1, list(shard_heads)] = 239
+        for addr, size in zip(shard_addrs, shard_sizes, strict=True):
+            ctypes.memset(addr, 239, size)
+        assert torch.equal(conv_storage, expected_conv)
+        assert torch.equal(state_storage, expected_state)
+
+
 def _rank_local_layout(num_regions: int, num_block_lens: int) -> RankLocalStoreLayout:
     metadata = KeyMetadata("test-model", 1, 0, 0, 0)
     layout = RankLocalStoreLayout(metadata, BLOCK_SIZE, BLOCK_SIZE)
