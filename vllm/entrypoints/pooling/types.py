@@ -3,19 +3,30 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
+from typing import (
+    Any,
+    Generic,
+    NotRequired,
+    TypeAlias,
+    TypedDict,
+    TypeGuard,
+    TypeVar,
+    cast,
+)
 
 from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
-from vllm.renderers.chat_utils import (
+from vllm.renderers.chat_utils.types import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    OpenAIHarmonyMessage,
 )
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
@@ -81,6 +92,10 @@ AnyPoolingResponse: TypeAlias = (
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 
+ChatType: TypeAlias = list[ChatCompletionMessageParam]
+PoolingInput: TypeAlias = PromptType | ChatType
+
+
 @dataclass(kw_only=True, slots=True)
 class ChunkedEmbeddingMetadata:
     prompt_index: int
@@ -133,15 +148,13 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     late_interaction_doc_keys: list[str] | None = None
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: int | Sequence[int] | None
-    late_chunking: list[LateChunkingSlot | None] = field(
-        default_factory=list, kw_only=True
-    )
+    late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -221,3 +234,56 @@ class PoolingEngineInput(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
+
+
+def _is_chat_message(item: Any) -> bool:
+    # harmony messages are pydantic models, not dicts
+    if OpenAIHarmonyMessage is not None and isinstance(item, OpenAIHarmonyMessage):
+        return True
+    # OpenAI / Custom chat messages are TypedDicts (plain dicts at runtime)
+    return isinstance(item, dict) and "role" in item
+
+
+def is_conversations(prompt_or_conversations: PoolingInput) -> TypeGuard[ChatType]:
+    """Return True if a single PoolingInput is a chat conversation."""
+    if not isinstance(prompt_or_conversations, list):
+        return False
+    if len(prompt_or_conversations) == 0:
+        return False
+    return all(_is_chat_message(x) for x in prompt_or_conversations)
+
+
+def input_to_seq(
+    input_or_inputs: PoolingInput | Sequence[PoolingInput],
+) -> Sequence[PoolingInput]:
+    # Treat non-Sequence, str, bytes, and dict as a single prompt.
+    if not isinstance(input_or_inputs, Sequence) or isinstance(
+        input_or_inputs, (str, bytes, dict)
+    ):
+        return [cast(PoolingInput, input_or_inputs)]
+
+    # Empty sequence: nothing to normalize.
+    if len(input_or_inputs) == 0:
+        return input_or_inputs  # type: ignore[return-value]
+
+    # list[int] is a single tokenized prompt. A sequence that mixes ints with
+    # other element types is neither a single tokenized prompt nor a valid
+    # batch of prompts, so reject it instead of leaking it downstream.
+    has_int = any(isinstance(x, int) for x in input_or_inputs)
+    all_int = all(isinstance(x, int) for x in input_or_inputs)
+    if has_int and not all_int:
+        raise VLLMValidationError(
+            "Cannot mix token ids with other element types in one input; "
+            "expected list[int] (a single tokenized prompt) or a sequence of "
+            "prompts. If you meant a batch, wrap each prompt explicitly: "
+            "e.g. [[1, 2], [3, 4]]."
+        )
+    if all_int:
+        return [input_or_inputs]  # type: ignore[list-item]
+
+    # A sequence of chat messages is a single conversation, not a batch of inputs.
+    if all(_is_chat_message(x) for x in input_or_inputs):
+        return [input_or_inputs]  # type: ignore[list-item]
+
+    # Any other Sequence is already a batch of prompts / conversations.
+    return input_or_inputs  # type: ignore[return-value]
