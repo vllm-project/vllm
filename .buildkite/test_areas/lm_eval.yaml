@@ -1446,7 +1446,7 @@ steps:
 
 - label: ":nvidia: (DGX Spark) [Nightly] GSM8K Eval (NVFP4 MTP)"
   key: gsm8k-eval-nvfp4-mtp-dgx-spark
-  timeout_in_minutes: 45
+  timeout_in_minutes: 40
   device: dgx-spark
   optional: true
   num_devices: 1
