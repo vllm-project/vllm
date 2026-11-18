@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import os
 
 import torch
@@ -8,6 +7,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
@@ -196,8 +196,13 @@ class XPUWorker(Worker):
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
+        # Collect garbage, then freeze the startup heap so that later gc.collect()
+        # calls (weight loading, memory profiling, KV cache sizing) skip it, as
+        # Worker.init_device does. compile_or_warm_up_model unfreezes it and
+        # refreezes the final heap.
+        freeze_gc_heap()
+
         # Now take memory snapshot after NCCL is initialized
-        gc.collect()
         torch.accelerator.empty_cache()
 
         # take current memory snapshot
