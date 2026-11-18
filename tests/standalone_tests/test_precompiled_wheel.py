@@ -6,8 +6,6 @@
 import ast
 import logging
 import os
-import re
-import shutil
 import subprocess
 import sysconfig
 import tempfile
@@ -27,6 +25,13 @@ nodes = [
     node
     for node in ast.parse(setup_path.read_text()).body
     if (
+        isinstance(node, ast.Import)
+        and all(
+            alias.name in {"os", "re", "shutil", "subprocess", "sysconfig"}
+            for alias in node.names
+        )
+    )
+    or (
         isinstance(node, (ast.ClassDef, ast.FunctionDef))
         and node.name
         in {
@@ -46,11 +51,6 @@ nodes = [
     )
 ]
 namespace: dict[str, Any] = {
-    "subprocess": subprocess,
-    "os": os,
-    "re": re,
-    "shutil": shutil,
-    "sysconfig": sysconfig,
     "Path": Path,
     "logger": logging.getLogger("setup"),
     "envs": SimpleNamespace(VLLM_DOCKER_BUILD_CONTEXT=False, VLLM_USE_PRECOMPILED=True),
