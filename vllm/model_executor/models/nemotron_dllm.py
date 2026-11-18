@@ -32,6 +32,8 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
@@ -40,7 +42,10 @@ from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
+from vllm.v1.worker.gpu.sample.logits_processor import (
+    LogitsProcessor as LogitsProcessorV2,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
@@ -48,6 +53,28 @@ from vllm.v1.worker.gpu.states import RequestState
 from .interfaces import SupportsPP, SupportsQuant
 
 logger = init_logger(__name__)
+
+
+class NemotronDiffusionRequestValidator(LogitsProcessorV2):
+    """Rejects request options that masked diffusion cannot honor.
+
+    The model config registers this processor for masked diffusion; it only
+    checks requests at admission and leaves logits unchanged.
+    """
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        if sampling_params.logprob_token_ids is not None:
+            raise ValueError(
+                "logprob_token_ids is not supported with Nemotron masked "
+                "diffusion; use logprobs."
+            )
+
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        return False
+
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        return logits
 
 
 def _hf_yarn_get_mscale(scale: float, mscale: float = 1.0) -> float:
@@ -232,7 +259,7 @@ def _filter_sampling_logits(
 ) -> torch.Tensor:
     """Select sampling candidates after temperature scaling, excluding masks."""
     logits = logits.float().clone()
-    logits[:, mask_token_id] = float("-inf")
+    logits[:, mask_token_id].fill_(-torch.inf)
     temperatures = torch.where(temperatures > 0, temperatures, 1.0)
     filtered = apply_top_k_top_p(logits / temperatures[:, None], top_k, top_p)
     # Retain unscaled logits for the confidence-based reveal policy.
@@ -268,12 +295,18 @@ def _compiled_masked_step(
     leftmost: bool,
     threshold_mode: bool,
     log_threshold: float,
+    # Top-k scores at reveal [max_num_reqs, CL, >=num_topk] (modified in-place)
+    reveal_topk_ids: torch.Tensor | None = None,
+    reveal_topk_logprobs: torch.Tensor | None = None,
+    num_topk: int = 0,
+    split_after_sampling: bool = False,
 ) -> torch.Tensor:
     """Update absorbing masked-token state and emit completed blocks.
 
     Confidence uses the selected token's probability before temperature scaling.
-    Capture token logprobs when positions are revealed, then refresh causal KV
-    on the following commit step. Return logits for top-k introspection.
+    Capture the token's logprob and rank, and with `num_topk > 0` the top-k
+    logprobs, when positions are revealed, then refresh causal KV on the
+    following commit step. Return the sampling logits.
     """
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
@@ -300,6 +333,11 @@ def _compiled_masked_step(
         u = torch.rand_like(logits_3d).clamp_min(1e-20)
         gumbel = -torch.log(-torch.log(u))
         x0 = (logits_3d + req_temps[:, None, None] * gumbel).argmax(dim=-1)
+        if split_after_sampling:
+            # SM100 only: keep the random argmax separate from the downstream
+            # gather/reductions. Inductor otherwise emits an out-of-scope
+            # reduction temporary for the checkpoint vocabulary there.
+            torch._dynamo.graph_break()
     else:
         x0 = logits_3d.argmax(dim=-1)  # [num_decode, CL]
     chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
@@ -342,11 +380,14 @@ def _compiled_masked_step(
         # Greedy requests report unscaled model logprobs, as in AR sampling.
         row_temp = torch.where(req_temps > 0, req_temps, 1.0)
         sample_logits = logits_3d / row_temp[:, None, None]
+        log_norm = sample_logits.logsumexp(dim=-1, keepdim=True)
         chosen_lp = sample_logits.gather(-1, x0.unsqueeze(-1)).squeeze(
             -1
-        ) - sample_logits.logsumexp(dim=-1)
+        ) - log_norm.squeeze(-1)
         chosen_rank = (
-            (logits_3d >= chosen_logits.unsqueeze(-1)).sum(dim=-1).to(torch.int32)
+            (logits_3d >= chosen_logits.unsqueeze(-1))
+            .sum(dim=-1)
+            .to(unmask_ranks.dtype)
         )
         write = transfer & is_denoise.unsqueeze(1)
         unmask_logprobs[decode_slots] = torch.where(
@@ -355,6 +396,20 @@ def _compiled_masked_step(
         unmask_ranks[decode_slots] = torch.where(
             write, chosen_rank, unmask_ranks[decode_slots]
         )
+        if num_topk > 0:
+            assert reveal_topk_ids is not None and reveal_topk_logprobs is not None
+            # Top-k of the same distribution, for every decode row at once;
+            # only positions revealed this step overwrite their entries.
+            topk_scores, topk_ids = sample_logits.topk(num_topk, dim=-1)
+            topk_write = write.unsqueeze(-1)
+            reveal_topk_logprobs[decode_slots, :, :num_topk] = torch.where(
+                topk_write,
+                topk_scores - log_norm,
+                reveal_topk_logprobs[decode_slots, :, :num_topk],
+            )
+            reveal_topk_ids[decode_slots, :, :num_topk] = torch.where(
+                topk_write, topk_ids, reveal_topk_ids[decode_slots, :, :num_topk]
+            )
 
     # ---- Absorbing-state update (denoise rows only) ----
     new_canvas = torch.where(transfer & is_denoise.unsqueeze(1), x0, cur_canvas)
@@ -415,6 +470,7 @@ class NemotronLabsDiffusionRequestStates:
         mask_token_id: int,
         max_denoising_steps: int,
         device: torch.device,
+        max_num_logprobs: int = 0,
     ):
         self.max_num_reqs = max_num_reqs
         self.canvas_length = canvas_length
@@ -441,22 +497,45 @@ class NemotronLabsDiffusionRequestStates:
             max_num_reqs, canvas_length, dtype=torch.float32, device=device
         )
         self.unmask_ranks = torch.zeros(
-            max_num_reqs, canvas_length, dtype=torch.int32, device=device
+            max_num_reqs, canvas_length, dtype=torch.int64, device=device
+        )
+        # Top-k token ids/logprobs of the same distribution, for requests
+        # with logprobs > 0 (up to max_logprobs).
+        self.max_num_logprobs = max_num_logprobs
+        self.reveal_topk_ids = torch.zeros(
+            max_num_reqs,
+            canvas_length,
+            max_num_logprobs,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.reveal_topk_logprobs = torch.full(
+            (max_num_reqs, canvas_length, max_num_logprobs),
+            float("-inf"),
+            dtype=torch.float32,
+            device=device,
         )
 
+    # State is reset with in-place fills: assigning a Python scalar through
+    # `__setitem__` copies it from the host and synchronizes with the GPU.
     def init_canvas(self, slot_indices) -> None:
         """Reset the canvas to all-mask for the given slots."""
-        self.canvas[slot_indices] = self.mask_token_id
+        if isinstance(slot_indices, int):
+            self.canvas[slot_indices : slot_indices + 1].fill_(self.mask_token_id)
+        else:
+            self.canvas.index_fill_(0, slot_indices, self.mask_token_id)
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
-        self.canvas[slot_idx] = self.mask_token_id
-        self.step[slot_idx] = 0
-        self.unmask_logprobs[slot_idx] = 0.0
-        self.unmask_ranks[slot_idx] = 0
+        self.is_encoder_phase[slot_idx : slot_idx + 1].fill_(True)
+        self.init_canvas(slot_idx)
+        self.step[slot_idx : slot_idx + 1].zero_()
+        self.unmask_logprobs[slot_idx : slot_idx + 1].zero_()
+        self.unmask_ranks[slot_idx : slot_idx + 1].zero_()
+        self.reveal_topk_ids[slot_idx : slot_idx + 1].zero_()
+        self.reveal_topk_logprobs[slot_idx : slot_idx + 1].fill_(float("-inf"))
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
+        self.is_encoder_phase[slot_idx : slot_idx + 1].fill_(False)
 
 
 class NemotronLabsDiffusionModelState(ModelState):
@@ -512,6 +591,10 @@ class NemotronLabsDiffusionModelState(ModelState):
             mask_token_id=getattr(hf_config, "mask_token_id", 100),
             max_denoising_steps=max_denoising_steps,
             device=device,
+            # The config hook rejects max_logprobs=-1 in this mode.
+            max_num_logprobs=min(
+                self.model_config.max_logprobs, self.model_config.get_vocab_size()
+            ),
         )
         self._req_id_to_index: dict[str, int] = {}
 
@@ -592,7 +675,7 @@ class NemotronLabsDiffusionModelState(ModelState):
             slots
         ]
         if actual_num_reqs < num_reqs:
-            self._causal_buf[actual_num_reqs:num_reqs] = False
+            self._causal_buf[actual_num_reqs:num_reqs].fill_(False)
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
         return build_attn_metadata(
@@ -624,7 +707,10 @@ class MaskedDiffusionSampler:
 
     The default threshold policy reveals all confident positions and guarantees
     at least one reveal per step. `logprobs=0` returns each token's logprob at
-    reveal time; top-k introspection uses the converged denoising distribution.
+    reveal time, and `logprobs=k` adds the top-k of that same distribution,
+    independently of the other requests in the batch. Returned logprobs are
+    processed: they follow the request's temperature and top-k/top-p
+    filtering, as the token was sampled.
     """
 
     def __init__(
@@ -645,6 +731,11 @@ class MaskedDiffusionSampler:
         self.threshold_mode = selection_policy == "confidence_threshold"
         # Compared against per-position chosen-token logprobs (natural log).
         self.log_threshold = math.log(confidence_threshold)
+        # SM100 only: see `_compiled_masked_step`.
+        self.split_after_sampling = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
 
         max_num_reqs = diffusion_states.max_num_reqs
         device = diffusion_states.device
@@ -656,10 +747,7 @@ class MaskedDiffusionSampler:
         self._decode_idx = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
         self._query_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self._num_logits = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
-
-        # Per-slot stash for top-k (logprobs>0) tensors computed on the
-        # converging denoise step; consumed on the subsequent commit step.
-        self._pending_logprobs: dict[int, LogprobsTensors] = {}
+        self._num_logprobs = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -667,9 +755,6 @@ class MaskedDiffusionSampler:
                 "Masked block-diffusion does not support repetition/frequency/"
                 "presence penalties; ignoring them for this request."
             )
-        # Purge any stale logprobs stashed under this slot by a prior request
-        # that was aborted between its converging denoise and commit steps.
-        self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
@@ -839,15 +924,17 @@ class MaskedDiffusionSampler:
 
         all_slots = input_batch.idx_mapping[:num_reqs]
 
-        # Snapshot which slots are committing BEFORE the compiled step runs,
-        # since it mutates is_encoder_phase (commit->False, converge->True).
-        is_committing = states.is_encoder_phase[decode_slots].clone()
-
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
+        # Top-k is captured at reveal, so a request that asks for it does not
+        # change how the other requests' scores are computed.
+        num_topk = max(
+            0,
+            int(np.max(self.sampling_states.num_logprobs[decode_slots_np], initial=0)),
+        )
 
         req_temps = self.sampling_states.temperature.gpu[decode_slots]
 
-        logits_3d = _compiled_masked_step(
+        _compiled_masked_step(
             logits[: num_decode * CL],
             decode_slots,
             decode_idx,
@@ -875,69 +962,44 @@ class MaskedDiffusionSampler:
             leftmost=self.leftmost,
             threshold_mode=self.threshold_mode,
             log_threshold=self.log_threshold,
+            reveal_topk_ids=states.reveal_topk_ids,
+            reveal_topk_logprobs=states.reveal_topk_logprobs,
+            num_topk=num_topk,
+            split_after_sampling=self.split_after_sampling,
         )
 
-        # Top-k introspection (logprobs>0): stash the converged denoise
-        # step's top-k (is_encoder_phase flipped False->True); attached on
-        # the commit. The logprobs==0 path reads the at-unmask buffers
-        # instead and needs no stash.
-        if max_num_logprobs > 0 and num_decode > 0:
-            converged_mask = states.is_encoder_phase[decode_slots]
-            just_converged = converged_mask & ~is_committing
-            if just_converged.any():
-                flat_logits = logits_3d.reshape(-1, logits_3d.shape[-1])
-                final_canvas = states.canvas[decode_slots]
-                for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                    li = int(local_idx.item())
-                    slot = int(decode_slots[local_idx].item())
-                    k_i = int(valid_canvas_len_np[li])
-                    row = li * CL
-                    self._pending_logprobs[slot] = compute_topk_scores(
-                        flat_logits[row : row + k_i],
-                        max_num_logprobs,
-                        final_canvas[local_idx][:k_i],
-                    )
-
-        # Commit steps: emit logprobs for the committed block. The sampled
-        # token's logprob/rank come from the at-unmask buffers when only
-        # they are needed (logprobs==0); top-k rows come from the stash.
+        # Every request gets CL rows at a fixed offset; the output processor
+        # keeps the first num_sampled of them, so emitting needs no host read
+        # of the GPU phase flags. Column 0 is the sampled token, then up to
+        # max_num_logprobs top-k entries per the request's own setting.
         logprobs_tensors = None
-        emit = max_num_logprobs >= 0 and num_decode > 0
-        committing_np = is_committing.cpu().numpy() if emit else None
-        if emit and committing_np is not None and committing_np.any():
-            decode_row_of_req = {
-                int(decode_indices_np[li]): li for li in range(num_decode)
-            }
-            parts_ids, parts_lp, parts_ranks = [], [], []
-            cu_gen: list[int] = []
-            flat_offset = 0
-            for i in range(num_reqs):
-                cu_gen.append(flat_offset)
-                decode_row = decode_row_of_req.get(i)
-                if decode_row is None or not committing_np[decode_row]:
-                    continue
-                slot = int(slots_np[i])
-                k_i = int(valid_canvas_len_np[decode_row])
-                if max_num_logprobs > 0:
-                    lp = self._pending_logprobs.pop(slot, None)
-                    if lp is None:
-                        continue
-                    parts_ids.append(lp.logprob_token_ids)
-                    parts_lp.append(lp.logprobs)
-                    parts_ranks.append(lp.selected_token_ranks)
-                    flat_offset += lp.logprobs.shape[0]
-                else:
-                    parts_ids.append(sampled[i, :k_i].to(torch.int64).unsqueeze(-1))
-                    parts_lp.append(states.unmask_logprobs[slot, :k_i].unsqueeze(-1))
-                    parts_ranks.append(states.unmask_ranks[slot, :k_i])
-                    flat_offset += k_i
-            if parts_ids:
-                logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=torch.cat(parts_ids),
-                    logprobs=torch.cat(parts_lp),
-                    selected_token_ranks=torch.cat(parts_ranks),
-                    cu_num_generated_tokens=cu_gen,
+        if max_num_logprobs >= 0 and num_decode > 0:
+            token_ids = sampled.to(torch.int64).unsqueeze(-1)
+            scores = states.unmask_logprobs[all_slots].unsqueeze(-1)
+            if max_num_logprobs > 0:
+                self._num_logprobs.np[:num_reqs] = self.sampling_states.num_logprobs[
+                    slots_np
+                ]
+                self._num_logprobs.copy_to_uva()
+                requested = self._num_logprobs.gpu[:num_reqs, None, None]
+                columns = torch.arange(max_num_logprobs, device=device)
+                keep = columns < requested  # [num_reqs, 1, max_num_logprobs]
+                topk_ids = states.reveal_topk_ids[all_slots, :, :max_num_logprobs]
+                topk_scores = states.reveal_topk_logprobs[
+                    all_slots, :, :max_num_logprobs
+                ]
+                token_ids = torch.cat(
+                    (token_ids, torch.where(keep, topk_ids, 0)), dim=-1
                 )
+                scores = torch.cat(
+                    (scores, torch.where(keep, topk_scores, float("-inf"))), dim=-1
+                )
+            logprobs_tensors = LogprobsTensors(
+                logprob_token_ids=token_ids.reshape(num_reqs * CL, -1),
+                logprobs=scores.reshape(num_reqs * CL, -1),
+                selected_token_ranks=states.unmask_ranks[all_slots].reshape(-1),
+                cu_num_generated_tokens=[i * CL for i in range(num_reqs)],
+            )
 
         return self._build_output(
             input_batch,

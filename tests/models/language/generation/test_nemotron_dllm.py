@@ -101,7 +101,10 @@ def test_arch_in_model_registry():
 
 
 @pytest.mark.parametrize("flash_version", [None, 3])
-def test_attention_backend_supports_mixed_causality(flash_version):
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
+def test_attention_backend_supports_mixed_causality(
+    flash_version, pipeline_parallel_size
+):
     from types import SimpleNamespace
     from typing import cast
 
@@ -125,12 +128,22 @@ def test_attention_backend_supports_mixed_causality(flash_version):
                 hf_config=NemotronLabsDiffusionConfig(),
                 override_generation_config={},
                 is_diffusion=True,
+                max_logprobs=20,
+                logits_processors=None,
             ),
             diffusion_config=None,
             scheduler_config=None,
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=pipeline_parallel_size
+            ),
         ),
     )
-    if flash_version is not None:
+    if pipeline_parallel_size != 1:
+        with pytest.raises(ValueError, match="PP=1"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+    elif flash_version is not None:
         with pytest.raises(ValueError, match="requires FA4"):
             NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
                 config
@@ -219,6 +232,56 @@ def test_ar_mode_config(explicit_diffusion_config):
         assert attention.flash_attn_version == 3
         assert scheduler.max_num_seqs == SchedulerConfig.DEFAULT_MAX_NUM_SEQS
         assert config.model_config.override_generation_config["max_new_tokens"] is None
+
+
+@pytest.mark.parametrize("max_logprobs", [20, -1])
+def test_masked_diffusion_request_checks(max_logprobs):
+    """Masked diffusion keeps top-k per position in buffers sized by
+    max_logprobs and rejects logprob_token_ids at admission."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from vllm import SamplingParams
+    from vllm.config import VllmConfig
+    from vllm.config.attention import AttentionConfig
+    from vllm.exceptions import VLLMValidationError
+    from vllm.model_executor.models.config import (
+        NemotronLabsDiffusionForBlockDiffusionConfig,
+    )
+    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    model_config = SimpleNamespace(
+        hf_config=NemotronLabsDiffusionConfig(),
+        override_generation_config={},
+        is_diffusion=True,
+        runner_type="generate",
+        max_logprobs=max_logprobs,
+        logits_processors=None,
+    )
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            attention_config=AttentionConfig(),
+            model_config=model_config,
+            diffusion_config=None,
+            scheduler_config=None,
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        ),
+    )
+    if max_logprobs == -1:
+        with pytest.raises(ValueError, match="max-logprobs"):
+            NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(
+                config
+            )
+        return
+    NemotronLabsDiffusionForBlockDiffusionConfig.verify_and_update_config(config)
+    validate = InputProcessor._build_logits_processors_params_validator(
+        cast(Any, SimpleNamespace(model_config=model_config))
+    )
+    validate(SamplingParams(max_tokens=8, logprobs=2))
+    with pytest.raises(VLLMValidationError, match="logprob_token_ids"):
+        validate(SamplingParams(max_tokens=8, logprob_token_ids=[1, 2]))
 
 
 def test_diffusion_model_options_are_model_specific():
@@ -442,6 +505,82 @@ def test_threshold_unmasking_and_commit(max_steps, valid_length, eager_sampler):
     assert not phase[1].item()
     assert step[1].item() == 0
     assert (canvas[0] == mask).all()  # Unscheduled request is untouched.
+
+
+def test_topk_captured_at_reveal(eager_sampler):
+    """Top-k scores are written once, when a position is revealed, for every
+    decode row at once; later steps and other rows leave them unchanged."""
+    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+
+    width, vocab, mask, k = 4, 12, 10, 3
+    slots = torch.tensor([0, 1])
+    canvas = torch.full((3, width), mask, dtype=torch.int64)
+    step = torch.zeros(3, dtype=torch.int32)
+    phase = torch.zeros(3, dtype=torch.bool)
+    lp = torch.zeros(3, width)
+    ranks = torch.zeros(3, width, dtype=torch.int64)
+    topk_ids = torch.zeros(3, width, k, dtype=torch.int64)
+    topk_lp = torch.full((3, width, k), float("-inf"))
+
+    def advance(logits, temperatures):
+        _compiled_masked_step(
+            logits.reshape(-1, vocab),
+            slots,
+            slots,
+            slots,
+            torch.full((2,), width),
+            temperatures,
+            canvas,
+            step,
+            phase,
+            lp,
+            ranks,
+            torch.zeros(2, width, dtype=torch.int32),
+            torch.zeros(2, dtype=torch.int32),
+            torch.zeros(3, width, dtype=torch.int64),
+            max_denoising_steps=2,
+            mask_token_id=mask,
+            CL=width,
+            all_greedy=bool((temperatures == 0).all()),
+            capture_logprobs=True,
+            leftmost=True,
+            threshold_mode=False,
+            log_threshold=0.0,
+            reveal_topk_ids=topk_ids,
+            reveal_topk_logprobs=topk_lp,
+            num_topk=k,
+        )
+
+    temperatures = torch.tensor([0.0, 2.0])
+    torch.manual_seed(0)
+    logits1 = torch.randn(2, width, vocab) * 3
+    logits1[..., mask] = float("-inf")
+    advance(logits1, temperatures)
+    first = (canvas[:2] != mask).clone()
+    assert first[:, :2].all() and not first[:, 2:].any()  # leftmost, 2 per step
+    after_first = (topk_ids.clone(), topk_lp.clone())
+
+    logits2 = torch.randn(2, width, vocab) * 3
+    logits2[..., mask] = float("-inf")
+    advance(logits2, temperatures)
+    assert (canvas[:2] != mask).all()
+    for row, temperature in enumerate(temperatures.tolist()):
+        scale = temperature or 1.0
+        for logits, revealed in ((logits1, first[row]), (logits2, ~first[row])):
+            expected = (logits[row] / scale).log_softmax(-1).topk(k, dim=-1)
+            torch.testing.assert_close(
+                topk_lp[row][revealed], expected.values[revealed]
+            )
+            assert torch.equal(topk_ids[row][revealed], expected.indices[revealed])
+            # The sampled token's score comes from the same distribution.
+            chosen = (logits[row] / scale).log_softmax(-1)
+            chosen = chosen.gather(-1, canvas[row, :, None]).squeeze(-1)
+            torch.testing.assert_close(lp[row][revealed], chosen[revealed])
+    # Positions revealed in the first step keep their first-step scores.
+    assert torch.equal(topk_ids[:2][first], after_first[0][:2][first])
+    assert torch.equal(topk_lp[:2][first], after_first[1][:2][first])
+    # An unscheduled slot is untouched.
+    assert (topk_ids[2] == 0).all() and topk_lp[2].isneginf().all()
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +844,146 @@ def test_stochastic_rollouts(monkeypatch):
             lp = entry[tid]
             assert lp.rank is not None
             assert lp.logprob <= 1e-6 and lp.rank >= 1
+
+
+def _diffusion_llm(selection_policy, enforce_eager=True, async_scheduling=None):
+    from vllm import LLM
+
+    model_options = {}
+    if selection_policy is not None:
+        model_options["selection_policy"] = selection_policy
+    kwargs = {}
+    if async_scheduling is not None:
+        kwargs["async_scheduling"] = async_scheduling
+    return LLM(
+        model=MODEL_PATH,
+        attention_config={"backend": "TRITON_ATTN"},
+        trust_remote_code=True,
+        enforce_eager=enforce_eager,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.6,
+        diffusion_config={"model_options": model_options},
+        **kwargs,
+    )
+
+
+def _assert_same_scores(expected_completion, completion, num_logprobs):
+    """Same tokens and, per position, the same sampled-token and top-k scores."""
+    assert completion.token_ids == expected_completion.token_ids
+    assert expected_completion.logprobs is not None
+    assert completion.logprobs is not None
+    assert len(completion.logprobs) == len(completion.token_ids)
+    for token, expected, actual in zip(
+        completion.token_ids, expected_completion.logprobs, completion.logprobs
+    ):
+        assert token in expected and token in actual
+        assert actual[token].logprob == pytest.approx(expected[token].logprob, abs=1e-3)
+        assert actual[token].rank == expected[token].rank
+        top = {t: lp for t, lp in actual.items() if lp.rank <= num_logprobs}
+        top_expected = {t: lp for t, lp in expected.items() if lp.rank <= num_logprobs}
+        assert len(top) == num_logprobs
+        assert top.keys() == top_expected.keys()
+        for t, lp in top.items():
+            assert lp.logprob == pytest.approx(top_expected[t].logprob, abs=1e-3)
+
+
+@requires_gpu
+@requires_weights
+@pytest.mark.parametrize("selection_policy", [None, "leftmost"])
+@pytest.mark.parametrize(
+    "enforce_eager,async_scheduling", [(True, None), (False, None), (False, True)]
+)
+def test_diffusion_logprobs_independent_of_batch_requests(
+    monkeypatch, selection_policy, enforce_eager, async_scheduling
+):
+    """A neighbour's logprob setting must not change a request's scores.
+
+    Batches have the same size and prompts, so the forward numerics match;
+    `None` uses the default confidence-threshold policy.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    from vllm import SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tok = _load_tokenizer()
+    prompt = TokensPrompt(prompt_token_ids=_prompt_ids(tok, device="cpu")[0].tolist())
+    budgets = (17, 41, 9)
+
+    def run(llm, num_logprobs):
+        assert llm.reset_prefix_cache()
+        return llm.generate(
+            [prompt] * 3,
+            [
+                SamplingParams(temperature=0, max_tokens=n, logprobs=k, ignore_eos=True)
+                for n, k in zip(budgets, num_logprobs)
+            ],
+            use_tqdm=False,
+        )
+
+    llm = _diffusion_llm(selection_policy, enforce_eager, async_scheduling)
+    try:
+        sampled_only = run(llm, (0, 0, 0))
+        top2 = run(llm, (2, 2, 2))
+        mixed = run(llm, (None, 0, 2))
+        assert mixed[0].outputs[0].logprobs is None
+        assert [len(out.outputs[0].token_ids) for out in mixed] == list(budgets)
+        _assert_same_scores(sampled_only[1].outputs[0], mixed[1].outputs[0], 0)
+        _assert_same_scores(top2[2].outputs[0], mixed[2].outputs[0], 2)
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
+
+
+@requires_gpu
+@requires_weights
+def test_diffusion_topk_logprobs_with_temperature(monkeypatch):
+    """With sampling, each returned token is scored under the distribution
+    it was drawn from, and the top-k entries come from that same step."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    import math
+
+    from vllm import SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tok = _load_tokenizer()
+    prompt = TokensPrompt(prompt_token_ids=_prompt_ids(tok, device="cpu")[0].tolist())
+    llm = _diffusion_llm(None)
+    try:
+        outputs = llm.generate(
+            [prompt] * 3,
+            [
+                SamplingParams(
+                    temperature=t, max_tokens=24, logprobs=k, ignore_eos=True
+                )
+                for t, k in ((0.7, 3), (1.3, 0), (0.0, 3))
+            ],
+            use_tqdm=False,
+        )
+        for output, num_logprobs in zip(outputs, (3, 0, 3)):
+            completion = output.outputs[0]
+            assert completion.logprobs is not None
+            assert len(completion.logprobs) == len(completion.token_ids) == 24
+            for token, position in zip(completion.token_ids, completion.logprobs):
+                chosen = position[token]
+                assert math.isfinite(chosen.logprob) and chosen.logprob <= 0
+                top = sorted(
+                    (lp for lp in position.values() if lp.rank <= num_logprobs),
+                    key=lambda lp: lp.rank,
+                )
+                assert [lp.rank for lp in top] == list(range(1, num_logprobs + 1))
+                if top:
+                    # The sampled token is scored in the same distribution.
+                    assert chosen.logprob <= top[0].logprob + 1e-4
+                    if chosen.rank <= num_logprobs:
+                        assert chosen.logprob == pytest.approx(
+                            top[chosen.rank - 1].logprob, abs=1e-4
+                        )
+    finally:
+        del llm
+        cleanup_dist_env_and_memory()
 
 
 def _assert_ar_runner(obj):
