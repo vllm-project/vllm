@@ -21,8 +21,8 @@ _weights_pre_processed: ContextVar[bool] = ContextVar(
 @contextmanager
 def weights_already_processed():
     """Mark that weights are already in post-processed (runtime) format, so
-    `process_weights_after_loading` skips tensor transforms (used by the
-    weight cache IPC loader).
+    `process_weights_after_loading` skips tensor transforms (weight cache
+    loaders, elastic EP scale-up).
     """
     token = _weights_pre_processed.set(True)
     try:
@@ -33,6 +33,26 @@ def weights_already_processed():
 
 def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
+
+
+_weights_from_peers: ContextVar[bool] = ContextVar("weights_from_peers", default=False)
+
+
+@contextmanager
+def weights_from_peers():
+    """Mark a load whose weights are then overwritten by tensors received from
+    peer ranks (elastic EP scale-up), so post-load processing must not run
+    collectives that the peers do not join.
+    """
+    token = _weights_from_peers.set(True)
+    try:
+        yield
+    finally:
+        _weights_from_peers.reset(token)
+
+
+def are_weights_from_peers() -> bool:
+    return _weights_from_peers.get()
 
 
 def set_weight_attrs(
