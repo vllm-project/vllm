@@ -742,6 +742,14 @@ class NixlBaseConnectorWorker:
                 for g in kv_cache_config.transfer_groups
             )
         )
+        # A failed load also reports the request's blocks only when the
+        # scheduler can map them back to requests: one KV cache group, counting
+        # groups outside the transfer (e.g. HiSparse). Otherwise the scheduler
+        # raises on invalid_block_ids, so failures go through failed_recving.
+        # TODO: Drop this once _handle_invalid_blocks supports several groups.
+        self._report_invalid_block_ids = (
+            not self._is_hma_required and len(kv_cache_config.kv_cache_groups) == 1
+        )
 
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
@@ -3438,8 +3446,7 @@ class NixlBaseConnectorWorker:
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 self._pending_recv_notifs.pop(req_id, None)
-                # TODO (NickLucche) handle failed transfer for HMA.
-                if not self._is_hma_required:
+                if self._report_invalid_block_ids:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
