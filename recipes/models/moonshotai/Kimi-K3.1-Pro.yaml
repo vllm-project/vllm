@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-15
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -22,10 +22,11 @@ meta:
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
-  # The first release after v0.33.0, which K3.1 missed. A number, not "nightly":
+  # The first release after v0.34.0, which carries only part of K3.1
+  # (vllm-project/vllm#65685 merged after its cut). A number, not "nightly":
   # the renderer reads "nightly" as 0.0.0 and would offer a `kimi-k31-cu129` tag
   # that doesn't exist.
-  min_vllm_version: "0.34.0"
+  min_vllm_version: "0.35.0"
   nightly_required: true
   # NVIDIA's is the day-0 CUDA 13 (cu130) build only. AMD's is the ROCm 10.0
   # 5c14fe8 build, the one the MI355X AgentX preset was measured on.
@@ -793,7 +794,7 @@ presets:
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 1 to 660 on 2 to 9 B300 nodes: TP8 + DCP8 prefill workers with EP8 on MegaMoE and TP8 + DCP8 decode workers on the low-latency decode backend, one node each, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM; NIXL and Mooncake move KV over AWS EFA."
-    source: { label: "InferenceX #5068", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5068", key: "kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "c3406a12cda081e005045d7a701908d6830a7fef" }
+    source: { label: "InferenceX #5108", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5108", key: "kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "e8a5d3ad815e96c34ee21355617687b0cde00a5b" }
     image:
       vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
       dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
@@ -826,8 +827,11 @@ presets:
       - "--mamba-ssm-cache-dtype"
       - "float32"
       - "--enable-prefix-caching"
+      # 1408 tokens, the block size of the DSpark draft's sliding-window KV
+      # group with 4 draft tokens (1536 at 1 client): with any other unit,
+      # vLLM turns off partial prefix-cache hits for the whole hybrid KV cache.
       - "--prefix-match-unit"
-      - "128"
+      - "1408"
       - "--no-enable-flashinfer-autotune"
       - "--stream-interval"
       - "10"
@@ -877,7 +881,7 @@ presets:
     # The lane's connector options on the composed MultiConnector, and its
     # draft revision and length.
     json_args:
-      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 4, rejection_sample_method: block }
+      "--speculative-config": { revision: "e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f", num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config":
         kv_load_failure_policy: recompute
         NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { backends: ["LIBFABRIC"], enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
@@ -935,6 +939,11 @@ presets:
         label: "1 (1P1D)"
         concurrency: 1
         description: "One prefill and one decode worker (16 GPUs), 7 draft tokens."
+        # With 7 draft tokens the draft's sliding-window KV group has
+        # 1536-token blocks.
+        args:
+          - "--prefix-match-unit"
+          - "1536"
         json_args:
           "--speculative-config": { num_speculative_tokens: 7 }
         roles:
@@ -1004,7 +1013,7 @@ presets:
               - "--compilation-config"
               - '{"cudagraph_capture_sizes":[20,40,60,80,100,120,140,160,180,200,220,240,260,280,300,320,340,360,380,400,420,440,460,480,500,520,540,560,580,600,620,640]}'
     runbook: |
-      The disaggregated B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5068](https://github.com/SemiAnalysisAI/InferenceX/pull/5068)). Dynamo + vLLM run TP8 + DCP8 prefill and decode workers, one B300 node each. The prefill workers also run the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL on its LIBFABRIC backend, and all workers share a Mooncake store in host DRAM on its EFA transport. The lane ran the image digest the preset pins, Dynamo built from `229be5cff1156859b0e3e43b598ee800b2f81ccc` (`v1.7.0-kimi-k3.1-pro-dev.1`) and Mooncake `0.3.14`; the preset has been measured only on that combination, on AWS B300 nodes with 16 EFA devices each.
+      The disaggregated B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5108](https://github.com/SemiAnalysisAI/InferenceX/pull/5108)). Dynamo + vLLM run TP8 + DCP8 prefill and decode workers, one B300 node each. The prefill workers also run the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL on its LIBFABRIC backend, and all workers share a Mooncake store in host DRAM on its EFA transport. The lane ran the image digest the preset pins, Dynamo built from `229be5cff1156859b0e3e43b598ee800b2f81ccc` (`v1.7.0-kimi-k3.1-pro-dev.1`) and Mooncake `0.3.14`; the preset has been measured only on that combination, on AWS B300 nodes with 16 EFA devices each.
 
       | Clients | Prefill workers | Decode workers | Nodes | Draft tokens | Decode `--max-num-seqs` | Decode `--gpu-memory-utilization` | Decode capture sizes |
       |---:|---:|---:|---:|---:|---:|---:|---|
@@ -1019,8 +1028,8 @@ presets:
       **Serving config.**
       - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, `--gpu-memory-utilization 0.97` and `--enforce-eager`. `--max-async-kv-loads-per-step 4` starts up to four Mooncake store loads per engine step, and `--long-prefill-token-threshold 4096` chunks prompts with more than 4096 new tokens so that one long prompt does not hold back the others. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each.
       - **Decode:** TP8 + DCP8 without expert parallelism, with `VLLM_ENABLE_GEMM_RS=0` and `--max-async-kv-loads-per-step 2`. `--additional-config '{"decode_backend":"latency_specialized"}'` runs pure decode steps on the fused low-latency path; the Low-latency decode toggle is not offered under PD, so the preset sets the flag in the decode args. `--use-replayssm` makes KDA verification replay the accepted prefix instead of keeping one recurrent state per draft token. The decode `--compilation-config` sets only the capture sizes (multiples of 1 + draft tokens per request) and replaces the PD strategy's `FULL_DECODE_ONLY`, so the CUDA graph mode is vLLM's default, as in the lane. From 264 clients, decode admits up to 128 requests at `--gpu-memory-utilization 0.98` and captures up to 640 rows.
-      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit 128`; `--no-enable-flashinfer-autotune` and `--stream-interval 10`. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
-      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview) at revision `6a2ef20a`, with probabilistic drafting and block rejection: 7 draft tokens at 1 client, 4 from 20 clients up.
+      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit` set to the block size of the draft's sliding-window KV group, 1408 with 4 draft tokens and 1536 at 1 client with 7 (with any other unit, vLLM turns off partial prefix-cache hits for the whole hybrid KV cache, and next-turn Mooncake store hits drop); `--no-enable-flashinfer-autotune` and `--stream-interval 10`. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) at revision `e4e6e626` (5 GQA layers, 2,048-token sliding window), with probabilistic drafting and block rejection: 7 draft tokens at 1 client, 4 from 20 clients up.
       - **Collectives and kernels:** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`), and so do TOKENSPEED_MLA's FP16 partials (`TOKENSPEED_MLA_FP16_PARTIALS=0`). NCCL runs only inside a node (`NCCL_MNNVL_ENABLE=0`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `NCCL_TUNER_PLUGIN=ofi`).
       - **KV transfer over EFA:** the NIXL connector uses `"backends": ["LIBFABRIC"]`, with `NIXL_DISABLE_CUDA_ADDR_WA=1`, `FI_EFA_ENABLE_SHM_TRANSFER=0`, `UCX_MEMTYPE_REG_WHOLE=n` and `UCX_TCP_AF_PRIO=inet`. The Mooncake transfer engine uses `MC_SLICE_SIZE=1048576`, `MC_MAX_MR_SIZE=68719476736`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `MC_EFA_NIC_SELECTION=local` and `MC_MS_FILTERS` set to the node's 16 EFA devices, and `WITH_NVIDIA_PEERMEM=0` for hosts without the nvidia-peermem module. A rank registers tens of GB of GPU KV cache with the store, so `MC_MAX_MR_SIZE` must be above that: at the 4 GiB of the GB300 presets, every registration fails over EFA. vLLM loads from the store with 4 receive threads (`VLLM_MOONCAKE_LOAD_RECV_THREADS=4`), and `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE=1` makes a store lookup lease only the keys that a hit loads. The connector options add a 60 s store lookup timeout, `store_tp_size: 1` and `store_chunk_size: 4096`. From 264 clients, the store keeps the tail pages a request loaded and drops the older tails it consumed (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), and store lookups start before admission, up to 16 at a time and kept for 30 s (`lookup_prefetch_limit: 16`, `lookup_prefetch_ttl_s: 30`); this cuts store evictions and the prefill work they cause.
       - **660 clients:** the indexer computes its logits in BF16 on both roles (`"indexer_logits_dtype":"bfloat16"` in `--attention-config`), prefill selects the indexer top-k with `--kernel-config '{"sparse_indexer_topk_backend":"deep_select"}'`, and the Mooncake master evicts 2% of the store per round instead of 10% (`--eviction_ratio=0.02`, see Services).
@@ -1066,13 +1075,13 @@ presets:
 
       ### Throughput measurement only (synthetic acceptance)
 
-      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 3.69 for 7 draft tokens (1 client) and 3.19 for 4 (20 clients and up). Only `--speculative-config` changes, on both roles:
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 4.16 for 7 draft tokens (1 client) and 3.46 for 4 (20 clients and up). Only `--speculative-config` changes, on both roles:
 
       ```bash
       # 1 client
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.69}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":4.16}'
       # 20 clients and up
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","revision":"e4e6e6261e9f8b6d5f249f9627eb6b109d762d5f","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.46}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -1143,22 +1152,22 @@ presets:
     runbook: |
       The TP32 + DCP8 arm of the vllm-torchtpu#2775 validation on the same slice: complete GSM8K at **97.42%** (1,285/1,319), with prefix-cache and long-context checks matching the TP32 arm. Compile sizes drop the 1-batch capture (DCP decode batches start at 8).
 
-  # GB300: the Dynamo + vLLM AgentX lanes of SemiAnalysisAI/InferenceX#4907,
-  # one preset per worker layout and one point per benchmark concurrency. Every
-  # point serves the K3.1 DSpark draft with block rejection, FP8 KV with an
-  # MXFP4 indexer cache, FP32 KDA state, and a shared Mooncake KV store in host
-  # DRAM. The PD presets restate the lane's serving flags on both roles; role
-  # blocks add the rest.
+  # GB300: the Dynamo + vLLM AgentX lanes of SemiAnalysisAI/InferenceX#5069
+  # (the DEP16 preset: #4907), one preset per worker layout and one point per
+  # benchmark concurrency. Every point serves the K3.1 DSpark draft with block
+  # rejection, FP8 KV with an MXFP4 indexer cache, FP32 KDA state, and a shared
+  # Mooncake KV store in host DRAM. The PD presets restate the lane's serving
+  # flags on both roles; role blocks add the rest.
   gb300_agentx_pd:
-    label: "AgentX 1P3D TP8 + DCP8"
+    label: "AgentX 1P5D / 1P3D TP8 + DCP8"
     hardware: gb300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    description: "Concurrency 20 to 56 on 32 GPUs: one TP8 + DCP8 prefill worker with EP8 on MegaMoE and three TP8 + DCP8 decode workers on the low-latency decode backend, two GB300 trays each, served by Dynamo with the K3.1 DSpark draft (4 tokens) and a shared Mooncake KV store in host DRAM."
-    source: { label: "InferenceX #4907", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4907", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "f2bb2756fffac8fc8e5d241fe0f936e32c3c3e90" }
+    description: "Concurrency 44 and 56: one TP8 + DCP8 prefill worker with EP8 on MegaMoE and five (or three) TP8 + DCP8 decode workers on the low-latency decode backend, two GB300 trays each, served by Dynamo with the K3.1 DSpark draft (4 tokens) and a shared Mooncake KV store in host DRAM."
+    source: { label: "InferenceX #5069", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5069", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "06eab45a92b07ba89c8c50fff05ca12b857b7c2c" }
     image:
-      vllm: "vllm/vllm-openai:kimi-k31-mc@sha256:f29efae15f9cb47f6215add0cba70b4b7d3596e6f3990d8b46c7cad0f8fbbc8b"
-      dynamo: "3dd0744eb72c707d76d4c520ae4dea9e286a4ab6"
+      vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
+      dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
     select:
       pd_router: dynamo
       frontend: rust
@@ -1180,8 +1189,9 @@ presets:
       - "1"
       - "--kv-cache-dtype"
       - "fp8"
+      # BF16 indexer logits; K3.1 defaults to FP32.
       - "--attention-config"
-      - '{"indexer_kv_dtype":"mxfp4"}'
+      - '{"indexer_kv_dtype":"mxfp4","indexer_logits_dtype":"bfloat16"}'
       # The K3.1 precision policy keeps the KDA state in FP32.
       - "--mamba-cache-dtype"
       - "float32"
@@ -1230,14 +1240,15 @@ presets:
       # recipe's Blackwell block.
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
       TILELANG_CLEANUP_TEMP_FILES: "1"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
     # The lane's connector options on the composed MultiConnector, and its
     # draft length.
-    json_args: &k31_gb300_pd_json
-      "--speculative-config": { num_speculative_tokens: 4, rejection_sample_method: block }
+    json_args: &k31_gb300_dcp8_json
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
       "--kv-transfer-config":
         kv_load_failure_policy: recompute
         NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
-        MooncakeStoreConnector: { kv_load_failure_policy: recompute, kv_connector_extra_config: { enable_cross_layers_blocks: false, enable_offload: false } }
+        MooncakeStoreConnector: { kv_load_failure_policy: recompute, kv_connector_extra_config: { lookup_timeout_s: 60, lookup_prefetch_limit: 16, lookup_prefetch_ttl_s: 30, enable_cross_layers_blocks: false, enable_offload: false } }
     roles:
       prefill:
         # TP8 + EP8 with MegaMoE; CUDA graphs up to 8192 tokens.
@@ -1246,6 +1257,8 @@ presets:
         args:
           - "--moe-backend"
           - "deep_gemm_mega_moe"
+          - "--kernel-config"
+          - &k31_gb300_prefill_topk '{"sparse_indexer_topk_backend":"deep_select"}'
           - "--max-num-seqs"
           - "32"
           - "--max-cudagraph-capture-size"
@@ -1278,23 +1291,18 @@ presets:
     # the lane's worker counts (each worker is two trays). Decode capture sizes
     # are multiples of 5 rows (1 + 4 draft tokens) per request.
     points:
-      c20:
-        label: "20 (1P3D)"
-        concurrency: 20
-        description: "One prefill and three decode workers (32 GPUs), 64 decode sequences."
-        # Bind each worker process to its GPU's NUMA node (GPUs 0-1 on node 0,
-        # GPUs 2-3 on node 1).
-        args: &k31_gb300_numa_args ["--numa-bind", "--numa-bind-nodes", "0", "0", "1", "1"]
-      c32:
-        label: "32 (1P3D)"
-        concurrency: 32
-        description: "One prefill and three decode workers (32 GPUs), 64 decode sequences."
-        args: *k31_gb300_numa_args
+      c44:
+        label: "44 (1P5D)"
+        concurrency: 44
+        description: "One prefill and five decode workers (48 GPUs), 64 decode sequences."
       c56:
+        label: "56 (1P5D)"
+        concurrency: 56
+        description: "One prefill and five decode workers (48 GPUs), 64 decode sequences."
+      c56_1p3d:
         label: "56 (1P3D)"
         concurrency: 56
         description: "One prefill and three decode workers (32 GPUs), 256 decode sequences."
-        env: { VLLM_WORKER_MULTIPROC_METHOD: "spawn" }
         roles:
           decode:
             args:
@@ -1307,28 +1315,28 @@ presets:
               - "--compilation-config"
               - &k31_gb300_decode_graphs_1280 '{"cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300,305,310,315,320,340,360,380,400,420,440,460,480,500,520,540,560,580,600,620,640,660,680,700,720,740,760,780,800,820,840,860,880,900,920,940,960,980,1000,1020,1040,1060,1080,1100,1120,1140,1160,1180,1200,1220,1240,1260,1280]}'
     runbook: |
-      The concurrency 20, 32 and 56 points of the GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4907](https://github.com/SemiAnalysisAI/InferenceX/pull/4907)). Dynamo + vLLM run one prefill worker and three decode workers, each TP8 + DCP8 across two 4-GPU GB300 trays (32 GPUs). The prefill worker also runs the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL, and all workers share an RDMA Mooncake store in host DRAM. The lane ran the image digest the preset pins, Dynamo built from `3dd0744eb72c707d76d4c520ae4dea9e286a4ab6` ([ai-dynamo/dynamo#18124](https://github.com/ai-dynamo/dynamo/pull/18124), the first Dynamo revision that registers the K3.1 model type) and Mooncake `0.3.14`; the preset has been measured only on that combination, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
+      The concurrency 44 and 56 points of the GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5069](https://github.com/SemiAnalysisAI/InferenceX/pull/5069)). Dynamo + vLLM run one prefill worker and five (or three) decode workers, each TP8 + DCP8 across two 4-GPU GB300 trays. The prefill worker also runs the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL, and all workers share an RDMA Mooncake store in host DRAM. The lane ran the image digest the preset pins (vLLM `0.1.dev25356+gdbbc9e310`), Dynamo built from `229be5cff1156859b0e3e43b598ee800b2f81ccc` ([`v1.7.0-kimi-k3.1-pro-dev.1`](https://github.com/ai-dynamo/dynamo/tree/v1.7.0-kimi-k3.1-pro-dev.1), which registers the K3.1 model type) and Mooncake `0.3.14`; the preset has been measured only on that combination, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
 
-      | Clients | Prefill workers | Decode workers | GPUs | Decode `--max-num-seqs` | Decode capture sizes | CPU binding |
-      |---:|---:|---:|---:|---:|---|---|
-      | 20, 32 | 1 | 3 | 32 | 64 | 5 to 320 in steps of 5 | `--numa-bind` |
-      | 56 | 1 | 3 | 32 | 256 | 5 to 320 in steps of 5, then 340 to 1280 in steps of 20 | `VLLM_WORKER_MULTIPROC_METHOD=spawn` |
+      | Clients | Prefill workers | Decode workers | GPUs | Decode `--max-num-seqs` | Decode capture sizes |
+      |---:|---:|---:|---:|---:|---|
+      | 44, 56 | 1 | 5 | 48 | 64 | 5 to 320 in steps of 5 |
+      | 56 | 1 | 3 | 32 | 256 | 5 to 320 in steps of 5, then 340 to 1280 in steps of 20 |
 
       Each point renders one prefill worker and one decode worker; start the table's number of workers per role with the same commands, two trays each. Run every worker command on both of its trays with the same `--master-addr` (the first tray's address), `--nnodes 2` and `--node-rank 0` or `1`.
 
       **Serving config.**
-      - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, and `FULL_AND_PIECEWISE` CUDA graphs for 4 to 8192 tokens. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each.
+      - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, and `FULL_AND_PIECEWISE` CUDA graphs for 4 to 8192 tokens. `--kernel-config '{"sparse_indexer_topk_backend":"deep_select"}'` runs the sparse indexer's top-k on the DeepSelect kernels instead of the image's default chain. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each.
       - **Decode:** TP8 + DCP8 without expert parallelism, with `VLLM_ENABLE_GEMM_RS=0`. `--additional-config '{"decode_backend":"latency_specialized"}'` runs pure decode steps on the fused low-latency path; the Low-latency decode toggle is not offered under PD, so the preset sets the flag in the decode args. `--use-replayssm` makes KDA verification replay the accepted prefix instead of keeping one recurrent state per draft token. The decode `--compilation-config` sets only the capture sizes (multiples of 5 rows: 1 + 4 draft tokens per request) and replaces the PD strategy's `FULL_DECODE_ONLY`, so the CUDA graph mode is vLLM's default, as in the lane.
-      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit 128`; `--gpu-memory-utilization 0.95`, `--enable-cumem-allocator`, `--no-enable-flashinfer-autotune` and `--stream-interval 10`. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
-      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark) with 4 tokens, probabilistic drafting and block rejection.
+      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`) and BF16 indexer logits (`indexer_logits_dtype`; K3.1 defaults to FP32); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit 128`; `--gpu-memory-utilization 0.95`, `--enable-cumem-allocator`, `--no-enable-flashinfer-autotune` and `--stream-interval 10`. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview) with 4 tokens, probabilistic drafting and block rejection.
       - **Collectives and kernels:** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`), and so do TOKENSPEED_MLA's FP16 partials (`TOKENSPEED_MLA_FP16_PARTIALS=0`). NCCL runs over the NVLink domain (`NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`) without a network plugin (`NCCL_NET_PLUGIN=none`).
       - **KV transfer:** NIXL uses `UCX_MEMTYPE_REG_WHOLE=n` and `UCX_TCP_AF_PRIO=inet`. The Mooncake transfer engine uses `MC_SLICE_SIZE=1048576`, `MC_MAX_MR_SIZE=4294967296` and `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, and `WITH_NVIDIA_PEERMEM=0` for hosts without the nvidia-peermem module. vLLM loads from the store with 4 receive threads (`VLLM_MOONCAKE_LOAD_RECV_THREADS=4`), and `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE=1` makes a store lookup lease only the keys that a hit loads.
-      - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files.
-      - **CPU binding:** at 20 and 32 clients, `--numa-bind --numa-bind-nodes 0 0 1 1` binds each worker process to its GPU's NUMA node (GPUs 0 and 1 on node 0, GPUs 2 and 3 on node 1 of a tray). At 56 clients, workers start with `VLLM_WORKER_MULTIPROC_METHOD=spawn` and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do.
+      - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. A store lookup may take up to 60 s (`lookup_timeout_s`; the connector's default is 1 s), and starts when the request arrives, with up to 16 lookups in flight (`lookup_prefetch_limit`) and results kept for 30 s (`lookup_prefetch_ttl_s`). `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files. Every worker loads the checkpoint with `--load-format fastsafetensors`, which changes load time only.
+      - **Worker start:** every worker starts with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do; no `--numa-bind`.
 
       **Tool calling and reasoning** are on in this preset. Under Dynamo the builder renders `--dyn-tool-call-parser kimi_k3`, `--dyn-reasoning-parser kimi_k3` and vLLM's `--reasoning-parser kimi_k3`, and the preset adds `--dyn-enable-structural-tag`: the flags of the lane's accuracy runs.
 
-      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode and session affinity (the builder renders round-robin).
+      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it (recompute on a failed store load, the NIXL KV buffer on the GPU, the 60 s lookup timeout, store lookups started on arrival, cross-layer blocks and store offload off). Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode (the builder renders round-robin).
 
       ### Services
 
@@ -1353,10 +1361,10 @@ presets:
       ```bash
       export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592 DYN_TCP_REQUEST_TIMEOUT=120
       export DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1
-      python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 1
+      python3 -m dynamo.frontend --router-mode least-loaded
       ```
 
-      `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` skips the frontend's preflight validation of tool parameter schemas marked `strict: true`. Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation.
+      `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` skips the frontend's preflight validation of tool parameter schemas marked `strict: true`.
 
       ### Benchmark-only settings left out
 
@@ -1367,7 +1375,7 @@ presets:
       To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes, on both roles:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -1377,11 +1385,11 @@ presets:
     hardware: gb300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    description: "Concurrency 192 and 384: two or three TP8 + DCP8 prefill workers with EP8 on MegaMoE, and one decode worker across eight GB300 trays that runs four TP8 + DCP8 data-parallel ranks with EP32 on MegaMoE and the low-latency decode backend, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM."
-    source: { label: "InferenceX #4907", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4907", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "f2bb2756fffac8fc8e5d241fe0f936e32c3c3e90" }
+    description: "Concurrency 256 and 448: two or three TP8 + DCP8 prefill workers with EP8 on MegaMoE, and one decode worker across eight GB300 trays that runs four TP8 + DCP8 data-parallel ranks with EP32 on MegaMoE and the low-latency decode backend, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM."
+    source: { label: "InferenceX #5069", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5069", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "06eab45a92b07ba89c8c50fff05ca12b857b7c2c" }
     image:
-      vllm: "vllm/vllm-openai:kimi-k31-mc@sha256:f29efae15f9cb47f6215add0cba70b4b7d3596e6f3990d8b46c7cad0f8fbbc8b"
-      dynamo: "3dd0744eb72c707d76d4c520ae4dea9e286a4ab6"
+      vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
+      dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
     select:
       pd_router: dynamo
       frontend: rust
@@ -1390,7 +1398,7 @@ presets:
       kv_offload: kv_store_distributed_mooncake
     args: *k31_gb300_dcp8_args
     env: *k31_gb300_pd_env
-    json_args: *k31_gb300_pd_json
+    json_args: *k31_gb300_dcp8_json
     roles:
       prefill:
         parallelism: tep
@@ -1398,6 +1406,8 @@ presets:
         args:
           - "--moe-backend"
           - "deep_gemm_mega_moe"
+          - "--kernel-config"
+          - *k31_gb300_prefill_topk
           - "--max-num-seqs"
           - "32"
           - "--max-num-batched-tokens"
@@ -1410,7 +1420,9 @@ presets:
           VLLM_ENABLE_GEMM_RS: "1"
           DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT: "1024"
           DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT: "1024"
-          VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+          # Mooncake store tail pruning, on both roles.
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
       decode:
         # One engine across eight trays (vLLM's multi-node launch: --nnodes 8),
         # whose --tensor-parallel-size 8 and --data-parallel-size 4 replace the
@@ -1438,12 +1450,15 @@ presets:
           - "256"
         env:
           VLLM_ENABLE_GEMM_RS: "0"
-          VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
+          # MegaMoE layers on the EpMoeLayer schedule of DEP decode.
+          VLLM_KIMI_K3_HYBRID_EP_MOE: "1"
     # Decode capture sizes are multiples of 1 + draft tokens per request.
     points:
-      c192:
-        label: "192 (2P1D)"
-        concurrency: 192
+      c256:
+        label: "256 (2P1D)"
+        concurrency: 256
         description: "Two prefill workers and one DP4 x TP8 decode worker (48 GPUs), 6 draft tokens."
         json_args:
           "--speculative-config": { num_speculative_tokens: 6 }
@@ -1459,9 +1474,9 @@ presets:
               - "1792"
               - "--compilation-config"
               - '{"cudagraph_capture_sizes":[7,14,21,28,35,42,49,56,63,70,77,84,91,98,105,112,119,126,133,140,147,154,161,168,175,182,189,196,203,210,217,224,231,238,245,252,259,266,273,280,287,294,301,308,315,322,329,336,343,350,357,364,371,378,385,392,399,406,413,420,427,434,441,448,476,504,532,560,588,616,644,672,700,728,756,784,812,840,868,896,924,952,980,1008,1036,1064,1092,1120,1148,1176,1204,1232,1260,1288,1316,1344,1372,1400,1428,1456,1484,1512,1540,1568,1596,1624,1652,1680,1708,1736,1764,1792]}'
-      c384:
-        label: "384 (3P1D)"
-        concurrency: 384
+      c448:
+        label: "448 (3P1D)"
+        concurrency: 448
         description: "Three prefill workers and one DP4 x TP8 decode worker (56 GPUs), 4 draft tokens."
         roles:
           decode:
@@ -1473,32 +1488,33 @@ presets:
               - "--compilation-config"
               - *k31_gb300_decode_graphs_1280
     runbook: |
-      The concurrency 192 and 384 points of the GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4907](https://github.com/SemiAnalysisAI/InferenceX/pull/4907)), on the image, Dynamo revision and Mooncake version of the [AgentX 1P3D TP8 + DCP8 preset](#preset-gb300_agentx_pd). The prefill workers are that preset's: TP8 + DCP8 with EP8 on MegaMoE across two trays each. The single decode worker spans eight trays (32 GPUs) and runs four data-parallel ranks, each TP8 + DCP8 across two trays, with the routed experts EP32 on MegaMoE across all 32 GPUs and the low-latency decode backend. KV moves over NIXL, and all workers share the RDMA Mooncake store in host DRAM.
+      The concurrency 256 and 448 points of the GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5069](https://github.com/SemiAnalysisAI/InferenceX/pull/5069)), on the image, Dynamo revision and Mooncake version of the [AgentX TP8 + DCP8 PD preset](#preset-gb300_agentx_pd). The prefill workers are that preset's: TP8 + DCP8 with EP8 on MegaMoE across two trays each. The single decode worker spans eight trays (32 GPUs) and runs four data-parallel ranks, each TP8 + DCP8 across two trays, with the routed experts EP32 on MegaMoE across all 32 GPUs and the low-latency decode backend. KV moves over NIXL, and all workers share the RDMA Mooncake store in host DRAM. InferenceX#5069 measured both points with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
 
       | Clients | Prefill workers | Decode workers | GPUs | Draft tokens | Decode `--max-num-batched-tokens` and largest capture size | Prefill chunking |
       |---:|---:|---:|---:|---:|---:|---|
-      | 192 | 2 | 1 | 48 | 6 | 1792 | `--long-prefill-token-threshold 4096`, adaptive |
-      | 384 | 3 | 1 | 56 | 4 | 1280 | default |
+      | 256 | 2 | 1 | 48 | 6 | 1792 | `--long-prefill-token-threshold 4096`, adaptive |
+      | 448 | 3 | 1 | 56 | 4 | 1280 | default |
 
       Each point renders one prefill worker and the decode worker; start the table's number of prefill workers with the same command, two trays each, with the same `--master-addr` (the first tray's address), `--nnodes 2` and `--node-rank 0` or `1`. Run the decode command on each of its eight trays with `--nnodes 8`, `--node-rank 0` to `7`, and the first tray's address as both `--master-addr` and `--data-parallel-address`; ranks 1 to 7 add `--headless`, as rendered.
 
-      **Changes from the [1P3D preset](#preset-gb300_agentx_pd).**
+      **Changes from the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd).**
       - **Decode layout.** The builder renders the decode pool as one TEP engine across eight trays (`--tensor-parallel-size 32 --enable-expert-parallel`); the decode args `--tensor-parallel-size 8 --data-parallel-size 4` replace its TP size, so the engine runs four TP8 data-parallel ranks with DCP8 inside each, and expert parallelism spans all 32 GPUs. `--data-parallel-rpc-port 13345` is the lane's choice; any free port works.
-      - **Decode batch.** MegaMoE (`--moe-backend deep_gemm_mega_moe`) on decode as well, `--max-num-seqs 256` per data-parallel rank, `--gpu-memory-utilization 0.92`, and `--max-num-batched-tokens` and CUDA graph sizes up to 256 × (1 + draft tokens): multiples of 7 up to 448 and then of 28 up to 1792 with 6 draft tokens, multiples of 5 up to 320 and then of 20 up to 1280 with 4.
-      - **Prefill.** `--max-num-batched-tokens 16384`. At 192 clients the prefill workers also chunk long prompts with `--long-prefill-token-threshold 4096 --long-prefill-token-threshold-adaptive`, and both roles draft 6 tokens; at 384 clients both roles draft 4.
-      - **Worker start.** Every worker starts with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do; no `--numa-bind`.
+      - **Decode MoE.** MegaMoE (`--moe-backend deep_gemm_mega_moe`) on decode as well, and `VLLM_KIMI_K3_HYBRID_EP_MOE=1` runs its MoE layers on the EpMoeLayer schedule that DEP decode uses.
+      - **Decode batch.** `--max-num-seqs 256` per data-parallel rank, `--gpu-memory-utilization 0.92`, and `--max-num-batched-tokens` and CUDA graph sizes up to 256 × (1 + draft tokens): multiples of 7 up to 448 and then of 28 up to 1792 with 6 draft tokens, multiples of 5 up to 320 and then of 20 up to 1280 with 4.
+      - **Prefill.** `--max-num-batched-tokens 16384`. At 256 clients the prefill workers also chunk long prompts with `--long-prefill-token-threshold 4096 --long-prefill-token-threshold-adaptive`, and both roles draft 6 tokens; at 448 clients both roles draft 4.
+      - **Mooncake store tail pruning** on both roles. `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1` removes a partial-tail key that a request loaded once the request stores its own, longer tail, so each multi-turn prompt keeps one tail in the store instead of one per turn. With `VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1` it keeps the tail the request loaded and removes the older tails along its prompt instead, so a prompt that branches back one turn still hits.
 
-      Everything else (env, connector options, tool-call and reasoning parsers, services and frontend) is as in the [1P3D preset](#preset-gb300_agentx_pd), including its benchmark-only settings left out.
+      Everything else (env, connector options, tool-call and reasoning parsers, services and frontend) is as in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), including its benchmark-only settings left out.
 
       ### Throughput measurement only (synthetic acceptance)
 
-      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 3.57 for 6 draft tokens (192 clients) and 3.19 for 4 (384 clients). Only `--speculative-config` changes, on both roles:
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 3.57 for 6 draft tokens (256 clients) and 3.19 for 4 (448 clients). Only `--speculative-config` changes, on both roles:
 
       ```bash
-      # 192 clients
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":6,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.57}'
-      # 384 clients
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      # 256 clients
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":6,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.57}'
+      # 448 clients
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -1546,8 +1562,8 @@ presets:
       - "--stream-interval"
       - "10"
       - "--dyn-enable-structural-tag"
-    # The env of the 1P3D preset (its direct DCP paths are inherited from the
-    # lane and have no effect without DCP), plus spawned workers.
+    # The env of the TP8 + DCP8 PD preset (its direct DCP paths are inherited
+    # from the lane and have no effect without DCP).
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_USE_DIRECT_DCP_A2A: "1"
@@ -1576,7 +1592,14 @@ presets:
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
       TILELANG_CLEANUP_TEMP_FILES: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-    json_args: *k31_gb300_pd_json
+    # The connector options and draft length of the TP8 + DCP8 PD preset,
+    # without its store lookup timeout.
+    json_args:
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config":
+        kv_load_failure_policy: recompute
+        NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
+        MooncakeStoreConnector: { kv_load_failure_policy: recompute, kv_connector_extra_config: { enable_cross_layers_blocks: false, enable_offload: false } }
     roles:
       prefill:
         # One DEP16 pool (TP1 x DP16 with expert parallelism) across four trays.
@@ -1622,24 +1645,162 @@ presets:
         concurrency: 352
         description: "One DEP16 prefill worker and one DEP16 decode worker (32 GPUs)."
     runbook: |
-      The concurrency-352 point of the GB300 AgentX DEP16 lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep16-disagg`, [SemiAnalysisAI/InferenceX#4907](https://github.com/SemiAnalysisAI/InferenceX/pull/4907)). Dynamo + vLLM run one prefill worker and one decode worker, each DEP16 (`--tensor-parallel-size 1 --data-parallel-size 16` with expert parallelism) across four 4-GPU GB300 trays, 32 GPUs in all, with MegaMoE on both roles and no DCP. KV moves over NIXL, and all workers share an RDMA Mooncake store in host DRAM. The lane ran the image digest the preset pins, with the Dynamo revision and Mooncake version of the [AgentX 1P3D TP8 + DCP8 preset](#preset-gb300_agentx_pd); the preset has been measured only on that combination, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
+      The concurrency-352 point of the GB300 AgentX DEP16 lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep16-disagg`, [SemiAnalysisAI/InferenceX#4907](https://github.com/SemiAnalysisAI/InferenceX/pull/4907)). Dynamo + vLLM run one prefill worker and one decode worker, each DEP16 (`--tensor-parallel-size 1 --data-parallel-size 16` with expert parallelism) across four 4-GPU GB300 trays, 32 GPUs in all, with MegaMoE on both roles and no DCP. KV moves over NIXL, and all workers share an RDMA Mooncake store in host DRAM. The lane ran the image digest the preset pins, with the Dynamo revision and Mooncake version of the [AgentX TP8 + DCP8 PD preset](#preset-gb300_agentx_pd); the preset has been measured only on that combination, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
 
       Run each worker command on each of its four trays with `--data-parallel-start-rank` 0, 4, 8 and 12 and the same `--data-parallel-address` (the first tray's address), as rendered.
 
       **Serving config.**
       - **Both roles:** `--max-num-seqs 32` per data-parallel rank and `--block-size 16384`: the image does not pick a power-of-two attention block size at TP1 by itself, so the lane pins the same size on both roles. `--kv-cache-memory-bytes` sizes the KV cache per rank explicitly (61926160384 bytes on prefill, 64475268096 on decode): the size vLLM reported it could use on this image, minus 3 GiB. Size it to your own image and memory budget; the explicit size replaces the KV sizing from `--gpu-memory-utilization 0.95`.
-      - **Prefill:** `--max-num-batched-tokens 2048` with `--long-prefill-token-threshold 512 --long-prefill-token-threshold-adaptive`, so one long prompt does not fill a rank's step, and `FULL_AND_PIECEWISE` CUDA graphs for 4 to 2048 tokens. `VLLM_ENABLE_GEMM_RS=1` and Dynamo's admission limits (1024) as in the 1P3D preset.
+      - **Prefill:** `--max-num-batched-tokens 2048` with `--long-prefill-token-threshold 512 --long-prefill-token-threshold-adaptive`, so one long prompt does not fill a rank's step, and `FULL_AND_PIECEWISE` CUDA graphs for 4 to 2048 tokens. `VLLM_ENABLE_GEMM_RS=1` and Dynamo's admission limits (1024) as in the TP8 + DCP8 PD preset.
       - **Decode:** the low-latency decode backend (`--additional-config '{"decode_backend":"latency_specialized"}'`) with `--use-replayssm`, `--max-num-batched-tokens 160`, and CUDA graphs for 5 to 160 rows in steps of 5 (32 requests × (1 + 4 draft tokens)) in vLLM's default graph mode, which the decode `--compilation-config` keeps by replacing the PD strategy's `FULL_DECODE_ONLY`. `VLLM_ENABLE_GEMM_RS=0`.
-      - Everything else (precision, kernels, collectives, KV transfer, timeouts, tool-call and reasoning parsers, connector options) is as in the [1P3D preset](#preset-gb300_agentx_pd). The lane's env also keeps the direct DCP paths (`VLLM_USE_DIRECT_DCP_*=1`), which have no effect without DCP. All workers start with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do. The data-parallel RPC ports are the builder's placeholders; the lane used 13355 for prefill and 13345 for decode.
+      - Everything else (precision, kernels, collectives, KV transfer, timeouts, tool-call and reasoning parsers, connector options) is as in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), except three settings this lane does not set: the BF16 indexer logits, the prefill `--kernel-config` and the 60 s store lookup timeout. The lane's env also keeps the direct DCP paths (`VLLM_USE_DIRECT_DCP_*=1`), which have no effect without DCP. All workers start with `VLLM_WORKER_MULTIPROC_METHOD=spawn`, and each tray's GPUs are pinned with `CUDA_VISIBLE_DEVICES`, as the rendered commands do. The data-parallel RPC ports are the builder's placeholders; the lane used 13355 for prefill and 13345 for decode.
 
-      Start the services and the frontend as for the [1P3D preset](#preset-gb300_agentx_pd); the same benchmark-only settings are left out.
+      Start the services as for the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), and the frontend with that preset's env but with one-second session affinity, as the lane runs it; the same benchmark-only settings are left out.
+
+      ```bash
+      python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 1
+      ```
+
+      Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation.
 
       ### Throughput measurement only (synthetic acceptance)
 
       To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes, on both roles:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
+  gb300_agentx_pd_dep32:
+    label: "AgentX 2P1D DEP16 prefill, DEP32 decode"
+    hardware: gb300
+    strategy: pd_cluster
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 960 on 64 GPUs: two DEP16 prefill workers (four GB300 trays each) and one DEP32 decode worker across eight trays (TP1 x DP32 with EP32 on MegaMoE) on the low-latency decode backend, served by Dynamo with the K3.1 DSpark draft (4 tokens) and a shared Mooncake KV store in host DRAM."
+    source: { label: "InferenceX #5069", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5069", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep32-disagg", revision: "06eab45a92b07ba89c8c50fff05ca12b857b7c2c" }
+    image:
+      vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
+      dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
+    select:
+      pd_router: dynamo
+      frontend: rust
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: false, nvfp4_kv_cache: false }
+      kv_offload: kv_store_distributed_mooncake
+    # The DEP16 preset's args with BF16 indexer logits.
+    args:
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--block-size"
+      - "16384"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","indexer_logits_dtype":"bfloat16"}'
+      - "--mamba-cache-dtype"
+      - "float32"
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--enable-prefix-caching"
+      - "--prefix-match-unit"
+      - "128"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--max-num-seqs"
+      - "32"
+      - "--enable-cumem-allocator"
+      - "--no-enable-flashinfer-autotune"
+      - "--stream-interval"
+      - "10"
+      - "--dyn-enable-structural-tag"
+    env: *k31_gb300_pd_env
+    # The store lookup starts when a request arrives (up to 16 in flight, kept
+    # for 30 s), and the store keys use a TP1 layout in 4096-token chunks.
+    json_args:
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config":
+        kv_load_failure_policy: recompute
+        NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
+        MooncakeStoreConnector: { kv_load_failure_policy: recompute, kv_connector_extra_config: { lookup_prefetch_limit: 16, lookup_prefetch_ttl_s: 30, enable_cross_layers_blocks: false, enable_offload: false, store_tp_size: 1, store_chunk_size: 4096 } }
+    roles:
+      prefill:
+        # Each prefill worker is one DEP16 pool across four trays, as in the
+        # DEP16 preset.
+        parallelism: dep
+        nodes: 4
+        args:
+          - "--kv-cache-memory-bytes"
+          - "61926160384"
+          - "--kernel-config"
+          - *k31_gb300_prefill_topk
+          - "--max-async-kv-loads-per-step"
+          - "4"
+          - "--max-num-batched-tokens"
+          - "2048"
+          - "--long-prefill-token-threshold"
+          - "512"
+          - "--long-prefill-token-threshold-adaptive"
+          - "--max-cudagraph-capture-size"
+          - "2048"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[4,8,12,16,20,24,32,40,48,64,80,96,128,160,256,384,512,640,768,896,1024,1152,1280,1408,1536,1664,1792,1920,2048]}'
+        env:
+          VLLM_ENABLE_GEMM_RS: "1"
+          DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT: "1024"
+          DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT: "1024"
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
+      decode:
+        # One DEP32 pool (TP1 x DP32 with expert parallelism) across eight
+        # trays, with a larger KV pool than DEP16 decode.
+        parallelism: dep
+        nodes: 8
+        args:
+          - "--kv-cache-memory-bytes"
+          - "97710505984"
+          - "--max-async-kv-loads-per-step"
+          - "2"
+          - "--additional-config"
+          - '{"decode_backend":"latency_specialized"}'
+          - "--use-replayssm"
+          - "--max-num-batched-tokens"
+          - "160"
+          - "--max-cudagraph-capture-size"
+          - "160"
+          - "--compilation-config"
+          - '{"cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160]}'
+        env:
+          VLLM_ENABLE_GEMM_RS: "0"
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
+    # The builder renders one prefill worker; the labels give the lane's
+    # worker counts.
+    points:
+      c960:
+        label: "960 (2P1D)"
+        concurrency: 960
+        description: "Two DEP16 prefill workers and one DEP32 decode worker (64 GPUs)."
+    runbook: |
+      The concurrency-960 point of the GB300 AgentX DEP32 lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dep32-disagg`, [SemiAnalysisAI/InferenceX#5069](https://github.com/SemiAnalysisAI/InferenceX/pull/5069)). Dynamo + vLLM run two prefill workers, each DEP16 across four 4-GPU GB300 trays as in the [DEP16 preset](#preset-gb300_agentx_pd_dep16), and one decode worker, DEP32 (`--tensor-parallel-size 1 --data-parallel-size 32` with expert parallelism) across eight trays: 64 GPUs in all, with MegaMoE on both roles and no DCP. KV moves over NIXL, and all workers share an RDMA Mooncake store in host DRAM. The lane ran the image digest the preset pins (vLLM `0.1.dev25356+gdbbc9e310`), with the Dynamo revision and Mooncake version of the [AgentX TP8 + DCP8 PD preset](#preset-gb300_agentx_pd); the preset has been measured only on that combination, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
+
+      The point renders one prefill worker; start the second with the same command on four more trays. Run each prefill command on each of its four trays with `--data-parallel-start-rank` 0, 4, 8 and 12, and the decode command on each of its eight trays with 0, 4, … 28, each with its worker's first tray as `--data-parallel-address`, as rendered.
+
+      **Changes from the [DEP16 preset](#preset-gb300_agentx_pd_dep16).**
+      - **Decode layout and KV pool.** One DEP32 decode worker; `--kv-cache-memory-bytes 97710505984` per rank (prefill keeps 61926160384). At 960 clients decode is otherwise bound by its KV capacity. Size it to your own image and memory budget.
+      - **Store lookup.** The scheduler starts a request's Mooncake store lookup when the request arrives, with up to 16 lookups in flight (`lookup_prefetch_limit`) and results kept for 30 s (`lookup_prefetch_ttl_s`); beyond that it looks up as usual. `store_tp_size: 1` and `store_chunk_size: 4096` lay out the store keys for TP1 ranks in 4096-token chunks.
+      - **KV load starts.** `--max-async-kv-loads-per-step` caps the asynchronous KV loads that start in one scheduling step: 4 on prefill, 2 on decode. Each start allocates the request's KV blocks, and with data parallelism every rank waits for the slowest step.
+      - **Mooncake store tail pruning** on both roles (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), as in the [hybrid preset](#preset-gb300_agentx_pd_hybrid).
+      - **Indexer.** BF16 indexer logits on both roles and the DeepSelect top-k on prefill, as in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd).
+
+      Everything else is as in the DEP16 preset, including the frontend's one-second session affinity (`--router-session-affinity-ttl-secs 1`). The lane's benchmark client also ran on a node of its own, which is not a server setting.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 4 draft tokens, 3.19. Only `--speculative-config` changes, on both roles:
+
+      ```bash
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
@@ -1650,10 +1811,10 @@ presets:
     strategy: multi_node_tp
     workload: "Agentic (InferenceX AgentX)"
     description: "Concurrency 1 on four GB300 trays: one aggregated TP16 + DCP16 engine on the low-latency decode backend, with the K3.1 DSpark draft (7 tokens) and the Mooncake KV store in host DRAM."
-    source: { label: "InferenceX #4907", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4907", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-agg", revision: "f2bb2756fffac8fc8e5d241fe0f936e32c3c3e90" }
+    source: { label: "InferenceX #5069", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5069", key: "kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-agg", revision: "06eab45a92b07ba89c8c50fff05ca12b857b7c2c" }
     image:
-      vllm: "vllm/vllm-openai:kimi-k31-mc@sha256:5c243ce00d2d289a295065e3d794d5beb783e9c9a85eba3d2eef7024f822a531"
-      dynamo: "3dd0744eb72c707d76d4c520ae4dea9e286a4ab6"
+      vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
+      dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
     select:
       nodes: 4
       frontend: rust
@@ -1729,7 +1890,7 @@ presets:
       TILELANG_CLEANUP_TEMP_FILES: "1"
     # The draft length, and the lane's options on the store connector.
     json_args:
-      "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
+      "--speculative-config": { model: "Inferact/Kimi-K3.1-Pro-DSpark-preview", num_speculative_tokens: 7, rejection_sample_method: block }
       "--kv-transfer-config": { kv_load_failure_policy: recompute, kv_connector_extra_config: { load_async: true, lookup_async: true, enable_cross_layers_blocks: false, enable_offload: false } }
     points:
       c1:
@@ -1737,26 +1898,26 @@ presets:
         concurrency: 1
         description: "One aggregated TP16 + DCP16 engine (16 GPUs)."
     runbook: |
-      The concurrency-1 point of the GB300 AgentX aggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-agg`, [SemiAnalysisAI/InferenceX#4907](https://github.com/SemiAnalysisAI/InferenceX/pull/4907)): one engine serves prefill and decode with TP16 + DCP16 across four 4-GPU GB300 trays, without expert parallelism, on the low-latency decode backend, with the Mooncake store in host DRAM as its KV tier (no NIXL). The lane ran the image digest the preset pins; the preset has been measured only on that image, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
+      The concurrency-1 point of the GB300 AgentX aggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-agg`, [SemiAnalysisAI/InferenceX#5069](https://github.com/SemiAnalysisAI/InferenceX/pull/5069)): one engine serves prefill and decode with TP16 + DCP16 across four 4-GPU GB300 trays, without expert parallelism, on the low-latency decode backend, with the Mooncake store in host DRAM as its KV tier (no NIXL). The lane ran the image digest the preset pins; the preset has been measured only on that image, with the preview draft `Inferact/Kimi-K3.1-Pro-DSpark-preview`.
 
       **Serving config.**
       - **TP16 + DCP16.** DCP16 shards the MLA latent and indexer-key caches across the whole TP group, with the A2A DCP backend, `--cp-kv-cache-interleave-size 1` and the direct DCP paths (`VLLM_USE_DIRECT_DCP_*`). FP8 MLA KV cache with an MXFP4 indexer key cache; FP32 KDA conv and recurrent state.
       - **Low-latency decode** (the Low-latency decode feature, on in this preset) runs pure decode steps on the fused path, with `--use-replayssm`. A decode step is 8 rows (1 + 7 draft tokens); `FULL_AND_PIECEWISE` CUDA graphs cover 7 to 2048 tokens.
       - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft with 7 tokens, probabilistic drafting and block rejection.
       - `--max-num-seqs 1`, `--gpu-memory-utilization 0.90`, and `--max-num-batched-tokens 16384` with `--long-prefill-token-threshold 4096`: a lone prompt prefills in chunks of up to 16384 tokens, and next to other requests each prompt's chunk stops at 4096 tokens.
-      - The env follows the [1P3D preset](#preset-gb300_agentx_pd) (collectives, kernels, Mooncake transfer settings, timeouts) with `VLLM_ENABLE_GEMM_RS=0` and `VLLM_SSM_CONV_STATE_LAYOUT=DS`. It also keeps the lane's `UCX_*` settings, which have no effect without NIXL.
-      - The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row and sets the lane's options on its `MooncakeStoreConnector`: recompute on a failed load, asynchronous load and lookup, and cross-layer blocks and store offload off. Start the Mooncake master and size the store as for the [1P3D preset](#preset-gb300_agentx_pd).
+      - The env follows the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd) (collectives, kernels, Mooncake transfer settings, timeouts) with `VLLM_ENABLE_GEMM_RS=0` and `VLLM_SSM_CONV_STATE_LAYOUT=DS`. It also keeps the lane's `UCX_*` settings, which have no effect without NIXL.
+      - The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row and sets the lane's options on its `MooncakeStoreConnector`: recompute on a failed load, asynchronous load and lookup, and cross-layer blocks and store offload off. Start the Mooncake master and size the store as for the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd).
 
-      **Served through Dynamo in the lane.** InferenceX ran this engine as one aggregated Dynamo worker (`python3 -m dynamo.vllm` on each tray with the same engine flags) behind the Dynamo frontend of the [1P3D preset](#preset-gb300_agentx_pd), with `DYN_REQUEST_PLANE=tcp`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. The builder renders the same engine flags for `vllm serve` on the Multi-Node TP strategy, with vLLM's Rust frontend. Under Dynamo, tool calling and reasoning take `--dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` and `--reasoning-parser kimi_k3` in place of the rendered parser flags, as in the lane's accuracy runs.
+      **Served through Dynamo in the lane.** InferenceX ran this engine as one aggregated Dynamo worker (`python3 -m dynamo.vllm` on each tray with the same engine flags) behind the Dynamo frontend of the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd), with `DYN_REQUEST_PLANE=tcp`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`, and loaded the checkpoint with `--load-format fastsafetensors`. The builder renders the same engine flags for `vllm serve` on the Multi-Node TP strategy, with vLLM's Rust frontend. Under Dynamo, tool calling and reasoning take `--dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` and `--reasoning-parser kimi_k3` in place of the rendered parser flags, as in the lane's accuracy runs.
 
-      **Benchmark-only settings left out.** As in the [1P3D preset](#preset-gb300_agentx_pd): `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, and the job and benchmark-client settings. The throughput runs leave out the parser flags.
+      **Benchmark-only settings left out.** As in the [TP8 + DCP8 PD preset](#preset-gb300_agentx_pd): `--served-model-name` (the model ID), `VLLM_SERVER_DEV_MODE=1`, and the job and benchmark-client settings. The throughput runs leave out the parser flags.
 
       ### Throughput measurement only (synthetic acceptance)
 
       To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for 7 draft tokens, 3.69. Only `--speculative-config` changes:
 
       ```bash
-      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.69}'
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.69}'
       ```
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
