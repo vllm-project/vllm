@@ -82,12 +82,14 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     },
 }
 
-# Per-rank input limit for standalone FlashInfer MNNVL all-reduce.
+# Inclusive per-rank input limit for standalone FlashInfer MNNVL all-reduce.
 # The key is (compute capability, world size, node count).
 FI_MNNVL_ALLREDUCE_MAX_SIZE_MB: dict[tuple[int, int, int], float] = {
+    (100, 8, 1): 128,
+    (100, 8, 2): 128,
     (103, 4, 1): 80,
-    (103, 8, 1): 64,
-    (103, 8, 2): 64,
+    (103, 8, 1): 128,
+    (103, 8, 2): 128,
     (103, 16, 4): 8,
 }
 

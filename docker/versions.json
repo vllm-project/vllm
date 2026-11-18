@@ -2,7 +2,7 @@
   "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
   "variable": {
     "CUDA_VERSION": {
-      "default": "13.0.3"
+      "default": "13.2.1"
     },
     "PYTHON_VERSION": {
       "default": "3.12"
@@ -14,13 +14,19 @@
       "default": "false"
     },
     "NCCL_VERSION": {
-      "default": "2.30.7"
+      "default": "2.31.2"
+    },
+    "EFA_INSTALLER_VERSION": {
+      "default": "1.51.0"
+    },
+    "EFA_INSTALLER_SHA256": {
+      "default": "83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c"
     },
     "BUILD_BASE_IMAGE": {
-      "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
+      "default": "pytorch/manylinux2_28-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:13.0.3-base-ubuntu24.04"
+      "default": "nvidia/cuda:13.2.1-base-ubuntu24.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -35,9 +41,6 @@
       "default": "disabled"
     },
     "INSTALL_KV_CONNECTORS": {
-      "default": "false"
-    },
-    "BUILD_NIXL": {
       "default": "false"
     },
     "SCCACHE_BUCKET_NAME": {
@@ -62,7 +65,7 @@
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "d4f41e4e93"
+      "default": "a56d6156febcd9976e55adc85b5155bfac9f28f8"
     },
     "GIT_REPO_CHECK": {
       "default": "0"
@@ -83,7 +86,10 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.7"
+      "default": ">=0.17.1"
+    },
+    "GGUF_VERSION": {
+      "default": ">=0.19.0"
     }
   }
 }

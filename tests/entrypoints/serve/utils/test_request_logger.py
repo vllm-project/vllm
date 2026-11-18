@@ -284,6 +284,7 @@ def test_request_logger_log_request_body_truncation(max_log_len):
     with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
         RequestLogger(max_log_len=max_log_len).log_request_body(request)
 
-    mock_logger.debug.assert_called_once()
-    logged_body = mock_logger.debug.call_args.args[2]
+    mock_logger.log.assert_called_once()
+    assert mock_logger.log.call_args.args[0] == logging.DEBUG
+    logged_body = mock_logger.log.call_args.args[3]
     assert logged_body == full_body[:max_log_len]

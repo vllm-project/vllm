@@ -191,7 +191,7 @@ class ShardedStateLoader(BaseModelLoader):
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
             model_weights = model_weights_override
-        local_model_path = model_weights
+        local_model_path = self._prepare_weights(model_weights, model_config.revision)
 
         rendered_pattern = ShardedStateLoader._render_default_pattern(
             self.pattern, part="*"

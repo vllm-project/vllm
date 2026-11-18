@@ -1,0 +1,128 @@
+meta:
+  title: "Qwen2.5-32B"
+  slug: "qwen2.5-32b"
+  provider: "Qwen"
+  description: "Qwen2.5 32B dense base (pretrained) language model for text completion — verified on TPU v6e (Trillium)."
+  date_added: 2026-06-05
+  date_updated: 2026-06-04
+  tasks:
+    - text
+  performance_headline: "Verified on TPU v6e (Trillium) with BF16, TP=4 on a 2x2 slice"
+  related_recipes: []
+  hardware:
+    trillium: verified
+
+model:
+  model_id: "Qwen/Qwen2.5-32B"
+  min_vllm_version: "0.6.2"
+  architecture: dense
+  parameter_count: "32B"
+  active_parameters: "32B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 77
+    description: "Full precision BF16 — TPU v6e 2x2 (4 chips, TP=4) or a single 80GB+ GPU"
+
+  fp8:
+    model_id: "RedHatAI/Qwen2.5-32B-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 39
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen2.5-32B is the 32B dense **base** (pretrained, non-instruct) model in the Qwen2.5 series. It's a text-completion model — use the `/v1/completions` endpoint rather than chat, or pick `Qwen/Qwen2.5-32B-Instruct` if you need a chat-tuned variant. BF16 is the training precision and gives the best accuracy.
+
+  ## Prerequisites
+
+  ### NVIDIA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### TPU (Trillium / v6e)
+  Use the official vLLM TPU image. The 32B model is served on a `v6e-4` slice (`--topology 2x2`, 4 chips, TP=4).
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  ```
+
+  ## Deployment Configurations
+
+  ### TPU v6e (Trillium, 2x2 slice, TP=4)
+  Verified end-to-end on a 4-chip v6e slice.
+  ```bash
+  export HF_HOME=/dev/shm
+  export HF_TOKEN=<your HF token>
+  export TP=4
+  export MAX_MODEL_LEN=4096
+  vllm serve Qwen/Qwen2.5-32B \
+    --seed 42 \
+    --gpu-memory-utilization 0.98 \
+    --max-num-batched-tokens 2048 \
+    --max-num-seqs 128 \
+    --tensor-parallel-size $TP \
+    --max-model-len $MAX_MODEL_LEN
+  ```
+
+  ### Single GPU / node (BF16)
+  ```bash
+  vllm serve Qwen/Qwen2.5-32B \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 2
+  ```
+
+  ## Configuration Tips
+
+  - `--max-model-len 4096` keeps memory in check on a 4-chip v6e slice; native context is 128K — raise it if you have headroom.
+  - vLLM has been V1-engine-only for a long time, so no `VLLM_USE_V1=1` export is needed even though the upstream TPU recipe still shows it.
+  - vLLM uses 90% of device memory by default; the TPU recipe pushes `--gpu-memory-utilization 0.98` to maximize KV cache.
+  - `--max-num-batched-tokens` and `--max-num-seqs` tune batch throughput vs latency.
+
+  ## Benchmarking
+
+  Launch the server with `--no-enable-prefix-caching` for consistent measurements.
+
+  ```bash
+  vllm bench serve \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --model Qwen/Qwen2.5-32B \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 1024 \
+    --num-prompts 128
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen2.5-32B)
+  - [Qwen2.5-32B on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen2.5-32B)
