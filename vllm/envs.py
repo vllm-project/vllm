@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_REPLICATED_EMBED: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1370,6 +1371,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark on ROCm: keep the full input embedding table on every TP rank,
+    # so the lookup needs no all-reduce; the DSpark draft shares the table.
+    # Costs (TP - 1) / TP of the table in extra memory per rank. Off by default.
+    "VLLM_MUSE_REPLICATED_EMBED": lambda: bool(
+        int(os.getenv("VLLM_MUSE_REPLICATED_EMBED", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops

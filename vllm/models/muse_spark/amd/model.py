@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from vllm.model_executor.models.utils import (
@@ -1008,6 +1009,18 @@ class MuseSparkModel(LlamaModel):
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
         config = self.config
+        if (
+            envs.VLLM_MUSE_REPLICATED_EMBED
+            and isinstance(self.embed_tokens, VocabParallelEmbedding)
+            and not config.tie_word_embeddings
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+                quant_config=vllm_config.quant_config,
+                disable_tp=True,
+            )
+            logger.info_once("Muse replicated input embedding engaged")
         if get_pp_group().is_last_rank:
             self.norm = MuseSparkRMSNorm(
                 config.hidden_size,
