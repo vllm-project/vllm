@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -391,13 +391,13 @@ class HiSparseCoordinator:
             for manager in self.resident_managers
         )
 
-    def _unpin_pages(
+    def _iter_unpinnable_pages(
         self,
         request_id: str,
         state: _HiSparseRequestState,
         page_indices: Iterable[int],
-    ) -> None:
-        """Release the pages' resident blocks to the pool, in the given order."""
+    ) -> Iterator[tuple[int, tuple[KVCacheBlock, ...]]]:
+        """Select complete, durable pages outside the active tail."""
         num_unpinnable = self._num_resident_pages(request_id) - ACTIVE_TAIL_PAGES
         pages = [
             page_idx
@@ -412,10 +412,22 @@ class HiSparseCoordinator:
             manager.get_residency_pages(request_id, pages)
             for manager in self.resident_managers
         ]
-        released: list[KVCacheBlock] = []
         for page_idx, blocks in zip(pages, zip(*columns)):
             if any(block.is_null for block in blocks):
                 continue
+            yield page_idx, blocks
+
+    def _unpin_pages(
+        self,
+        request_id: str,
+        state: _HiSparseRequestState,
+        page_indices: Iterable[int],
+    ) -> None:
+        """Release the pages' resident blocks to the pool, in the given order."""
+        released: list[KVCacheBlock] = []
+        for page_idx, blocks in self._iter_unpinnable_pages(
+            request_id, state, page_indices
+        ):
             for block in blocks:
                 self._owners.setdefault(block.block_id, set()).add(
                     (request_id, page_idx)
@@ -457,7 +469,7 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
-    def get_transition_reclaimable_blocks(self, request_id: str) -> int:
+    def get_num_reclaimable_blocks(self, request_id: str) -> int:
         """Clean resident blocks a hot-first allocation can release immediately."""
         if not self.hot_managers or not all(
             request_id in manager.hot_required for manager in self.hot_managers
@@ -472,14 +484,28 @@ class HiSparseCoordinator:
         state = self.request_states.get(request_id)
         if state is None:
             return 0
-        reclaimable = 0
-        for page_idx in state.pinned_clean:
-            if page_idx in state.pending_pages or page_idx not in state.valid_pages:
-                continue
-            blocks = self._resident_page_blocks(request_id, page_idx)
-            if blocks is not None:
-                reclaimable += sum(block.ref_cnt == 1 for block in blocks)
-        return reclaimable
+        return sum(
+            block.ref_cnt == 1
+            for _, blocks in self._iter_unpinnable_pages(
+                request_id, state, state.pinned_clean
+            )
+            for block in blocks
+        )
+
+    def prepare_allocation(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> dict[int, list[KVCacheBlock]]:
+        """Allocate the hot tier before releasing pages to fund other groups."""
+        if not self.get_num_reclaimable_blocks(request_id):
+            return {}
+        hot_blocks = {
+            manager.kv_cache_group_id: manager.allocate_new_blocks(
+                request_id, num_tokens, num_tokens_main_model
+            )
+            for manager in self.hot_managers
+        }
+        self.update_residency(request_id)
+        return hot_blocks
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
@@ -1099,4 +1125,5 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
+    kv_cache_manager.coordinator.allocation_hook = coordinator
     return coordinator

@@ -884,10 +884,16 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
 
 
 @pytest.mark.parametrize("num_resident_groups", [1, 3])
-@pytest.mark.parametrize("writes_complete", [False, True])
+@pytest.mark.parametrize(
+    "completed_pages", [(), (4, 5), tuple(range(6))], ids=["pending", "tail", "all"]
+)
+@pytest.mark.parametrize(
+    "shared_pages", [(), (0,), tuple(range(4))], ids=["private", "mixed", "shared"]
+)
 def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     num_resident_groups,
-    writes_complete,
+    completed_pages,
+    shared_pages,
     monkeypatch,
 ):
     """A hot region fits even when hot plus the next chunk do not fit together."""
@@ -908,9 +914,21 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         is not None
     )
     request.num_computed_tokens = 6 * HISPARSE_BLOCK_SIZE
-    if writes_complete:
-        _publish_hisparse_pages(manager)
     coordinator = get_hisparse_coordinator(manager)
+    source_blocks = manager.get_blocks(request.request_id).blocks[0]
+    completed_host_blocks = {source_blocks[page].block_id for page in completed_pages}
+    counts = {
+        transfer.transfer_id: 1
+        for transfer in coordinator.build_offload_command().page_transfers
+        if transfer.host_block_id in completed_host_blocks
+    }
+    coordinator.update_spills(counts, counts)
+    # A second owner keeps these blocks out of the free queue after unpinning.
+    if shared_pages:
+        for resident in coordinator.resident_managers:
+            manager.block_pool.touch(
+                resident.get_residency_pages(request.request_id, shared_pages)
+            )
     for hot in coordinator.hot_managers:
         hot.require_hot(request.request_id)
     free = manager.block_pool.get_num_free_blocks()
@@ -932,6 +950,7 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         before = manager.block_pool.get_num_free_blocks()
         update_residency(request_id)
         observed_releases.append(manager.block_pool.get_num_free_blocks() - before)
+        assert coordinator.request_states[request_id].unpinned_pages == set(range(4))
 
     monkeypatch.setattr(
         manager.coordinator, "get_num_blocks_to_allocate", record_budget
@@ -939,7 +958,7 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     monkeypatch.setattr(coordinator, "update_residency", record_released_blocks)
     blocks = manager.allocate_slots(request, 2 * HISPARSE_BLOCK_SIZE)
 
-    if not writes_complete:
+    if len(completed_pages) < 6 or len(shared_pages) == 4:
         assert observed_budgets == [gross_budget]
         assert not observed_releases
         assert blocks is None
@@ -949,7 +968,7 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         return
 
     (budget,) = observed_budgets
-    assert budget < gross_budget
+    assert gross_budget - budget == (4 - len(shared_pages)) * num_resident_groups
     assert observed_releases == [gross_budget - budget]
     assert blocks is not None
     assert all(hot.has_hot(request.request_id) for hot in coordinator.hot_managers)
@@ -957,7 +976,7 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         len(blocks.blocks[hot.kv_cache_group_id]) == 2
         for hot in coordinator.hot_managers
     )
-    assert coordinator.request_states[request.request_id].unpinned_pages
+    assert {4, 5} <= coordinator.request_states[request.request_id].pinned_clean
 
 
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
