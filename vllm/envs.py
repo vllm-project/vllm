@@ -2111,9 +2111,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
     ),
-    # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
-    # This backend has a strict single-stream contract and is opt-in while its
-    # integration is being qualified.
+    # Whether to use FlashInfer's single-node PCIe CUDA-IPC collectives:
+    # tensor-parallel all-reduce and uniform expert-parallel MoE AG/RS.
+    # These backends have strict single-stream contracts and are opt-in while
+    # their integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
     ),
