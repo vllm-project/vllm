@@ -18,6 +18,7 @@ from .base import (
     PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -674,6 +675,7 @@ class PyNvVideoCodecVideoBackendMixin:
                     gpu_source.key_frame_indices,
                     source.total_frames_num,
                 )
+            charge_sampled_frames(len(frame_idx), gpu_source.width, gpu_source.height)
             raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
             pool = get_mm_gpu_ipc_pool()
             if pool is None or raw_frame_bytes == 0:

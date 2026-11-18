@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -95,8 +96,20 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
     model.hc_count = 2
     model.hidden_size = 4
     model.num_mtp_layers = 1
-    model.pre_fc_norm_embedding = torch.nn.Identity()
-    model.pre_fc_norm_hidden = torch.nn.Identity()
+    if backend == "nvidia":
+        # The nvidia forward passes the norm weights to the fused Triton
+        # kernel (bypassed below): the norms only carry weights here.
+        class NormStub(torch.nn.Module):
+            def __init__(self, width: int) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(width))
+                self.variance_epsilon = 1e-6
+
+        model.pre_fc_norm_embedding = NormStub(model.hidden_size)
+        model.pre_fc_norm_hidden = NormStub(model.hc_count * model.hidden_size)
+    else:
+        model.pre_fc_norm_embedding = torch.nn.Identity()
+        model.pre_fc_norm_hidden = torch.nn.Identity()
     model.fc_embedding = torch.nn.Identity()
     model.fc_hidden = torch.nn.Identity()
 
@@ -128,6 +141,15 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
     with (
         patch(f"{mtp_module}.sp_shard", side_effect=lambda x: x[:2]),
         patch(f"{mtp_module}.sp_all_gather", side_effect=gather),
+        # The fused norm kernel is CUDA-only; it has dedicated kernel tests.
+        (
+            patch(
+                f"{mtp_module}.fused_pre_fc_norms_split",
+                side_effect=lambda embeds, hidden, *args: (embeds, hidden),
+            )
+            if backend == "nvidia"
+            else nullcontext()
+        ),
     ):
         sample_hidden, returned_multi_hidden = model.forward(
             input_ids=None,
