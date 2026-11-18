@@ -6,8 +6,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use vllm_tokenizer::{DecodedText, Tokenizer as _};
-use xgrammar_structural_tag::ToolChoice;
 use xgrammar_structural_tag::format::Format;
+use xgrammar_structural_tag::{AllowedToolRef, AllowedToolsMode, ToolChoice};
 
 use super::{BeamUnifiedParser, HfPosition, build_output_grammar, other_names};
 use crate::output_grammar::test_utils::outline;
@@ -303,6 +303,38 @@ fn required_calls_any_tool_after_reasoning() {
     "#]].assert_eq(
         &grammar(HfPosition::ResponseStart, ToolChoice::required(), true).unwrap(),
     );
+}
+
+/// `auto` allowed tools admit an answer or a call to the allowed tools only:
+/// neither the other declared tool nor an undeclared name.
+#[test]
+fn auto_allowed_tools_call_only_the_allowed_tools() {
+    let allowed = ToolChoice::allowed_tools(
+        AllowedToolsMode::Auto,
+        vec![AllowedToolRef::function("get_time")],
+    );
+    expect_test::expect![[r#"
+        sequence
+          tag `<|channel|>analysis<|message|>` .. `<|end|><|start|>assistant`
+            sequence
+              /[^<]/
+              text
+          or
+            sequence
+              sequence
+                ` to=get_time<|channel|>analysis <|constrain|>xml<|message|>`
+                sequence
+                  optional
+                    sequence
+                      optional `\n`
+                      tag `<rfl:parameter name="zone">\n` text excluding [`<|end|>`, `<|call|>`, `</rfl:parameter>`] `\n</rfl:parameter>`
+              optional `<|call|>`
+            sequence
+              `<|channel|>final<|message|>`
+              text excluding [`<|end|>`, `<|return|>`]
+              optional `<|return|>`
+    "#]]
+        .assert_eq(&grammar(HfPosition::ResponseStart, allowed, false).unwrap());
 }
 
 #[test]

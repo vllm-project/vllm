@@ -4517,6 +4517,88 @@ async fn chat_structured_outputs_use_configured_backend() {
     }
 }
 
+/// `allowed_tools` restricts the calls the grammar admits to the allowed
+/// subset, in both modes, while plain `required` admits every tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_allowed_tools_restrict_the_call_grammar() {
+    let allowed = |mode| {
+        json!({
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": mode,
+                "tools": [{"type": "function", "function": {"name": "get_time"}}],
+            },
+        })
+    };
+    for (tool_choice, callable) in [
+        (json!("required"), ["get_weather", "get_time"].as_slice()),
+        (allowed("required"), ["get_time"].as_slice()),
+        (allowed("auto"), ["get_time"].as_slice()),
+    ] {
+        let case = tool_choice.to_string();
+        let chat_backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend)
+                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
+            },
+            {
+                let case = case.clone();
+                move |request| {
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    let structured_outputs =
+                        params.structured_outputs.as_ref().expect("structured outputs");
+                    let tag = structured_outputs
+                        .params
+                        .constraint
+                        .as_structural_tag()
+                        .expect("structural tag");
+                    for name in ["get_weather", "get_time"] {
+                        let grammar_name = format!("<function={name}>");
+                        assert_eq!(
+                            tag.contains(&grammar_name),
+                            callable.contains(&name),
+                            "{case}: {name} in {tag}"
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+
+        let tool = |name: &str| {
+            json!({
+                "type": "function",
+                "function": {"name": name, "parameters": {"type": "object"}},
+            })
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 2,
+                            "tools": [tool("get_weather"), tool("get_time")],
+                            "tool_choice": tool_choice,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{case}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn openai_return_weight_versions_reports_spans_on_final_choice() {

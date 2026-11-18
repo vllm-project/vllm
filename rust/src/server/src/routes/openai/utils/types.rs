@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::ChatTool;
+use vllm_chat::{AllowedToolsMode, ChatTool};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -445,8 +445,7 @@ pub enum ToolChoice {
     AllowedTools {
         #[serde(rename = "type")]
         tool_type: String,
-        mode: String,
-        tools: Vec<ToolReference>,
+        allowed_tools: AllowedTools,
     },
 }
 
@@ -462,7 +461,23 @@ pub struct FunctionChoice {
     pub name: String,
 }
 
-/// Tool reference for `ToolChoice::AllowedTools`.
+/// The allowed set of `ToolChoice::AllowedTools`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTools {
+    pub mode: AllowedToolsMode,
+    pub tools: Vec<AllowedTool>,
+}
+
+/// One tool of [`AllowedTools`], named like a function tool choice:
+/// `{"type": "function", "function": {"name": ...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionChoice,
+}
+
+/// Tool reference of the Responses API `allowed_tools` tool choice.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
