@@ -273,7 +273,6 @@ class DeepseekV32Model(torch.nn.Module):
                 True, full_num_tokens, self.shardq_min_tokens
             )
         )
-
         attn_in = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
