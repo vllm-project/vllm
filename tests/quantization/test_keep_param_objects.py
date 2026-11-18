@@ -404,12 +404,11 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     backend: str,
     default_vllm_config,
     dist_init,
-    monkeypatch,
+    weight_updates,
 ) -> None:
     """Post-load processing reruns on every reload (and rebuilds MoE experts
     objects); every tensor the kernel reads keeps the cold-start address and
     holds what a cold start on the new weights computes."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = backend
     default_vllm_config.kernel_config.linear_backend = backend

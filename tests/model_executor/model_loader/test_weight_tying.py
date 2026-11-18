@@ -93,11 +93,10 @@ def test_no_retie_without_checkpoint_override():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_direct_reload_keeps_cold_start_tying(monkeypatch):
+@pytest.mark.usefixtures("dist_init", "weight_updates")
+def test_direct_reload_keeps_cold_start_tying():
     """A direct reload does not re-tie: once lm_head is the input embeddings,
     every later update's lm_head would be dropped."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     model_config = make_model_config(untied_by_checkpoint=True)
     device = torch.device("cpu")
     model = UntiedModel()

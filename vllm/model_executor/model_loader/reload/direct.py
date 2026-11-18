@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload: `VLLM_RELOAD_MODE=direct`, or the default `auto` with
-runtime weight updates enabled.
+"""Direct weight reload, the default with runtime weight updates enabled.
 
 Cold start records each tensor's checkpoint layout before post-load processing
 (PWAL). `begin` views re-laid-out tensors back to that layout on their

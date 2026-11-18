@@ -63,7 +63,7 @@ layerwise instead, for example for the configurations direct reload refuses.
 
 ### High Level Weight Transfer API
 
-The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) reload inside their `start_weight_update`/`finish_weight_update` lifecycle, in the mode `VLLM_RELOAD_MODE` selects: layerwise by default, or [direct](direct_reload.md).
+The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) reload inside their `start_weight_update`/`finish_weight_update` lifecycle, in [direct](direct_reload.md) mode by default, or layerwise with `VLLM_RELOAD_MODE=layerwise`.
 
 ### Mid Level `reload_weights` API
 

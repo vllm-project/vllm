@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (`VLLM_RELOAD_MODE=direct`) on a toy model whose
+"""Direct weight reload on a toy model whose
 post-load processing has the hazards found on real models:
 
 (a) a parent derives a separate tensor from a child's weight (MLA W_UK/W_UV
@@ -279,9 +279,7 @@ def _runs(model: _ToyModel) -> dict[str, int]:
     }
 
 
-@pytest.fixture(autouse=True)
-def _direct_mode(monkeypatch):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+pytestmark = pytest.mark.usefixtures("weight_updates")
 
 
 class TestReloadEqualsColdStart:
@@ -689,12 +687,11 @@ def _config(**overrides) -> SimpleNamespace:
         quant_config=None,
         lora_config=None,
         speculative_config=None,
-        weight_transfer_config=None,
+        weight_transfer_config=SimpleNamespace(backend="nccl"),
     )
     return SimpleNamespace(**(fields | overrides))
 
 
-_UPDATES = {"weight_transfer_config": SimpleNamespace(backend="nccl")}
 _LORA = {"lora_config": object()}
 
 
@@ -702,13 +699,12 @@ _LORA = {"lora_config": object()}
     "mode,overrides,match",
     [
         ("direct", {}, None),
-        # without weight updates the default loads and reloads layerwise
-        ("auto", _LORA, "layerwise"),
-        ("auto", _LORA | _UPDATES, "LoRA"),
-        ("layerwise", _LORA | _UPDATES, "layerwise"),
-        # it always reloads layerwise
+        ("direct", _LORA, "LoRA"),
+        ("layerwise", _LORA, "layerwise"),
+        # without weight updates, and with sharded_rdt, reloads are layerwise
+        ("direct", _LORA | {"weight_transfer_config": None}, "layerwise"),
         (
-            "auto",
+            "direct",
             _LORA | {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
             "layerwise",
         ),
@@ -736,10 +732,10 @@ _LORA = {"lora_config": object()}
     ],
     ids=[
         "defaults",
-        "auto-lora",
-        "auto-updates-lora",
-        "layerwise-updates-lora",
-        "auto-sharded-rdt-lora",
+        "lora",
+        "layerwise-lora",
+        "no-updates-lora",
+        "sharded-rdt-lora",
         "offload",
         "torchao",
         "draft-lm-head-quant",

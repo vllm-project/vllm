@@ -244,7 +244,7 @@ class _Model(torch.nn.Module):
 
 
 @pytest.mark.parametrize("mode", ["layerwise", "direct"])
-def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
+def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, weight_updates):
     """A reload writes the block-FP8 shards and finishes with the model's
     process_weights_after_loading; the kernel tensors keep their storage."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)

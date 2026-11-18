@@ -311,7 +311,9 @@ def test_update_resets_active_on_error():
 
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
+def test_failed_finish_ends_session_only_in_direct_mode(
+    mode, monkeypatch, weight_updates
+):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     engine = _RecordingEngine(raise_on_finish=True)
     worker = _make_worker(engine)

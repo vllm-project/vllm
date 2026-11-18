@@ -5,9 +5,8 @@ when runtime weight updates are enabled (`--weight-transfer-config`, any
 backend but `sharded_rdt`). Without them, a model loads and reloads as with
 [Layerwise (Re)loading](layerwise.md).
 
-`VLLM_RELOAD_MODE` overrides the default (`auto`): `direct` always uses direct
-reload, `layerwise` never does, for example for the configurations direct
-reload refuses (see below).
+Set `VLLM_RELOAD_MODE=layerwise` to update weights layerwise instead, for
+example for the configurations direct reload refuses (see below).
 
 ## How It Works
 
