@@ -135,8 +135,15 @@ impl InferenceServiceImpl {
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
             let media_io_kwargs = proto_request.media_io_kwargs.take();
+            let output_mode = proto_request.response.as_ref().map(|options| options.output_mode());
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
+            if output_mode == Some(pb::OutputMode::Text) && !self.state.chat.text().has_tokenizer()
+            {
+                return Err(Status::invalid_argument(
+                    "output_mode text requires a tokenizer",
+                ));
+            }
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 

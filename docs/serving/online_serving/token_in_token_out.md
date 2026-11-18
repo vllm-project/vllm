@@ -130,6 +130,44 @@ The server returns a 400 for:
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
+## Rust gRPC output modes
+
+The Rust frontend's `vllm.Inference.Generate` and `GenerateStream` RPCs select
+output with `ResponseOptions.output_mode` in
+[`inference.proto`](../../../rust/proto/inference.proto). This gRPC contract
+differs from the HTTP endpoint above:
+
+| `output_mode` | gRPC behavior |
+| --- | --- |
+| Omitted or `OUTPUT_MODE_UNSPECIFIED` | Honor the legacy `output_text` flag, which defaults to `true`; tokenizer-less backends retain their token-only fallback. |
+| `OUTPUT_MODE_TEXT` | Detokenize and return `SequenceOutput.text`, even when `output_text` is `false`. A tokenizer is required; otherwise return `INVALID_ARGUMENT`. |
+| `OUTPUT_MODE_TOKENS` | Skip detokenization and return an empty `text`, even when `output_text` is `true`. |
+| `OUTPUT_MODE_DERENDER` | Return gRPC `UNIMPLEMENTED`; worker-side parsing is not supported yet. |
+| Unknown numeric enum value | Return gRPC `INVALID_ARGUMENT`. |
+
+`output_token_ids` independently selects whether `SequenceOutput.token_ids`
+is populated; it defaults to `false` in both text and tokens modes. To receive
+token IDs without decoding, set it to `true` together with
+`OUTPUT_MODE_TOKENS`. Stop strings must be empty when detokenization is off;
+otherwise either RPC returns `INVALID_ARGUMENT`. Use `stop_token_ids` instead.
+Finish information remains available in either mode.
+
+For example, this protobuf JSON request selects text and token IDs together:
+
+```json
+{
+  "tokenIds": {"ids": [151644, 872, 198]},
+  "stopping": {"maxNewTokens": 32},
+  "response": {
+    "outputMode": "OUTPUT_MODE_TEXT",
+    "outputTokenIds": true
+  }
+}
+```
+
+`Generate` collects the result in one response. `GenerateStream` returns text
+and token deltas followed by finish information. These rules apply to both RPCs.
+
 ## Weight versions
 
 The final output of every choice carries `weight_versions`, the label of the weights that sampled each range of its output tokens. Ranges are half-open over output-token indexes (prompt excluded), contiguous and in generation order, so a request that crossed one weight update gets two:

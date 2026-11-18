@@ -96,6 +96,27 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
+    // A prost getter maps an unknown nonzero enum value back to Unspecified;
+    // validate the raw field so such a client error is rejected instead of
+    // silently taking the legacy fallback.
+    if let Some(options) = response {
+        if pb::OutputMode::try_from(options.output_mode).is_err() {
+            return Err(Status::invalid_argument(format!(
+                "unknown output_mode value: {}",
+                options.output_mode
+            )));
+        }
+    }
+
+    // Worker-side derendering (structured content, reasoning, and tool-call
+    // deltas from the decode worker) is not implemented yet; reject it instead
+    // of silently falling back to raw text.
+    if response.is_some_and(|options| options.output_mode() == pb::OutputMode::Derender) {
+        return Err(Status::unimplemented(
+            "output_mode derender is not implemented yet",
+        ));
+    }
+
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
     sampling_params.watermarking = req.watermarking;
@@ -119,6 +140,8 @@ pub fn to_text_request(
         }
     }
 
+    let detokenize = ResponseOpts::from_proto(response).output_text;
+
     let decode_options = TextDecodeOptions {
         skip_special_tokens: response
             .and_then(|options| options.skip_special_tokens)
@@ -126,7 +149,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
-        detokenize: response.and_then(|options| options.output_text).unwrap_or(true),
+        detokenize,
     };
 
     Ok(TextRequest {
@@ -605,7 +628,11 @@ impl ResponseOpts {
             Some(r) => Self {
                 prompt_token_ids: r.prompt_token_ids,
                 prompt_logprobs: r.prompt_logprobs,
-                output_text: r.output_text.unwrap_or(true),
+                output_text: match r.output_mode() {
+                    pb::OutputMode::Tokens => false,
+                    pb::OutputMode::Text => true,
+                    _ => r.output_text.unwrap_or(true),
+                },
                 output_token_ids: r.output_token_ids,
                 output_logprobs: r.output_logprobs,
             },
@@ -645,6 +672,73 @@ mod tests {
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn grpc_output_mode_derender_is_rejected_as_unimplemented() {
+        let request = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_mode: pb::OutputMode::Derender as i32,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(request, false, &served()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[test]
+    fn grpc_output_mode_unknown_value_is_rejected_as_invalid_argument() {
+        let request = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_mode: 99,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(request, false, &served()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn grpc_output_mode_supersedes_legacy_output_text() {
+        // TOKENS maps to today's output_text = false behavior.
+        let request = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_mode: pb::OutputMode::Tokens as i32,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(request.clone(), false, &served()).expect("convert ok");
+        assert!(!text.decode_options.detokenize);
+        let opts = ResponseOpts::from_proto(request.response.as_ref());
+        assert!(!opts.output_text);
+
+        // Explicit TEXT keeps text output even alongside output_text = false.
+        let request = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_mode: pb::OutputMode::Text as i32,
+                output_text: Some(false),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(request.clone(), false, &served()).expect("convert ok");
+        assert!(text.decode_options.detokenize);
+        let opts = ResponseOpts::from_proto(request.response.as_ref());
+        assert!(opts.output_text);
+
+        // Unset output_mode preserves the legacy output_text default.
+        let request = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_text: Some(false),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(request, false, &served()).expect("convert ok");
+        assert!(!text.decode_options.detokenize);
     }
 
     #[test]

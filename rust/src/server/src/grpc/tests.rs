@@ -230,12 +230,14 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
 #[derive(Clone)]
 struct FakeTextBackend {
     tokenizer: DynTokenizer,
+    has_tokenizer: bool,
 }
 
 impl Default for FakeTextBackend {
     fn default() -> Self {
         Self {
             tokenizer: Arc::new(TestTokenizer::new()),
+            has_tokenizer: true,
         }
     }
 }
@@ -243,6 +245,10 @@ impl Default for FakeTextBackend {
 impl TextBackend for FakeTextBackend {
     fn tokenizer(&self) -> DynTokenizer {
         Arc::clone(&self.tokenizer)
+    }
+
+    fn has_tokenizer(&self) -> bool {
+        self.has_tokenizer
     }
 
     fn model_id(&self) -> &str {
@@ -845,87 +851,225 @@ async fn unary_generate_with_token_ids_prompt() {
     server_task.abort();
 }
 
-/// `output_text=false` turns detokenization off, so neither RPC may decode.
-/// Token IDs and finish info stay the same.
+/// Explicit modes override the legacy text flag in both decoding and output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn generate_without_output_text_skips_detokenization() {
-    for streaming in [false, true] {
-        let (inference_service, control_service, engine_health, engine_task) =
-            setup_grpc_service_with_backend(
-                b"engine-grpc-token-only",
-                default_stream_output_specs(),
-                Arc::new(FakeTextBackend {
-                    tokenizer: Arc::new(PanickingTokenizer),
-                }),
-                |_| {},
+async fn generate_output_mode_precedence_for_both_rpcs() {
+    for (mode, legacy_text, output_token_ids, expected_text) in [
+        (pb::OutputMode::Unspecified, Some(false), true, false),
+        (pb::OutputMode::Unspecified, None, true, true),
+        (pb::OutputMode::Text, Some(false), false, true),
+        (pb::OutputMode::Tokens, Some(true), true, false),
+        (pb::OutputMode::Tokens, None, false, false),
+    ] {
+        for streaming in [false, true] {
+            let tokenizer: DynTokenizer = if expected_text {
+                Arc::new(TestTokenizer::new())
+            } else {
+                Arc::new(PanickingTokenizer)
+            };
+            let (inference_service, control_service, engine_health, engine_task) =
+                setup_grpc_service_with_backend(
+                    b"engine-grpc-token-only",
+                    default_stream_output_specs(),
+                    Arc::new(FakeTextBackend {
+                        tokenizer,
+                        ..Default::default()
+                    }),
+                    |_| {},
+                )
+                .await;
+            let (channel, server_task) = start_grpc_test_server(
+                inference_service,
+                control_service,
+                engine_health,
+                tokio_util::sync::CancellationToken::new(),
             )
             .await;
-        let (channel, server_task) = start_grpc_test_server(
-            inference_service,
-            control_service,
-            engine_health,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-        let mut client = InferenceClient::new(channel);
-        let request = pb::GenerateRequest {
-            request_id: "test-token-only".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-                ids: vec![1, 2, 3],
-            })),
-            stopping: Some(pb::StoppingCriteria {
-                max_new_tokens: 10,
+            let mut client = InferenceClient::new(channel);
+            let request = pb::GenerateRequest {
+                request_id: "test-token-only".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2, 3],
+                })),
+                stopping: Some(pb::StoppingCriteria {
+                    max_new_tokens: 10,
+                    ..Default::default()
+                }),
+                response: Some(pb::ResponseOptions {
+                    output_mode: mode as i32,
+                    output_text: legacy_text,
+                    output_token_ids,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            response: Some(pb::ResponseOptions {
-                output_text: Some(false),
-                output_token_ids: true,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+            };
 
-        let outputs: Vec<_> = if streaming {
-            let mut stream =
-                client.generate_stream(request).await.expect("start stream").into_inner();
-            let mut outputs = Vec::new();
-            while let Some(response) = stream.message().await.expect("stream message") {
-                outputs.extend(response.outputs);
+            let outputs =
+                generate_outputs(&mut client, request, streaming).await.expect("generate");
+
+            assert_eq!(
+                outputs.iter().map(|output| output.text.as_str()).collect::<String>(),
+                if expected_text { "hi" } else { "" },
+                "{mode:?}, streaming={streaming}"
+            );
+            assert_eq!(
+                outputs
+                    .iter()
+                    .flat_map(|output| output.token_ids.iter().copied())
+                    .collect::<Vec<_>>(),
+                if output_token_ids {
+                    vec![b'h' as u32, b'i' as u32, b'!' as u32]
+                } else {
+                    vec![]
+                },
+                "{mode:?}, streaming={streaming}"
+            );
+            let finish = outputs
+                .last()
+                .and_then(|output| output.finish_info.as_ref())
+                .expect("finish_info present");
+            assert_eq!(
+                finish.finish_reason,
+                pb::finish_info::FinishReason::Stop as i32
+            );
+            assert_eq!(finish.num_output_tokens, 3);
+
+            engine_task.await.expect("mock engine task");
+            server_task.abort();
+        }
+    }
+}
+
+async fn generate_outputs(
+    client: &mut InferenceClient<Channel>,
+    request: pb::GenerateRequest,
+    streaming: bool,
+) -> Result<Vec<pb::SequenceOutput>, tonic::Status> {
+    if streaming {
+        let mut stream = client.generate_stream(request).await?.into_inner();
+        let mut outputs = Vec::new();
+        while let Some(response) = stream.message().await? {
+            outputs.extend(response.outputs);
+        }
+        Ok(outputs)
+    } else {
+        Ok(client.generate(request).await?.into_inner().outputs.into_iter().collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_output_mode_on_tokenizerless_backend_for_both_rpcs() {
+    for mode in [
+        pb::OutputMode::Text,
+        pb::OutputMode::Tokens,
+        pb::OutputMode::Unspecified,
+    ] {
+        for streaming in [false, true] {
+            let (inference_service, control_service, engine_health, engine_task) =
+                setup_grpc_service_with_backend(
+                    b"engine-grpc-no-tokenizer",
+                    default_stream_output_specs(),
+                    Arc::new(FakeTextBackend {
+                        tokenizer: Arc::new(PanickingTokenizer),
+                        has_tokenizer: false,
+                    }),
+                    |_| {},
+                )
+                .await;
+            let (channel, server_task) = start_grpc_test_server(
+                inference_service,
+                control_service,
+                engine_health,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+            let mut client = InferenceClient::new(channel);
+            let request = pb::GenerateRequest {
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2, 3],
+                })),
+                response: Some(pb::ResponseOptions {
+                    output_mode: mode as i32,
+                    output_token_ids: mode != pb::OutputMode::Text,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let result = generate_outputs(&mut client, request, streaming).await;
+            if mode == pb::OutputMode::Text {
+                let status = result.expect_err("explicit TEXT needs a tokenizer");
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert!(status.message().contains("requires a tokenizer"));
+            } else {
+                let outputs = result.expect("token output remains available");
+                assert!(outputs.iter().all(|output| output.text.is_empty()));
+                assert_eq!(
+                    outputs
+                        .iter()
+                        .flat_map(|output| &output.token_ids)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    [b'h' as u32, b'i' as u32, b'!' as u32]
+                );
+                engine_task.await.expect("mock engine task");
             }
-            outputs
-        } else {
-            client
-                .generate(request)
-                .await
-                .expect("unary generate")
-                .into_inner()
-                .outputs
-                .into_iter()
-                .collect()
-        };
+            server_task.abort();
+        }
+    }
+}
 
-        assert!(outputs.iter().all(|output| output.text.is_empty()));
-        assert_eq!(
-            outputs
-                .iter()
-                .flat_map(|output| output.token_ids.iter().copied())
-                .collect::<Vec<_>>(),
-            [b'h' as u32, b'i' as u32, b'!' as u32]
-        );
-        let finish = outputs
-            .last()
-            .and_then(|output| output.finish_info.as_ref())
-            .expect("finish_info present");
-        assert_eq!(
-            finish.finish_reason,
-            pb::finish_info::FinishReason::Stop as i32
-        );
-        assert_eq!(finish.num_output_tokens, 3);
-
-        engine_task.await.expect("mock engine task");
-        server_task.abort();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_output_mode_errors_for_both_rpcs() {
+    for (mode, stop_strings, code) in [
+        (
+            pb::OutputMode::Derender as i32,
+            vec![],
+            tonic::Code::Unimplemented,
+        ),
+        (99, vec![], tonic::Code::InvalidArgument),
+        (
+            pb::OutputMode::Tokens as i32,
+            vec!["stop".to_string()],
+            tonic::Code::InvalidArgument,
+        ),
+    ] {
+        for streaming in [false, true] {
+            let (mut client, server_task, _engine_task) = grpc_test_server(
+                b"engine-grpc-output-mode-errors",
+                default_stream_output_specs(),
+            )
+            .await;
+            let request = pb::GenerateRequest {
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2, 3],
+                })),
+                stopping: Some(pb::StoppingCriteria {
+                    stop_strings: stop_strings.clone(),
+                    ..Default::default()
+                }),
+                response: Some(pb::ResponseOptions {
+                    output_mode: mode,
+                    output_text: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let status = if streaming {
+                client.generate_stream(request).await.expect_err("unsupported output mode")
+            } else {
+                client.generate(request).await.expect_err("unsupported output mode")
+            };
+            assert_eq!(
+                status.code(),
+                code,
+                "output_mode={mode}, streaming={streaming}"
+            );
+            server_task.abort();
+        }
     }
 }
 

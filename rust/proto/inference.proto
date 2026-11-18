@@ -162,6 +162,14 @@ message StoppingCriteria {
   optional int64 thinking_token_budget = 7;
 }
 
+// Output content mode. UNSPECIFIED preserves the legacy output_text flag.
+enum OutputMode {
+  OUTPUT_MODE_UNSPECIFIED = 0;
+  OUTPUT_MODE_TEXT = 1;
+  OUTPUT_MODE_TOKENS = 2;
+  OUTPUT_MODE_DERENDER = 3;
+}
+
 message ResponseOptions {
   // Prompt options
   bool prompt_token_ids = 1;
@@ -176,6 +184,11 @@ message ResponseOptions {
   optional CandidateTokens output_candidates = 7;
   // Defaults to true when omitted.
   optional bool skip_special_tokens = 8;
+  // Supersedes output_text when set. UNSPECIFIED uses output_text (default true).
+  // TEXT requires a tokenizer; otherwise returns INVALID_ARGUMENT.
+  // TOKENS disables detokenization; output_token_ids still controls returned IDs.
+  // DERENDER returns UNIMPLEMENTED; unknown enum values return INVALID_ARGUMENT.
+  OutputMode output_mode = 9;
 }
 
 message KVCacheParameters {
