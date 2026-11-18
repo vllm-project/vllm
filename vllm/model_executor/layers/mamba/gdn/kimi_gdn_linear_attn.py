@@ -287,10 +287,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             else "auto"
         )
         backend = "triton" if backend == "auto" else backend
-        assert backend == "triton", (
-            "The shared Kimi GDN layer only supports the Triton KDA "
-            f"prefill backend, got {backend!r}."
-        )
+        if backend != "triton":
+            raise ValueError(
+                "The shared Kimi GDN layer only supports the Triton KDA "
+                f"prefill backend, got {backend!r}."
+            )
         self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
             state_len=self.conv_size - 1
         )
