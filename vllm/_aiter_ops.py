@@ -5832,3 +5832,6 @@ class rocm_aiter_ops:
 
 rocm_aiter_ops.register_ops_once()
 _sync_aiter_situv2_moe_env()
+# A forked engine or worker process must see the environment it was forked
+# with, as a spawned one would, not the flags read at import.
+os.register_at_fork(after_in_child=rocm_aiter_ops.refresh_env_variables)

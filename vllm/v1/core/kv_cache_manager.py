@@ -656,7 +656,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(request)
 
     def remove_skipped_blocks(
         self,
@@ -690,7 +690,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        return self.coordinator.pop_blocks_for_free(request.request_id)
+        return self.coordinator.pop_blocks_for_free(request)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
