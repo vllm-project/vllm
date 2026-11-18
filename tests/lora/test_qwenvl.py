@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from functools import partial
 
+import numpy as np
 import pytest
 
 import vllm
@@ -253,6 +255,104 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
                 expected_outputs=EXPECTED_OUTPUTS,
                 lora_id=lora_id,
             )
+
+
+def _check_qwen_video_lora_rows(merger_proj, model):
+    def check_mapping(expected_rows, layer, args):
+        x = args[0]
+        rows = x.numel() // x.shape[-1]
+        assert rows == expected_rows, f"Two videos should use {expected_rows} rows"
+        adapter_slots = layer.punica_wrapper.token_lora_indices
+        mapped_rows = adapter_slots.numel()
+        assert mapped_rows == rows, f"LoRA maps {mapped_rows} of {rows} rows"
+        assert adapter_slots.tolist() == [0] * rows
+
+    model.visual.blocks[0].attn.qkv.register_forward_pre_hook(
+        partial(check_mapping, 4096)
+    )
+    model.visual.merger.get_submodule(merger_proj).register_forward_pre_hook(
+        partial(check_mapping, 1024)
+    )
+    for merger in getattr(model.visual, "deepstack_merger_list", ()):
+        merger.get_submodule(merger_proj).register_forward_pre_hook(
+            partial(check_mapping, 1024)
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_path", "adapter_fixture", "frame_size", "merger_proj"),
+    [
+        (QWEN25VL_MODEL_PATH, "qwen25vl_vision_lora_files", 224, "mlp.0"),
+        (QWEN3VL_MODEL_PATH, "qwen3vl_vision_lora_files", 256, "linear_fc1"),
+        ("Qwen/Qwen3.5-4B", "qwen35_vl_lora_files", 256, "linear_fc1"),
+    ],
+    ids=["qwen25vl", "qwen3vl", "qwen35"],
+)
+def test_qwen_evs_tower_connector_lora(
+    vllm_runner,
+    request,
+    monkeypatch,
+    model_path,
+    adapter_fixture,
+    frame_size,
+    merger_proj,
+):
+    # Queue both requests before the engine can schedule either one.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    num_frames = 16
+    if model_path == QWEN25VL_MODEL_PATH:
+        prompt = "<|vision_start|><|video_pad|><|vision_end|>Describe the video."
+        max_pixels = frame_size**2
+    else:
+        # Qwen3 expands the bare video token and budgets pixels per clip.
+        prompt = "Describe the video. <|video_pad|>"
+        max_pixels = num_frames * frame_size**2
+    prompts = []
+    for pixel in (0, 255):
+        frames = np.full((num_frames, frame_size, frame_size, 3), pixel, dtype=np.uint8)
+        metadata = {
+            "fps": 2.0,
+            "duration": 8.0,
+            "total_num_frames": num_frames,
+            "frames_indices": list(range(num_frames)),
+            "video_backend": "opencv",
+            "do_sample_frames": False,
+        }
+        prompts.append(
+            {
+                "prompt": prompt,
+                "multi_modal_data": {"video": (frames, metadata)},
+            }
+        )
+    adapter_path = request.getfixturevalue(adapter_fixture)
+    with vllm_runner(
+        model_path,
+        enable_lora=True,
+        enable_tower_connector_lora=True,
+        max_lora_rank=8,
+        max_model_len=512,
+        max_num_batched_tokens=512,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 4 * (frame_size // 8) ** 2,
+                "longest_edge": max_pixels,
+            }
+        },
+        kernel_config={"enable_jit_warmup": False, "enable_flashinfer_autotune": False},
+        video_pruning_rate=0.75,
+    ) as runner:
+        runner.apply_model(partial(_check_qwen_video_lora_rows, merger_proj))
+        llm = runner.get_llm()
+        outputs = llm.generate(
+            prompts,
+            vllm.SamplingParams(temperature=0, max_tokens=1),
+            lora_request=LoRARequest("vision", 1, adapter_path),
+        )
+        assert [len(output.outputs[0].token_ids) for output in outputs] == [1, 1]
 
 
 def test_qwen3vl_vision_lora(

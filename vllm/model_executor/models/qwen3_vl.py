@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
@@ -62,6 +63,7 @@ from vllm.config.multimodal import (
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.logger import init_logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -1891,6 +1893,8 @@ class Qwen3VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        # Video pruning disables encoder CUDA graphs, so buffers can grow.
+        self.allow_mm_lora_buffer_growth = self.is_multimodal_pruning_enabled
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
@@ -2315,8 +2319,14 @@ class Qwen3VLForConditionalGeneration(
         embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
         is_video_embed = torch.isin(repl_token_ids, embed_token_id)
 
-        # Get text embeddings for indicator tokens (has only `visual_dim``).
-        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
+        # Encoder-generated indicator tokens have no language LoRA mapping.
+        language_model = self.get_language_model()
+        text_model = getattr(language_model, "model", None)
+        embed_tokens = getattr(text_model, "embed_tokens", None)
+        if isinstance(embed_tokens, BaseLayerWithLoRA):
+            text_embeddings = embed_tokens.base_layer(repl_token_ids)
+        else:
+            text_embeddings = language_model.embed_input_ids(repl_token_ids)
 
         if self.use_deepstack:
             (
@@ -2907,11 +2917,18 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: MultiModalKwargsItem | None,
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_mm_embeds * merge_size**2, num_mm_embeds
+        merge_area = self.config.vision_config.spatial_merge_size**2
+        if (
+            modality == "video"
+            and self.is_multimodal_pruning_enabled
+            and mm_kwargs is not None
+            and "pixel_values_videos" in mm_kwargs
+        ):
+            # The tower and all mergers run before pruning.
+            grid_thw = mm_kwargs["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_mm_embeds = math.prod(grid_thw.tolist()) // merge_area
+        return num_mm_embeds * merge_area, num_mm_embeds
 
 
 @lru_cache
