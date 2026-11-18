@@ -365,7 +365,10 @@ class Qwen3ASRForConditionalGeneration(
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # Keep the lengths on the host. The audio tower only needs them for
+        # chunk bookkeeping, and reading them back from the device would
+        # synchronize once per encoder call.
+        audio_feature_lengths = audio_input["audio_feature_lengths"].cpu()
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 

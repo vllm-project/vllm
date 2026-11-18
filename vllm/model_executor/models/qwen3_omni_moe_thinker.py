@@ -428,7 +428,12 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # Compute chunk information
+        # Compute chunk information. The lengths stay on the host so that the
+        # `.item()`/`.tolist()` calls below read host values: reading them back
+        # from the device drains the queue and stalls whatever is decoding
+        # behind this encoder call.
+        feature_lens = feature_lens.cpu()
+        aftercnn_lens = aftercnn_lens.cpu()
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         chunk_lengths = torch.tensor(
@@ -450,7 +455,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
         # Vectorized mask creation: avoid creating many small tensors
         max_len_after_cnn = feature_lens_after_cnn.max().item()
-        indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
+        indices = torch.arange(max_len_after_cnn)
         padded_mask_after_cnn = indices.unsqueeze(0) < feature_lens_after_cnn.unsqueeze(
             1
         )
@@ -488,8 +493,15 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         )
         padded_embed = padded_embed + positional_embedding
 
-        # Extract valid hidden states and compute cu_seqlens
-        hidden_states = padded_embed[padded_mask_after_cnn]
+        # Extract valid hidden states and compute cu_seqlens. The rows are
+        # gathered with host-built indices: indexing with a boolean mask has to
+        # read the output size back from the device.
+        valid_rows = async_tensor_h2d(
+            padded_mask_after_cnn.flatten().nonzero().squeeze(1).tolist(),
+            dtype=torch.long,
+            device=padded_embed.device,
+        )
+        hidden_states = padded_embed.flatten(0, 1).index_select(0, valid_rows)
 
         # Compute cumulative sequence lengths for chunked attention
         cu_chunk_lens = [0]
@@ -504,7 +516,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if remainder:
                 cu_chunk_lens.append(remainder)
         cu_seqlens = async_tensor_h2d(
-            cu_chunk_lens, dtype=torch.int32, device=aftercnn_lens.device
+            cu_chunk_lens, dtype=torch.int32, device=input_features.device
         ).cumsum(-1, dtype=torch.int32)
 
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)

@@ -4,9 +4,15 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 from transformers import PretrainedConfig
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoderConfig,
+)
 
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
@@ -216,6 +222,46 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires a GPU")
+def test_qwen3_omni_audio_encoder_keeps_one_row_per_valid_frame(
+    default_vllm_config, dist_init
+):
+    """The tower emits exactly the unpadded tokens, from device lengths.
+
+    The valid rows are gathered with host-built indices rather than a boolean
+    mask, and the lengths arrive on the device from the multimodal inputs, so
+    both a wrong index set and a missing host transfer surface here.
+    """
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeAudioEncoder,
+        _get_feat_extract_output_lengths,
+    )
+
+    config = Qwen3OmniMoeAudioEncoderConfig(
+        d_model=64,
+        encoder_layers=1,
+        encoder_attention_heads=4,
+        encoder_ffn_dim=128,
+        downsample_hidden_size=32,
+        output_dim=48,
+        n_window_infer=200,
+    )
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        encoder = Qwen3OmniMoeAudioEncoder(config)
+
+    # Several chunks and attention windows, with a ragged tail in each item.
+    feature_lens = torch.tensor([950, 130])
+    aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
+    features = torch.randn(
+        config.num_mel_bins, int(feature_lens.sum()), device="cuda"
+    ).to(torch.bfloat16)
+
+    with torch.no_grad():
+        output = encoder(features, feature_lens.cuda(), aftercnn_lens.cuda())
+
+    assert output.shape == (int(aftercnn_lens.sum()), config.output_dim)
 
 
 if __name__ == "__main__":
