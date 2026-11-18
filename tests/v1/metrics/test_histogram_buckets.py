@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import KVTokenSlots, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,39 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_kv_token_slots_gauge():
+    """Each kind is exported per engine and KV cache group from the engine's
+    SchedulerStats."""
+    config = build_logger_config(ObservabilityConfig())
+    stats = SchedulerStats(
+        kv_token_slots=[KVTokenSlots(0, 72, 8, 16), KVTokenSlots(1, 40, 24, 0)]
+    )
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        logger.record(scheduler_stats=stats, iteration_stats=None, engine_idx=1)
+        expected = {
+            ("0", "filled"): 72,
+            ("0", "tail_slack"): 8,
+            ("0", "reserved"): 16,
+            ("1", "filled"): 40,
+            ("1", "tail_slack"): 24,
+            ("1", "reserved"): 0,
+        }
+        for (kv_group, kind), num_slots in expected.items():
+            for engine, value in ((0, None), (1, num_slots)):
+                sample = prometheus_client.REGISTRY.get_sample_value(
+                    "vllm:kv_token_slots",
+                    {
+                        "model_name": TEST_MODEL,
+                        "engine": str(engine),
+                        "kv_group": kv_group,
+                        "kind": kind,
+                    },
+                )
+                assert sample == value, (engine, kv_group, kind)
     finally:
         unregister_vllm_metrics()
