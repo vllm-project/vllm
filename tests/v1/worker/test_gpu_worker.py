@@ -38,6 +38,24 @@ def test_gpu_worker_requires_triton(monkeypatch):
         )
 
 
+def test_worker_can_override_triton_validation(monkeypatch):
+    from vllm.config import DeviceConfig, VllmConfig
+
+    class WorkerWithoutTriton(gpu_worker.Worker):
+        def _validate_triton(self) -> None:
+            pass
+
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(
+        gpu_worker.current_platform, "uses_standalone_cpu_model_runner", lambda: False
+    )
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    worker = WorkerWithoutTriton(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert worker.vllm_config is config
+
+
 @pytest.mark.parametrize(
     "fallback,free_memory,requested",
     [(False, 100, 72), (True, 100, 92), (True, 80, 92)],

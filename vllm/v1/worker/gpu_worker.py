@@ -234,8 +234,7 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        if not HAS_TRITON and not current_platform.uses_standalone_cpu_model_runner():
-            raise ValueError("vLLM's model runner requires Triton.")
+        self._validate_triton()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -283,6 +282,11 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+    def _validate_triton(self) -> None:
+        """Validate Triton availability for the runner used by this worker."""
+        if not HAS_TRITON and not current_platform.uses_standalone_cpu_model_runner():
+            raise ValueError("vLLM's model runner requires Triton.")
 
     def _validate_profiler_config(self) -> None:
         validate_worker_profiler_config(self.profiler_config)
