@@ -281,14 +281,16 @@ class NixlBaseConnectorWorker:
                 # Each SSM region owns ssm_regions_per_layer consecutive descs,
                 # in ssm_regions order, and the PLE region the one after them.
                 # The PLE group can hold SSM state too (Qwen4Exp's GDN).
-                ssm_desc_ids = np.concatenate(
-                    [
-                        np.array([num_ssm_descs], dtype=np.int64)
-                        if i == self._ple_group_index and region == ple_region
-                        else ssm_slot[region] * ssm_regions_per_layer + sub_descs
-                        for region in group_regions.tolist()
-                    ]
-                )
+                regions = group_regions.tolist()
+                has_ple = i == self._ple_group_index and ple_region in regions
+                if has_ple:
+                    regions.remove(ple_region)
+                slots = np.array([ssm_slot[r] for r in regions], dtype=np.int64)
+                ssm_desc_ids = (
+                    slots[:, None] * ssm_regions_per_layer + sub_descs
+                ).ravel()
+                if has_ple:
+                    ssm_desc_ids = np.append(ssm_desc_ids, num_ssm_descs)
                 desc_ids = (
                     ssm_desc_ids[:, None] * logical_blocks
                     + blocks[None, :]
@@ -771,8 +773,8 @@ class NixlBaseConnectorWorker:
         )
         self._ple_group_index: int | None = None
         if self._is_csa_linear:
-            # The group holding the TP-replicated PLE state, alone or with SSM
-            # state.
+            # The group of each TP-replicated PLE state, which may hold SSM
+            # state too.
             ple_groups = [
                 index
                 for index, group in enumerate(kv_cache_config.kv_cache_groups)

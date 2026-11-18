@@ -82,12 +82,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroup,
-    KVCacheLayerConfig,
-    KVCacheSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig, MambaSpec
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
@@ -722,24 +717,15 @@ class Qwen4ExpModel(nn.Module):
         return loaded
 
 
-def _is_ple_state(spec: KVCacheSpec) -> bool:
-    return (
-        isinstance(spec, MambaSpec)
-        and spec.mamba_type == MambaAttentionBackendEnum.SHORT_CONV
-    )
-
-
 class Qwen4ExpKVCacheGrouping(SupportsKVCacheGrouping):
-    """The default KV cache grouping, with the PLE layers' short-conv states
-    folded into the narrowest GDN group.
+    """The default grouping, with the PLE layer's short-conv state folded into
+    the narrowest GDN group.
 
-    By default the PLE layer gets a group of its own. Every block is as large
-    as the widest group's (the QSA layers' KV), so each PLE block holds one
-    small conv state and wastes the rest: 9-13% of a 32k request's KV cache.
-    The GDN groups have the PLE layer's block table and usually room for it;
-    at worst it widens every block by its page, a small fraction of one.
-    Folding regardless of room keeps the grouping the same for every TP size,
-    which disaggregated P/D needs.
+    On its own, the small PLE state takes whole blocks sized for the widest
+    group (the QSA KV) and wastes nearly all of them, while the GDN groups
+    share its block table. It is folded even into a full block, which then
+    grows by its page, so that the grouping does not depend on the TP size:
+    P/D peers must group alike.
     """
 
     @classmethod
@@ -751,36 +737,42 @@ class Qwen4ExpKVCacheGrouping(SupportsKVCacheGrouping):
         from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
         groups = get_kv_cache_groups(vllm_config, layer_configs)
-        ple_groups = [
-            group
-            for group in groups
-            if all(map(_is_ple_state, group.kv_cache_specs.values()))
-        ]
-        if len(ple_groups) != 1:
+        ple = next(
+            (
+                group
+                for group in groups
+                if all(
+                    isinstance(spec, MambaSpec)
+                    and spec.mamba_type == MambaAttentionBackendEnum.SHORT_CONV
+                    for spec in group.kv_cache_specs.values()
+                )
+            ),
+            None,
+        )
+        if ple is None:
             return groups
-        ple = ple_groups[0]
-        gdn_groups = [
-            group
-            for group in groups
-            if group is not ple
-            and group.manager_config == ple.manager_config
-            and group.block_size == ple.block_size
-        ]
-        if not gdn_groups:
+        gdn = min(
+            (
+                group
+                for group in groups
+                if group is not ple
+                and group.manager_config == ple.manager_config
+                and group.block_size == ple.block_size
+            ),
+            key=lambda group: group.page_size_bytes,
+            default=None,
+        )
+        if gdn is None:
             return groups
-        gdn = min(gdn_groups, key=lambda group: group.page_size_bytes)
-        # Unpadded: the page was padded only to fill a block on its own.
+        # The PLE page was padded only to fill a block on its own.
         ple_specs = {
             name: replace(spec, page_size_padded=None)
             for name, spec in ple.kv_cache_specs.items()
             if isinstance(spec, MambaSpec)
         }
+        folded = replace(gdn, kv_cache_specs=gdn.kv_cache_specs | ple_specs)
         return [
-            replace(group, kv_cache_specs=group.kv_cache_specs | ple_specs)
-            if group is gdn
-            else group
-            for group in groups
-            if group is not ple
+            folded if group is gdn else group for group in groups if group is not ple
         ]
 
 
