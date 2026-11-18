@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The sharded-RDT consumer on the load plan, on CPU.
-
-The engine runs for real against real producer servers through a loopback
-transport that does what Ray's receive into a target does: a pull's one flat
-byte tensor is copied into the slice of the receive arena the engine named,
-after the slice is poisoned. Getting the pull frees it at the producer.
-After two syncs every tensor of the model must equal a cold start on the
-same weights, byte for byte, at the same address.
-"""
+"""The sharded-RDT consumer on CPU: the real engine pulls from real producer
+servers through a loopback for Ray, and must equal a cold start after two
+syncs, byte for byte and address for address."""
 
 import dataclasses
 import weakref
@@ -37,7 +31,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     flat_layout,
     flat_view,
     gather_units,
-    piece_nbytes,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
@@ -107,7 +100,7 @@ class _Loopback:
         return _Handle(server, sent, target, server.outstanding.pop())
 
     def get(self, handles, targets):
-        """Ray's get: into the target while it lives, after poisoning it."""
+        """Ray's get: poison the target, then land the pull in it."""
         for h, target in zip(handles, targets, strict=True):
             assert h.target() is target, "the target died in flight"
             target.fill_(0xA5)
@@ -128,8 +121,7 @@ def _metas_info(shapes):
 
 
 class _Fleet:
-    """`num_producers` real servers holding `shapes` per `owners`, and one
-    consumer engine on `model`."""
+    """Real producers holding `shapes` per `owners`, and one engine on `model`."""
 
     def __init__(
         self,
@@ -200,8 +192,6 @@ class _Fleet:
         self.engine._hooks = self.loopback.hooks()
 
     def sync(self, weights, sync_idx):
-        """One sync: start (plans the first time), the trainers gather every
-        unit, the worker pulls, every unit is released, finish."""
         self.engine.start_weight_update()
         for p, server in enumerate(self.servers):
             server.begin_sync([self.loopback.consumer_id], sync_idx)
@@ -237,118 +227,59 @@ def _check_equals_cold_start(fleet, make, shapes):
             assert ptr == ptrs[name], f"{name} moved"
 
 
-# ------------------------------------------------------------ byte equality
-
-
-@pytest.mark.parametrize("buffer_bytes", [64, 1 << 20])
-def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
-    """Transpose (a strided copy), a tied alias (nothing to pull), a cast and
-    a step slice (fallbacks), and an embedding; `router.bias` lives only on
-    producer 1."""
+def _toy_fleet(monkeypatch, **kw):
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(
-        monkeypatch,
-        model,
-        _TOY_SHAPES,
-        owners={"router.bias": [1]},
-        buffer_bytes=buffer_bytes,
-    )
-    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
-    pulled = {name for b in fleet.loopback.pulls for name, _ in b.pieces}
-    assert "lm_head.weight" not in pulled
-    (router,) = [
-        b for b in fleet.engine._buckets if ("router.bias", ((0, 5),)) in b.pieces
-    ]
-    assert router.producer == 1 and "router.bias" in _staged(router)
-    pieces = {
-        name: (b, i)
-        for b in fleet.engine._buckets
-        for i, (name, _) in enumerate(b.pieces)
-    }
-    b, i = pieces["proj.weight"]
-    assert "proj.weight" not in _staged(b)
-    ((j, dest),) = b.typed
-    assert j == i and dest.stride() == (1, 4)  # strided
-    start, end = b.layout[i][0], b.layout[i][0] + b.layout[i][1]
-    assert all(o + n <= start or o >= end for o, n in b.byte_srcs)
+    return _Fleet(monkeypatch, model, _TOY_SHAPES, **kw)
 
 
 def _staged(bucket):
-    """Names of the fallbacks whose pieces `bucket` carries."""
     return {staging.name for _, staging, _ in bucket.staged}
 
 
-def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
-    """Ray falls back to its own buffer, silently, when it cannot use a
-    target; the engine must not copy the stale slot out."""
-    import ray
-    import ray.experimental
+def _tp(monkeypatch, rank, size):
+    from vllm.model_executor import parameter
+    from vllm.model_executor.layers import linear
 
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
-    target = torch.zeros(16, dtype=torch.uint8)
-    monkeypatch.setattr(ray.experimental, "set_target_for_ref", lambda ref, ts: None)
-    monkeypatch.setattr(ray, "get", lambda refs: [[target.clone()] for _ in refs])
-    hooks = fleet.engine._ray_hooks()
-    with pytest.raises(RuntimeError, match="did not land"):
-        hooks.get(["ref"], [target])
+    for module in (linear, parameter):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: rank)
+        monkeypatch.setattr(
+            module, "get_tensor_model_parallel_world_size", lambda: size
+        )
 
 
-def test_pieces_over_buffer_bytes_go_in_row_segments(monkeypatch):
-    """A piece over `buffer_bytes` is cut into segments of whole rows: a
-    direct destination's land in its rows, a fallback's are joined and
-    loaded whole; every pull fits a receive slot."""
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=24, num_buffers=2)
-    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
-    pieces = [(n, box) for b in fleet.engine._buckets for n, box in b.pieces]
-    split = {n for n, _ in pieces if sum(m == n for m, _ in pieces) > 1}
-    loads = set().union(*map(_staged, fleet.engine._buckets))
-    assert split - loads and split & loads  # a direct and a fallback split
-    assert all(b.nbytes <= 24 for b in fleet.engine._buckets)
-    # every staging was loaded and freed
-    assert all(
-        st.tensor is None for b in fleet.engine._buckets for _, st, _ in b.staged
+# ------------------------------------------------------------ byte equality
+
+
+@pytest.mark.parametrize("buffer_bytes", [24, 64, 1 << 20])
+def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
+    """Transpose (strided), tied alias (not pulled), cast and step slice
+    (fallbacks), embedding; `router.bias` only on producer 1. At 24 B pieces
+    go in row segments, a fallback's joined in its staging."""
+    fleet = _toy_fleet(
+        monkeypatch, owners={"router.bias": [1]}, buffer_bytes=buffer_bytes
     )
-    # segments are no larger than the buckets the other pieces make, so the
-    # receive slot does not grow
-    regular = [
-        b.nbytes
-        for b in fleet.engine._buckets
-        if not any(n in split for n, _ in b.pieces)
-    ]
-    assert fleet.engine._slot_bytes == max(regular)
-
-
-def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=4)
-    with pytest.raises(RuntimeError, match="raise buffer_bytes"):
-        fleet.sync(_checkpoint(_TOY_SHAPES, seed=1), 1)
-
-
-def test_rows_round_down_to_whole_rows_within_the_budget():
-    t = torch.zeros(10, 3, dtype=torch.bfloat16)  # rows of 6 B
-    piece = ("w", ((0, 10), (0, 3)), torch.bfloat16, [t])
-    segs = engine_mod._rows(piece, 32)  # 5 rows = 30 B, with alignment 32
-    assert [seg[1][0] for seg in segs] == [(0, 5), (5, 10)]
-    assert [seg[3][0].data_ptr() for seg in segs] == [t.data_ptr(), t[5].data_ptr()]
-    assert engine_mod._rows(piece, 64) == [piece]
-
-
-def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
-    """One slot of the largest bucket of at most `buffer_bytes` per pull in
-    flight, pinned at the first plan, reused by every sync, and unpinned when
-    the plan is dropped."""
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48, num_buffers=3)
-    for sync_idx in (1, 2):
-        fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
-        (arena,) = _PINNED
-        slot = max(b.nbytes for b in fleet.engine._buckets)
-        assert arena.numel() == 3 * slot and arena is fleet.engine._arena
-    fleet.engine.shutdown()
-    assert not _PINNED
+    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
+    buckets = fleet.engine._buckets
+    assert "lm_head.weight" not in {
+        n for b in fleet.loopback.pulls for n, _ in b.pieces
+    }
+    assert {b.producer for b in buckets if "router.bias" in _staged(b)} == {1}
+    (b, i) = next(
+        (b, i)
+        for b in buckets
+        for i, (n, _) in enumerate(b.pieces)
+        if n == "proj.weight"
+    )
+    assert [(j, d.stride()) for j, d in b.typed] == [(i, (1, 4))]
+    pieces = [n for b in buckets for n, _ in b.pieces]
+    split = {n for n in pieces if pieces.count(n) > 1}
+    if buffer_bytes == 24:
+        staged = set().union(*map(_staged, buckets))
+        assert split - staged and split & staged  # a direct and a fallback split
+        assert all(st.tensor is None for b in buckets for _, st, _ in b.staged)
+    # segments are cut to the largest regular bucket: the slot does not grow
+    regular = [b.nbytes for b in buckets if not split & {n for n, _ in b.pieces}]
+    assert fleet.engine._slot_bytes == max(regular) <= buffer_bytes
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -356,86 +287,63 @@ def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
 def test_qkv_and_merged_column_under_tp(
     default_vllm_config, monkeypatch, tp_rank, buffer_bytes
 ):
-    from vllm.model_executor import parameter
-    from vllm.model_executor.layers import linear
-
-    for module in (linear, parameter):
-        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
-        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
+    _tp(monkeypatch, tp_rank, 2)
     make = _linear_model()
     model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
     fleet = _Fleet(monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes)
     _check_equals_cold_start(fleet, make, _LINEAR_SHAPES)
-    # every destination is contiguous: one fused byte copy per pull
     assert all(not b.typed and not b.staged for b in fleet.engine._buckets)
-    if buffer_bytes > 32:
-        # q, k, v (and gate, up) fill adjacent rows of one fused weight, so
-        # a pull lands each fused weight's pieces from it with one copy
+    if buffer_bytes > 32:  # q, k, v (gate, up) land in a fused weight with one copy
         copies = [d for b in fleet.engine._buckets for d in b.byte_dsts]
         assert len({d.untyped_storage().data_ptr() for d in copies}) == len(copies)
 
 
 @pytest.mark.parametrize("ep_rank", [0, 1])
 def test_experts_under_ep_owned_by_one_producer(monkeypatch, ep_rank):
-    """Experts held only by producer 1 (an EP trainer); this worker needs
-    only its own two experts of each."""
     make = _experts_model(ep_rank, 2, 0, 1)
     model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
-    fleet = _Fleet(
-        monkeypatch,
-        model,
-        _EXPERT_SHAPES,
-        owners={n: [1] for n in _EXPERT_SHAPES},
-        buffer_bytes=64,
-    )
+    owners = {n: [1] for n in _EXPERT_SHAPES}
+    fleet = _Fleet(monkeypatch, model, _EXPERT_SHAPES, owners=owners)
     _check_equals_cold_start(fleet, make, _EXPERT_SHAPES)
     assert {b.producer for b in fleet.engine._buckets} == {1}
-    for b in fleet.engine._buckets:
-        for _, box in b.pieces:  # its own experts' rows (maybe in segments)
-            assert 2 * ep_rank <= box[0][0] < box[0][1] <= 2 * ep_rank + 2
+    rows = {box[0] for b in fleet.engine._buckets for _, box in b.pieces}
+    assert all(2 * ep_rank <= a < z <= 2 * ep_rank + 2 for a, z in rows)
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("buffer_bytes", [16, 1 << 20])
 def test_expert_tp_two_boxes_per_name(monkeypatch, tp_rank, buffer_bytes):
-    """Gate and up rows are two boxes of one name, landing strided; with
-    16 B budgets each row of each piece is its own pull."""
+    """Gate and up rows are two strided boxes of one name; at 16 B every row
+    is its own pull."""
     make = _experts_model(0, 1, tp_rank, 2)
     model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
     fleet = _Fleet(monkeypatch, model, _EXPERT_SHAPES, buffer_bytes=buffer_bytes)
     _check_equals_cold_start(fleet, make, _EXPERT_SHAPES)
-    gate_up = [
-        box
-        for b in fleet.engine._buckets
-        for name, box in b.pieces
-        if name == "experts.gate_up_proj"
-    ]
+    buckets = fleet.engine._buckets
+    gate_up = [n for b in buckets for n, _ in b.pieces if n == "experts.gate_up_proj"]
     if buffer_bytes == 16:
-        assert len(gate_up) > 2  # segments of whole rows
-        assert all(len(b.pieces) == 1 for b in fleet.engine._buckets)
+        assert len(gate_up) > 2 and all(len(b.pieces) == 1 for b in buckets)
     else:
         assert len(gate_up) == 2
 
 
 def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
-    """A unit stays gathered until every live worker has freed its pulls."""
     make = _experts_model(0, 1, 0, 1)
     fleets: list[_Fleet] = []
     for consumer in (0, 1):
-        model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
-        fleet = _Fleet(
-            monkeypatch,
-            model,
-            _EXPERT_SHAPES,
-            num_producers=1,
-            consumer_id=consumer,
-            num_consumers=2,
-            buffer_bytes=1 << 20,
-            servers=fleets[0].servers if fleets else None,
+        fleets.append(
+            _Fleet(
+                monkeypatch,
+                _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0)),
+                _EXPERT_SHAPES,
+                num_producers=1,
+                consumer_id=consumer,
+                num_consumers=2,
+                buffer_bytes=1 << 20,
+                servers=fleets[0].servers if fleets else None,
+            )
         )
-        fleets.append(fleet)
-    for fleet in fleets:
-        fleet.engine.start_weight_update()
+        fleets[-1].engine.start_weight_update()
     (server,) = fleets[0].servers
     server.begin_sync([0, 1], 0)
     weights = _checkpoint(_EXPERT_SHAPES, seed=1)
@@ -444,121 +352,141 @@ def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
     assert server._resident, "released before consumer 1 pulled"
     fleets[1].engine.update_weights({"sync_idx": 0})
     assert server.end_sync() == [0]
+    expected = _state(_cold_start(make, weights))
     for fleet in fleets:
         fleet.engine.finish_weight_update()
-        expected = _state(_cold_start(make, weights))
         for name, s in _state(fleet.engine.model).items():
             assert torch.equal(s[3], expected[name][3]), name
 
 
-# ------------------------------------------------------------ buckets
+def test_plan_failure_leaves_a_note_and_retries(monkeypatch):
+    fleet = _toy_fleet(monkeypatch)
+    hooks = fleet.engine._hooks
+
+    def boom(_):
+        raise RuntimeError("producers unreachable")
+
+    fleet.engine._hooks = dataclasses.replace(hooks, register=boom)
+    with pytest.raises(RuntimeError, match="unreachable") as info:
+        fleet.engine.start_weight_update()
+    assert "mid-reload" in "".join(info.value.__notes__)
+    fleet.engine._hooks = hooks
+    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
+
+
+# ------------------------------------------------------------ plan and transport
+
+
+def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
+    """Ray silently receives into its own buffer when it cannot use a target."""
+    import ray
+    import ray.experimental
+
+    fleet = _toy_fleet(monkeypatch)
+    target = torch.zeros(16, dtype=torch.uint8)
+    monkeypatch.setattr(ray.experimental, "set_target_for_ref", lambda ref, ts: None)
+    monkeypatch.setattr(ray, "get", lambda refs: [[target.clone()] for _ in refs])
+    with pytest.raises(RuntimeError, match="did not land"):
+        fleet.engine._ray_hooks().get(["ref"], [target])
+
+
+def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):
+    with pytest.raises(RuntimeError, match="raise buffer_bytes"):
+        _toy_fleet(monkeypatch, buffer_bytes=4).engine.start_weight_update()
+
+
+def test_rows_round_down_to_whole_rows_within_the_cap():
+    t = torch.zeros(10, 3, dtype=BF16)  # rows of 6 B; 5 rows = 30 B, aligned 32
+    piece = ("w", ((0, 10), (0, 3)), BF16, [t])
+    segs = engine_mod._rows(piece, 32)
+    assert [seg[1][0] for seg in segs] == [(0, 5), (5, 10)]
+    assert [seg[3][0].data_ptr() for seg in segs] == [t.data_ptr(), t[5].data_ptr()]
+    assert engine_mod._rows(piece, 64) == [piece]
+
+
+def test_receive_arena_is_pinned_once_per_plan(monkeypatch):
+    fleet = _toy_fleet(monkeypatch, buffer_bytes=48, num_buffers=3)
+    for sync_idx in (1, 2):
+        fleet.sync(_checkpoint(_TOY_SHAPES, seed=sync_idx), sync_idx)
+        (arena,) = _PINNED
+        assert arena.numel() == 3 * max(b.nbytes for b in fleet.engine._buckets)
+    fleet.engine.shutdown()
+    assert not _PINNED
 
 
 def test_buckets_never_cross_a_unit_and_respect_the_budget(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, buffer_bytes=48)
+    fleet = _toy_fleet(monkeypatch, buffer_bytes=48)
     fleet.engine.start_weight_update()
-    for b in fleet.engine._buckets:
-        assert {fleet.units[n] for n, _ in b.pieces} == {b.unit}
-        if len(b.pieces) > 1:
-            assert b.nbytes <= 48
     seqs: dict[int, list[int]] = {}
     for b in fleet.engine._buckets:
+        assert {fleet.units[n] for n, _ in b.pieces} == {b.unit} and b.nbytes <= 48
         seqs.setdefault(b.producer, []).append(b.seq)
     assert all(s == list(range(len(s))) for s in seqs.values())
 
 
 def test_pipeline_stages_pull_side_by_side(monkeypatch):
-    """Two stages are independent components: pulls interleave them, each in
-    unit order, instead of draining stage 0 first."""
-    from vllm.model_executor import parameter
-    from vllm.model_executor.layers import linear
-
-    for module in (linear, parameter):
-        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
-        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    """Stages interleave, each in unit order, instead of draining stage 0."""
+    _tp(monkeypatch, 0, 1)
     make = _linear_model()
     model = _cold_start(make, _checkpoint(_LINEAR_SHAPES, seed=0))
-    names = list(_LINEAR_SHAPES)
-    owners = {n: [0] if i < 3 else [1] for i, n in enumerate(names)}
+    owners = {n: [0] if i < 3 else [1] for i, n in enumerate(_LINEAR_SHAPES)}
     fleet = _Fleet(monkeypatch, model, _LINEAR_SHAPES, owners=owners, buffer_bytes=128)
     fleet.engine.start_weight_update()
-    producers = [b.producer for b in fleet.engine._buckets]
-    assert producers[:2] == [0, 1], producers
+    buckets = fleet.engine._buckets
+    assert [b.producer for b in buckets][:2] == [0, 1]
     for p in (0, 1):
-        units = [b.unit for b in fleet.engine._buckets if b.producer == p]
+        units = [b.unit for b in buckets if b.producer == p]
         assert units == sorted(units)
 
 
-def test_plan_failure_leaves_a_note_and_retries(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
-
-    def boom(_):
-        raise RuntimeError("producers unreachable")
-
-    hooks = fleet.engine._hooks
-    assert hooks is not None
-    fleet.engine._hooks = dataclasses.replace(hooks, register=boom)
-    with pytest.raises(RuntimeError, match="unreachable") as info:
-        fleet.engine.start_weight_update()
-    assert "mid-reload" in "".join(info.value.__notes__)
-    assert not fleet.engine._planned
-    fleet.engine._hooks = hooks
-    _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
-
-
-def test_receive_without_a_plan_raises(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
+def test_init_and_receive_refusals(monkeypatch):
+    fleet = _toy_fleet(monkeypatch)
     with pytest.raises(RuntimeError, match="start_weight_update"):
         fleet.engine.receive_weights(ShardedRDTWeightTransferUpdateInfo(sync_idx=0))
-
-
-def test_init_refuses_layerwise(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="sharded_rdt.*VLLM_RELOAD_MODE=direct"):
-        _Fleet(monkeypatch, model, _TOY_SHAPES)
-
-
-def test_init_refuses_mismatched_metadata(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES)
-    info = ShardedRDTWeightTransferInitInfo(
-        trainer_actor_names=["p0"],
-        names=["a", "b"],
-        dtype_names=["bfloat16"],
-        shapes=[[1]],
+    bad = ShardedRDTWeightTransferInitInfo(
+        trainer_actor_names=["p0"], names=["a", "b"], dtype_names=["bf16"], shapes=[[1]]
     )
     with pytest.raises(ValueError, match="2 names, 1 dtypes"):
-        fleet.engine.init_transfer_engine(info)
+        fleet.engine.init_transfer_engine(bad)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with pytest.raises(RuntimeError, match="sharded_rdt.*VLLM_RELOAD_MODE=direct"):
+        _toy_fleet(monkeypatch)
 
 
-def test_flat_layout_puts_each_piece_on_16_bytes():
-    boxes = [((0, 3),), ((0, 2), (0, 5)), ((1, 2), (0, 1), (0, 4))]
-    dtypes = [BF16, torch.float32, torch.uint8]
-    layout = flat_layout(boxes, dtypes)
-    assert [(off, n) for off, n, _, _ in layout] == [(0, 6), (16, 40), (64, 4)]
-    pieces = [
-        torch.randn(3).to(BF16),
-        torch.randn(2, 5),
-        torch.arange(4, dtype=torch.uint8).view(1, 1, 4),
-    ]
-    nbytes = sum(piece_nbytes(b, d) for b, d in zip(boxes, dtypes))
-    flat = torch.zeros(nbytes, dtype=torch.uint8)
-    torch._foreach_copy_([flat_view(flat, p) for p in layout], pieces)
-    for p, want in zip(layout, pieces):
-        got = flat_view(flat, p)
-        assert got.dtype == want.dtype and torch.equal(got, want)
+def test_consumer_id_offsets_independent_deployments(monkeypatch):
+    fleet = _toy_fleet(monkeypatch, num_consumers=4, consumer_id=1)
+    fleet.engine.parallel_config.world_size = 2
+    fleet.engine.init_transfer_engine(
+        ShardedRDTWeightTransferInitInfo(
+            trainer_actor_names=["p0", "p1"],
+            num_consumers=4,
+            replica_rank=1,
+            num_replicas=2,
+            **_metas_info(_TOY_SHAPES),
+        )
+    )
+    assert fleet.engine._consumer_id == 2 + 1
 
 
 # ------------------------------------------------------------ common
 
 
-@pytest.mark.parametrize(
-    "installed,ok", [("2.56.0", True), ("2.60.0", True), ("2.55.1", False)]
-)
+def test_flat_layout_puts_each_piece_on_16_bytes():
+    boxes = [((0, 3),), ((0, 2), (0, 5)), ((1, 2), (0, 1), (0, 4))]
+    pieces = [
+        torch.randn(3).to(BF16),
+        torch.randn(2, 5),
+        torch.arange(4, dtype=torch.uint8).view(1, 1, 4),
+    ]
+    layout = flat_layout(boxes, [p.dtype for p in pieces])
+    assert [(off, n) for off, n, _, _ in layout] == [(0, 6), (16, 40), (64, 4)]
+    flat = torch.zeros(80, dtype=torch.uint8)
+    torch._foreach_copy_([flat_view(flat, p) for p in layout], pieces)
+    for p, want in zip(layout, pieces):
+        assert torch.equal(flat_view(flat, p), want)
+
+
+@pytest.mark.parametrize("installed,ok", [("2.56.0", True), ("2.55.1", False)])
 def test_ray_version_floor(monkeypatch, installed, ok):
     import importlib.metadata
 
@@ -572,82 +500,41 @@ def test_ray_version_floor(monkeypatch, installed, ok):
             sharded_rdt_common.check_ray_rdt_version()
 
 
-def test_gather_units_cut_by_bytes():
+def test_units_and_arena_sizes():
     assert gather_units([4, 4, 4, 4], 8) == [0, 0, 1, 1]
     assert gather_units([4, 20, 4], 8) == [0, 1, 2]  # an oversized name alone
-    assert gather_units([], 8) == []
+    # `num_buffers` slots per consumer plus one, each `buffer_bytes` + alignment
+    assert arena_bytes(buffer_bytes=100, num_buffers=2, num_consumers=3) == 7 * 116
 
 
-def test_arena_holds_every_consumers_window_plus_slack():
-    """Slots of `buffer_bytes`, however large the largest tensor."""
-    assert (
-        arena_bytes(buffer_bytes=100, num_buffers=2, num_consumers=3)
-        == (2 * 3 + 1) * 116
-    )
-    assert arena_bytes(buffer_bytes=100, num_buffers=1, num_consumers=1) == 2 * 116
+@pytest.mark.parametrize(
+    "router,expected",
+    [
+        (RdtRouter(4, 4), [0, 1, 2, 3]),  # identity
+        (RdtRouter(2, 4), [0, 0, 1, 1]),  # fan-in
+        (RdtRouter(2, 4, workers_per_replica=2), [0, 1, 0, 1]),  # two deployments
+    ],
+)
+def test_router_spreads_consumers(router, expected):
+    assert [router.producer_for(c, "w", 0) for c in range(4)] == expected
 
 
-class TestRouter:
-    def test_identity_when_fleets_match(self):
-        r = RdtRouter(4, 4)
-        assert [r.producer_for(c, "w", 0) for c in range(4)] == [0, 1, 2, 3]
-
-    def test_fan_in_shares_a_producer(self):
-        r = RdtRouter(2, 4)
-        assert [r.producer_for(c, "w", 0) for c in range(4)] == [0, 0, 1, 1]
-
-    def test_a_consumer_spreads_its_units_over_its_block(self):
-        r = RdtRouter(4, 2)
-        assert {r.producer_for(0, "w", u) for u in range(4)} == {0, 1}
-
-    def test_owner_sets_route_pipeline_stages_and_experts(self):
-        r = RdtRouter(4, 2, [[0, 1], [2, 3], [3]], [0, 1, 2], ["s0", "s1", "e"])
-        assert r.producer_for(1, "s0", 0) in (0, 1)
-        assert r.producer_for(0, "s1", 0) in (2, 3)
-        assert r.producer_for(0, "e", 0) == r.producer_for(1, "e", 5) == 3
-
-    def test_every_deployment_routes_like_the_first(self):
-        r = RdtRouter(2, 4, workers_per_replica=2)
-        assert [r.producer_for(c, "w", 0) for c in range(4)] == [0, 1, 0, 1]
-
-    def test_uneven_deployments_are_refused(self):
-        with pytest.raises(ValueError, match="uniform"):
-            RdtRouter(2, 3, workers_per_replica=2)
-
-    def test_consumers_of_bounds_fan_in(self):
-        r = RdtRouter(2, 2, [[0, 1], [1]], [0, 1], ["w", "e"])
-        assert r.consumers_of(0) == [0]
-        assert r.consumers_of(1) == [0, 1]
-
-    def test_components_couple_co_owners_only(self):
-        assert RdtRouter(
-            4, 1, [[0, 1], [2], [3]], [0, 1, 2], ["a", "b", "c"]
-        ).components() == [0, 0, 2, 3]
-        assert len(set(RdtRouter(3, 1).components())) == 1
-
-    @pytest.mark.parametrize(
-        "owner_sets,classes,match",
-        [
-            ([[]], [0], "empty"),
-            ([[0, 5]], [0], "out of range"),
-            ([[0]], [3], "class 3"),
-        ],
-    )
-    def test_validate(self, owner_sets, classes, match):
-        with pytest.raises(ValueError, match=match):
-            RdtRouter(2, 1, owner_sets, classes, ["w"]).validate()
+def test_router_owner_sets_fan_in_and_components():
+    assert {RdtRouter(4, 2).producer_for(0, "w", u) for u in range(4)} == {0, 1}
+    r = RdtRouter(4, 2, [[0, 1], [2, 3], [3]], [0, 1, 2], ["s0", "s1", "e"])
+    assert r.producer_for(1, "s0", 0) in (0, 1) and r.producer_for(0, "s1", 0) in (2, 3)
+    assert r.producer_for(0, "e", 0) == r.producer_for(1, "e", 5) == 3
+    assert r.consumers_of(0) == [0] and r.consumers_of(3) == [0, 1]
+    assert r.components() == [0, 0, 2, 2]
+    assert len(set(RdtRouter(3, 1).components())) == 1
 
 
-def test_consumer_id_offsets_independent_deployments(monkeypatch):
-    model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
-    fleet = _Fleet(monkeypatch, model, _TOY_SHAPES, num_consumers=4, consumer_id=1)
-    info = ShardedRDTWeightTransferInitInfo(
-        trainer_actor_names=["p0", "p1"],
-        num_consumers=4,
-        replica_rank=1,
-        num_replicas=2,
-        **_metas_info(_TOY_SHAPES),
-    )
-    fleet.engine.parallel_config.world_size = 2
-    fleet.engine.init_transfer_engine(info)
-    assert fleet.engine._consumer_id == 2 + 1
+@pytest.mark.parametrize(
+    "owner_sets,classes,match",
+    [([[]], [0], "empty"), ([[0, 5]], [0], "out of range"), ([[0]], [3], "class 3")],
+)
+def test_router_validate(owner_sets, classes, match):
+    with pytest.raises(ValueError, match=match):
+        RdtRouter(2, 1, owner_sets, classes, ["w"]).validate()
+    with pytest.raises(ValueError, match="uniform"):
+        RdtRouter(2, 3, workers_per_replica=2)

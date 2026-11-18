@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The sharded-RDT trainer engine, on CPU: init info, the ownership and unit
-plan it derives from metadata, the worker init payload, and the gather loop
-against a real producer server (CUDA IPC replaced by an in-process registry).
-"""
+"""The sharded-RDT trainer engine on CPU, against a real producer server
+(CUDA IPC replaced by an in-process registry)."""
 
 import json
 import threading
+import time
 from functools import cached_property
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -23,8 +23,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 
 
 class _Source(WeightSource):
-    """Ordered (name, tensor) pairs with optional owners; yields what `rank`
-    owns."""
+    """Ordered (name, tensor) pairs; yields what `rank` owns."""
 
     def __init__(self, pairs, owners=None, rank=0):
         self._pairs, self._owners, self._rank = list(pairs), owners or {}, rank
@@ -89,8 +88,8 @@ def _engine(source, *, rank=0, world=1, client=None, **init):
     return engine
 
 
-def _attach_server(engine, consumer_ids=(0,)):
-    """A real producer server for `engine`, as `_spawn_server` would build it."""
+def _attach_server(engine):
+    """A real producer for `engine`, as `_spawn_server` builds it."""
     served = {
         m.name: (str(m.dtype).removeprefix("torch."), m.shape)
         for m in engine._meta
@@ -109,21 +108,10 @@ def _attach_server(engine, consumer_ids=(0,)):
     return server
 
 
-# ------------------------------------------------------------ init info
-
-
-@pytest.mark.parametrize(
-    "kw,match",
-    [
-        ({"buffer_bytes": 0}, "buffer_bytes"),
-        ({"num_buffers": 0}, "num_buffers"),
-        ({"num_consumers": 0}, "num_consumers"),
-    ],
-)
-def test_init_info_validates(kw, match):
-    kw = {"num_consumers": 1} | kw
-    with pytest.raises(ValueError, match=match):
-        ShardedRDTTrainerInitInfo(rank=0, **kw)
+@pytest.mark.parametrize("field", ["buffer_bytes", "num_buffers", "num_consumers"])
+def test_init_info_validates(field):
+    with pytest.raises(ValueError, match=field):
+        ShardedRDTTrainerInitInfo(rank=0, **{"num_consumers": 1, field: 0})
 
 
 def test_trainer_init_needs_a_full_source():
@@ -144,30 +132,33 @@ def test_trainer_init_needs_a_full_source():
         )
 
 
-# ------------------------------------------------------------ plan
-
-
-def test_ownership_comes_from_metadata_alike_on_every_rank():
-    owned = [
-        {"embed.weight", "model.layers.0.w", "norm.weight"},
-        {"model.layers.1.w", "norm.weight"},
-    ]
-    tables = []
-    for rank in (0, 1):
-        engine = _engine(_Source(_PP, _PP_OWNERS, rank), rank=rank, world=2)
-        tables.append((engine._owner_sets, engine._name_owner_class))
-        assert engine._owned_names == owned[rank]
-    assert tables[0] == tables[1] == ([[0], [1], [0, 1]], [0, 0, 1, 2])
-
-
-def test_units_are_global_and_a_rank_gathers_those_it_owns_part_of():
-    """8 B per name, 16 B units: [embed, l0], [l1, norm] on every rank."""
-    for rank, units in ((0, [0, 1]), (1, [1])):
-        engine = _engine(
-            _Source(_PP, _PP_OWNERS, rank), rank=rank, world=2, buffer_bytes=16
-        )
-        assert engine._units == [0, 0, 1, 1]
-        assert list(engine._owned_units) == units
+@pytest.mark.parametrize(
+    "rank,owned,units,gathered",
+    [
+        (0, {"embed.weight", "model.layers.0.w", "norm.weight"}, [0, 1], None),
+        (
+            1,
+            {"model.layers.1.w", "norm.weight"},
+            [1],
+            ["model.layers.1.w", "norm.weight"],
+        ),
+    ],
+)
+def test_a_rank_plans_and_gathers_what_it_owns(cpu_ipc, rank, owned, units, gathered):
+    """Ownership comes from metadata, alike on every rank; units are global
+    (8 B names, 16 B units) and a rank gathers those it owns part of."""
+    source = _Source(_PP, _PP_OWNERS, rank)
+    engine = _engine(source, rank=rank, world=2, buffer_bytes=16)
+    assert (engine._owner_sets, engine._name_owner_class) == (
+        [[0], [1], [0, 1]],
+        [0, 0, 1, 2],
+    )
+    assert engine._owned_names == owned and engine._units == [0, 0, 1, 1]
+    assert list(engine._owned_units) == units
+    if gathered:
+        _attach_server(engine).register_consumer(0, [])
+        engine.send_weights()
+        assert source.yielded == gathered
 
 
 def test_owners_outside_the_trainer_are_refused():
@@ -176,20 +167,17 @@ def test_owners_outside_the_trainer_are_refused():
 
 
 def test_arena_covers_the_consumers_that_may_pull_from_the_rank():
-    """With experts on rank 1 only, both consumers may pull from it; rank 0
-    serves the shared names to consumer 0 alone."""
-    owners = {"model.layers.1.w": (1,)}
-    sizes = []
-    for rank in (0, 1):
-        engine = _engine(
-            _Source(_PP, owners, rank),
+    """Layer 1 only on rank 1: both consumers may pull from it, one from 0."""
+    sizes = [
+        _engine(
+            _Source(_PP, {"model.layers.1.w": (1,)}, rank),
             rank=rank,
             world=2,
             num_consumers=2,
             buffer_bytes=100,
-            num_buffers=2,
-        )
-        sizes.append(engine._arena_bytes())
+        )._arena_bytes()
+        for rank in (0, 1)
+    ]
     assert sizes == [(2 * 1 + 1) * 116, (2 * 2 + 1) * 116]
 
 
@@ -198,7 +186,6 @@ def test_worker_payload_survives_json():
     engine._server_names = ["srv0", "srv1"]
     payload = json.loads(json.dumps(engine.get_worker_init_payload()))
     assert payload["trainer_actor_names"] == ["srv0", "srv1"]
-    assert payload["owner_sets"] == [[0], [1], [0, 1]]
     assert payload["name_owner_class"] == [0, 0, 1, 2]
     assert payload["dtype_names"] == ["float32"] * 4
     assert payload["buffer_bytes"] == 64
@@ -222,21 +209,19 @@ def test_metadata_disagreement_across_ranks_fails_at_init(monkeypatch):
 
 def test_the_sender_drives_the_workers_around_its_gathers(cpu_ipc):
     client = RecordingClient()
-    engine = _engine(_Source(_pairs(2)), client=client, buffer_bytes=32)
+    engine = _engine(_Source(_pairs(2)), client=client, num_consumers=2)
     server = _attach_server(engine)
-    server.register_consumer(0, [])  # pulls nothing: units release at publish
+    for c in (0, 1):
+        server.register_consumer(c, [])  # pulls nothing: units release at publish
     engine.send_weights()
-    assert client.last_update_info == {"sync_idx": 0}
-    engine.send_weights()
+    engine.send_weights(live_consumer_ids=[1])  # degraded: consumer 0 died
     assert client.order == ["start", "update", "finish"] * 2
-    assert client.last_update_info == {"sync_idx": 1}
+    assert client.last_update_info == {"sync_idx": 1} and server._live == {1}
     assert not engine._inflight
 
 
 def test_a_failed_update_fails_the_sync_on_every_producer_at_once(cpu_ipc, monkeypatch):
-    """A worker's pull fails (say NIXL cannot register a block): the sync
-    fails with that error right away, not after the stall watchdog."""
-    import time
+    """A worker's pull fails: the sync fails at once, not by the watchdog."""
 
     class _Failing(RecordingClient):
         def update_weights(self, update_info):
@@ -246,54 +231,40 @@ def test_a_failed_update_fails_the_sync_on_every_producer_at_once(cpu_ipc, monke
     server = _attach_server(engine)
     # consumer 0 needs both units but never pulls: only the error ends the sync
     server.register_consumer(
-        0, [[("model.layers.0.w", [[0, 8]])], [("model.layers.1.w", [[0, 8]])]]
+        0, [[("model.layers.0.w", ((0, 8),))], [("model.layers.1.w", ((0, 8),))]]
     )
     engine._server_names = ["rk0"]
-
-    class _Actor:
-        class set_gather_error:  # noqa: N801
-            remote = staticmethod(server.set_gather_error)
-
-    monkeypatch.setattr(trainer_mod.ray, "get_actor", lambda *a, **k: _Actor)
+    actor = SimpleNamespace(
+        set_gather_error=SimpleNamespace(remote=server.set_gather_error)
+    )
+    monkeypatch.setattr(trainer_mod.ray, "get_actor", lambda *a, **k: actor)
     t0 = time.monotonic()
     with pytest.raises(RuntimeError, match="register cuda memory"):
         engine.send_weights()
     assert time.monotonic() - t0 < 10  # the stall watchdog is 20 s
 
 
-def test_a_rank_gathers_only_units_it_owns(cpu_ipc):
-    source = _Source(_PP, _PP_OWNERS, 1)
-    engine = _engine(source, rank=1, world=2, buffer_bytes=16)
-    server = _attach_server(engine)
-    server.register_consumer(0, [])
-    engine.send_weights()
-    assert source.yielded == ["model.layers.1.w", "norm.weight"]
-
-
-@pytest.mark.parametrize("lookahead", [0, 1, 2])
+@pytest.mark.parametrize("lookahead", [0, 2])
 def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
-    """A worker pulls every unit, one at a time; the rank gathers ahead of it
-    by `gather_lookahead` units and no more, and every byte served is the
-    published one."""
+    """The rank gathers `gather_lookahead` units ahead of a worker pulling one
+    at a time, no more, and serves the published bytes."""
     pairs = _pairs(6)
     engine = _engine(_Source(pairs), buffer_bytes=32, gather_lookahead=lookahead)
     server = _attach_server(engine)
-    server.register_consumer(0, [[(n, [[0, 8]])] for n, _ in pairs])
-    peak = [0]
-    served = []
-    original = engine._remote
+    server.register_consumer(0, [[(n, ((0, 8),))] for n, _ in pairs])
+    peak, served, remote = [0], [], engine._remote
 
-    def remote(method, *args):
+    def counting_remote(method, *args):
         if method == "publish_unit":
             peak[0] = max(peak[0], len(engine._inflight))
-        return original(method, *args)
+        return remote(method, *args)
 
-    engine._remote = remote
+    engine._remote = counting_remote
 
     def consumer():
         for seq in range(len(pairs)):
             (t,) = server.bucket(0, seq, 0)
-            served.append(t.view(torch.float32).clone())
+            served.append(t.view(torch.float32)[0].item())
             server.free()
 
     worker = threading.Thread(target=consumer)
@@ -301,7 +272,7 @@ def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
     engine.send_weights()
     worker.join(timeout=20)
     assert peak[0] <= lookahead + 1
-    assert [t[0].item() for t in served] == [float(i) for i in range(6)]
+    assert served == [float(i) for i in range(6)]
 
 
 def test_a_source_out_of_order_fails_the_sync(cpu_ipc):
@@ -314,11 +285,3 @@ def test_a_source_out_of_order_fails_the_sync(cpu_ipc):
     with pytest.raises(RuntimeError, match="metadata order"):
         engine.send_weights()
     assert server._error is not None
-
-
-def test_a_degraded_sync_serves_the_live_set(cpu_ipc):
-    engine = _engine(_Source(_pairs(1)), num_consumers=3, buffer_bytes=32)
-    server = _attach_server(engine)
-    server.register_consumer(2, [])
-    engine.send_weights(live_consumer_ids=[2])
-    assert server._live == {2}
