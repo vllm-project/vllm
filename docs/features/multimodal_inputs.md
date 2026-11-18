@@ -13,6 +13,23 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## GLM-5.3-Flash
+
+`zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
+Rust frontend for image and video inputs. Its Python multimodal preprocessor
+has been removed. Enable the Rust frontend explicitly:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash
+```
+
+You can also use `vllm-rs serve zai-org/GLM-5.3-Flash`. Selecting
+`--tokenizer-mode glm5_next` alone does not enable the Rust frontend.
+Python `LLM` and the Python API server reject multimodal initialization for
+this checkpoint. For Python text-only inference, set
+`limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -1124,6 +1141,32 @@ vllm serve llava-hf/llava-1.5-7b-hf \
   --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
 ```
 
+#### Image Decoding Backend
+
+vLLM decodes image bytes with one of these backends:
+
+| Backend | Description |
+| --- | --- |
+| `pil` (default) | Pillow, returns PIL images |
+| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"image": {"image_backend": "torchcodec"}}'
+```
+
+The `torchcodec` backend decodes faster than Pillow, and the HF image
+processor receives a tensor directly, skipping its PIL-to-tensor conversion.
+The pixel values are identical to the `pil` backend.
+Images with transparency, CMYK or 16-bit images, animated images and
+`image_mode` values other than `RGB` are decoded with Pillow.
+
+!!! note
+    The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
+    Pillow when it is unavailable. Some processors only accept PIL images
+    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
+    not support this backend yet.
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
@@ -1283,6 +1326,8 @@ You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
 #### Image Embedding Inputs
 

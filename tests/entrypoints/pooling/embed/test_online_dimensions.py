@@ -53,9 +53,7 @@ def server(model_info, dtype: str):
 
     if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
         # Manually enable Matryoshka Embeddings
-        args.extend(
-            ["--trust_remote_code", "--hf_overrides", '{"matryoshka_dimensions":[256]}']
-        )
+        args.extend(["--hf_overrides", '{"matryoshka_dimensions":[256]}'])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
         yield remote_server

@@ -25,6 +25,7 @@ def _make_vllm_config(
     )
     return SimpleNamespace(
         use_flashinfer_replayssm=False,
+        use_replayssm_trackers=False,
         cache_config=SimpleNamespace(
             block_size=block_size,
             mamba_cache_mode="none",
@@ -34,6 +35,7 @@ def _make_vllm_config(
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL,
             max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         speculative_config=speculative_config,
         num_speculative_tokens=num_speculative_tokens,

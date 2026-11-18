@@ -496,10 +496,11 @@ class BaseRenderer(ABC, Generic[_T]):
         # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399
         # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421
 
-        # Here we take the max of the two to determine if a token id is
-        # truly out-of-vocabulary.
+        # Only multimodal placeholders may exceed the model vocab: they are
+        # replaced before the embedding lookup. A text-only model embeds every
+        # id, so tokenizer-only ids (e.g. Kimi's reserved tokens) are rejected.
         max_token_id = self.model_config.get_vocab_size() - 1
-        if tokenizer is not None:
+        if tokenizer is not None and self.model_config.is_multimodal_model:
             max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here
