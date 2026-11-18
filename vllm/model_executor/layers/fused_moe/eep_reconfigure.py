@@ -49,7 +49,9 @@ def _make_eep_experts(
     ctor_arg_names = set(signature(experts_cls.__init__).parameters)
     if "activation_key" in ctor_arg_names:
         # Static INT8 Triton experts must be rebuilt with their activation key.
-        experts_kwargs["activation_key"] = source_experts.activation_key
+        experts_kwargs["activation_key"] = getattr(
+            source_experts, "activation_key", None
+        )
         generic_arg_names.add("activation_key")
     unsupported_args = ctor_arg_names - generic_arg_names
     missing_args = set(experts_kwargs) - ctor_arg_names
