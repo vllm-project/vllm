@@ -4,6 +4,7 @@
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import statistics
@@ -94,6 +95,10 @@ def main():
     if args.table_rows > manifest["rows"][(1, 14).index(args.layer)]:
         parser.error("table rows exceed checkpoint size")
     host = load_local_rows(manifest, args.layer, args.table_rows)
+    checkpoint_prefix_sha256 = {
+        kind: hashlib.sha256(memoryview(tensor.view(torch.uint8).numpy())).hexdigest()
+        for kind, tensor in zip(("weight", "scale"), host)
+    }
     views = tuple(get_accelerator_view_from_cpu_tensor(tensor) for tensor in host)
     table = SimpleNamespace(
         dim=256,
@@ -117,6 +122,14 @@ def main():
     reader = VllmRemoteReader(args.model)
     results = []
     try:
+        implementation_sha256 = {
+            name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for name, path in (
+                ("benchmark", __file__),
+                ("local_lookup", inspect.getsourcefile(ParallelEngramEmbedding.lookup)),
+                ("reader_backend", inspect.getsourcefile(type(reader))),
+            )
+        }
         for tokens in args.tokens:
             generator = torch.Generator().manual_seed(20261029 + tokens)
             ids = torch.randint(
@@ -163,6 +176,12 @@ def main():
                 "device": torch.cuda.get_device_name(),
                 "torch_version": torch.__version__,
                 "library_sha256": hashlib.sha256(args.library.read_bytes()).hexdigest(),
+                "implementation_sha256": implementation_sha256,
+                "reader_backend": (
+                    f"{type(reader).__module__}.{type(reader).__qualname__}"
+                ),
+                "index_pattern": "fixed random IDs per shape; alternating local/remote",
+                "checkpoint_prefix_sha256": checkpoint_prefix_sha256,
                 "table_rows": args.table_rows,
                 "warmup": args.warmup,
                 "samples": args.samples,

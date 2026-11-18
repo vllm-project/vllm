@@ -202,6 +202,12 @@ host-wall durations; event intervals can include host launch gaps. This is a
 single-reader component test, not a serving benchmark or a prefetch-overlap
 measurement. The bounded table and repeated IDs may affect cache behavior;
 token counts do not by themselves imply production prefill or decode shapes.
+The result records hashes of the benchmark, local lookup and reader source files,
+the reader backend name, input pattern, and the weight and scale bytes of the
+local checkpoint prefix. Use these alongside the transport-library hash to
+identify the tested implementation and data. The November 10 `7d49fdfaeb`
+measurements used a DOCA 3.1 research shim; they do not identify or measure a
+later DOCA 3.5 runtime or vLLM revision.
 
 Use a nonzero `--shutdown-timeout` to allow worker cleanup. A forced shutdown
 can leave an owner lease outstanding; the owner must retain the backing until
