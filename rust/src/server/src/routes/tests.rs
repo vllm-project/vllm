@@ -5610,6 +5610,7 @@ async fn generate_expands_content_parts_after_features() {
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["prompt_token_ids"], rendered["token_ids"]);
     assert_eq!(json["mm_placeholders"], features["mm_placeholders"]);
+    assert_eq!(json["mm_hashes"], features["mm_hashes"]);
     engine_task.finish().await;
 }
 
