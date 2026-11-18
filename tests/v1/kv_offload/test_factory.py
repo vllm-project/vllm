@@ -919,25 +919,25 @@ def _fake_node_groups(
     return queried
 
 
-def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
-    """Run `_workers_span_nodes` on one rank of a TP=2, PP=2 engine whose
-    ranks 0-2 share a node and rank 3 sits on another.
+def _join_engine(
+    rank: int, init_method: str, nodes: str, tp: int, pp: int = 1, pcp: int = 1
+) -> None:
+    """Make this process rank `rank` of an engine whose rank r sits on node
+    `nodes[r]`.
 
-    The groups are vLLM `GroupCoordinator`s on Gloo without device
-    communicators, so no GPU is needed. Node placement is simulated where
-    `in_the_same_node_as` probes it: a shared memory segment created on one
-    node cannot be opened from the other.
+    The world, TP, PP and PCP groups are vLLM `GroupCoordinator`s on Gloo
+    without device communicators, so no GPU is needed. Node placement is
+    simulated where `in_the_same_node_as` probes it: a shared memory segment
+    created on one node cannot be opened from another.
     """
-    import uuid
     from datetime import timedelta
     from multiprocessing import shared_memory
 
     import torch.distributed as dist
 
     import vllm.distributed.parallel_state as parallel_state
-    from vllm.v1.kv_offload.tiering.spec import _workers_span_nodes
 
-    node = "b" if rank == 3 else "a"
+    node = nodes[rank]
     open_shm = shared_memory.SharedMemory
 
     def node_shared_memory(name=None, create=False, size=0):
@@ -945,7 +945,7 @@ def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
             name = f"node{node}_{uuid.uuid4().hex[:16]}"
             return open_shm(name=name, create=True, size=size)
         if not name.startswith(f"node{node}_"):
-            raise FileNotFoundError(name)  # created on the other node
+            raise FileNotFoundError(name)  # created on another node
         return open_shm(name=name)
 
     shared_memory.SharedMemory = node_shared_memory  # type: ignore[misc]
@@ -954,7 +954,7 @@ def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
         "gloo",
         init_method=init_method,
         rank=rank,
-        world_size=4,
+        world_size=len(nodes),
         timeout=timedelta(seconds=60),
     )
 
@@ -967,10 +967,26 @@ def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
             group_name=name,
         )
 
-    # vLLM's rank layout for TP=2, PP=2: TP is the innermost axis.
-    parallel_state._TP = coordinator([[0, 1], [2, 3]], "tp")
-    parallel_state._PP = coordinator([[0, 2], [1, 3]], "pp")
-    parallel_state._PCP = coordinator([[0], [1], [2], [3]], "pcp")
+    # vLLM's rank grid: TP is the innermost axis, then PCP, then PP.
+    grid = torch.arange(len(nodes)).reshape(1, 1, pp, pcp, tp)
+    parallel_state._WORLD = coordinator([list(range(len(nodes)))], "world")
+    parallel_state._TP = coordinator(grid.reshape(-1, tp).tolist(), "tp")
+    parallel_state._PCP = coordinator(
+        grid.transpose(3, 4).reshape(-1, pcp).tolist(), "pcp"
+    )
+    parallel_state._PP = coordinator(
+        grid.transpose(2, 4).reshape(-1, pp).tolist(), "pp"
+    )
+
+
+def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
+    """Run `_workers_span_nodes` on one rank of a TP=2, PP=2 engine whose
+    ranks 0-2 share a node and rank 3 sits on another."""
+    import torch.distributed as dist
+
+    from vllm.v1.kv_offload.tiering.spec import _workers_span_nodes
+
+    _join_engine(rank, init_method, "aaab", tp=2, pp=2)
     results.put((rank, _workers_span_nodes()))
     dist.destroy_process_group()
 
@@ -997,85 +1013,194 @@ def test_workers_span_nodes_agrees_across_ranks(tmp_path):
     ]
 
 
-@pytest.mark.parametrize(
-    ("secondary_tiers", "spanning_group", "mirrored"),
-    [
-        ([], "tp", False),
-        ([{"type": "example"}], None, False),
-        ([{"type": "example"}], "tp", True),
-        ([{"type": "example"}], "pp", True),
-        ([{"type": "example"}], "pcp", True),
-    ],
-)
-@pytest.mark.parametrize(
-    ("rank", "remote_ranks", "head_shard"),
-    [
-        # The workers on the head node pre-fault its region between them.
-        (1, {2, 3}, (1, 2)),
-        (0, {1, 2, 3}, (0, 1)),
-        (2, {1, 3}, (1, 2)),
-        # A worker off the head node.
-        (1, {1, 2, 3}, None),
-    ],
-)
-def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
-    monkeypatch,
-    secondary_tiers,
-    spanning_group,
-    mirrored,
-    rank,
-    remote_ranks,
-    head_shard,
-):
-    """Secondary tiers on an engine that spans nodes get a region mirror."""
-    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+class _FakeNixlAgent:
+    """Stands in for `nixl_utils.NixlWrapper`, the NIXL agent: the RDMA
+    library and the memory of peers on other nodes are outside this host.
+    Records what each agent registers and which peers it adds."""
 
-    on_head = rank not in remote_ranks
+    created: list["_FakeNixlAgent"] = []
+
+    def __init__(self, name: str, config: Any):
+        self.name = name
+        self.registered: list[tuple[str, list[tuple[int, int]]]] = []
+        self.peers: list[str] = []
+        _FakeNixlAgent.created.append(self)
+
+    def create_backend(self, backend: str, params: dict) -> None:
+        assert backend == "UCX"
+
+    def register_memory(self, descs: list, mem_type: str):
+        registration = (mem_type, [(addr, size) for addr, size, _, _ in descs])
+        self.registered.append(registration)
+        return registration
+
+    def deregister_memory(self, registration) -> None:
+        self.registered.remove(registration)
+
+    def get_agent_metadata(self) -> bytes:
+        return self.name.encode()
+
+    def add_remote_agent(self, metadata: bytes) -> str:
+        self.peers.append(metadata.decode())
+        return self.peers[-1]
+
+    def remove_remote_agent(self, peer: str) -> None:
+        self.peers.remove(peer)
+
+
+def _region_mapping(engine_id: str) -> tuple[int, int, str] | None:
+    """(start, end, path) of this process's mapping of the engine's region."""
+    with open("/proc/self/maps") as maps:
+        for line in maps:
+            if f"vllm_offload_{engine_id}.mmap" in line:
+                fields = line.split()
+                start, end = (int(a, 16) for a in fields[0].split("-"))
+                return start, end, fields[-1]
+    return None
+
+
+def _create_worker_on_rank(
+    rank: int,
+    init_method: str,
+    nodes: str,
+    parallel: dict[str, int],
+    secondary_tiers: list[dict],
+    engine_id: str,
+    results,
+) -> None:
+    """Build this rank's offloading worker through `TieringOffloadingSpec`
+    and report what it allocated and registered."""
+    import torch.distributed as dist
+
+    from vllm.distributed import nixl_utils
+    from vllm.v1.kv_offload.base import CanonicalKVCacheRef, CanonicalKVCacheTensor
+
+    _join_engine(rank, init_method, nodes, **parallel)
+    nixl_utils.NixlWrapper = _FakeNixlAgent
+    nixl_utils.nixl_agent_config = dict
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
+        engine_id=engine_id,
         worker_kv_bytes_per_block=4096,
         rank=rank,
-        world_size=4,
-        tp_size=2,
-        pp_size=2,
+        world_size=len(nodes),
+        tp_size=parallel["tp"],
+        pp_size=parallel.get("pp", 1),
+        pcp_size=parallel.get("pcp", 1),
         extra_config={"secondary_tiers": secondary_tiers},
     )
     assert isinstance(spec, TieringOffloadingSpec)
-    queried = _fake_node_groups(monkeypatch, spanning_group, world_size=4)
-    topology = MagicMock(
-        rank=rank, on_head=on_head, remote_ranks=frozenset(remote_ranks)
+    blocks = torch.zeros((8, 4096), dtype=torch.int8)
+    kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=blocks, page_size_bytes=4096)],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)]],
     )
-    monkeypatch.setattr(tiering_spec_module, "mirror_topology", lambda: topology)
-    monkeypatch.setattr(
-        tiering_spec_module, "gather_construction_errors", lambda *args: None
+
+    worker = spec.create_worker(kv_caches)
+    # Every rank has built its worker, pre-faulting its share of the region.
+    dist.barrier()
+
+    mapping = _region_mapping(engine_id)
+    names = {blocks.data_ptr(): "kv"}
+    region = None
+    if mapping is not None:
+        start, end, path = mapping
+        names[start] = "region"
+        region = (end - start, os.stat(path).st_blocks * 512)
+    prefix = f"kv-offload-mirror-{engine_id}-"
+    results.put(
+        (
+            rank,
+            type(worker).__name__,
+            region,
+            [
+                (
+                    agent.name.removeprefix(prefix),
+                    [
+                        (mem, [(names.get(addr, addr), size) for addr, size in descs])
+                        for mem, descs in agent.registered
+                    ],
+                    [peer.removeprefix(prefix) for peer in agent.peers],
+                )
+                for agent in _FakeNixlAgent.created
+            ],
+        )
     )
-    attach = MagicMock()
-    monkeypatch.setattr(tiering_spec_module, "attach_region_mirror", attach)
-    region_ctor = MagicMock()
-    worker_ctor = MagicMock()
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
-    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
+    # The region's file goes away when its creator shuts down.
+    dist.barrier()
+    worker.shutdown()
+    dist.destroy_process_group()
 
-    worker = spec.create_worker(MagicMock())
 
-    if mirrored:
-        assert worker is attach.return_value
-        assert attach.call_args.args[5] is topology
-        if on_head:
-            assert attach.call_args.args[0] is worker_ctor.return_value
-            assert region_ctor.call_args.kwargs["populate_shard"] == head_shard
-        else:
-            # Off the head node GPU blocks go straight to the head region.
-            assert attach.call_args.args[:2] == (None, None)
-            region_ctor.assert_not_called()
-            worker_ctor.assert_not_called()
-    else:
-        assert worker is worker_ctor.return_value
-        attach.assert_not_called()
-    # Without secondary tiers each node's region serves its own workers. With
-    # them every group is queried, even after one spans nodes, since each
-    # query is a collective that the group's other ranks also join.
-    assert sorted(queried) == (["pcp", "pp", "tp"] if secondary_tiers else [])
+_TIERS = [{"type": "example"}]
+
+
+@pytest.mark.parametrize(
+    ("nodes", "parallel", "secondary_tiers", "placement"),
+    [
+        # H: rank 0 registering the head region, L: a CPU worker on its node's
+        # region, R: off the head node, moving its KV to its slot over NIXL.
+        pytest.param("aaab", {"tp": 2, "pp": 2}, [], "LLLL", id="no-tiers"),
+        pytest.param("aaaa", {"tp": 2, "pp": 2}, _TIERS, "LLLL", id="one-node"),
+        pytest.param("abab", {"tp": 2, "pp": 2}, _TIERS, "HRLR", id="tp-spans"),
+        pytest.param("aabb", {"tp": 2, "pp": 2}, _TIERS, "HLRR", id="pp-spans"),
+        pytest.param("aabb", {"tp": 2, "pcp": 2}, _TIERS, "HLRR", id="pcp-spans"),
+        # Only rank 3's groups span nodes; three head ranks pre-fault.
+        pytest.param("aaab", {"tp": 2, "pp": 2}, _TIERS, "HLLR", id="rank3-off"),
+        pytest.param("abbb", {"tp": 2, "pp": 2}, _TIERS, "HRRR", id="rank0-alone"),
+    ],
+)
+def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
+    tmp_path, nodes, parallel, secondary_tiers, placement
+):
+    """Secondary tiers on an engine that spans nodes get a region mirror: the
+    head node's workers map and pre-fault the whole region between them,
+    rank 0 registers it for the others, which map no region and register
+    their KV cache instead."""
+    import torch.multiprocessing as mp
+
+    engine_id = f"mirror-{uuid.uuid4().hex[:8]}"
+    context = mp.get_context("spawn")
+    results = context.SimpleQueue()
+    mp.start_processes(
+        _create_worker_on_rank,
+        args=(
+            f"file://{tmp_path / 'store'}",
+            nodes,
+            parallel,
+            secondary_tiers,
+            engine_id,
+            results,
+        ),
+        nprocs=len(nodes),
+        start_method="spawn",
+    )
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=len(nodes),
+        tp_size=parallel["tp"],
+        extra_config={"secondary_tiers": secondary_tiers},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    region_bytes = spec.num_chunks * spec.kv_bytes_per_chunk
+    # Mapped bytes, and bytes allocated once every rank has pre-faulted.
+    whole_region = (region_bytes, region_bytes)
+    remote = [str(rank) for rank, kind in enumerate(placement) if kind == "R"]
+
+    def expected(rank: int, kind: str) -> tuple:
+        if kind == "H":
+            agent = ("0", [("DRAM", [("region", region_bytes)])], remote)
+            return rank, "RegionMirrorHeadWorker", whole_region, [agent]
+        if kind == "R":
+            agent = (str(rank), [("VRAM", [("kv", 8 * 4096)])], ["0"])
+            return rank, "RegionMirrorWorker", None, [agent]
+        return rank, "CPUOffloadingWorker", whole_region, []
+
+    assert sorted(results.get() for _ in nodes) == [
+        expected(rank, kind) for rank, kind in enumerate(placement)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1116,6 +1241,7 @@ def test_tiering_spec_rejects_unmirrorable_engines_across_nodes(
             classmethod(lambda cls, config: kvcr_cls),
         )
     spec = _create_spec(**kwargs)
+    assert isinstance(spec, TieringOffloadingSpec)
     _fake_node_groups(monkeypatch, "tp", world_size=world_group_size)
     monkeypatch.setattr(tiering_spec_module, "mirror_topology", MagicMock())
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
