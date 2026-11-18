@@ -296,6 +296,8 @@ def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None
     existing = layer._parameters.get(dst_name)
     if existing is not None and existing is not param:
         raise ValueError(f"{dst_name!r} is already registered as another parameter")
+    if existing is None:  # direct reload unregisters it before rerunning
+        layer.__dict__.setdefault("_runtime_aliases", []).append(dst_name)
     layer.register_parameter(dst_name, param)
     param.runtime_name = dst_name
 

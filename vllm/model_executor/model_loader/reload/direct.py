@@ -143,11 +143,6 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         for name, p in model.named_parameters(remove_duplicate=False)
         if hasattr(p, "_ckpt")
     )
-    # every module's parameters by name before post-load processing (stand-ins
-    # included), which `begin` restores for the rerun
-    model._ckpt_param_objects = {
-        module: dict(module._parameters) for module in model.modules()
-    }
 
 
 def _check_params_kept(model: torch.nn.Module) -> None:
@@ -208,28 +203,16 @@ def _checkpoint_views(
 
 
 def _undo_parameter_renames(model: torch.nn.Module) -> None:
-    """Undo `move_parameter` and `retire_parameter`, so the rerun of post-load
-    processing sees the parameters as cold start did: each under its names
-    from before processing (a stand-in's included) and live. Names processing
-    registered for a checkpoint tensor are dropped, and retired flags and
-    runtime names are cleared, also on tensors processing created."""
-    recorded = model._ckpt_param_objects
+    """Undo `move_parameter` and `retire_parameter`, whose names and flags
+    post-load processing reads: the rerun then sees each parameter under its
+    checkpoint name and live, as cold start did."""
     for module in model.modules():
-        before = recorded.get(module, {})
-        for name, p in list(module._parameters.items()):
-            if p is None or (hasattr(p, "_ckpt") and not _owned(model, p)):
-                continue
-            p.__dict__.pop("retired", None)
-            p.__dict__.pop("runtime_name", None)
-            if name not in before and _owned(model, p):
-                del module._parameters[name]
-        for name, p in before.items():
-            if (
-                module._parameters.get(name) is not p
-                and p is not None
-                and (p.is_meta or _owned(model, p))
-            ):
-                module._parameters[name] = p
+        for name in module.__dict__.pop("_runtime_aliases", ()):
+            del module._parameters[name]
+        for p in module._parameters.values():
+            if p is not None and (not hasattr(p, "_ckpt") or _owned(model, p)):
+                p.__dict__.pop("retired", None)
+                p.__dict__.pop("runtime_name", None)
 
 
 @torch.no_grad()
