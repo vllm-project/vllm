@@ -5,16 +5,20 @@ from dataclasses import dataclass, field
 from functools import partial
 
 import pytest
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import AssistantMessage, UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from ...utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
-@dataclass
+@dataclass(slots=True)
 class VitCudagraphTestConfig:
     model: str
     modalities: list[str] = field(default_factory=lambda: ["image", "video"])
@@ -28,13 +32,16 @@ class VitCudagraphTestConfig:
     needs_video_metadata: bool = False
     vllm_runner_kwargs: dict = field(default_factory=dict)
     compilation_config_overrides: dict = field(default_factory=dict)
+    # Mistral-format models need the image token grid inserted by the
+    # tokenizer's chat encoding, so `image_prompt` is used as the text chunk.
+    mistral_chat_prompt: bool = False
     marks: list = field(default_factory=list)
     skip: bool = False
 
 
 def params_with_marks(
     configs: dict[str, VitCudagraphTestConfig],
-) -> list[pytest.param]:
+) -> list[object]:
     return [
         pytest.param(model_id, marks=cfg.marks) for model_id, cfg in configs.items()
     ]
@@ -97,6 +104,41 @@ def minicpmv_chat_template(content: str) -> str:
 
 
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "pixtral": VitCudagraphTestConfig(
+        model="mistralai/Ministral-3-3B-Instruct-2512",
+        modalities=["image"],
+        image_prompt="What is in this image?",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024, 4096],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "tokenizer_mode": "mistral",
+            "config_format": "mistral",
+        },
+        mistral_chat_prompt=True,
+        marks=[pytest.mark.core_model],
+    ),
+    "mistral3": VitCudagraphTestConfig(
+        model="mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        modalities=["image"],
+        image_prompt="<s>[INST][IMG]What is in this image?[/INST]",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024, 4096],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            # The repo also ships a Mistral-format config, which resolves to
+            # PixtralForConditionalGeneration.
+            "config_format": "hf",
+            "tokenizer_mode": "hf",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Mistral3ForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
         modalities=["image"],
@@ -175,6 +217,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="KimiVLForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
+    "kimi_k3": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-K3",
+        modalities=["image"],
+        image_prompt="<|kimi_image_placeholder|>What is in this image?",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        # 1 text + 1 vision layer with random weights, as for kimi_vl.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "enable_chunked_prefill": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiK3ForConditionalGeneration",
             ),
         },
         marks=[pytest.mark.core_model],
@@ -286,6 +347,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # download. The test only validates that encoder CG capture/
         # replay functions correctly, not output quality.
         vllm_runner_kwargs={
+            "trust_remote_code": True,
             "load_format": "dummy",
             "hf_overrides": partial(
                 dummy_hf_overrides,
@@ -469,12 +531,6 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     if "image" not in config.modalities:
         pytest.skip(f"{model_id} does not support the image modality.")
 
-    image_prompts = IMAGE_ASSETS.prompts(
-        {
-            "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
-            "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
-        }
-    )
     images = [[asset.pil_image] for asset in image_assets]
 
     with vllm_runner(
@@ -486,6 +542,36 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
+        if config.mistral_chat_prompt:
+            assert config.image_prompt is not None
+            tokenizer = vllm_model.llm.get_tokenizer()
+            assert isinstance(tokenizer, MistralTokenizer)
+            image_prompts = [
+                tokenizer.mistral.encode_chat_completion(
+                    ChatCompletionRequest(
+                        messages=[
+                            UserMessage(
+                                content=[
+                                    ImageChunk(image=asset.pil_image),
+                                    TextChunk(text=config.image_prompt),
+                                ]
+                            ),
+                            # Dummy weights tend to repeat the last prompt token;
+                            # end on text rather than the [/INST] control token
+                            # so the output does not detokenize to "".
+                            AssistantMessage(content="The image shows", prefix=True),
+                        ]
+                    )
+                ).tokens
+                for asset in image_assets
+            ]
+        else:
+            image_prompts = IMAGE_ASSETS.prompts(
+                {
+                    "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
+                    "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
+                }
+            )
         outputs = vllm_model.generate_greedy(
             image_prompts, config.max_tokens, images=images
         )
@@ -520,6 +606,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
             "baby_reading": config.video_prompt,  # type: ignore[typeddict-item]
         }
     )
+    sampled_vids: list
     if config.needs_video_metadata:
         sampled_vids = [
             sample_frames_with_video_metadata(
@@ -599,7 +686,9 @@ def _check_eonly_encoder_outputs(worker, batches):
 
 @pytest.mark.parametrize(
     "model_id",
-    params_with_marks({key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5")}),
+    params_with_marks(
+        {key: MODEL_CONFIGS[key] for key in ("qwen3_vl", "qwen3_5", "glm4_1v")}
+    ),
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
 def test_eonly_vit_cudagraph_outputs(
@@ -610,7 +699,8 @@ def test_eonly_vit_cudagraph_outputs(
     from PIL import Image
     from transformers import AutoProcessor
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     token_budgets = [64, 256, 2048]
@@ -672,3 +762,102 @@ def test_eonly_vit_cudagraph_outputs(
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")
+
+
+def _check_k3_replay_and_threshold(worker, grids, hits, misses):
+    """Run one image batch through the real manager; compare with eager.
+
+    Args:
+        grids: grid_thw of each image in the batch.
+        hits: expected graph hits for the batch.
+        misses: expected eager fallbacks for the batch.
+
+    """
+    import torch
+
+    from vllm.utils.torch_utils import set_random_seed
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    model = runner.model
+    patch = runner.model_config.hf_config.vision_config.patch_size
+    set_random_seed(0)
+    with torch.inference_mode():
+        num_patches = sum(t * h * w for t, h, w in grids)
+        kwargs = {
+            # The input norm takes raw 8-bit pixels.
+            "pixel_values": torch.randint(
+                0,
+                256,
+                (num_patches, 3, patch, patch),
+                device=runner.device,
+                dtype=torch.uint8,
+            ),
+            "grid_thws": grids,
+        }
+        before = manager.get_cumulative_stats()
+        actual = torch.cat(manager.execute(kwargs))
+        after = manager.get_cumulative_stats()
+        assert after["graph_hits"] - before["graph_hits"] == hits
+        assert after["graph_misses"] - before["graph_misses"] == misses
+        expected = model.encoder_eager_forward(kwargs)
+        assert actual.shape == expected.shape
+        assert torch.isfinite(actual).all() and expected.abs().max() > 0
+        # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+        bound = 2 * expected.abs().max().item() * 2**-7
+        diff = (actual.float() - expected.float()).abs().max().item()
+        assert diff <= bound, f"max abs diff {diff} > {bound}"
+    return manager.token_budgets
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
+@pytest.mark.parametrize(
+    ("grids", "hits", "misses"),
+    [
+        pytest.param([[1, 16, 16]], 1, 0, id="fills_smallest_budget_64"),
+        pytest.param([[1, 28, 28]], 1, 0, id="padded_budget_196"),
+        pytest.param([[1, 32, 64]], 1, 0, id="fills_largest_budget_512"),
+        pytest.param([[1, 34, 64]], 0, 1, id="above_largest_budget_544"),
+        pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
+        pytest.param(
+            [[1, 28, 28], [1, 34, 64]], 0, 2, id="batch_over_budget_all_eager"
+        ),
+    ],
+)
+def test_kimi_k3_vit_cudagraph_replay_and_threshold(
+    grids, hits, misses, vllm_runner, monkeypatch
+):
+    """Replay matches eager; a batch whose total output tokens fit the largest
+    budget (512 by default) replays once, and a larger batch runs eagerly."""
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["kimi_k3"]
+    compilation_config = get_compilation_config(config)
+    compilation_config.pop("encoder_cudagraph_token_budgets")
+    compilation_config["encoder_cudagraph_max_vision_items_per_batch"] = 2
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=compilation_config,
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        results = vllm_model.llm.collective_rpc(
+            partial(
+                _check_k3_replay_and_threshold,
+                grids=grids,
+                hits=hits,
+                misses=misses,
+            )
+        )
+    for token_budgets in results:
+        assert token_budgets[-1] == 512

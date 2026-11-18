@@ -280,8 +280,9 @@ def test_minimax_reduce_rms_qk(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()) or not HAS_TRITON,
-    reason="CUDA or XPU and Triton required",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu())
+    or not HAS_TRITON,
+    reason="CUDA, ROCm or XPU and Triton required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 128, 333, 2049])
 @pytest.mark.parametrize("hidden_dims", [(3072, 512), (768, 256), (3000, 500)])
@@ -297,7 +298,7 @@ def test_minimax_qk_norm_triton_fallback(
     The all-reduce is a TP communication barrier, so it is monkeypatched to
     identity here; both the Triton path and the reference see the same
     (patched) reduction. This validates the kernel math and the folded
-    ``/ tp_world`` scaling without needing multiple ranks -- ``hidden_dims``
+    `/ tp_world` scaling without needing multiple ranks -- `hidden_dims`
     are the per-rank q/k segment widths.
     """
     monkeypatch.setattr(rms_norm_tp, "_all_reduce_variance", lambda v: v)

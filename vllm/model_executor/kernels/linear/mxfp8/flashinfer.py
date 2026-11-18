@@ -99,7 +99,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
         else:
             assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = x.dtype, x.shape
+            out_dtype, input_shape = layer.params_dtype, x.shape
             input_mxfp8, input_scale = mxfp8_e4m3_quantize(
                 x.view(-1, K), is_sf_swizzled_layout=True
             )
@@ -177,7 +177,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
         else:
             assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = x.dtype, x.shape
+            out_dtype, input_shape = layer.params_dtype, x.shape
             input_mxfp8, input_scale = mxfp8_e4m3_quantize(
                 x.view(-1, K), is_sf_swizzled_layout=True
             )

@@ -10,6 +10,12 @@ from unittest.mock import Mock
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
+)
+from vllm.entrypoints.generate.base.protocol import (
+    ResponseFormat as OpenAIResponseFormat,
+)
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -17,12 +23,12 @@ from vllm.tokenizers.mistral import MistralTokenizer
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -41,12 +47,12 @@ class MockModelConfig:
     renderer_num_workers: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -92,6 +98,54 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        (
+            OpenAIResponseFormat(
+                type="json_schema",
+                json_schema=OpenAIJsonSchemaResponseFormat(
+                    name="answer", schema={"type": "object"}, strict=True
+                ),
+            ),
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                    "strict": True,
+                },
+            },
+        ),
+        (OpenAIResponseFormat(type="text"), None),
+    ],
+    ids=["json_schema", "text"],
+)
+def test_renderer_passes_response_format_to_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    response_format: OpenAIResponseFormat,
+    expected: dict[str, Any] | None,
+) -> None:
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.apply_chat_template = Mock(return_value=[1])
+    renderer = MistralRenderer(
+        MockVllmConfig(
+            MockModelConfig(skip_tokenizer_init=True),
+            parallel_config=MockParallelConfig(),
+        ),
+        tokenizer=mock_tokenizer,
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.mistral.parse_chat_messages",
+        lambda *_args, **_kwargs: ([], None, None),
+    )
+
+    renderer.render_messages([], ChatParams(response_format=response_format))
+
+    kwargs = mock_tokenizer.apply_chat_template.call_args.kwargs
+    assert kwargs.get("response_format") == expected
 
 
 def test_apply_mistral_chat_template_thinking_chunk():

@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{
     DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
@@ -133,13 +134,14 @@ impl InferenceServiceImpl {
 
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
+            let media_io_kwargs = proto_request.media_io_kwargs.take();
             let mut text_request =
-                convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
+                convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 
             if !lora_name.is_empty() {
-                if !self.state.engine_core_client().ready_response().supports_lora {
+                if !self.state.llm().info().supports_lora {
                     return Err(Status::failed_precondition(
                         "engine was not started with LoRA enabled",
                     ));
@@ -150,7 +152,7 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = super::media::from_proto(media)?;
+            let media = super::media::from_proto(media, media_io_kwargs.as_ref())?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
@@ -258,7 +260,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params.map(Box::new),
             ec_transfer_params: collected.ec_transfer_params.map(Box::new),
-            sampling_mask: collected.sampling_mask,
+            spec_decode_metrics: collected.spec_decode_metrics,
+            weight_versions: collected.weight_versions,
+            routed_experts: collected.routed_experts.map(Box::new),
             timestamps: collected.timestamps,
         };
 
@@ -267,6 +271,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             &collected.token_ids,
             collected.logprobs.as_ref(),
             Some(&finish_info),
+            collected.sampling_mask.as_ref(),
             &response_opts,
         )?;
         info!(
@@ -326,6 +331,8 @@ async fn generate_stream_responses(
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
     pin_mut!(stream);
+    // The terminal output carries the whole request's rows.
+    let mut sampling_mask: Option<SamplingMask> = None;
 
     while let Some(event) = stream.next().await {
         let response = match event {
@@ -333,6 +340,7 @@ async fn generate_stream_responses(
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids,
                 prompt_logprobs,
+                ..
             }) => {
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
@@ -350,19 +358,26 @@ async fn generate_stream_responses(
                     SampledDelta {
                         token_ids,
                         logprobs,
+                        sampling_mask: delta_sampling_mask,
                     },
                 finished,
-            }) => convert::to_sequence_output(
-                &decoded.text,
-                &token_ids,
-                logprobs.as_ref(),
-                finished.as_deref(),
-                &response_opts,
-            )
-            .map(|outputs| pb::GenerateResponse {
-                prompt_info: None,
-                outputs: Some(outputs),
-            }),
+            }) => {
+                if let Some(mut mask) = delta_sampling_mask {
+                    sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+                }
+                convert::to_sequence_output(
+                    &decoded.text,
+                    &token_ids,
+                    logprobs.as_ref(),
+                    finished.as_deref(),
+                    sampling_mask.as_ref().filter(|_| finished.is_some()),
+                    &response_opts,
+                )
+                .map(|outputs| pb::GenerateResponse {
+                    prompt_info: None,
+                    outputs: Some(outputs),
+                })
+            }
         };
         y.yield_ok(response?).await;
     }
@@ -374,7 +389,7 @@ async fn generate_stream_responses(
     Ok(())
 }
 
-fn text_error_to_status(error: vllm_text::Error) -> Status {
+pub(super) fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
     if error.is_request_validation_error() {
         Status::invalid_argument(message)
@@ -399,4 +414,59 @@ fn log_text_error(
         "gRPC inference request failed"
     );
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{TryStreamExt as _, stream};
+    use vllm_text::{DecodedText, FinishReason, Finished};
+
+    use super::*;
+
+    /// The terminal output carries the sampling-mask rows of every update, and
+    /// earlier outputs none.
+    #[tokio::test]
+    async fn stream_sends_whole_sampling_mask_on_terminal_output() {
+        let delta = |token_id: u32, finished: Option<Finished>| DecodedTextEvent::TextDelta {
+            decoded: DecodedText::default(),
+            sampled: SampledDelta {
+                token_ids: vec![token_id],
+                logprobs: None,
+                sampling_mask: Some(SamplingMask {
+                    rows: vec![vec![token_id]],
+                }),
+            },
+            finished: finished.map(Box::new),
+        };
+        let finished = Finished {
+            usage: Default::default(),
+            finish_reason: FinishReason::Length,
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
+            timestamps: Default::default(),
+        };
+        let events = stream::iter([Ok(delta(1, None)), Ok(delta(2, Some(finished)))]);
+
+        let masks: Vec<_> = generate_stream_responses(
+            events,
+            ResponseOpts::default(),
+            Span::none(),
+            Instant::now(),
+        )
+        .map_ok(|response| response.outputs.expect("outputs").sampling_mask)
+        .try_collect()
+        .await
+        .expect("stream");
+
+        assert_eq!(
+            masks,
+            [
+                vec![],
+                vec![pb::TokenIds { ids: vec![1] }, pb::TokenIds { ids: vec![2] }]
+            ]
+        );
+    }
 }

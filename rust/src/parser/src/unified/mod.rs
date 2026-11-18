@@ -294,10 +294,26 @@ pub enum UnifiedParserError {
     MissingToken { token: String },
     #[error("unified parser parsing failed: {message}")]
     ParsingFailed { message: String },
+    /// The output ended inside a tool call, e.g. at `max_tokens` or a stop
+    /// string: the call's markup is truncated rather than malformed.
+    #[error("incomplete {parser} tool call")]
+    IncompleteToolCall { parser: &'static str },
     #[error(transparent)]
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
     Tool(#[from] ToolParserError),
+}
+
+impl UnifiedParserError {
+    /// Whether the output ended inside a tool call, from this parser or the
+    /// tool parser it drives.
+    pub fn is_incomplete_tool_call(&self) -> bool {
+        matches!(
+            self,
+            Self::IncompleteToolCall { .. }
+                | Self::Tool(ToolParserError::IncompleteToolCall { .. })
+        )
+    }
 }
 
 /// Returns the ID for the given token, or an error if it's not found.

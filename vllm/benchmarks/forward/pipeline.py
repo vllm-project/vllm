@@ -12,14 +12,18 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from vllm.benchmarks.forward.capture import ForwardBench, _compare, write_input_ids
+from vllm.benchmarks.forward.capture import (
+    ForwardBench,
+    _compare,
+    check_sampled,
+    write_input_ids,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     get_world_group,
     graph_capture,
 )
-from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
 
@@ -28,7 +32,8 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
     """Load one stage per torchrun process; PipelineBench drives execution.
 
     Serving's external launcher requires sampling broadcasts across PP stages.
-    The forward benchmark has no sampling or independent schedulers to sync.
+    The forward benchmark samples only on the last stage and has no independent
+    schedulers to sync.
     """
 
     supports_pp = True
@@ -144,23 +149,15 @@ class PipelineBench(ForwardBench):
             assert received is not None
             for key, tensor in self.input_tensors.tensors.items():
                 tensor.copy_(received[key])
-        context = get_forward_context()
-        saved = dict(vars(context))
-
-        def forward():
-            for name, value in saved.items():
-                setattr(context, name, value)
-            with override_forward_context(context):
-                return self._model_forward(**inputs)
-
-        self._run_model = forward
+        self._run_model = self._make_forward(inputs)
         self.snapshots = [(view, view.clone()) for view in self.state_views]
         self.input_snapshots = (
             {k: v.clone() for k, v in self.input_tensors.tensors.items()}
             if self.input_tensors is not None
             else {}
         )
-        output = forward()
+        output = self._run_model()
+        self.draft_reference = self.drafter.tokens.clone() if self.drafter else None
         self.reference = {k: v.clone() for k, v in _tensors(output).items()}
         if not pp.is_last_rank:
             pp.send_tensor_dict(_tensors(output), all_gather_group=get_tp_group())
@@ -201,6 +198,12 @@ class PipelineBench(ForwardBench):
                 v.numel() * v.element_size() for v in self.state_views
             ),
         )
+        if self.drafter is not None:
+            self.result["drafter"] = self.drafter.check(self.draft_reference)
+        if self.sampled is not None:
+            self.result["sampler"] = check_sampled(
+                self.sampled, self.runner.model_config.get_vocab_size()
+            )
 
     def _stream(self, profile: bool = False):
         pp, world = get_pp_group(), get_world_group()

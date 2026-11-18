@@ -68,7 +68,7 @@ def _coalesce_runs(
     return slots, ids[slots], ends - slots
 
 
-@dataclass
+@dataclass(slots=True)
 class Transfer:
     """A batched copy in flight on a dedicated GPU stream.
 
