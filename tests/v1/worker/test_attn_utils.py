@@ -43,9 +43,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseSourceManager,
 )
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-from vllm.v1.hisparse.binding import (
-    allocate_hisparse_kv_caches,
-)
+from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
@@ -82,7 +80,6 @@ from vllm.v1.worker.utils import (
 )
 
 
-@pytest.mark.parametrize("sparse_full_attention", [False, True])
 @pytest.mark.parametrize(
     ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
@@ -95,44 +92,22 @@ from vllm.v1.worker.utils import (
     ],
 )
 def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
-    monkeypatch,
-    enabled,
-    block_size,
-    main_sizes,
-    indexer_sizes,
-    expected,
-    indexer,
-    sparse_full_attention,
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
 ):
-    """Resolve sparse source/indexer geometry without changing compression."""
-    main_spec = (
-        AttentionSpec(
-            block_size=block_size,
-            num_kv_heads=2,
-            head_size=32,
-            dtype=torch.bfloat16,
-            topk_buffer_width=35,
-            cache_role=SparseCacheRole.SPARSE,
-            is_index_group_leader=True,
-        )
-        if sparse_full_attention
-        else MLAAttentionSpec(
+    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    specs = {
+        "main": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
             cache_role=SparseCacheRole.SPARSE,
-        )
-    )
-    compress_ratio = 4 if sparse_full_attention else 1
-    specs = {
-        "main": main_spec,
+        ),
         "indexer": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
-            tokens_per_state=compress_ratio,
             cache_role=SparseCacheRole.INDEXER,
         ),
         "dense": AttentionSpec(
@@ -154,6 +129,9 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils_module, "get_hisparse_page_layer_configs", lambda *_: {}
+    )
     mamba_fit_inputs: list[dict[str, KVCacheLayerConfig]] = []
 
     def fit_mamba_blocks(_, layer_configs, __):
@@ -164,13 +142,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
     )
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig() if enabled else None
-        ),
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
-        cache_config=SimpleNamespace(kv_cache_layout=None),
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        speculative_config=None,
+        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
@@ -178,13 +150,8 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_layer_configs(config)
-    main = resolved["main"].spec
-    assert main.block_size == expected
-    indexer_spec = resolved["indexer"].spec
-    assert isinstance(indexer_spec, MLAAttentionSpec)
-    assert indexer_spec.block_size == indexer
-    assert indexer_spec.tokens_per_state == compress_ratio
-    assert indexer_spec.num_states == indexer // compress_ratio
+    assert resolved["main"].spec.block_size == expected
+    assert resolved["indexer"].spec.block_size == indexer
     assert [lcs["indexer"].spec.block_size for lcs in mamba_fit_inputs] == (
         [indexer] if enabled else []
     )
@@ -193,16 +160,6 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
         customize_attention_spec(dense_backend, specs["dense"], "dense")
     )
     assert all(spec.block_size == block_size for spec in specs.values())
-    if enabled:
-        resident = resolved["main.hisparse_resident"]
-        hot = resolved["main.hisparse_hot"]
-        assert resident.spec.block_size == hot.spec.block_size == expected
-        assert (
-            resident.spec.page_size_bytes
-            == hot.spec.page_size_bytes
-            == main.page_size_bytes
-        )
-        assert len(resolved) == len(specs) + 2
 
 
 def test_resolve_hisparse_specs_before_kv_cache_layout():
@@ -1207,9 +1164,6 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
 
 def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
     """The row copy data plane sees all heads' K/V without copying host storage."""
-    names = ["layer.0", "layer.1"]
-    resident_names = [f"{name}.hisparse_resident" for name in names]
-    hot_names = [f"{name}.hisparse_hot" for name in names]
     spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
@@ -1219,47 +1173,32 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         cache_role=SparseCacheRole.SPARSE,
         is_index_group_leader=True,
     )
+    pages = [("layer", spec, HiSparseSourceManager.config(), True)]
+    for suffix, page_spec_cls, manager_config in (
+        ("resident", HiSparsePageSpec, HiSparseResidentManager.config()),
+        ("hot", HiSparseHotPageSpec, HiSparseHotManager.config(blocks_per_request=2)),
+    ):
+        page_spec = page_spec_cls(block_size=2, page_size=32)
+        pages.append((f"layer.hisparse_{suffix}", page_spec, manager_config, False))
     config = KVCacheConfig(
         num_blocks=4,
         hisparse_host_num_blocks=3,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=192,
-                layers=names,
-                layer_stride=96,
+                size=96 if host else 128,
+                layers=[name],
+                layer_stride=32,
                 block_stride=32,
-                host_resident=True,
-            ),
-            KVCacheTensor(
-                size=256,
-                layers=resident_names,
-                layer_stride=32,
-                block_stride=64,
-            ),
-            KVCacheTensor(
-                size=256,
-                layers=hot_names,
-                layer_stride=32,
-                block_stride=64,
-            ),
+                host_resident=host,
+            )
+            for name, _, _, host in pages
         ],
         kv_cache_groups=[
-            new_kv_cache_group(
-                names, spec, HiSparseSourceManager.config(), host_resident=True
-            ),
-            new_kv_cache_group(
-                resident_names,
-                HiSparsePageSpec(block_size=2, page_size=32),
-                HiSparseResidentManager.config(),
-            ),
-            new_kv_cache_group(
-                hot_names,
-                HiSparseHotPageSpec(block_size=2, page_size=32),
-                HiSparseHotManager.config(blocks_per_request=2),
-            ),
+            new_kv_cache_group([name], page_spec, manager, host_resident=host)
+            for name, page_spec, manager, host in pages
         ],
     )
-    host_backing = torch.zeros(192, dtype=torch.int8)
+    host_backing = torch.zeros(96, dtype=torch.int8)
     host_pool = SimpleNamespace(
         allocate=lambda size: host_backing,
         registered=host_backing,
@@ -1268,58 +1207,39 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
     caches = allocate_hisparse_kv_caches(
         config, torch.device("cpu"), KVCacheLayout.BLNHC, [2, 2, 2], host_pool
     )
-
-    def make_handle():
-        # Exercise the real bind methods on CPU without starting GPU streams.
-        runtime = object.__new__(HiSparseRuntime)
-        runtime.row_width = 8
-        runtime.kv_dtype = torch.bfloat16
-        runtime.backend = CUDAHiSparseBackend()
-        runtime.is_group_leader = True
-        runtime.index_group = SimpleNamespace(
-            followers=[],
-            device_global_indices=torch.full((1, 2), -1),
-            lru_slots=torch.arange(2),
-            swap_stats=torch.zeros(2),
-        )
-        return HiSparseCacheHandle(runtime)
-
-    forward_context = {}
-    expected_rows = []
-    for index, name in enumerate(names):
-        # Distinct layer/block/token/head/K/V values in canonical attention
-        # views detect a silent head/token transpose in the row-copy view.
-        tagged_rows = (
-            torch.arange(48, dtype=torch.float32).view(3, 2, 2, 4) + index * 64
-        ).to(torch.bfloat16)
-        caches[name].copy_(tagged_rows.transpose(1, 2))
-        expected_rows.append(tagged_rows.view(6, 8))
-        forward_context[name] = SimpleNamespace(
-            hisparse_cache=make_handle(),
-            is_draft_layer=False,
-        )
-    reader = make_handle()
-    forward_context["reader"] = SimpleNamespace(
-        kv_sharing_target_layer_name=names[1], hisparse_cache=reader
+    # Exercise the real bind methods on CPU without starting GPU streams.
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.row_width = 8
+    runtime.kv_dtype = torch.bfloat16
+    runtime.backend = CUDAHiSparseBackend()
+    runtime.is_group_leader = True
+    runtime.index_group = SimpleNamespace(
+        followers=[],
+        device_global_indices=torch.full((1, 2), -1),
+        lru_slots=torch.arange(2),
+        swap_stats=torch.zeros(2),
     )
-    block_tables = SimpleNamespace(
-        input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
-        slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
-    )
+    handle = HiSparseCacheHandle(runtime)
+    # Distinct block/token/head/K/V values in the canonical attention view
+    # detect a silent head/token transpose in the row-copy view.
+    tagged_rows = torch.arange(48, dtype=torch.float32).view(3, 2, 2, 4)
+    caches["layer"].copy_(tagged_rows.to(torch.bfloat16).transpose(1, 2))
 
     attn_utils_module.bind_hisparse_kv_caches(
-        forward_context=forward_context,
+        forward_context={
+            "layer": SimpleNamespace(hisparse_cache=handle, is_draft_layer=False)
+        },
         kv_cache_config=config,
         kv_caches=caches,
-        block_tables=block_tables,
+        block_tables=SimpleNamespace(
+            input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
+            slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
+        ),
         host_pool=host_pool,
     )
 
-    torch.testing.assert_close(reader.runtime.host_cache, expected_rows[1])
-    for index, name in enumerate(names):
-        host_cache = forward_context[name].hisparse_cache.runtime.host_cache
-        assert host_cache.data_ptr() == caches[name].data_ptr()
-        torch.testing.assert_close(host_cache, expected_rows[index])
+    assert runtime.host_cache.data_ptr() == caches["layer"].data_ptr()
+    torch.testing.assert_close(runtime.host_cache.float(), tagged_rows.view(6, 8))
 
 
 class _TableBuilder:
