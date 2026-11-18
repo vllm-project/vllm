@@ -265,30 +265,6 @@ class InklingParser(ParserEngine):
         i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
         return i >= 0 and input_ids[i] in ended_ids
 
-    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        vocab = self.vocab
-        thinking_id = vocab.get(CONTENT_THINKING)
-        end_ids = {
-            token_id
-            for token_id in (
-                vocab.get(END_MESSAGE),
-                vocab.get(CONTENT_MODEL_END_SAMPLING),
-            )
-            if token_id is not None
-        }
-        in_reasoning = False
-        count = 0
-        for token_id in token_ids:
-            if token_id == thinking_id:
-                in_reasoning = True
-                continue
-            if token_id in end_ids:
-                in_reasoning = False
-                continue
-            if in_reasoning:
-                count += 1
-        return count
-
     def _single_pass_parse(
         self,
         text: str,
