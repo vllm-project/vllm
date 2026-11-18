@@ -34,7 +34,6 @@ def test_mtp_rejected_placeholders_match_greedy_token_ids(
         "block_size": None,
         "max_model_len": 256,
         "max_num_seqs": 1,
-        "trust_remote_code": True,
         "enable_chunked_prefill": None,
         "limit_mm_per_prompt": {"image": 0, "video": 0},
         "attention_backend": ("TRITON_ATTN" if current_platform.is_rocm() else "auto"),
