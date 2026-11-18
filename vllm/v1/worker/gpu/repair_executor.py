@@ -11,6 +11,13 @@ ownership fence against the scheduler-authorized physical write set, with
 abort containment (re-zero of partial writes) and a fail-closed TP consensus
 on every verdict.
 
+Known limitation: kernel-block-split cache groups (AttentionGroup
+kernel_block_size below the manager block size) bind layer views whose
+derived block unit is the kernel block, not the manager unit the
+authorization uses; the fence detects the unit mismatch and refuses every
+such repair loudly (the request falls back to recompute). Supporting those
+layouts needs the manager unit plumbed into the work descriptor.
+
 The module lives beside the GPU model runner because the old
 kv_connector_model_runner_mixin module no longer exists upstream: its
 connector plumbing was absorbed into vllm/v1/worker/gpu/kv_connector.py.
@@ -25,12 +32,23 @@ import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.v1.core.sched.output import RepairWork
 from vllm.v1.outputs import RepairResultReport
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+
+def _format_repair_exception(exc: BaseException) -> str:
+    """The envelope's diagnostic record of a contained exception: the
+    exception's type and message (the full traceback goes to the log via
+    logger.exception). Kept on the RepairResultReport so the scheduler
+    side sees the original failure even when worker logs are lost."""
+    text = type(exc).__name__ + ": " + str(exc)
+    return text if len(text) <= 300 else text[:297] + "..."
 
 
 def execute_repair_only(
@@ -57,158 +75,353 @@ def execute_repair_only(
     """
     works = scheduler_output.repair_works
     assert works is not None
-    # Repair steps are exclusive: no ordinary request rides the batch.
-    assert set(works) == set(scheduler_output.num_scheduled_tokens), (
-        "hole repair: a repair step must not carry ordinary work "
-        f"({len(works)} repair works vs "
-        f"{len(scheduler_output.num_scheduled_tokens)} scheduled requests)"
-    )
-    assert set(batch_req_ids) == set(scheduler_output.num_scheduled_tokens), (
-        "hole repair: batch_req_ids must name exactly the repair step's "
-        f"requests ({batch_req_ids!r} vs "
-        f"{sorted(scheduler_output.num_scheduled_tokens)})"
-    )
     global _REPAIR_SYNC_PROFILE
     _REPAIR_SYNC_PROFILE = {} if _repair_sync_profile_enabled() else None
+    try:
+        # Repair steps are exclusive: no ordinary request rides the batch.
+        # The works and the scheduling counts are broadcast data (identical
+        # on every rank); only batch_req_ids is worker-local. A step-level
+        # violation on ONE rank must not strand the TP peers inside the
+        # first verdict collective: the failure is contained here and every
+        # work still gets its (failed) verdict and its collective.
+        assert set(works) == set(scheduler_output.num_scheduled_tokens), (
+            "hole repair: a repair step must not carry ordinary work "
+            f"({len(works)} repair works vs "
+            f"{len(scheduler_output.num_scheduled_tokens)} scheduled requests)"
+        )
+        assert set(batch_req_ids) == set(scheduler_output.num_scheduled_tokens), (
+            "hole repair: batch_req_ids must name exactly the repair step's "
+            f"requests ({batch_req_ids!r} vs "
+            f"{sorted(scheduler_output.num_scheduled_tokens)})"
+        )
+    except Exception as exc:
+        step_error = _format_repair_exception(exc)
+        logger.exception(
+            "Repair step validation failed (%d works) -> failed verdicts "
+            "for every work",
+            len(works),
+        )
+        step_results: list[RepairResultReport] = []
+        for step_work in works.values():
+            try:
+                _ranks_repair_agree(
+                    True,
+                    0,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    step_work.layer_end,
+                    False,
+                    plan_id=step_work.plan_id,
+                    epoch=step_work.epoch,
+                    span=step_work.repair_span,
+                )
+            except Exception as collect_exc:
+                logger.exception(
+                    "Repair TP consensus failed req=%s -> abort",
+                    step_work.request_id,
+                )
+                step_error = step_error or _format_repair_exception(collect_exc)
+            step_results.append(
+                RepairResultReport(
+                    request_id=step_work.request_id,
+                    plan_id=step_work.plan_id,
+                    epoch=step_work.epoch,
+                    structural_check=False,
+                    executed_layers=0,
+                    span=step_work.repair_span,
+                    aborted=True,
+                    commit_check=None,
+                    error_detail=step_error,
+                )
+            )
+        if _REPAIR_SYNC_PROFILE is not None:
+            _REPAIR_SYNC_PROFILE = None
+        return step_results
 
     row_starts: dict[str, int] = {}
     row = 0
     for req_id in batch_req_ids:
         row_starts[req_id] = row
-        row += scheduler_output.num_scheduled_tokens[req_id]
+        # A worker-local batch corruption (a missing scheduling entry) must
+        # not strand the TP peers in the FIRST collective: the missing entry
+        # degrades to a zero-width window, which the per-work envelope below
+        # contains as that work's failed verdict while the other works run
+        # normally.
+        row += scheduler_output.num_scheduled_tokens.get(req_id, 0)
 
     results: list[RepairResultReport] = []
     for work_row, req_id in enumerate(batch_req_ids):
-        work = works[req_id]
-        lo = row_starts[req_id]
-        hi = lo + scheduler_output.num_scheduled_tokens[req_id]
-        span_start, span_end = work.repair_span
-        pos_first = _int_timed(positions[lo], f"positions[{lo}].int")
-        pos_last = _int_timed(positions[hi - 1], f"positions[{hi - 1}].int")
-        assert pos_first == span_start and pos_last == span_end - 1, (
-            f"hole repair: physical positions [{pos_first},"
-            f"{pos_last}] do not match the repair span "
-            f"[{span_start}, {span_end}) of {req_id}"
-        )
-
-        layers = model.model.layers
-        assert work.layer_end <= len(layers), (
-            f"hole repair: layer_end {work.layer_end} exceeds the stack "
-            f"({len(layers)} layers)"
-        )
-
-        attn_metadata = get_forward_context().attn_metadata
-        assert isinstance(attn_metadata, dict) and attn_metadata
-        meta: Any = next(iter(attn_metadata.values()))
-        block_size = _repair_block_size(layers[0])
-
-        # Pre-write safety gate: the slot window and the block-table row
-        # are fetched once to the host (a single D2H per work item -- the
-        # same lists feed the post-write attestation) and the geometry is
-        # validated BEFORE the first cache-writing kernel, so a malformed
-        # slot mapping can never write into another request's KV.
-        slots_host = _tolist_timed(
-            meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
-        )
-        block_table_host = _tolist_timed(
-            _repair_block_table_row(meta, work_row),
-            "pre_write.block_tables.tolist",
-        )
-        # Ownership fence: the expected physical blocks come from the WORK
-        # (the scheduler snapshotted them from KVCacheManager at the
-        # admission), NOT from this worker's metadata. The expected
-        # physical slots are reconstructed from the authorization and
-        # compared against the ACTUAL slot mapping: two
-        # consistently-corrupted worker structures (the block table and
-        # the slot mapping both pointing at a foreign request's blocks)
-        # cannot reproduce the authorized slot multiset, so the foreign
-        # write is refused.
-        auth_blocks = tuple(work.expected_write_block_ids)
-        auth_present = bool(auth_blocks)
-        span_blocks = -(-(span_end - span_start) // block_size)
-        # The authorization must cover exactly the span's blocks: a
-        # partial or over-long snapshot is malformed -- refused, never a
-        # crash.
-        auth_len_ok = len(auth_blocks) == span_blocks
-        expected_slots: Counter[int] = Counter()
-        if auth_present and auth_len_ok:
-            first_blk = span_start // block_size
-            for tok in range(span_start, span_end):
-                block_id = auth_blocks[(tok // block_size) - first_blk]
-                expected_slots[block_id * block_size + tok % block_size] += 1
-        auth_slots_ok = (
-            auth_present and auth_len_ok and Counter(slots_host) == expected_slots
-        )
-        # The worker block table's span slice must AGREE with the
-        # authorization (an independent check of the row itself).
-        table_span = block_table_host[
-            span_start // block_size : -(-span_end // block_size)
-        ]
-        auth_table_ok = auth_present and list(table_span) == list(auth_blocks)
-        pre_write_ownership = _slots_owned_by_request_list(
-            slots_host, block_table_host, block_size
-        )
-        pre_write_coverage = _slots_cover_span_list(
-            slots_host, block_table_host, span_start, span_end, block_size
-        )
-        pre_write_ok = (
-            pre_write_ownership
-            and pre_write_coverage
-            and auth_present
-            and auth_slots_ok
-            and auth_table_ok
-        )
-        if not pre_write_ok:
-            logger.error(
-                "Repair pre-write fence refused req=%s plan_id=%d "
-                "span=[%d,%d) ownership=%s coverage=%s auth_present=%s "
-                "auth_slots=%s auth_table=%s -- no cache write executed",
-                work.request_id,
-                work.plan_id,
-                span_start,
-                span_end,
-                pre_write_ownership,
-                pre_write_coverage,
-                auth_present,
-                auth_slots_ok,
-                auth_table_ok,
+        # Failure envelope: a rank-local recoverable exception anywhere
+        # between the work lookup and the verdict construction (positions
+        # fetch, metadata access, the host-side fence, embedding, the layer
+        # stream, the re-zero, or the collective itself) must not escape and
+        # strand the TP peers inside _ranks_repair_agree -- it is captured
+        # here, preserved as error_detail, and converged into a consistent
+        # failed verdict that still participates in consensus.
+        work: RepairWork | None = None
+        span_start, span_end = -1, -1
+        lo = row_starts.get(req_id, 0)
+        hi = lo + scheduler_output.num_scheduled_tokens.get(req_id, 0)
+        executed_layers = 0
+        layer_failed_at: int | None = None
+        backend_ok = True
+        pre_write_ok = False
+        auth_present = False
+        auth_slots_ok = False
+        auth_table_ok = False
+        pre_write_ownership = False
+        pre_write_coverage = False
+        error_detail: str | None = None
+        meta: Any = None
+        layers: Any = None
+        try:
+            work = works[req_id]
+            span_start, span_end = work.repair_span
+            pos_first = _int_timed(positions[lo], f"positions[{lo}].int")
+            pos_last = _int_timed(positions[hi - 1], f"positions[{hi - 1}].int")
+            assert pos_first == span_start and pos_last == span_end - 1, (
+                f"hole repair: physical positions [{pos_first},"
+                f"{pos_last}] do not match the repair span "
+                f"[{span_start}, {span_end}) of {req_id}"
             )
 
-        hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
-        residual = None
-        executed_layers = 0
-        backend_ok = True
-        if pre_write_ok:
-            for idx, layer in enumerate(layers[: work.layer_end]):
+            layers = model.model.layers
+            assert work.layer_end <= len(layers), (
+                f"hole repair: layer_end {work.layer_end} exceeds the stack "
+                f"({len(layers)} layers)"
+            )
+
+            attn_metadata = get_forward_context().attn_metadata
+            assert isinstance(attn_metadata, dict) and attn_metadata
+            meta = next(iter(attn_metadata.values()))
+            block_size = _repair_block_size(layers[0])
+
+            # Pre-write safety gate: the slot window and the block-table row
+            # are fetched once to the host (a single D2H per work item -- the
+            # same lists feed the post-write attestation) and the geometry is
+            # validated BEFORE the first cache-writing kernel, so a malformed
+            # slot mapping can never write into another request's KV.
+            slots_host = _tolist_timed(
+                meta.slot_mapping[lo:hi], "pre_write.slot_mapping.tolist"
+            )
+            block_table_host = _tolist_timed(
+                _repair_block_table_row(meta, work_row),
+                "pre_write.block_tables.tolist",
+            )
+            # Ownership fence: the expected physical blocks come from the WORK
+            # (the scheduler snapshotted them from KVCacheManager at the
+            # admission), NOT from this worker's metadata. The expected
+            # physical slots are reconstructed from the authorization and
+            # compared against the ACTUAL slot mapping: two
+            # consistently-corrupted worker structures (the block table and
+            # the slot mapping both pointing at a foreign request's blocks)
+            # cannot reproduce the authorized slot multiset, so the foreign
+            # write is refused.
+            auth_blocks = tuple(work.expected_write_block_ids)
+            auth_present = bool(auth_blocks)
+            span_blocks = -(-(span_end - span_start) // block_size)
+            # The authorization must cover exactly the span's blocks: a
+            # partial or over-long snapshot is malformed -- refused, never a
+            # crash.
+            auth_len_ok = len(auth_blocks) == span_blocks
+            expected_slots: Counter[int] = Counter()
+            if auth_present and auth_len_ok:
+                first_blk = span_start // block_size
+                for tok in range(span_start, span_end):
+                    block_id = auth_blocks[(tok // block_size) - first_blk]
+                    expected_slots[block_id * block_size + tok % block_size] += 1
+            auth_slots_ok = (
+                auth_present and auth_len_ok and Counter(slots_host) == expected_slots
+            )
+            # The worker block table's span slice must AGREE with the
+            # authorization (an independent check of the row itself).
+            table_span = block_table_host[
+                span_start // block_size : -(-span_end // block_size)
+            ]
+            auth_table_ok = auth_present and list(table_span) == list(auth_blocks)
+            pre_write_ownership = _slots_owned_by_request_list(
+                slots_host, block_table_host, block_size
+            )
+            pre_write_coverage = _slots_cover_span_list(
+                slots_host, block_table_host, span_start, span_end, block_size
+            )
+            pre_write_ok = (
+                pre_write_ownership
+                and pre_write_coverage
+                and auth_present
+                and auth_slots_ok
+                and auth_table_ok
+            )
+            if not pre_write_ok:
+                logger.error(
+                    "Repair pre-write fence refused req=%s plan_id=%d "
+                    "span=[%d,%d) ownership=%s coverage=%s auth_present=%s "
+                    "auth_slots=%s auth_table=%s -- no cache write executed",
+                    work.request_id,
+                    work.plan_id,
+                    span_start,
+                    span_end,
+                    pre_write_ownership,
+                    pre_write_coverage,
+                    auth_present,
+                    auth_slots_ok,
+                    auth_table_ok,
+                )
+
+            hidden_states = model.model.embed_input_ids(input_ids[lo:hi])
+            residual = None
+            if pre_write_ok:
+                for idx, layer in enumerate(layers[: work.layer_end]):
+                    try:
+                        hidden_states, residual = layer(
+                            positions[lo:hi], hidden_states, residual
+                        )
+                    except Exception as exc:
+                        # Exception containment: a failure inside the repair
+                        # stream is request-local. Stop the stream here,
+                        # re-zero the partial writes INCLUDING this raising
+                        # layer's rows (it may have written some KV rows
+                        # before raising), report the failure, and let the
+                        # scheduler's recompute fallback own the request. A
+                        # poisoned device context fails loudly at the next
+                        # step; a successful transaction is never fabricated.
+                        layer_failed_at = idx
+                        backend_ok = False
+                        error_detail = _format_repair_exception(exc)
+                        logger.exception(
+                            "Repair layer exception req=%s idx=%d span=[%d,%d) "
+                            "-> contained as abort",
+                            work.request_id,
+                            idx,
+                            span_start,
+                            span_end,
+                        )
+                        break
+                    executed_layers += 1
+            del hidden_states, residual
+        except Exception as exc:
+            # The envelope: any rank-local recoverable failure OUTSIDE the
+            # per-layer containment (the work lookup itself, position
+            # fetch, metadata access, host fence, embedding, re-zero)
+            # converges to the failed verdict below instead of escaping and
+            # stranding the TP ranks in consensus.
+            backend_ok = False
+            if error_detail is None:
+                error_detail = _format_repair_exception(exc)
+            logger.exception(
+                "Repair pre-verdict exception req=%s plan_id=%s span=[%d,%d) "
+                "-> contained as abort",
+                req_id,
+                work.plan_id if work is not None else "unknown",
+                span_start,
+                span_end,
+            )
+
+        if work is None:
+            # The work lookup itself failed on this rank: no geometry, no
+            # identity. Still enter the collective with a placeholder
+            # identity -- the peers carry the real one, the summaries
+            # diverge, and consensus fails everywhere (fail-closed). The
+            # scheduler's identity check rejects the placeholder echo as
+            # stale, and its missing-verdict synthesis aborts the plan.
+            if error_detail is None:
+                error_detail = "RepairWork lookup failed on this rank"
+            logger.error(
+                "Repair work lookup failed req=%s -> placeholder failed "
+                "verdict (error_detail=%s)",
+                req_id,
+                error_detail,
+            )
+            results.append(
+                RepairResultReport(
+                    request_id=req_id,
+                    plan_id=-1,
+                    epoch=-1,
+                    structural_check=False,
+                    executed_layers=0,
+                    span=(-1, -1),
+                    aborted=True,
+                    commit_check=None,
+                    error_detail=error_detail,
+                )
+            )
+            continue
+
+        aborted = executed_layers < work.layer_end or error_detail is not None
+        if aborted and meta is not None and layers is not None:
+            # Best-effort partial-write invalidation. Depth: the raising
+            # layer is included (it may have written rows before raising);
+            # a failure before the layer loop wrote nothing (depth 0, no
+            # kernel launched). A clean full-depth run never reaches this
+            # block. The scheduler-side eviction is the authoritative
+            # invalidation -- this zeroing must never mask its failure, so
+            # its own exception is contained too.
+            depth = (
+                min(layer_failed_at + 1, work.layer_end)
+                if layer_failed_at is not None
+                else executed_layers
+            )
+            if depth > 0:
                 try:
-                    hidden_states, residual = layer(
-                        positions[lo:hi], hidden_states, residual
-                    )
-                except Exception:
-                    # Exception containment: a failure inside the repair
-                    # stream is request-local. Stop the stream here, re-zero
-                    # the executed layers' partial writes (the abort handler
-                    # below), report the failure, and let the scheduler's
-                    # recompute fallback own the request. A poisoned device
-                    # context fails loudly at the next step; a successful
-                    # transaction is never fabricated.
+                    _rezero_repair_span(layers[:depth], meta, lo, hi)
+                except Exception as exc:
+                    if error_detail is None:
+                        error_detail = _format_repair_exception(exc)
                     logger.exception(
-                        "Repair layer exception req=%s idx=%d span=[%d,%d) "
-                        "-> contained as abort",
+                        "Repair abort re-zero failed req=%s plan_id=%d "
+                        "span=[%d,%d) depth=%d (scheduler-side eviction "
+                        "remains the authoritative invalidation)",
                         work.request_id,
-                        idx,
+                        work.plan_id,
                         span_start,
                         span_end,
+                        depth,
                     )
-                    backend_ok = False
-                    break
-                executed_layers += 1
-        del hidden_states, residual
 
-        aborted = executed_layers < work.layer_end
-        if aborted:
-            _rezero_repair_span(layers[:executed_layers], meta, lo, hi)
+        ranks_agree = False
+        try:
+            # TP consensus, fail-closed: every rank executes the SAME works
+            # (the SchedulerOutput is broadcast) and all-gathers its packed
+            # verdict summary -- outcome flags AND the work's identity. The
+            # transaction commits only when every rank agrees on identity
+            # AND outcome. This call is UNCONDITIONAL on every path the
+            # envelope controls: skipping it on one rank would deadlock the
+            # others inside the collective.
+            ranks_agree = _ranks_repair_agree(
+                aborted,
+                executed_layers,
+                pre_write_ok,
+                auth_present and auth_slots_ok,
+                auth_table_ok,
+                pre_write_ownership,
+                pre_write_coverage,
+                work.layer_end,
+                backend_ok,
+                plan_id=work.plan_id,
+                epoch=work.epoch,
+                span=work.repair_span,
+            )
+        except Exception as exc:
+            # The collective itself failed (process-group error, or a
+            # backend timeout): consensus is unachievable, which by
+            # fail-closure is a failed verdict.
+            if error_detail is None:
+                error_detail = _format_repair_exception(exc)
+            logger.exception(
+                "Repair TP consensus failed req=%s plan_id=%d -> abort",
+                work.request_id,
+                work.plan_id,
+            )
 
+        # The final abort flag: the run stopped short of its layer range,
+        # OR the envelope contained any exception (including a verdict-
+        # phase or collective failure after a clean run -- the transaction
+        # did not complete, so its writes must be treated as partial
+        # forever after).
+        aborted = aborted or error_detail is not None
         commit_check = {
             "transfer_complete": not aborted,
             # The post-write attestation reuses the pre-write host lists
@@ -223,23 +436,7 @@ def execute_repair_only(
             "write_coverage": pre_write_coverage,
             "layer_coverage": executed_layers == work.layer_end,
             "backend_ok": backend_ok,
-            # TP consensus, fail-closed: every rank executes the SAME works
-            # (the SchedulerOutput is broadcast) and all-gathers its packed
-            # verdict summary. The transaction commits only when every rank
-            # agrees and succeeded -- a single failed or divergent rank
-            # aborts the transaction on EVERY rank, never the driver's
-            # verdict alone.
-            "ranks_agree": _ranks_repair_agree(
-                aborted,
-                executed_layers,
-                pre_write_ok,
-                auth_present and auth_slots_ok,
-                auth_table_ok,
-                pre_write_ownership,
-                pre_write_coverage,
-                work.layer_end,
-                backend_ok,
-            ),
+            "ranks_agree": ranks_agree,
             "identity_ok": work.plan_id >= 0 and work.epoch >= 0,
         }
         structural_check = all(commit_check.values())
@@ -252,11 +449,12 @@ def execute_repair_only(
             span=(span_start, span_end),
             aborted=aborted,
             commit_check=commit_check,
+            error_detail=error_detail,
         )
         logger.info(
             "Repair executed req=%s plan_id=%d epoch=%d span=[%d,%d) "
             "layer_end=%d executed_layers=%d aborted=%s "
-            "structural_check=%s attn_state=%s",
+            "structural_check=%s attn_state=%s error_detail=%s",
             work.request_id,
             work.plan_id,
             work.epoch,
@@ -266,7 +464,8 @@ def execute_repair_only(
             executed_layers,
             aborted,
             structural_check,
-            str(getattr(meta, "attn_state", None)),
+            str(getattr(meta, "attn_state", None)) if meta is not None else None,
+            error_detail,
         )
         results.append(result)
     if _REPAIR_SYNC_PROFILE is not None:
@@ -332,20 +531,40 @@ def _ranks_repair_agree(
     write_coverage: bool,
     layer_end: int,
     backend_ok: bool,
+    plan_id: int = -1,
+    epoch: int = -1,
+    span: tuple[int, int] = (-1, -1),
 ) -> bool:
     """The TP cross-rank repair agreement (fail-closed).
 
     Every rank executes the same repair works and reaches its own local
-    verdict. Each rank packs its verdict summary into one int64 tensor
+    verdict. Each rank packs its verdict summary -- the outcome flags AND
+    the work's identity (plan_id, epoch, span) -- into one int64 tensor
     and all-gathers it: the transaction succeeds only when EVERY rank's
     summary is identical to the local one AND every rank's summary is a
     success (not aborted, full layer coverage, all local checks green).
     A single failed or divergent rank aborts the transaction on every
-    rank -- the driver's verdict alone never commits.
+    rank -- the driver's verdict alone never commits. The identity fields
+    make a rank executing stale or foreign work (a divergent broadcast,
+    a replayed schedule) abort on every rank instead of committing a
+    verdict whose geometry happened to agree.
     """
     ws = _tp_world_size()
     if ws <= 1:
-        return True
+        # Uniform semantics: with one rank, "every rank agrees and
+        # succeeded" reduces to the local summary being a success --
+        # the same predicate the multi-rank loop derives from the
+        # gathered summaries.
+        return (
+            not aborted
+            and executed_layers == layer_end
+            and pre_write_ok
+            and auth_ownership_ok
+            and auth_table_ok
+            and slot_ownership
+            and write_coverage
+            and backend_ok
+        )
     summary = torch.tensor(
         [
             int(aborted),
@@ -357,12 +576,22 @@ def _ranks_repair_agree(
             int(write_coverage),
             int(layer_end),
             int(backend_ok),
+            int(plan_id),
+            int(epoch),
+            int(span[0]),
+            int(span[1]),
         ],
         dtype=torch.int64,
     )
-    npu = getattr(torch, "npu", None)
-    if npu is not None and npu.is_available():
-        summary = summary.to("npu")
+    # The summary must ride the process group's accelerator when there
+    # is one: the default world group is NCCL/HCCN on GPU and NPU hosts,
+    # which only accept device tensors. Derive the device from the
+    # platform (portable across cuda/npu/xpu) rather than referencing a
+    # vendor backend; on a CPU-only host the group is gloo and the CPU
+    # tensor is already correct.
+    device_type = current_platform.device_type
+    if device_type:
+        summary = summary.to(device_type)
     world = [torch.empty_like(summary) for _ in range(ws)]
     torch.distributed.all_gather(world, summary)
     local_success = (
@@ -422,7 +651,7 @@ def _slots_owned_by_request(
     meta, block_size: int, row: int = 0, lo: int = 0, hi: int | None = None
 ) -> bool:
     """Commit-check element: every span slot lives inside a block the
-    request's own block table names. ``row`` is the work item's row in
+    request's own block table names. `row` is the work item's row in
     the step's block tables; the slot window is the item's [lo, hi) rows
     of the step's slot mapping."""
     owned = {
@@ -451,7 +680,7 @@ def _slots_cover_span(
     the span's slots, each expected row exactly once. A multiset
     comparison: a duplicated slot (two tokens aliased to one cache row,
     silently losing one row's KV) must fail the check, which a set
-    comparison passes. ``row`` is the item's block-table row; the actual
+    comparison passes. `row` is the item's block-table row; the actual
     slots are the item's [lo, hi) rows of the step's slot mapping."""
     expected: Counter[int] = Counter()
     block_table = _repair_block_table_row(meta, row)
@@ -471,15 +700,19 @@ def _repair_cache_views(layer) -> list[torch.Tensor]:
 
     A layer's cache is backend-dependent: vLLM core binds one 4D
     `[B, H, N, C]` tensor per layer (K and V share it, split along the
-    channel dim); the Ascend backend binds a `[2, ...]`-stacked (or
-    two-element) cache whose leading dim separates K and V. Both forms
-    are indexed by the manager block id on dim 0, so re-zeroing selects
-    `cache[bidx, oidx]` rows through the token dim that follows.
+    channel dim); the Ascend backend binds a two-element (or
+    `[2, ...]`-stacked) cache whose leading dim separates K and V. A
+    single tensor is NEVER split on its leading shape -- a core-layout
+    cache with exactly two blocks must not be mistaken for the Ascend
+    stacked form -- only explicit list/tuple bindings and a genuine
+    `[2, B, ...]` 3-D stack are treated as (K, V) pairs.
     """
     cache = layer.self_attn.attn.kv_cache
     if isinstance(cache, (list, tuple)):
         return list(cache)
-    if isinstance(cache, torch.Tensor) and cache.dim() >= 1 and cache.shape[0] == 2:
+    if isinstance(cache, torch.Tensor) and cache.dim() == 3 and cache.shape[0] == 2:
+        # The Ascend stacked [2, num_blocks, tokens] form: dim 0 is the K/V
+        # selector, not a block index (a core-layout view is 4-D).
         return [cache[0], cache[1]]
     return [cache]
 
@@ -509,17 +742,25 @@ def _repair_block_size(layer) -> int:
 def _repair_block_table_row(meta, row: int) -> torch.Tensor:
     """The `row`-th request's block-table row from attention metadata.
 
-    Backends name the batched block table differently: the Ascend
-    metadata exposes `block_tables` ([num_reqs, max_blocks]); the CUDA
-    backends expose `block_table` (same shape). Both carry the manager
-    block ids for one request per row.
+    Backends name the batched block table differently: the CUDA backends
+    expose `block_table` (FlashAttention), the Ascend metadata
+    `block_tables`, and the HPC backend `block_table_tensor` -- all the
+    same `[num_reqs, max_blocks]` manager-block-id table. FlashInfer
+    keeps its tables inside prefill/decode sub-objects and exposes no
+    top-level field; such backends fail here with a named error, which
+    the failure envelope converts into that work's failed verdict.
     """
     table = getattr(meta, "block_tables", None)
     if table is None:
         table = getattr(meta, "block_table", None)
     if table is None:
+        table = getattr(meta, "block_table_tensor", None)
+    if table is None:
         raise AttributeError(
-            "repair metadata exposes neither block_tables nor block_table"
+            "repair metadata exposes none of block_tables/block_table/"
+            "block_table_tensor (backend "
+            + type(meta).__name__
+            + "); its repair plan cannot be fenced"
         )
     return table[row]
 
