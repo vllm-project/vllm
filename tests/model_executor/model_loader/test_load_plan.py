@@ -445,24 +445,24 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     [
         (lambda p, w: p.copy_(w * 2), "applies"),
         (lambda p, w: p.copy_(w.to(torch.float32).to(BF16)), "applies"),
+        (lambda p, w: p.copy_(w.view(torch.int16)), "a view of the torch.bfloat16"),
         (lambda p, w: p.copy_(w if bool(w.sum() > 0) else -w), "reads tensor values"),
         (lambda p, w: p.__setitem__(slice(None), w), "without Tensor.copy_"),
         (lambda p, w: p.copy_(w).mul_(2), "reads the destination"),  # composed
         (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
         (lambda p, w: torch.add(w, 0, out=p), "without Tensor.copy_ (add.out)"),
         (lambda p, w: (w.to("cpu").float().numpy(), p.copy_(w)), "reads tensor values"),
-        (lambda p, w: p.copy_(w.view(torch.int16)), "a view of the torch.bfloat16"),
     ],
     ids=[
         "arith",
         "cast-roundtrip",
+        "view-cast",
         "value-read",
         "setitem",
         "composed",
         "expand",
         "out",
         "numpy",
-        "view-cast",
     ],
 )
 def test_fallbacks(loader, reason):
