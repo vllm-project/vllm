@@ -90,7 +90,7 @@ ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
 # The toolchain PPA is added from its pinned signing key (fingerprint
-# 60C317803A41BA51845E371A1E9377A2BA9EF27F) rather than add-apt-repository,
+# C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5) rather than add-apt-repository,
 # which needs the Launchpad API and fails the build whenever that API is down.
 COPY docker/keys/ubuntu-toolchain-r.asc /etc/apt/keyrings/ubuntu-toolchain-r.asc
 
