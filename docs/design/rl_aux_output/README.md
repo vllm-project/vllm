@@ -68,6 +68,7 @@ Later:
 | [Design space](design_space.md) | The alternatives for each decision and why this one |
 | [Scenarios](scenarios.md) | Sizing: bytes per position, KV tier capacity, object pool, object counts |
 | [Experiments](experiments.md) | Validation results, open items, and earlier measurements |
+| [Request-wise](request_wise.md) | This branch: positions named by the request that computes them, the `aux_held` floor, partial objects at preemption, removal of unlisted objects, and the trainer's contract |
 
 ## Status
 
