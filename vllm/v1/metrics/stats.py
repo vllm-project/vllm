@@ -203,7 +203,8 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float
+    # GPU time, measured by the output worker; None where it does not time.
+    elapsed_ms: float | None = None
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
@@ -236,8 +237,8 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    # Timed iterations to report: from the output worker (GPU time) or from
-    # EngineCore (wall clock).
+    # Iterations to report: timed on the GPU by the output worker, or untimed
+    # from EngineCore.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

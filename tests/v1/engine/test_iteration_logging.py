@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import queue
-import time
 from types import SimpleNamespace
 
 import pytest
 
+from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
@@ -42,27 +42,36 @@ def make_fake_engine(
     )
 
 
-def test_capture_iteration_details_disabled_without_log_stats():
+def test_untimed_iteration_details_disabled_without_log_stats():
     engine = make_fake_engine(log_stats=False)
 
-    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
-        assert iteration_details is None
-
+    assert EngineCore._untimed_iteration_details(engine, None) is None
     assert not hasattr(engine, "_iteration_index")
 
 
-def test_capture_iteration_details_fills_elapsed_time():
+def test_untimed_iteration_details_have_no_elapsed_time():
     engine = make_fake_engine()
 
-    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
-        assert iteration_details is not None
-        assert iteration_details.elapsed_ms == 0.0
-        assert iteration_details.is_dummy
-        time.sleep(0.001)
+    iteration_details = EngineCore._untimed_iteration_details(engine, None)
 
     assert iteration_details is not None
-    assert iteration_details.elapsed_ms > 0.0
+    assert iteration_details.elapsed_ms is None
+    assert iteration_details.is_dummy
     assert engine._iteration_index == 1
+
+
+def test_untimed_iteration_details_copy_the_scheduled_counts():
+    engine = make_fake_engine()
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=11,
+        iteration_details=IterationDetails(1, 8, 2, 3, 4, 5),
+    )
+
+    iteration_details = EngineCore._untimed_iteration_details(engine, scheduler_output)
+
+    assert iteration_details == SchedulerIterationDetails(
+        0, 1, 8, 2, 3, num_encoder_inputs=4, num_encoder_output_tokens=5
+    )
 
 
 def test_attach_iteration_details_uses_existing_output():
@@ -97,11 +106,10 @@ def test_attach_iteration_details_falls_back_to_client_zero_without_outputs():
     assert outputs[0].scheduler_stats.iteration_records == [iteration_details]
 
 
-def test_capture_iteration_details_defers_to_gpu_timing():
+def test_untimed_iteration_details_defer_to_gpu_timing():
     engine = make_fake_engine(gpu_iteration_timing=True)
 
-    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
-        assert iteration_details is None
+    assert EngineCore._untimed_iteration_details(engine, None) is None
 
 
 def test_dummy_batch_publishes_the_gpu_timings_it_returns():

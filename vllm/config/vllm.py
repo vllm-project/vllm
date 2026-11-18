@@ -609,8 +609,8 @@ class VllmConfig:
 
     @property
     def gpu_iteration_timing(self) -> bool:
-        """Whether logged iteration details are timed by the output worker with
-        CUDA events instead of by EngineCore's wall clock."""
+        """Whether the output worker times logged iterations with CUDA events.
+        Otherwise they are logged without an elapsed time."""
         parallel_config = self.parallel_config
         return (
             self.observability_config.enable_logging_iteration_details
