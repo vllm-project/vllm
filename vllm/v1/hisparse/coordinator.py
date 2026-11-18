@@ -1125,5 +1125,9 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    kv_cache_manager.coordinator.allocation_hook = coordinator
+    from vllm.v1.hisparse.kv_cache_coordinator import _HiSparseKVCacheCoordinator
+
+    cache_coordinator = kv_cache_manager.coordinator
+    assert isinstance(cache_coordinator, _HiSparseKVCacheCoordinator)
+    cache_coordinator.hisparse_coordinator = coordinator
     return coordinator

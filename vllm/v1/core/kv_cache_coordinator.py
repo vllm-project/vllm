@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Protocol
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -88,20 +87,6 @@ def replay_boundaries(
     resend = (num_prompt_tokens - 1) // block * block
     extension = num_prompt_tokens // block * block
     return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
-
-
-class KVCacheAllocationHook(Protocol):
-    """Coordinate allocations that can release blocks before other groups grow."""
-
-    def get_num_reclaimable_blocks(self, request_id: str) -> int:
-        """Count blocks that preparation can immediately return to the free pool."""
-        ...
-
-    def prepare_allocation(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> dict[int, list[KVCacheBlock]]:
-        """Release counted blocks and return any groups allocated in preparation."""
-        ...
 
 
 class KVCacheCoordinator(ABC):
@@ -191,7 +176,6 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        self.allocation_hook: KVCacheAllocationHook | None = None
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
             for manager in self.single_type_managers:
@@ -278,15 +262,6 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
-        if (
-            self.allocation_hook is not None
-            and num_blocks_to_allocate <= self.block_pool.num_gpu_blocks
-        ):
-            num_blocks_to_allocate = max(
-                0,
-                num_blocks_to_allocate
-                - self.allocation_hook.get_num_reclaimable_blocks(request_id),
-            )
         return num_blocks_to_allocate
 
     def allocate_new_computed_blocks(
@@ -363,24 +338,15 @@ class KVCacheCoordinator(ABC):
             The new allocated blocks.
 
         """
-        prepared_blocks = (
-            self.allocation_hook.prepare_allocation(
-                request_id, num_tokens, num_tokens_main_model
-            )
-            if self.allocation_hook is not None
-            else {}
-        )
         return tuple(
-            prepared_blocks[group_id]
-            if group_id in prepared_blocks
-            else manager.allocate_new_blocks(
+            manager.allocate_new_blocks(
                 request_id,
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
             )
-            for group_id, manager in enumerate(self.single_type_managers)
+            for manager in self.single_type_managers
         )
 
     def get_num_cacheable_tokens(

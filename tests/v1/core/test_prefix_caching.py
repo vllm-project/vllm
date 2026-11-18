@@ -890,10 +890,12 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
 @pytest.mark.parametrize(
     "shared_pages", [(), (0,), tuple(range(4))], ids=["private", "mixed", "shared"]
 )
+@pytest.mark.parametrize("enable_caching", [False, True])
 def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     num_resident_groups,
     completed_pages,
     shared_pages,
+    enable_caching,
     monkeypatch,
 ):
     """A hot region fits even when hot plus the next chunk do not fit together."""
@@ -903,6 +905,7 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         max_model_len=256,
         max_in_flight_tokens=8 * HISPARSE_BLOCK_SIZE,
         num_resident_groups=num_resident_groups,
+        enable_caching=enable_caching,
     )
     request = make_request(
         "transition", list(range(8 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
