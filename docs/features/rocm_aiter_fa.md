@@ -28,3 +28,11 @@ Eligible layers have an FP8 KV cache, head size 64, supported power-of-two query
 Q is copied to contiguous storage if needed, viewed as `[tokens, heads * head_size]`, then quantized with one scale for the entire tensor. QK and PV use FP8 matrix operations. Low-parallelism batches may use split-KV plus a merge kernel. FP8 arithmetic can change outputs; this path is not a bitwise replacement or batch-invariant mode.
 
 Evaluate complete copy + Q quantization + attention + merge latency and model quality on representative cached/new-token shapes. Kernel-only timing and the historical head-dim64 results do not establish a benefit for every workload.
+
+## FlyDSL FP8 paged extend
+
+`VLLM_ROCM_AITER_FA_FLYDSL_EXTEND=1` runs extends of eligible layers on a FlyDSL fp8 paged kernel. It defaults to off and, when it applies, takes precedence over `VLLM_ROCM_MUSE_FP8_CTX_ATTN` and the sliding-window gather path.
+
+Eligible layers run on gfx950 with FlyDSL and AITER's FlyDSL buffer ops importable, bf16 activations, an `fp8`/`fp8_e4m3` KV cache in the non-shuffled layout with 16-token blocks, head size 64, eight query heads per KV head, and no ALiBi, sinks or logits soft-capping. Both full-attention and sliding-window layers are eligible. Steps with more than 64 extend requests and CUDA graph capture keep the existing path.
+
+Full-attention layers quantize Q with one scale per token before the kernel. Sliding-window layers pass bf16 Q and the kernel quantizes it with one scale per token and KV head. QK and PV use FP8 matrix operations. A request whose query blocks cannot fill the GPU splits its context scan, chosen per request from CPU-side lengths, and a merge kernel combines the splits. FP8 arithmetic can change outputs; this path is not a bitwise replacement or batch-invariant mode.

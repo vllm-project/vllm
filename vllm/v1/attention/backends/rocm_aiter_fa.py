@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
+from vllm.v1.attention.ops import flydsl_fp8_paged_extend as flydsl_extend
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.triton_fp8_paged_extend import (
     fp8_paged_extend_attention,
@@ -56,6 +57,9 @@ _PAGED_MTP_MODE = os.environ.get("VLLM_ROCM_AITER_FA_PAGED_MTP", "0").strip().lo
 # Full-attention extends with an fp8 cache: one fp8 paged kernel over context + new
 # tokens instead of the 32K-slice gather/dequant + varlen + merge loop.
 _FP8_CTX_ATTN = os.environ.get("VLLM_ROCM_MUSE_FP8_CTX_ATTN", "0") == "1"
+# Full-attention and sliding-window extends with an fp8 e4m3 cache on gfx950: the
+# FlyDSL fp8 paged kernel; it takes precedence over the paths above.
+_FLYDSL_EXTEND = os.environ.get("VLLM_ROCM_AITER_FA_FLYDSL_EXTEND", "0") == "1"
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 
@@ -67,6 +71,14 @@ def _per_tensor_quant_rows(query: torch.Tensor) -> tuple[torch.Tensor, torch.Ten
         query.contiguous().view(query.shape[0], -1), current_platform.fp8_dtype()
     )
     return q_fp8.view(query.shape), q_descale
+
+
+def _per_token_quant_rows(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token fp8 quant of q [T, H, D] over each H * D row; descales are [T]."""
+    q_fp8, q_descale = rocm_aiter_ops.per_token_quant(
+        query.contiguous().view(query.shape[0], -1), current_platform.fp8_dtype()
+    )
+    return q_fp8.view(query.shape), q_descale.view(query.shape[0])
 
 
 if current_platform.is_rocm():
@@ -400,6 +412,8 @@ class AiterFlashAttentionChunkPrefillMetadata:
     max_seq_len: int
     query_start_loc: torch.Tensor
     chunk_context_metadata: AiterChunkContextMetadata
+    query_start_loc_cpu: torch.Tensor
+    seq_lens_cpu: torch.Tensor
 
 
 @dataclass(slots=True)
@@ -863,6 +877,11 @@ class AiterFlashAttentionMetadataBuilder(
                 max_seq_len=seq_lens[num_extends_slice].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
                 chunk_context_metadata=chunk_context_metadata,
+                query_start_loc_cpu=query_start_loc_cpu[
+                    num_decodes : num_decodes + num_extends + 1
+                ]
+                - query_start_loc_cpu[num_decodes],
+                seq_lens_cpu=seq_lens_for_extend,
             )
 
         attn_metadata = AiterFlashAttentionMetadata(
@@ -1048,6 +1067,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
             and fp8_paged_extend_supported(num_heads, num_kv_heads, head_size)
         )
+        self.use_flydsl_extend = (
+            _FLYDSL_EXTEND
+            and kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and alibi_slopes is None
+            and sinks is None
+            and self.logits_soft_cap == 0.0
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and flydsl_extend.flydsl_fp8_paged_extend_supported(
+                num_heads, num_kv_heads, head_size
+            )
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1151,6 +1181,39 @@ class AiterFlashAttentionImpl(AttentionImpl):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ):
+        if (
+            self.use_flydsl_extend
+            and attn_metadata.causal
+            and query.dtype == torch.bfloat16
+            and attn_metadata.num_extends <= flydsl_extend.MAX_REQS
+            and key_cache.shape[1] == flydsl_extend.PAGE_SIZE
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            extend_metadata = attn_metadata.extend_metadata
+            assert extend_metadata is not None
+            start = attn_metadata.num_decodes
+            if self.sliding_window[0] == -1:
+                q, q_descale = _per_token_quant_rows(query)
+            else:
+                q, q_descale = query, None
+            flydsl_extend.flydsl_fp8_paged_extend_attention(
+                q,
+                key_cache,
+                value_cache,
+                output,
+                cu_seqlens_q,
+                attn_metadata.seq_lens[start : start + attn_metadata.num_extends],
+                block_table,
+                max_seqlen_q,
+                q_descale,
+                k_scale,
+                v_scale,
+                self.scale,
+                extend_metadata.query_start_loc_cpu,
+                extend_metadata.seq_lens_cpu,
+                window=self.sliding_window[0] + 1,
+            )
+            return
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
                 attn_metadata,
