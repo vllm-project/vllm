@@ -1221,8 +1221,11 @@ def _assert_spec_decode_position_matches(
         )
         # Within the top-k, a rank change is a near-tie swap: the top-k
         # values compared by rank above already match within tolerance.
-        assert ref_lp.rank == spec_lp.rank or (
-            max(ref_lp.rank, spec_lp.rank) <= num_top_logprobs
+        ref_rank, spec_rank = ref_lp.rank, spec_lp.rank
+        assert ref_rank == spec_rank or (
+            ref_rank is not None
+            and spec_rank is not None
+            and max(ref_rank, spec_rank) <= num_top_logprobs
         ), f"Rank mismatch for token {token_id} {detail}"
 
     # A token in only one side's top-k must be tied with the other side's
