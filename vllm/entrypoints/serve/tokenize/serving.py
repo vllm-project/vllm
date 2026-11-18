@@ -90,7 +90,7 @@ class ServingTokenization(BaseServing):
             rendered = await self.online_renderer.render_chat(
                 request.to_chat_completion_request(),
                 skip_mm_cache=True,
-                tok_params=tok_params
+                tok_params=tok_params,
             )
             if isinstance(rendered, ErrorResponse):
                 return rendered
