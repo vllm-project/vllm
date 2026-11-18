@@ -49,7 +49,10 @@ from .lfm3_vl import (
     Lfm3VlForConditionalGeneration,
     Lfm3VlProcessingInfo,
 )
-from .qwen2_5_omni_thinker import merge_interleaved_embeddings
+from .qwen2_5_omni_thinker import (
+    may_interleave_audio_video,
+    merge_interleaved_embeddings,
+)
 from .qwen3_vl import Qwen3VLMultiModalDataParser, Qwen3VLMultiModalProcessor
 from .utils import maybe_prefix
 
@@ -433,7 +436,11 @@ class Lfm3OmniForConditionalGeneration(Lfm3VlForConditionalGeneration):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if multimodal_embeddings and is_multimodal is not None:
+        if (
+            multimodal_embeddings
+            and is_multimodal is not None
+            and may_interleave_audio_video(multimodal_embeddings)
+        ):
             with gpu_sync_allowed():
                 input_ids_cpu = input_ids.cpu()
                 is_video = is_multimodal & (input_ids_cpu == self.config.video_token_id)

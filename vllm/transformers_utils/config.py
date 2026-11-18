@@ -155,6 +155,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     lfm3_vl="Lfm3VlConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    nemotron_labs_diffusion="NemotronLabsDiffusionConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -178,6 +179,8 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
+    inkling2="Inkling2MMConfig",
+    inkling2_model="Inkling2ModelConfig",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}

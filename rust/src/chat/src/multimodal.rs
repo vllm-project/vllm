@@ -69,7 +69,7 @@ pub struct MultimodalModelInfo {
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
 ///
-/// Modalities absent from the map are unlimited.
+/// Modalities absent from the map default to 999 items.
 pub type MmLimitPerPrompt = HashMap<MmModality, MmLimitSpec>;
 
 pub use vllm_engine_core_client::protocol::multimodal::MmModality;
@@ -87,7 +87,7 @@ pub enum MmLimitSpec {
     /// Configurable form:
     /// `"video": {"count": 1, "num_frames": 32}`
     Options {
-        /// Absent means unlimited, matching an absent modality.
+        /// Absent means the default limit, matching an absent modality.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         count: Option<usize>,
 
@@ -100,7 +100,7 @@ pub enum MmLimitSpec {
 }
 
 impl MmLimitSpec {
-    /// The configured item count, or `None` when this modality is unlimited.
+    /// The configured item count, or `None` when the default limit applies.
     pub fn count(&self) -> Option<usize> {
         match self {
             Self::Count(count) => Some(*count),
@@ -787,11 +787,15 @@ fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     }
 }
 
+/// Default per-modality item limit applied when `--limit-mm-per-prompt` does
+/// not specify a count for a modality. Matches the Python frontend's default.
+const DEFAULT_MM_ITEMS_PER_PROMPT: usize = 999;
+
 impl MultimodalModelInfo {
     /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
     /// per-modality item count, before any fetch/decode work is spent on them.
     ///
-    /// Modalities without a configured count are unlimited.
+    /// Modalities without a configured count default to 999 items.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
         self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
     }
@@ -806,10 +810,11 @@ impl MultimodalModelInfo {
         }
 
         for (modality, count) in counts {
-            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
-            else {
-                continue;
-            };
+            let limit = self
+                .limit_mm_per_prompt
+                .get(&modality)
+                .and_then(MmLimitSpec::count)
+                .unwrap_or(DEFAULT_MM_ITEMS_PER_PROMPT);
             if count > limit {
                 return Err(Error::MmLimitExceeded {
                     modality: modality.as_str().to_string(),
@@ -1239,7 +1244,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
@@ -2166,11 +2171,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_mm_limits_leaves_unconfigured_modalities_unlimited() {
+    fn validate_mm_limits_enforces_default_limit_for_unconfigured_modalities() {
         let info = qwen3_vl_info();
-        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
 
+        let at_limit: Vec<_> = std::iter::repeat_with(image_url_part).take(999).collect();
+        assert!(info.validate_mm_limits(&at_limit).is_ok());
+
+        let over_limit: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+        let error = info.validate_mm_limits(&over_limit).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 999 image(s) may be provided in one prompt."
+        );
+    }
+
+    #[test]
+    fn validate_mm_limits_explicit_limit_overrides_default() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmModality::Image,
+            MmLimitSpec::Count(2000),
+        )]));
+        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(2000).collect();
         assert!(info.validate_mm_limits(&parts).is_ok());
+
+        let over: Vec<_> = std::iter::repeat_with(image_url_part).take(2001).collect();
+        let error = info.validate_mm_limits(&over).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 2000 image(s) may be provided in one prompt."
+        );
     }
 
     #[test]
@@ -2205,10 +2234,10 @@ mod tests {
         );
     }
 
-    /// An options object without a `count` carries only profiling keys, which
-    /// say nothing about how many items are allowed.
+    /// An options object without a `count` falls back to the default limit
+    /// (999), so small counts still pass.
     #[test]
-    fn validate_mm_limits_treats_a_count_less_options_object_as_unlimited() {
+    fn validate_mm_limits_count_less_options_object_uses_default_limit() {
         let info = qwen3_vl_info_with_limits(HashMap::from([(
             MmModality::Image,
             MmLimitSpec::Options {
@@ -2218,6 +2247,13 @@ mod tests {
         )]));
 
         assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
+
+        let over_default: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+        let error = info.validate_mm_limits(&over_default).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 999 image(s) may be provided in one prompt."
+        );
     }
 
     fn parse_limits(json: &str) -> MmLimitPerPrompt {
