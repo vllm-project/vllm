@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -253,9 +254,17 @@ def _use_rocm_sparse_triton(
     """
     return (
         not kv_cache_dtype.startswith("fp8")
-        and head_size == kv_lora_rank
+        and (head_size == kv_lora_rank or _aiter_mla_asm_unavailable())
         and (num_prefills > 0 or num_decodes > 0)
     )
+
+
+@functools.cache
+def _aiter_mla_asm_unavailable() -> bool:
+    """True on gfx1250, where AITER has no asm MLA decode for non-fp8 KV."""
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
 
 
 def _use_triton_long_bf16_prefill(
