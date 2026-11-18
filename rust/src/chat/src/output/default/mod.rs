@@ -132,7 +132,7 @@ impl DefaultChatOutputProcessor {
         };
 
         if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
+            request.decode_options.skip_special_tokens = Some(false);
         }
         if request.sampling_params.structured_outputs.as_ref().is_some_and(|params| {
             matches!(
@@ -758,7 +758,7 @@ mod tests {
             reasoning,
             None,
         )?;
-        Ok(!request.decode_options.skip_special_tokens)
+        Ok(request.decode_options.skip_special_tokens == Some(false))
     }
 
     #[test]

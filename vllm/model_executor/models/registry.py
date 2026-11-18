@@ -478,6 +478,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2ForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2ForConditionalGeneration",
+    ),
     "KimiK31ForConditionalGeneration": (
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
@@ -709,6 +713,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
+    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
@@ -1604,46 +1609,6 @@ class _ModelRegistry:
         """Check support for HC SP without changing MoE parallelism."""
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
-
-    def model_has_inner_state(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_inner_state
-
-    def is_attention_free_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_attention_free
-
-    def is_hybrid_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_hybrid
-
-    def is_noops_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_noops
-
-    def is_transcription_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.supports_transcription
 
     def is_transcription_only_model(
         self,
