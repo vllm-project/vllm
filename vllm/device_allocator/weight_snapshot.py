@@ -441,12 +441,50 @@ def _roots(model_runner) -> dict[str, nn.Module]:
     return roots
 
 
+def _plausible_dummy_weights():
+    """Fill dummy floats and packed bytes with 0x3C: finite and positive in fp32,
+    bf16, fp16 and fp8, so quantization checks on the dummy build pass."""
+    try:
+        from vllm.model_executor.model_loader import dummy_loader
+    except ImportError:
+        return None
+    orig = dummy_loader.initialize_single_dummy_weight
+
+    def fill(param, *args, **kwargs):
+        plausible = param.is_floating_point() or param.dtype == torch.uint8
+        if plausible and param.is_contiguous():
+            with torch.no_grad():
+                param.reshape(-1).view(torch.uint8).fill_(0x3C)
+        else:
+            orig(param, *args, **kwargs)
+
+    dummy_loader.initialize_single_dummy_weight = fill
+    return lambda: setattr(dummy_loader, "initialize_single_dummy_weight", orig)
+
+
+_restoring = False
+
+
+def is_restoring() -> bool:
+    """True while a restore builds the model with dummy weights. Model code that
+    validates checkpoint coverage in its weight loader should skip that check."""
+    return _restoring
+
+
 def load_model(model_runner, path: Path) -> None:
     """Load the model through the snapshot at `path`.
 
     If it exists, build the model with dummy weights and restore the saved state
     into it; otherwise load normally and save the post-processed state."""
+    global _restoring
     restore_ = path.exists()
-    model_runner.load_model(load_dummy_weights=restore_)
+    undo = _plausible_dummy_weights() if restore_ else None
+    _restoring = restore_
+    try:
+        model_runner.load_model(load_dummy_weights=restore_)
+    finally:
+        _restoring = False
+        if undo is not None:
+            undo()
     roots = _roots(model_runner)
     (restore if restore_ else save)(roots, path)
