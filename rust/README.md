@@ -161,10 +161,8 @@ be sent to generate. Pass `--language-model-only` to skip multimodal
 processing, and set `--limit-mm-per-prompt` to the engine's limits so that
 render rejects the same requests.
 
-Set `--mm-processor-kwargs` to a JSON object to override processor configuration
-at startup. Request-level `mm_processor_kwargs` is not supported.
 See [multimodal processor options](../docs/features/multimodal_inputs.md#multimodal-processor-options-in-the-rust-frontend)
-for flat and modality-scoped configuration.
+for startup-only `--mm-processor-kwargs` configuration.
 
 Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is

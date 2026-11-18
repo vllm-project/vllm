@@ -426,20 +426,18 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        let mm_processor_kwargs = kwargs::resolve(mm_processor_kwargs)?;
         Self::from_loaded(
             context,
-            kwargs::apply(
-                preprocessor_config,
-                mm_processor_kwargs.get(&Modality::Image),
-            )?,
+            kwargs::apply(preprocessor_config, mm_processor_kwargs, "images_kwargs")?,
             kwargs::apply(
                 video_preprocessor_config,
-                mm_processor_kwargs.get(&Modality::Video),
+                mm_processor_kwargs,
+                "videos_kwargs",
             )?,
             kwargs::apply(
                 audio_preprocessor_config,
-                mm_processor_kwargs.get(&Modality::Audio),
+                mm_processor_kwargs,
+                "audio_kwargs",
             )?,
             limit_mm_per_prompt,
         )

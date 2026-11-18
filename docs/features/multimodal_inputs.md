@@ -665,6 +665,23 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
 
+### Multimodal Processor Options in the Rust Frontend
+
+At startup, pass `--mm-processor-kwargs` as a JSON object to `vllm-rs serve` or
+`vllm-rs render`:
+
+```bash
+vllm-rs serve Qwen/Qwen2-VL-2B-Instruct \
+  --mm-processor-kwargs '{"min_pixels": 3136, "max_pixels": 200704}'
+```
+
+Flat options apply to every modality. The `images_kwargs`, `videos_kwargs`, and
+`audio_kwargs` objects override flat options for their modality; both override
+the checkpoint configuration, merging nested objects recursively.
+
+Request-level `mm_processor_kwargs`, `--trust-request-mm-kwargs`, and non-empty
+`text_kwargs` are not supported.
+
 ### Media Download Cache
 
 Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.

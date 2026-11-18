@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use llm_multimodal::{Modality, PreProcessorConfig};
+use llm_multimodal::PreProcessorConfig;
 use serde_json::Value;
 
 use crate::error::{Result, bail_multimodal, multimodal};
@@ -17,8 +17,12 @@ const SCOPES: [&str; 4] = [
     "text_kwargs",
 ];
 
-/// Resolve shared options and modality-specific overrides at model load.
-pub(super) fn resolve(kwargs: &HashMap<String, Value>) -> Result<HashMap<Modality, Value>> {
+/// Merge startup options before the model processor interprets its config.
+pub(super) fn apply(
+    mut config: Value,
+    kwargs: &HashMap<String, Value>,
+    scope: &str,
+) -> Result<PreProcessorConfig> {
     if kwargs.get("text_kwargs").is_some_and(|value| {
         !value.is_null() && !value.as_object().is_some_and(|values| values.is_empty())
     }) {
@@ -29,30 +33,12 @@ pub(super) fn resolve(kwargs: &HashMap<String, Value>) -> Result<HashMap<Modalit
         .filter(|(key, _)| !SCOPES.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<serde_json::Map<_, _>>();
-    let mut resolved = HashMap::new();
-    for (modality, scope) in [
-        (Modality::Image, "images_kwargs"),
-        (Modality::Video, "videos_kwargs"),
-        (Modality::Audio, "audio_kwargs"),
-    ] {
-        let mut values = Value::Object(flat.clone());
-        if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
-            if !scoped.is_object() {
-                bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
-            }
-            merge(&mut values, scoped);
+    merge(&mut config, &Value::Object(flat));
+    if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
+        if !scoped.is_object() {
+            bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
         }
-        if values.as_object().is_some_and(|values| !values.is_empty()) {
-            resolved.insert(modality, values);
-        }
-    }
-    Ok(resolved)
-}
-
-/// Merge startup options before the model processor interprets its config.
-pub(super) fn apply(mut config: Value, overrides: Option<&Value>) -> Result<PreProcessorConfig> {
-    if let Some(overrides) = overrides {
-        merge(&mut config, overrides);
+        merge(&mut config, scoped);
     }
     PreProcessorConfig::from_value(config)
         .map_err(|error| multimodal!("failed to parse processor config: {error}"))
@@ -78,28 +64,26 @@ mod tests {
 
     #[test]
     fn model_specific_values_survive_scoped_config_merging() {
-        let kwargs = resolve(
-            &serde_json::from_value(json!({
-                "custom_options": {"width": 512, "height": 256},
-                "images_kwargs": {"custom_options": {"width": 1024}},
-                "audio_kwargs": {"max_samples": 16000},
-            }))
-            .unwrap(),
-        )
+        let kwargs = serde_json::from_value(json!({
+            "custom_options": {"width": 512, "height": 256},
+            "images_kwargs": {"custom_options": {"width": 1024}},
+            "audio_kwargs": {"max_samples": 16000},
+        }))
         .unwrap();
-        let mut configs = serde_json::Map::new();
-        for modality in [Modality::Image, Modality::Video, Modality::Audio] {
-            let config = apply(
+        let config = |scope| {
+            apply(
                 json!({"custom_options": {"checkpoint": true}}),
-                kwargs.get(&modality),
+                &kwargs,
+                scope,
             )
-            .unwrap();
-            configs.insert(
-                modality.to_string(),
-                serde_json::to_value(config.extra).unwrap(),
-            );
-        }
-        let mut configs = Value::Object(configs);
+            .unwrap()
+            .extra
+        };
+        let mut configs = json!({
+            "audio": config("audio_kwargs"),
+            "image": config("images_kwargs"),
+            "video": config("videos_kwargs"),
+        });
         configs.sort_all_objects();
         expect![[r#"
             {

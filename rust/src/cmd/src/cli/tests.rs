@@ -4369,8 +4369,9 @@ fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
 }
 
 #[test]
-fn mm_processor_kwargs_reach_frontend_and_managed_engine() {
+fn mm_processor_kwargs_reach_frontend_engine_and_render() {
     let kwargs = r#"{"images_kwargs":{"min_pixels":3136,"max_pixels":12544}}"#;
+    let expected: HashMap<String, serde_json::Value> = serde_json::from_str(kwargs).unwrap();
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
@@ -4386,16 +4387,15 @@ fn mm_processor_kwargs_reach_frontend_and_managed_engine() {
     let forwarded = engine
         .python_args
         .windows(2)
-        .find(|pair| pair[0] == "--mm-processor-kwargs")
+        .find(|args| args[0] == "--mm-processor-kwargs")
         .unwrap();
-    let expected: serde_json::Value = serde_json::from_str(kwargs).unwrap();
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&forwarded[1]).unwrap(),
+        serde_json::from_str::<HashMap<String, serde_json::Value>>(&forwarded[1]).unwrap(),
         expected
     );
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(
-        serde_json::to_value(config.mm_processor_kwargs).unwrap(),
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .mm_processor_kwargs,
         expected
     );
 
@@ -4410,9 +4410,5 @@ fn mm_processor_kwargs_reach_frontend_and_managed_engine() {
     let Command::Render(args) = cli.command else {
         panic!("expected render args")
     };
-    let config = args.into_config();
-    assert_eq!(
-        serde_json::to_value(config.mm_processor_kwargs).unwrap(),
-        expected
-    );
+    assert_eq!(args.into_config().mm_processor_kwargs, expected);
 }
