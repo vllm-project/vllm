@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from functools import lru_cache
 
 import torch
 
@@ -14,6 +15,8 @@ else:
 
 
 def register() -> str:
+    if os.environ["VLLM_TEST_CAPTURE_DEFAULTS"] == "capability10":
+        return f"{__name__}.Capability10Platform"
     return f"{__name__}.CaptureGridPlatform"
 
 
@@ -22,6 +25,15 @@ def _grid(limit: int, middle: int, dense_head: bool = False) -> list[int]:
     if dense_head:
         sizes.update(range(1, min(limit, 32) + 1))
     return sorted(n for n in sizes if 1 <= n <= limit)
+
+
+class Capability10Platform(NativePlatform):
+    @classmethod
+    @lru_cache(maxsize=8)
+    def get_device_capability(cls, device_id=0):
+        from vllm.platforms.interface import DeviceCapability
+
+        return DeviceCapability(10, 0)
 
 
 class CaptureGridPlatform(NativePlatform):

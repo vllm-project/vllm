@@ -178,7 +178,9 @@ For different spacing, override the relevant `Platform` method. The implementati
 
 Grid methods receive a resolved upper bound and return positive integer sizes no larger than that bound; a zero bound requires an empty list. The common resolver sorts and deduplicates the result and rejects out-of-range sizes. Keep the methods deterministic. `dense_head=True` requests the interactivity-mode coverage of every size from 1 through `min(bound, 32)`. Explicit user-provided grids bypass the generators for that grid. Request/query-length conversion, dynamic speculation, and target/drafter semantics remain in common code.
 
-This interface changes size selection only. A platform must still supply a compatible runner, attention backend, and graph implementation. CUDA keeps its existing SM100 defaults. ROCm retains the historical wider defaults for gfx10xx, which matched the previous shared capability-10 check; other ROCm devices and XPU inherit the traditional defaults. No architecture receives newly tuned defaults through this refactor.
+This interface changes size selection only. A platform must still supply a compatible runner, attention backend, and graph implementation. CUDA keeps its existing SM100 defaults; ROCm and XPU inherit the traditional defaults.
+
+ROCm gfx10xx previously matched the shared capability-10 check intended for NVIDIA SM100. Its defaults now use the traditional shared grid (initial ceiling 512 tokens), instead of independent grids (prefill up to 8192 tokens, decode up to `max_num_seqs` requests, and an 8192-token decode budget). To retain that wider coverage explicitly, set `max_prefill_cudagraph_capture_tokens=8192`, `max_decode_cudagraph_capture_requests` to your `max_num_seqs`, and `max_decode_cudagraph_capture_tokens=8192`. These are the former values, not tuned recommendations for gfx10xx. Scheduler limits still apply.
 
 ## Compatibility Guarantee
 

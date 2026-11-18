@@ -23,7 +23,6 @@ from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
@@ -1332,21 +1331,6 @@ class RocmPlatform(Platform):
         for t in threads:
             t.join()
         torch.accelerator.synchronize(device)
-
-    def get_cudagraph_capture_defaults(
-        self, vllm_config: "VllmConfig"
-    ) -> "CUDAGraphCaptureDefaults":
-        from vllm.config.compilation import CUDAGraphCaptureDefaults
-
-        # Preserve gfx10xx's historical match of the shared capability-10 rule.
-        if self.is_device_capability_family(100):
-            return CUDAGraphCaptureDefaults(
-                legacy_max_tokens=1024,
-                max_prefill_tokens=8192,
-                max_decode_requests=vllm_config.scheduler_config.max_num_seqs,
-                max_decode_tokens=8192,
-            )
-        return super().get_cudagraph_capture_defaults(vllm_config)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

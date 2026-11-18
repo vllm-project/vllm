@@ -642,7 +642,9 @@ from vllm.config.utils import replace
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 
-assert type(current_platform).__name__ == "CaptureGridPlatform"
+assert type(current_platform).__module__ == (
+    "vllm_add_dummy_platform.capture_grid_platform"
+)
 speculative_config = {"method": sys.argv[2], "num_speculative_tokens": 2}
 if sys.argv[2] == "ngram":
     speculative_config.update(prompt_lookup_min=1, prompt_lookup_max=1)
@@ -752,6 +754,21 @@ def test_platform_capture_grid_cannot_exceed_its_limit(capture_grid_platform):
     )
 
 
+def test_sm100_capture_defaults_are_cuda_only(capture_grid_platform):
+    """Capability 10 on ROCm must not select NVIDIA SM100 capture defaults."""
+    completed = capture_grid_platform("capability10", {})
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(
+        next(
+            line.removeprefix("CAPTURE_RESULT=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("CAPTURE_RESULT=")
+        )
+    )
+    assert result["budget"] == (8192 if current_platform.is_cuda() else None)
+    assert max(result["prefill"]) == (256 if current_platform.is_cuda() else 96)
+
+
 def _mock_config_for_cudagraph_sizes(
     max_num_seqs: int,
     num_speculative_tokens: int,
@@ -818,14 +835,10 @@ _CAPTURE_SIZE_FIELDS = (
 
 
 def _select_capture_defaults_platform(monkeypatch, sm100):
+    from vllm.platforms.cuda import CudaPlatformBase
     from vllm.platforms.interface import DeviceCapability
 
-    if current_platform.is_rocm():
-        from vllm.platforms.rocm import RocmPlatform as CapturePlatform
-    else:
-        from vllm.platforms.cuda import CudaPlatformBase as CapturePlatform
-
-    class CaptureDefaultsPlatform(CapturePlatform):
+    class CaptureDefaultsPlatform(CudaPlatformBase):
         @classmethod
         def get_device_capability(cls, device_id=0):
             return DeviceCapability(10, 0) if sm100 else DeviceCapability(9, 0)
@@ -1112,11 +1125,7 @@ def test_adaptive_verification_sees_the_resolved_decode_sizes(
     must reject every config whose resolved decode grid is empty, at config
     time, and accept the rest. Validation runs on the resolved sizes, as in
     `VllmConfig.__post_init__`."""
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: sm100 and family == 100,
-    )
+    _select_capture_defaults_platform(monkeypatch, sm100)
     compilation_config = CompilationConfig(cudagraph_mode=graph_mode, **kwargs)
     config = _mock_config_for_cudagraph_sizes(
         max_num_seqs=1024,
