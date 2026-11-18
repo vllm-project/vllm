@@ -9,6 +9,7 @@ from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.detokenizer_utils import (
+    MAX_PENDING_TOKENS,
     convert_ids_list_to_tokens,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
@@ -52,16 +53,13 @@ TOKENIZERS = [
 ]
 
 
-def _run_incremental_decode(
+def _new_detokenizer(
     tokenizer,
-    all_input_ids,
+    prompt_token_ids,
     skip_special_tokens: bool,
-    starting_index: int,
     spaces_between_special_tokens: bool = True,
     fast: bool | None = None,
 ):
-    prompt_token_ids = all_input_ids[:starting_index]
-
     params = SamplingParams(
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
@@ -79,11 +77,27 @@ def _run_incremental_decode(
     )
 
     if fast is None:
-        detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
-    elif fast:
-        detokenizer = FastIncrementalDetokenizer(tokenizer, request)
-    else:
-        detokenizer = SlowIncrementalDetokenizer(tokenizer, request)
+        return IncrementalDetokenizer.from_new_request(tokenizer, request)
+    if fast:
+        return FastIncrementalDetokenizer(tokenizer, request)
+    return SlowIncrementalDetokenizer(tokenizer, request)
+
+
+def _run_incremental_decode(
+    tokenizer,
+    all_input_ids,
+    skip_special_tokens: bool,
+    starting_index: int,
+    spaces_between_special_tokens: bool = True,
+    fast: bool | None = None,
+):
+    detokenizer = _new_detokenizer(
+        tokenizer,
+        all_input_ids[:starting_index],
+        skip_special_tokens,
+        spaces_between_special_tokens,
+        fast,
+    )
 
     output_text = ""
     for i, token_id in enumerate(all_input_ids[starting_index:]):
@@ -291,7 +305,86 @@ def test_oov_decode(tokenizer, fast):
     assert out_ids == [len(tokenizer)]
 
 
-# ---------- convert_ids_list_to_tokens collision tests ----------
+def _lone_lead_byte_token(tokenizer) -> int:
+    """A token that decodes to a single U+FFFD: a UTF-8 lead byte on its own."""
+    return next(
+        token_id
+        for token_id in range(min(len(tokenizer), 1024))
+        if tokenizer.decode([token_id]) == "�"
+    )
+
+
+@pytest.mark.parametrize(
+    "tokenizer_name", ["openai-community/gpt2", "codellama/CodeLlama-7b-hf"]
+)
+@pytest.mark.parametrize("fast", (True, False))
+def test_malformed_utf8_run_is_streamed_as_replacement_chars(tokenizer, fast):
+    """A model emitting byte tokens that never complete a code point (garbage
+    generation) must have them streamed out as U+FFFD while the run is in
+    progress. Holding them back until a valid character arrives re-decodes the
+    whole run on every step, which stalls the API server event loop on long
+    outputs, and text after the run must still decode as if never flushed."""
+    if fast and not isinstance(tokenizer, TokenizersBackend):
+        pytest.skip()
+
+    prompt = tokenizer.encode("Hello", add_special_tokens=False)
+    run = [_lone_lead_byte_token(tokenizer)] * 1024
+    tail = tokenizer.encode(" world", add_special_tokens=False)
+    detokenizer = _new_detokenizer(
+        tokenizer, prompt, skip_special_tokens=True, fast=fast
+    )
+
+    output_text = ""
+    for token_id in run:
+        detokenizer.update([token_id], False)
+        output_text += detokenizer.get_next_output_text(False, delta=True)
+    held_back = len(run) - output_text.count("�")
+    assert held_back <= MAX_PENDING_TOKENS, f"{held_back=} tokens never streamed"
+
+    for token_id in tail:
+        detokenizer.update([token_id], False)
+    output_text += detokenizer.get_next_output_text(True, delta=True)
+    prompt_text = tokenizer.decode(prompt, skip_special_tokens=True)
+    full_text = tokenizer.decode(prompt + run + tail, skip_special_tokens=True)
+    assert output_text == full_text[len(prompt_text) :]
+    assert detokenizer.output_token_ids == run + tail
+
+
+@pytest.mark.parametrize("tokenizer_name", ["codellama/CodeLlama-7b-hf"])
+def test_flush_after_prompt_ending_in_incomplete_utf8_does_not_leak_prompt(
+    tokenizer,
+):
+    """Restarting the fast stream behind a malformed run must not prime it with
+    a prefix that itself ends in an incomplete sequence: DecodeStream ignores
+    such a prefix and would re-emit the prompt text as generated output."""
+    bad_byte = _lone_lead_byte_token(tokenizer)
+    prompt = tokenizer.encode("Hello", add_special_tokens=False) + [bad_byte]
+    run = [bad_byte] * (2 * MAX_PENDING_TOKENS)
+    tail = tokenizer.encode(" world", add_special_tokens=False)
+    detokenizer = _new_detokenizer(
+        tokenizer, prompt, skip_special_tokens=True, fast=True
+    )
+
+    for token_id in run + tail:
+        detokenizer.update([token_id], False)
+    output_text = detokenizer.get_next_output_text(True, delta=True)
+
+    assert "Hello" not in output_text
+    assert output_text.endswith("world")
+    assert output_text.count("�") == len(run)
+
+
+@pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
+def test_fast_detokenizer_keeps_skipping_unrepresentable_ids(tokenizer):
+    """Ids DecodeStream cannot accept at all (#21951) are logged and skipped;
+    a run of them must not be collected for a flush that fails the same way."""
+    detokenizer = _new_detokenizer(tokenizer, [], skip_special_tokens=True, fast=True)
+    tail = tokenizer.encode(" world", add_special_tokens=False)
+
+    for token_id in [2**40] * (MAX_PENDING_TOKENS + 1) + tail:
+        detokenizer.update([token_id], False)
+
+    assert detokenizer.get_next_output_text(True, delta=True) == " world"
 
 
 class _MockBackend:
