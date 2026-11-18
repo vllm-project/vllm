@@ -1067,6 +1067,12 @@ def main(args: argparse.Namespace):
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
+    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+        # Importing vLLM copied HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES.
+        # Ray narrows HIP_VISIBLE_DEVICES per worker, so an inherited copy
+        # would conflict with it. Drop it; each worker re-syncs on import.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
