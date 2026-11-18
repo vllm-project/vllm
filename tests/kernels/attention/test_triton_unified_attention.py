@@ -1000,10 +1000,6 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
     fp8_key_cache = (key_cache / k_scale).to(FP8_DTYPE)
     fp8_value_cache = (value_cache / v_scale).to(FP8_DTYPE)
 
-    scale_shape = (num_seqs, num_kv_heads)
-    k_descale = torch.full(scale_shape, k_scale.item(), dtype=torch.float32)
-    v_descale = torch.full(scale_shape, v_scale.item(), dtype=torch.float32)
-
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
     )
@@ -1049,8 +1045,8 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
         block_table=block_tables,
         softcap=0,
         q_descale=None,
-        k_descale=k_descale,
-        v_descale=v_descale,
+        k_descale=k_scale,
+        v_descale=v_scale,
         seq_threshold_3D=seq_threshold_3D,
         num_par_softmax_segments=num_par_softmax_segments,
         softmax_segm_output=softmax_segm_output,
