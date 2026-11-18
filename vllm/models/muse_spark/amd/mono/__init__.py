@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -134,6 +135,7 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         buckets=buckets,
         fused_attention=fused,
         kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
+        ring1_group=group if envs.VLLM_MUSE_MONO_EP_RING1 else None,
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "

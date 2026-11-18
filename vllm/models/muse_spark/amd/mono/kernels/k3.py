@@ -96,6 +96,7 @@ from .dev import (
     permlane_swap,
     popcount,
     readlane,
+    reduce_scatter_all,
     rsrc,
     st_if,
     traced,
@@ -393,15 +394,23 @@ def dn_loads(
     nv=None,
     nbytes=W2_BYTES,
     sbytes=W2S_BYTES,
+    rep=None,
 ):
     """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv);
-    nbytes / sbytes: the local experts' w2 / scale bytes (the buffer bounds)."""
+    nbytes / sbytes: the local experts' w2 / scale bytes (the buffer bounds);
+    rep: (w2r, w2sr), the replicas of exec slots el .. 2 el - 1 (ring1)."""
     r = lane % 16
     g = lane // 16
     task = ok.select(task, fx.Int32(0))
     u = task >> 8
     j = task & 255
     e = uniform(fx.ptr_load(etab + (u if nv is None else fx.min(u, nv - 1))))
+    if const_expr(rep is not None):
+        el = rep[2]
+        isr = e >= el
+        w2 = isr.select(rep[0], w2)
+        w2s = isr.select(rep[1], w2s)
+        e = isr.select(e - el, e)
     rbase = e * DM + j * 16
     ops = []
     for i in range_constexpr(2):
@@ -452,6 +461,15 @@ class Build:
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     attn: str = ""  # this layer's verify attention fused at the head ("swa" / "full"); "" = run before the launch
     kv_fp8: bool = False  # e4m3 KV cache (insert and fused attention); else bf16
+    drain: bool = False  # the S=16 down-proj task loop runs as a ring (as at S=8)
+    # the per-token sums of stage A / load_h_norm as one reduce-scatter (bitwise)
+    tokred: bool = False
+    # stage O's rows in one poll, stage G's y in token-major pairs, the reducer CTAs'
+    # orr poll after the norm reduction (bitwise)
+    goab: bool = False
+    # 1: per-step ring placement onto replicas of rank r + 1's experts (W = 8);
+    # 2: also force a move when the plan has none (tests only)
+    ring1: int = 0
 
 
 def _lay(items):
@@ -580,6 +598,9 @@ def build(key: Build):
     CPW = KR // KCH // WAVES  # chunks a wave a tile
     MROW = KR + XPAD
     tag_par = lambda tag: tag & 1
+    RING1 = key.ring1
+    assert not RING1 or W == 8, key
+    XEL = 2 * EL if RING1 else EL  # exec slots: own experts, then rank r + 1's replicas
 
     @fx.struct
     class RouteLds:
@@ -600,6 +621,31 @@ def build(key: Build):
         upn: fx.Array[fx.Int32, 4, 16]
         tok: fx.Array[fx.Float32, WAVES * S + 8, 16]
         rs: fx.Array[fx.Float32, 2 * S + 32, 16]
+
+    if RING1:
+        # emap (global expert -> exec slot) and the 2 EL uslot carved out of the
+        # unused words (the tuned LDS offsets stay)
+        @fx.struct
+        class RouteLds:
+            rid: fx.Array[fx.Int32, S * TOPK, 16]
+            rw: fx.Array[fx.Float32, S * TOPK, 16]
+            uexp: fx.Array[fx.Int32, EL, 16]
+            kof: fx.Array[fx.Int32, EL * S, 16]
+            nu: fx.Array[fx.Int32, 4, 16]
+            sel: fx.Array[fx.Int32, max(S * TOPK * 3, EL), 16]
+            plist: fx.Array[fx.Int32, P, 16]
+            pidx: fx.Array[fx.Int32, P, 16]
+            np_: fx.Array[fx.Int32, 4, 16]
+            rstd: fx.Array[fx.Float32, P, 16]
+            uslot: fx.Array[fx.Int32, EL, 16]
+            uslot2: fx.Array[fx.Int32, 2 * EL, 16]
+            emap: fx.Array[fx.Int32, E, 16]
+            unused: fx.Array[fx.Int32, 3 * E - 2 * EL - E, 16]
+            ssacc: fx.Array[fx.Float32, 2 * S, 16]
+            upk: fx.Array[fx.Int32, 2 * S, 16]
+            upn: fx.Array[fx.Int32, 4, 16]
+            tok: fx.Array[fx.Float32, WAVES * S + 8, 16]
+            rs: fx.Array[fx.Float32, 2 * S + 32, 16]
 
     @fx.struct
     class StageA:
@@ -647,7 +693,7 @@ def build(key: Build):
 
         assert key.attn in ("swa", "full"), key
         assert W == 8, "the fused attention fragment is built for 2 kv heads a rank"
-        FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8)
+        FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8, if_flag=False)
         FaLds = FA.Lds
         # the fragment's source hash: the disk cache does not follow FA.run
         _KEYSTR = _KEYSTR + FA.key
@@ -668,7 +714,10 @@ def build(key: Build):
     class Reserved:  # 128 B at the LDS base, unused: keeps the tuned LDS offsets
         pad: fx.Array[fx.Int64, TL_POINTS, 16]
 
-    UNR = S == 8  # gate_up / down task loops as a ring (unroll 3, fixed slots)
+    # gate_up / down task loops as a ring (unroll 3, fixed slots); drain=1 extends
+    # the down ring to S = 16
+    UNR_GU = S == 8
+    UNR_DN = S == 8 or key.drain
     name = f"muse_k3_s{S}_w{W}_r{int(key.next_rope)}" + (
         f"_fa{key.attn}" if key.attn else ""
     )
@@ -746,15 +795,29 @@ def build(key: Build):
                 fx.ptr_store(xv[i], xl + (t * XQROW + kk) // 2)
         gpu.barrier()
         wf = [wr[i].bitcast(fx.Float32) for i in range(KPT)]
-        for t in range_constexpr(S):
-            pr = fx.Float32(0.0)
-            for pr_ in range_constexpr(KPT // 2):
-                xw1 = fx.ptr_load(xl + (t * XQROW + kr + 2 * pr_) // 2)
-                pr = pr + bf_lo(xw1) * wf[2 * pr_]
-                pr = pr + bf_hi(xw1) * wf[2 * pr_ + 1]
-            pr = wave_sum(pr)
-            if lane == 0:
-                fx.ptr_store(pr, tok + (wave * S + t))
+        if const_expr(key.tokred):
+            # one reduce-scatter, then each token's lowest lane stores it
+            prs = []
+            for t in range_constexpr(S):
+                pr = fx.Float32(0.0)
+                for pr_ in range_constexpr(KPT // 2):
+                    xw1 = fx.ptr_load(xl + (t * XQROW + kr + 2 * pr_) // 2)
+                    pr = pr + bf_lo(xw1) * wf[2 * pr_]
+                    pr = pr + bf_hi(xw1) * wf[2 * pr_ + 1]
+                prs.append(pr)
+            rsv, rtok, rlow = reduce_scatter_all(prs, S, lane)
+            if rlow:
+                fx.ptr_store(rsv, tok + (wave * S + rtok))
+        else:
+            for t in range_constexpr(S):
+                pr = fx.Float32(0.0)
+                for pr_ in range_constexpr(KPT // 2):
+                    xw1 = fx.ptr_load(xl + (t * XQROW + kr + 2 * pr_) // 2)
+                    pr = pr + bf_lo(xw1) * wf[2 * pr_]
+                    pr = pr + bf_hi(xw1) * wf[2 * pr_ + 1]
+                pr = wave_sum(pr)
+                if lane == 0:
+                    fx.ptr_store(pr, tok + (wave * S + t))
         gpu.barrier()
         if tid < EG * S:
             e2 = tid // S
@@ -933,6 +996,9 @@ def build(key: Build):
     @traced
     def stage_route(scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt):
         """Every token's routing (wave w: tokens w, w + 8, ...), then the local union."""
+        if const_expr(RING1):  # noqa: SIM102 (trace-time branch)
+            if tid < E:
+                fx.ptr_store(fx.Int32(0), rt["emap"] + tid)
         if const_expr(S <= WAVES):
             if wave < S:
                 route_token([wave], bias_v, [lgs_r[0]], tid, lane, rt)
@@ -954,27 +1020,33 @@ def build(key: Build):
             ix = tid + THREADS * ii
             if ix < EL * S:
                 fx.ptr_store(fx.Int32(-1), rt["kof"] + ix)
-        if tid < EL:
+        if tid < XEL:
             fx.ptr_store(fx.Int32(0), rt["sel"] + tid)
+        if const_expr(RING1):  # noqa: SIM102 (trace-time branch)
+            if tid < P:
+                fx.ptr_store(fx.Int32(1), rt["emap"] + fx.ptr_load(rt["rid"] + tid))
         gpu.barrier()
+        if const_expr(RING1):
+            ring1_plan(rt, rank, lane, wave)
+            gpu.barrier()
         for ii in range_constexpr((P + THREADS - 1) // THREADS):
             pq = tid + THREADS * ii
             if pq < P:
-                eid = slot_of(fx.ptr_load(rt["rid"] + pq), e0)
+                eid = xslot(rt, fx.ptr_load(rt["rid"] + pq), e0)
                 if eid >= 0:
                     fx.ptr_store(fx.Int32(1), rt["sel"] + eid)
         gpu.barrier()
         if wave == 0:
             ucarry = fx.Int32(0)
-            for hh in range_constexpr((EL + 63) // 64):
+            for hh in range_constexpr((XEL + 63) // 64):
                 el_ = lane + 64 * hh
-                f = fx.ptr_load(rt["sel"] + fx.min(el_, EL - 1))
-                f = (el_ < EL).select(f, fx.Int32(0))
+                f = fx.ptr_load(rt["sel"] + fx.min(el_, XEL - 1))
+                f = (el_ < XEL).select(f, fx.Int32(0))
                 incl = wave_incl_scan(f, lane) + ucarry
                 slot = incl - f
                 if f != 0:
                     fx.ptr_store(el_, rt["uexp"] + slot)
-                if el_ < EL:
+                if el_ < XEL:
                     fx.ptr_store(slot, rt["uslot"] + el_)
                 ucarry = readlane(incl, 63)
             if lane == 63:
@@ -985,7 +1057,7 @@ def build(key: Build):
             for hh in range_constexpr((P + 63) // 64):
                 pl_ = lane + 64 * hh
                 pp = fx.min(pl_, P - 1)
-                eid = slot_of(fx.ptr_load(rt["rid"] + pp), e0)
+                eid = xslot(rt, fx.ptr_load(rt["rid"] + pp), e0)
                 loc = ((eid >= 0) & (pl_ < P)).select(fx.Int32(1), fx.Int32(0))
                 incl = wave_incl_scan(loc, lane) + carry
                 if loc != 0:
@@ -999,7 +1071,7 @@ def build(key: Build):
         for ii in range_constexpr((P + THREADS - 1) // THREADS):
             pq = tid + THREADS * ii
             if pq < P:
-                eid = slot_of(fx.ptr_load(rt["rid"] + pq), e0)
+                eid = xslot(rt, fx.ptr_load(rt["rid"] + pq), e0)
                 if eid >= 0:
                     slot = fx.ptr_load(rt["uslot"] + eid)
                     fx.ptr_store(
@@ -1012,7 +1084,69 @@ def build(key: Build):
         el_ = e - e0
         return ((el_ >= 0) & (el_ < EL)).select(el_, fx.Int32(-1))
 
-    def gu_loads(w13, w13s, rt, task, lane, wave, ok):
+    def xslot(rt, e, e0):
+        """Exec slot of global expert e on this rank (ring1: the plan's map)."""
+        if const_expr(RING1):
+            return fx.ptr_load(rt["emap"] + e)
+        return slot_of(e, e0)
+
+    @traced
+    def ring1_plan(rt, rank, lane, wave):
+        """Emap holds the routed experts' 0 / 1 flags (lane l: experts 4 l .. 4 l + 3,
+        so lanes 8 r .. 8 r + 7 are rank r's). From them: every rank's count n_r, the
+        plan (rank r runs y_r of rank r + 1's used experts, the highest-indexed ones:
+        the smallest max load, then the smallest y_7; none: y = 0) and this rank's
+        exec map emap[e] = e - EL r (own, kept), EL + e - EL (r + 1) (a replica it
+        runs) or -1. A function of rid only: identical on every CTA and rank."""
+        if wave == 0:
+            f = [fx.ptr_load(rt["emap"] + (4 * lane + k)) for k in range(4)]
+            incl = wave_incl_scan(f[0] + f[1] + f[2] + f[3], lane)
+            after = bpermute(incl, lane | 7) - incl
+            n = [readlane(incl, 7)]
+            for r in range_constexpr(1, W):
+                n.append(readlane(incl, 8 * r + 7) - readlane(incl, 8 * r - 1))
+            tot, mx = n[0], n[0]
+            for r in range_constexpr(1, W):
+                tot = tot + n[r]
+                mx = fx.max(mx, n[r])
+            lo = (tot + (W - 1)) >> 3
+            m_ = lo + (lane >> 4)
+            t_ = lane & 15
+            if const_expr(RING1 == 2):
+                ok = (t_ <= n[0]) & ((m_ < mx) | ((m_ == mx) & (t_ >= 1)))
+            else:
+                ok = (t_ <= n[0]) & (m_ < mx)
+            yv = t_
+            for r in range_constexpr(W - 2, -1, -1):
+                yv = fx.max(n[r + 1] + yv - m_, 0)
+                ok = ok & (yv <= n[r + 1])
+            ok = ok & ((n[0] - t_ + yv) <= m_)
+            won = ballot(ok)
+            has = won != fx.Int64(0)
+            win = popcount(won ^ (won - fx.Int64(1))) - 1
+            ms = has.select(lo + (win >> 4), mx)
+            ys = [has.select(win & 15, fx.Int32(0))]
+            for r in range_constexpr(W - 2, -1, -1):
+                ys.insert(0, fx.max(n[r + 1] + ys[0] - ms, 0))
+            o = lane >> 3
+            mv = fx.Int32(0)
+            for r in range_constexpr(W):
+                mv = (o == r).select(ys[(r - 1) % W], mv)
+            own = o == rank
+            rgt = o == ((rank + 1) & (W - 1))
+            hi_ = after
+            for k in range_constexpr(3, -1, -1):
+                used = f[k] != 0
+                e = 4 * lane + k
+                kept = own & used & (hi_ >= mv)
+                taken = rgt & used & (hi_ < mv)
+                v = kept.select(
+                    e - EL * rank, taken.select(EL + e - EL * o, fx.Int32(-1))
+                )
+                fx.ptr_store(v, rt["emap"] + e)
+                hi_ = hi_ + f[k]
+
+    def gu_loads(w13, w13s, rt, task, lane, wave, ok, rep=None):
         """Task (u, j)'s w13 operands for this wave: gate / up row groups x the
         wave's 2 chunks of 256 K: 2 dwordx4 + 1 scale dword each. `ok` false:
         zeros, no memory access (a lookahead past the CTA's last task)."""
@@ -1022,6 +1156,11 @@ def build(key: Build):
         u = task >> 8
         j = task & 255
         e = uniform(fx.ptr_load(rt["uexp"] + u))
+        if const_expr(rep is not None):
+            isr = e >= EL
+            w13 = isr.select(rep[0], w13)
+            w13s = isr.select(rep[1], w13s)
+            e = isr.select(e - EL, e)
         ops = []
         if const_expr(GUSPLIT):
             # waves 0-3 the gate rows, 4-7 the up rows; wave w the chunks 4 (w % 4) + i
@@ -1042,15 +1181,28 @@ def build(key: Build):
     def load_h_norm(hv, wv, tid, lane, wave, hl, tok):
         """Rstd per token from the full h_raw, h = bf16(h_raw rstd w) -> LDS."""
         kk = (tid % (DM // 8)) * 8
-        for t in range_constexpr(S):
-            ss = fx.Float32(0.0)
-            for d in range_constexpr(4):
-                lo = bf_lo(hv[t][d])
-                hi = bf_hi(hv[t][d])
-                ss = ss + lo * lo + hi * hi
-            ss = wave_sum(ss)
-            if lane == 0:
-                fx.ptr_store(ss, tok + (wave * S + t))
+        if const_expr(key.tokred):
+            sss = []
+            for t in range_constexpr(S):
+                ss = fx.Float32(0.0)
+                for d in range_constexpr(4):
+                    lo = bf_lo(hv[t][d])
+                    hi = bf_hi(hv[t][d])
+                    ss = ss + lo * lo + hi * hi
+                sss.append(ss)
+            rsv, rtok, rlow = reduce_scatter_all(sss, S, lane)
+            if rlow:
+                fx.ptr_store(rsv, tok + (wave * S + rtok))
+        else:
+            for t in range_constexpr(S):
+                ss = fx.Float32(0.0)
+                for d in range_constexpr(4):
+                    lo = bf_lo(hv[t][d])
+                    hi = bf_hi(hv[t][d])
+                    ss = ss + lo * lo + hi * hi
+                ss = wave_sum(ss)
+                if lane == 0:
+                    fx.ptr_store(ss, tok + (wave * S + t))
         gpu.barrier()
         for t in range_constexpr(S):
             tot = fx.Float32(0.0)
@@ -1251,8 +1403,8 @@ def build(key: Build):
         zspec = (scratch + fx.Int64(lay["z"][0]), pick * (DM // 2) + bid * 8 + part, 1)
         # the CTA-aggregated partials of the pick's expert: CTAs cf .. cl
         nu_ = uniform(fx.ptr_load(rt["nu"] + 0))
-        el_ = slot_of(fx.ptr_load(rt["rid"] + pick), rt["rank"] * EL)
-        u = fx.ptr_load(rt["uslot"] + fx.min(fx.max(el_, 0), EL - 1))
+        el_ = xslot(rt, fx.ptr_load(rt["rid"] + pick), rt["rank"] * EL)
+        u = fx.ptr_load(rt["uslot"] + fx.min(fx.max(el_, 0), XEL - 1))
         cf = (u * 256) // nu_
         nc = (u * 256 + 255) // nu_ - cf + 1
         specs = [
@@ -1303,7 +1455,7 @@ def build(key: Build):
                     p = tt * TOPK + k
                     ix = fx.ptr_load(rt["pidx"] + p)
                     eid = fx.ptr_load(rt["rid"] + p)
-                    isl = slot_of(eid, rank * EL) >= 0
+                    isl = xslot(rt, eid, rank * EL) >= 0
                     ixc = fx.min(fx.max(ix, 0), P - 1)
                     zz = fx.ptr_load(zl + (ixc * 16 + rr))
                     rs = fx.ptr_load(rt["rstd"] + ixc)
@@ -1397,6 +1549,12 @@ def build(key: Build):
                 )
         return ops
 
+    def py_slot(part, tile, tt, rr):
+        """K part `part`'s partial of (tile, row rr, token tt) in the py region."""
+        if const_expr(key.goab):
+            return (part * NTL + tile) * 16 * S + tt * 16 + rr
+        return (part * NTL * 16 + tile * 16 + rr) * S + tt
+
     @traced
     def post_proj(
         w_pp_ops, scratch, peer, pl, tag, health, tid, bid, lane, wave, rank, ml, red
@@ -1452,8 +1610,12 @@ def build(key: Build):
         gpu.barrier()
         if tid < TPC * 8 * S:
             i = tid // (8 * S)
-            rp = (tid // S) % 8
-            tt = tid % S
+            if const_expr(key.goab):  # 8 lanes = one token's 64 contiguous y bytes
+                rp = tid % 8
+                tt = (tid // 8) % S
+            else:
+                rp = (tid // S) % 8
+                tt = tid % S
             v = []
             for h2 in range_constexpr(2):
                 rr = 2 * rp + h2
@@ -1470,7 +1632,7 @@ def build(key: Build):
                     mb_put(
                         tag,
                         scratch + fx.Int64(lay["py"][0]),
-                        ((kh - 1) * NTL * 16 + tile * 16 + 2 * rp + h2) * S + tt,
+                        py_slot(kh - 1, tile, tt, 2 * rp + h2),
                         v[h2],
                     )
             else:
@@ -1480,7 +1642,7 @@ def build(key: Build):
                     [
                         (
                             scratch + fx.Int64(lay["py"][0]),
-                            ((q - 1) * NTL * 16 + tile * 16 + 2 * rp + h2) * S + tt,
+                            py_slot(q - 1, tile, tt, 2 * rp + h2),
                             1,
                         )
                         for q in range(1, KSP)
@@ -1684,7 +1846,47 @@ def build(key: Build):
             mb_put(tag, scratch + fx.Int64(lay["xnf"][0]), bid, fx.Int32(1))
 
     # ------------------------------------------------------------ stage O: o-norm x gate, o_proj, push
+    O_EARLY = FA is not None and FA.split_ctas < BLOCKS
+
+    def o_loads_if(ok, w_o, bid, lane, wave):
+        """o_loads as predicated loads (bf_tile_load_mma addresses and policy; zeros and no
+        memory access when not ok)."""
+        ops = []
+        for i in range_constexpr(2):
+            for ci in range_constexpr(CO):
+                rowm = bid * 32 + 16 * i + lane % 16
+                kk = (wave + WAVES * ci) * KCH + 8 * (lane // 16)
+                ops.append(
+                    [
+                        ld_vec_if(
+                            ok,
+                            w_o,
+                            (rowm * OK_K + kk + 32 * qq) // 2,
+                            4,
+                            HID * OK_K * 2,
+                            CM_NT,
+                        )
+                        for qq in range(4)
+                    ]
+                )
+        return ops
+
     def o_loads(w_o, bid, lane, wave):
+        """Oearly builds: the non-split CTAs' tiles were issued at the merge (hooks), the
+        split CTAs' are issued here; each copy is zero on the other class."""
+        if O_EARLY:
+            early = FA.hooks.pop("early")
+            late = o_loads_if(bid < FA.split_ctas, w_o, bid, lane, wave)
+            return [
+                [
+                    fx.Vector.from_elements([e[k] + l_[k] for k in range(4)], fx.Int32)
+                    for e, l_ in zip(ev, lv)
+                ]
+                for ev, lv in zip(early, late)
+            ]
+        return o_loads_stock(w_o, bid, lane, wave)
+
+    def o_loads_stock(w_o, bid, lane, wave):
         """o_proj rows 32b .. 32b+32 (2 tiles) x this wave's CO chunks of K = OK_K (2048 / 1024)."""
         ops = []
         for i in range_constexpr(2):
@@ -1694,6 +1896,34 @@ def build(key: Build):
                     bf_tile_load_mma(w_o, bid * 32 + 16 * i, OK_K, c * KCH, lane)
                 )
         return ops
+
+    def o_gate_rows_batched(tid, tag, attn_o, attn_g, g_stride, ao, yl):
+        """Stage O's gated rows (goab): the gate loads first, then all of the
+        thread's attention rows in one poll."""
+        npc = S * OK_K // 8
+        nit = (npc + THREADS - 1) // THREADS
+        tks = []
+        for i in range_constexpr(nit):
+            e = tid + THREADS * i
+            tks.append((fx.min(e // (OK_K // 8), S - 1), (e % (OK_K // 8)) * 8))
+        gvs = [ld_vec(attn_g, (t * g_stride + kk) // 2, 4) for t, kk in tks]
+        if const_expr(ao is None):
+            xvs = [ld_vec(attn_o, (t * OK_K + kk) // 2, 4) for t, kk in tks]
+        else:
+            got = mb_poll(
+                tag,
+                ao[1],
+                [(ao[0], (t * OK_K + kk) // 2 + h, 2) for t, kk in tks for h in (0, 2)],
+                43,
+            )
+            xvs = [got[2 * i] + got[2 * i + 1] for i in range(nit)]
+        for i in range_constexpr(nit):
+            t, kk = tks[i]
+            ow = o_gate(xvs[i], gvs[i])
+            if tid + THREADS * i < npc:
+                fx.ptr_store(
+                    fx.Vector.from_elements(ow, fx.Int32), yl + (t * YROW + kk) // 2
+                )
 
     @traced
     def stage_o(
@@ -1720,29 +1950,33 @@ def build(key: Build):
         par = tag_par(tag)
         g = lane // 16
         npc = S * OK_K // 8
-        for i in range_constexpr((npc + THREADS - 1) // THREADS):
-            e = tid + THREADS * i
-            t = fx.min(e // (OK_K // 8), S - 1)
-            kk = (e % (OK_K // 8)) * 8
-            if const_expr(ao is None):
-                xv = ld_vec(attn_o, (t * OK_K + kk) // 2, 4)
-            else:  # the fused attention: the merged rows as tagged pairs
-                got = mb_poll(
-                    tag,
-                    ao[1],
-                    [
-                        (ao[0], (t * OK_K + kk) // 2, 2),
-                        (ao[0], (t * OK_K + kk) // 2 + 2, 2),
-                    ],
-                    43,
-                )
-                xv = got[0] + got[1]
-            gv = ld_vec(attn_g, (t * g_stride + kk) // 2, 4)
-            ow = o_gate(xv, gv)
-            if e < npc:
-                fx.ptr_store(
-                    fx.Vector.from_elements(ow, fx.Int32), yl + (t * YROW + kk) // 2
-                )
+        if const_expr(key.goab):
+            o_gate_rows_batched(tid, tag, attn_o, attn_g, g_stride, ao, yl)
+        else:
+            for i in range_constexpr((npc + THREADS - 1) // THREADS):
+                e = tid + THREADS * i
+                t = fx.min(e // (OK_K // 8), S - 1)
+                kk = (e % (OK_K // 8)) * 8
+                if const_expr(ao is None):
+                    xv = ld_vec(attn_o, (t * OK_K + kk) // 2, 4)
+                else:  # the fused attention: the merged rows as tagged pairs
+                    got = mb_poll(
+                        tag,
+                        ao[1],
+                        [
+                            (ao[0], (t * OK_K + kk) // 2, 2),
+                            (ao[0], (t * OK_K + kk) // 2 + 2, 2),
+                        ],
+                        43,
+                    )
+                    xv = got[0] + got[1]
+                gv = ld_vec(attn_g, (t * g_stride + kk) // 2, 4)
+                ow = o_gate(xv, gv)
+                if e < npc:
+                    fx.ptr_store(
+                        fx.Vector.from_elements(ow, fx.Int32),
+                        yl + (t * YROW + kk) // 2,
+                    )
         gpu.barrier()
         t = fx.min(lane % 16, S - 1)
         accs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(2)]
@@ -1876,7 +2110,13 @@ def build(key: Build):
                     (par * S + tt) * (HID // 2) + bid * 16 + pp,
                     wr,
                 )
-        if live:
+        if const_expr(key.goab):  # noqa: SIM108 (trace-time branch)
+            # the S reducer CTAs poll orr after the norm reduction (its partials do
+            # not depend on orr): no serial orr round trip ahead of the ssa4p poll
+            orr_now = live & (bid < BLOCKS - S)
+        else:
+            orr_now = live
+        if orr_now:
             got = mb_poll(
                 tag,
                 health,
@@ -1911,6 +2151,23 @@ def build(key: Build):
             + fx.Int64(par * S * BLOCKS * 4 * 8),
             pcm=CM_SYS,
         )
+        if const_expr(key.goab):  # noqa: SIM102 (trace-time branch)
+            if live & (bid >= BLOCKS - S):
+                got = mb_poll(
+                    tag,
+                    health,
+                    [
+                        (
+                            peer + fx.Int64(play["orr"][0]),
+                            (par * S + tt) * (HID // 2) + bid * 16 + pp,
+                            1,
+                        )
+                    ],
+                    REGION_IDS["orr"],
+                    cm=CM_SYS,
+                )
+                o0 = bf_lo(got[0][0])
+                o1 = bf_hi(got[0][0])
         r1 = fx.ptr_load(rsl + tt)
         n0 = bf16_round(o0 * r1)
         n1 = bf16_round(o1 * r1)
@@ -2195,6 +2452,7 @@ def build(key: Build):
         wave,
         rt,
         bid,
+        rep=None,
     ):
         lgs_r = route_poll(own_peer, tag, health, lane, wave)
         stage_route(scratch, bias_v, lgs_r, tag, health, rank, tid, lane, wave, rt)
@@ -2202,16 +2460,17 @@ def build(key: Build):
         t0 = bid * nu
         t1 = t0 + nu
         last = t1 - 1
-        q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1)]
+        q = [gu_loads(w13, w13s, rt, t0, lane, wave, t0 < t1, rep)]
         hv, wv = h_wait_issue(own_peer, w_pren, tag, health, tid, rank)
         q = q + [
-            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1)
+            gu_loads(w13, w13s, rt, t0 + d, lane, wave, (t0 + d) < t1, rep)
             for d in range(1, PF_GU)
         ]
         return q, hv, wv, t0, t1, last
 
-    # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
-    # part of the launch signature the decoder passes; this build does not read them.
+    # The kernel and its launcher. tl (a timeline buffer) and eptab are part of the launch
+    # signature the decoder passes; this build does not read them. w13r .. w2sr (rank r + 1's
+    # experts) are read by ring1 builds only.
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k3(
@@ -2303,9 +2562,24 @@ def build(key: Build):
             "upk": rl.upk.ptr,
             "upn": rl.upn.ptr,
         }
+        rep13 = rep2 = None
+        if const_expr(RING1):
+            rt["uslot"] = rl.uslot2.ptr
+            rt["emap"] = rl.emap.ptr
+            rep13 = (w13r, w13sr)
+            rep2 = (w2r, w2sr, EL)
         tok = rl.tok.ptr
         pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         own_peer = sel_peer(pl, rank)
+        if const_expr(O_EARLY):  # non-split CTAs: o_proj tiles issued at the merge
+            FA.hooks["pre_merge"] = (
+                o_loads_if,
+                bid >= FA.split_ctas,
+                w_o,
+                bid,
+                lane,
+                wave,
+            )
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         ao = None
@@ -2383,13 +2657,14 @@ def build(key: Build):
             wave,
             rt,
             bid,
+            rep13,
         )
         load_h_norm(hv, wv, tid, lane, wave, sc_.h.ptr, tok)
-        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1)
+        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1, rep13)
         gu_c = lambda ops, t, i: gu_compute(
             ops, t, i, scratch, tag, rt, tid, lane, wave, sc_.h.ptr, sc_.red.ptr
         )
-        task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR)
+        task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR_GU)
         dn_ld = lambda t: dn_loads(
             w2,
             w2s,
@@ -2402,6 +2677,7 @@ def build(key: Build):
             None,
             W2_BYTES,
             W2S_BYTES,
+            rep2,
         )
         dq = [dn_ld(t0)]
         gpu.barrier()
@@ -2417,9 +2693,9 @@ def build(key: Build):
         dn_c = lambda ops, t, i: dn_compute_c(
             ops, t, i, u0, scratch, tag, rt, tid, lane, wave, sd.a.ptr, sd.red.ptr
         )
-        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR)
+        dq, task, it = task_ring(dn_ld, dn_c, dq, t0, fx.Int32(0), tsplit, UNR_DN)
         dn_switch(scratch, tag, health, rt, tsplit, u0, u1, sd.a.ptr, tid)
-        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR)
+        task_ring(dn_ld, dn_c, dq, task, it, t1, UNR_DN)
         gpu.barrier()
         if tid < 2 * S:
             h2 = tid // S
@@ -2629,10 +2905,24 @@ def build(key: Build):
     return launch
 
 
-def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False):
+def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False, ring1=0):
     """The K3 build vLLM launches for S rows (8 / 16) of a TP = EP = W (8 / 4) group;
     next_rope: the next layer has RoPE; attn = "swa" / "full": this layer's verify attention
-    fused at the head (W = 8 only); kv_fp8: e4m3 KV cache."""
+    fused at the head (W = 8 only); kv_fp8: e4m3 KV cache; ring1: 1 = per-step
+    placement onto rank r + 1's replicas (W = 8), 2 = also a forced move (tests only).
+    W = 8 takes the reduce-scatter token sums, and at S = 16 the down ring and goab."""
     assert W in (4, 8) and S in (8, 16), (S, W)
     assert not attn or W == 8, (attn, W)
-    return Build(S=S, W=W, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
+    assert ring1 in (0, 1, 2) and (not ring1 or W == 8), (ring1, W)
+    s16 = W == 8 and S == 16
+    return Build(
+        S=S,
+        W=W,
+        next_rope=bool(next_rope),
+        attn=attn,
+        kv_fp8=bool(kv_fp8),
+        drain=s16,
+        tokred=W == 8,
+        goab=s16,
+        ring1=int(ring1),
+    )

@@ -129,12 +129,16 @@ def default_cpg(NR, swa):
     return BLOCKS // g
 
 
-def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False):
+def make(
+    NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False, if_flag=True
+):
     """The fragment for NR requests; swa = SWA (window 2048) or full attention; kv_fp8 = an e4m3
     cache. It stages enough page ids a CTA for maxk keys a request (PGN). nq < NQ: nq query rows
     a request (q / out row nq req + tok; query slots tok >= nq are padding, not stored); qcm /
     kvcm: the q / K / V load cache policies (a launch that wrote q and the KV itself reads them at
-    device scope)."""
+    device scope). if_flag=False: no P_IF flag a merged row (and no store drain ahead of it), for
+    a consumer that polls the P_AO pairs only. `hooks["pre_merge"]` = (fn, *args), set while
+    the consumer traces, runs at the merge's entry; its result goes to `hooks["early"]`."""
     # K / V load cache policy: cached for SWA, nontemporal for full
     KCM = (0 if swa else CM_NT) if kvcm is None else kvcm
 
@@ -161,6 +165,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False):
     if not swa:
         tiles = -(-(-(-maxk // TILE)) // CPG)  # tiles a CTA at maxk keys
         PGN = max(PGMAX, -(-tiles * (TILE // BS) // THREADS) * THREADS)
+    hooks = {}
 
     @fx.struct
     class Lds:
@@ -537,6 +542,10 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False):
         else:
             has = bid >= 0
             item = bid * IPC + tid // TPI
+        pre = hooks.get("pre_merge")
+        if const_expr(pre is not None):
+            # ahead of the segment-flag wait (vmcnt retires in order)
+            hooks["early"] = pre[0](*pre[1:])
         if has:
             itl = tid // TPI
             tt = tid % TPI
@@ -636,9 +645,10 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False):
                 else:
                     if tok < nq:  # query slot nq .. NQ - 1 of a request: padding
                         store_row(d, tag, req, tok, head, dq, w2)
-                rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
-                if tt == 0:
-                    mb_put(tag, d.part + fx.Int64(P_IF), item, fx.Int32(1))
+                if const_expr(if_flag):
+                    rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
+                    if tt == 0:
+                        mb_put(tag, d.part + fx.Int64(P_IF), item, fx.Int32(1))
 
     def run(dptr, tag, health, tid, bid, lane, wave, L):
         """The whole fragment; returns (the attn_o pointer, the tagged attn_o rows)."""
@@ -650,9 +660,12 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None, kv_fp8=False):
     return SimpleNamespace(
         Lds=Lds,
         run=run,
+        hooks=hooks,
+        split_ctas=G * CPG,
         key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}"
         + (f"_q{nq}_qc{qcm}" if (nq, qcm) != (NQ, 0) else "")
         + ("_kv8" if kv_fp8 else "")
+        + ("" if if_flag else "_noif")
         + f"_{_SRC_HASH}",
     )
 

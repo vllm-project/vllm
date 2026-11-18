@@ -53,6 +53,14 @@ layer's attention impl, and for sliding-window layers vLLM's window (2047, 0)
 to 1M keys a request; with a larger `max_model_len` every layer runs vLLM's
 op. 40-128 rows keep vLLM's op.
 
+EP ring1 (`VLLM_MUSE_MONO_EP_RING1=1`, TP 8 only): at load every rank
+receives a copy of rank r + 1's routed experts (w13, w2 and their scales,
+about 48 GiB a rank, so the KV cache shrinks by as much). Each K3 launch
+then computes one placement from the step's routing, identical on every
+rank: rank r runs the highest-indexed used experts of rank r + 1 that
+minimize the largest per-rank expert count. A weight refresh re-sends the
+copies.
+
 ## Contract with vLLM
 
 - Weights: read in place from vLLM's parameters (`kernels/` builds take

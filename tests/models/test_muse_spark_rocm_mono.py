@@ -12,6 +12,7 @@ stock layer loop: hidden states, aux hidden states and KV caches.
 """
 
 import dataclasses
+import importlib.util
 import inspect
 import json
 from typing import Any
@@ -356,6 +357,18 @@ def test_deployment_guard_accepts_only_tep8_or_tep4_with_dspark(checkpoints) -> 
     ]
 
 
+def test_deployment_guard_keeps_ep_ring1_to_tp8(checkpoints, monkeypatch) -> None:
+    """Ring1 placement covers 8 ranks of 32 experts only."""
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_RING1", "1")
+    tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
+    tep8 = _vllm_config(tiny, dspark, tp=8)
+    assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
+    tep4 = _vllm_config(tiny, dspark, tp=4)
+    assert deployment_refusals(tep4, 3, 4, _moe_parallel(ep_size=4)) == [
+        "VLLM_MUSE_MONO_EP_RING1 needs tensor_parallel_size=8"
+    ]
+
+
 # ------------------------------------------------- the tiny model on one GPU
 
 
@@ -370,6 +383,28 @@ def _on_gfx950() -> bool:
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="Muse Spark on ROCm needs AITER's gfx950 kernels"
 )
+requires_flydsl = pytest.mark.skipif(
+    importlib.util.find_spec("flydsl") is None
+    or importlib.util.find_spec("aiter") is None,
+    reason="the K3 builds need FlyDSL and AITER",
+)
+
+
+@requires_flydsl
+def test_k3_tp8_builds_batch_the_16_row_launch_only() -> None:
+    """TP 8 takes the reduce-scatter token sums in every K3 build, the down
+    ring and goab only at 16 rows (they lose at 8); TP 4 builds keep neither."""
+    from vllm.models.muse_spark.amd.mono.kernels import k3
+
+    key = {(s, w): k3.build_vllm(S=s, W=w) for s in (8, 16) for w in (4, 8)}
+    assert [(k.tokred, k.drain, k.goab) for k in key.values()] == [
+        (False, False, False),
+        (True, False, False),
+        (False, False, False),
+        (True, True, True),
+    ]
+    with pytest.raises(AssertionError):
+        k3.build_vllm(S=8, W=4, ring1=1)
 
 
 @dataclasses.dataclass(slots=True)
@@ -652,6 +687,7 @@ class _Key:
     attn: str = ""
     bnd: int = 0
     kv_fp8: bool = False
+    ring1: int = 0
 
 
 class _Kernel:
@@ -670,9 +706,9 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False):
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False, ring1=0):
         bnd = self.owner.bnd if self.name == "k5" else 0
-        return _Key(S, W, next_rope, attn, bnd, kv_fp8)
+        return _Key(S, W, next_rope, attn, bnd, kv_fp8, ring1)
 
     def build(self, key: _Key):
         o = self.owner
@@ -819,9 +855,16 @@ class Step:
 
 
 def _run_mono(
-    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+    tiny: TinyModel,
+    step: Step,
+    bnd: int,
+    buckets: list[int],
+    mode=CUDAGraphMode.NONE,
+    ring1_group=None,
+    inspect_mono=None,
 ):
-    """The step with the monokernel attached, on the stock launches."""
+    """The step with the monokernel attached, on the stock launches;
+    `inspect_mono(mono, launches)` runs before it is detached."""
     from vllm.distributed import get_tp_group
 
     launches = StockLaunches(tiny.model, tiny.dims, bnd)
@@ -836,9 +879,13 @@ def _run_mono(
         fused_attention=fused_attention_layers(
             tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
         ),
+        ring1_group=ring1_group,
     )
     try:
-        return launches, step.run(tiny, mode)
+        out = step.run(tiny, mode)
+        if inspect_mono is not None:
+            inspect_mono(tiny.model.mono, launches)
+        return launches, out
     finally:
         tiny.model.mono.close()
         tiny.model.mono = None
@@ -907,4 +954,33 @@ def test_other_steps_run_stock(tiny_model, query_lens, mode) -> None:
     stock = step.run(tiny_model, mode)
     launches, mono = _run_mono(tiny_model, step, 0, [8, 16, 32, 64, 96, 128], mode)
     assert launches.calls == []
+    _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+def test_ep_ring1_k3_reads_the_received_expert_copies(tiny_model) -> None:
+    """Ring1: K3's replica arguments point at the copies of rank r + 1's
+    experts received over the TP group (here rank 0's own)."""
+    from vllm.distributed import get_tp_group
+
+    tiny_model.lm.set_aux_hidden_state_layers((14, 30, 46, 58, 62))
+    step = Step(tiny_model, [ROWS_PER_REQUEST], seed=11)
+    stock = step.run(tiny_model)
+    k3_layers = []
+
+    def check(mono, launches) -> None:
+        for name, a in launches.calls:
+            assert name == "k3"
+            lw = mono.weights[a["layer"]]
+            got = [a[n] for n in ("w13r", "w13sr", "w2r", "w2sr")]
+            assert got == [t.data_ptr() for t in lw.ring1]
+            for own, copy in zip((lw.w13, lw.w13s, lw.w2, lw.w2s), lw.ring1):
+                assert copy.data_ptr() != own.data_ptr()
+                assert torch.equal(copy, own)
+            k3_layers.append(a["layer"])
+
+    _, mono = _run_mono(
+        tiny_model, step, 0, [8, 16], ring1_group=get_tp_group(), inspect_mono=check
+    )
+    assert k3_layers == list(range(FIRST_LAYER, LAST_LAYER + 1))
     _assert_same_step(stock, mono)

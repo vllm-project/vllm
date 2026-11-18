@@ -16,6 +16,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -165,6 +166,8 @@ class LayerWeights:
     w_in: torch.Tensor
     w_qkvg: torch.Tensor
     next_rope: bool
+    # EP ring1: copies of rank r + 1's w13, w13s, w2, w2s (read by K3 only)
+    ring1: tuple[torch.Tensor, ...] | None = None
 
     def __post_init__(self) -> None:
         def ptrs(names: str) -> tuple[int, ...]:
@@ -172,12 +175,46 @@ class LayerWeights:
 
         # HA (and K3): attention boundary, router and pre-expert projection;
         # HM: the local experts; HB: post-expert projection, FFN boundary and
-        # the next QKV. Without EPLB replicas, the replica arguments are the
+        # the next QKV. Without ring1 replicas, the replica arguments are the
         # own experts.
         self.ha = ptrs("w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren")
         self.hm = ptrs("w13 w13s w2 w2s w_post")
         self.hb = ptrs("w_pp w_pff alpha beta w_in w_qkvg")
         self.replicas = ptrs("w13 w13s w2 w2s w13")
+        if self.ring1 is not None:
+            rep = tuple(t.data_ptr() for t in self.ring1)
+            self.replicas = (*rep, rep[0])
+
+
+def ring1_exchange(
+    weights: dict[int, LayerWeights],
+    group: Any,
+    prev: dict[int, LayerWeights] | None = None,
+) -> dict[int, LayerWeights]:
+    """Give every layer's weights a copy of rank r + 1's experts (w13, w13s, w2,
+    w2s in the kernel layout). A refresh receives into `prev`'s copies. Collective
+    over the TP `GroupCoordinator` (send to r - 1, receive from r + 1)."""
+    import torch.distributed as dist
+
+    w, me = group.world_size, group.rank_in_group
+    src, dst = group.ranks[(me + 1) % w], group.ranks[(me - 1) % w]
+    out = {}
+    for i, lw in weights.items():
+        own = [lw.w13, lw.w13s, lw.w2, lw.w2s]
+        old = prev[i].ring1 if prev is not None and i in prev else None
+        if old is not None and [t.shape for t in old] == [t.shape for t in own]:
+            rep = list(old)
+        else:
+            rep = [torch.empty_like(t) for t in own]
+        ops = [
+            dist.P2POp(dist.isend, t.contiguous(), dst, group.device_group) for t in own
+        ]
+        ops += [dist.P2POp(dist.irecv, t, src, group.device_group) for t in rep]
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+        out[i] = dataclasses.replace(lw, ring1=tuple(rep))
+    torch.accelerator.synchronize()
+    return out
 
 
 def effective_norm_weight(norm: nn.Module) -> torch.Tensor:
@@ -261,6 +298,8 @@ def deployment_refusals(
         reasons.append("expert parallelism off (needs --enable-expert-parallel)")
     if parallel.enable_eplb:
         reasons.append("EPLB on")
+    if envs.VLLM_MUSE_MONO_EP_RING1 and tp_size != 8:
+        reasons.append("VLLM_MUSE_MONO_EP_RING1 needs tensor_parallel_size=8")
     if parallel.expert_placement_strategy != "linear":
         reasons.append(f"expert placement {parallel.expert_placement_strategy}")
     if moe_parallel is None or not moe_parallel.use_ep:
@@ -657,6 +696,7 @@ class _K3Bucket(_Bucket):
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[tuple[bool, str]] = (),
         kv_fp8: bool = False,
+        ring1: int = 0,
     ) -> None:
         w = dims.world_size
         super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
@@ -664,7 +704,12 @@ class _K3Bucket(_Bucket):
         def build(next_rope: bool, attn: str = ""):
             return k3.build(
                 k3.build_vllm(
-                    S=rows, W=w, next_rope=next_rope, attn=attn, kv_fp8=kv_fp8
+                    S=rows,
+                    W=w,
+                    next_rope=next_rope,
+                    attn=attn,
+                    kv_fp8=kv_fp8,
+                    ring1=ring1,
                 )
             )
 
@@ -871,10 +916,13 @@ class MuseSparkMono:
         buckets: Sequence[int],
         fused_attention: dict[int, str],
         kv_fp8: bool = False,
+        ring1_group: Any = None,
     ) -> None:
         self.rank = rank
         self.dims = dims
         self.kv_fp8 = kv_fp8
+        # the TP GroupCoordinator when K3 runs EP ring1 (rank r + 1's experts)
+        self.ring1_group = ring1_group
         self.refresh_weights(model)
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
@@ -891,7 +939,15 @@ class MuseSparkMono:
                     {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
-                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8
+                    kernels.k3,
+                    b,
+                    dims,
+                    device,
+                    group,
+                    fa,
+                    k3_kinds,
+                    kv_fp8,
+                    int(ring1_group is not None),
                 )
             else:
                 self.buckets[b] = _K5Bucket(
@@ -917,10 +973,21 @@ class MuseSparkMono:
 
     def refresh_weights(self, model: nn.Module) -> None:
         """Re-take the views, e.g. after a weight reload replaced parameters."""
+        prev = getattr(self, "weights", None)
         self.weights = {
             i: collect_layer_weights(model.layers, i, self.rank, self.dims)
             for i in range(FIRST_LAYER, LAST_LAYER + 1)
         }
+        if self.ring1_group is not None:
+            before = torch.accelerator.memory_allocated()
+            self.weights = ring1_exchange(self.weights, self.ring1_group, prev)
+            logger.info(
+                "Muse Spark monokernel EP ring1: rank %d holds rank %d's experts "
+                "(+%.2f GiB)",
+                self.rank,
+                (self.rank + 1) % self.dims.world_size,
+                (torch.accelerator.memory_allocated() - before) / 2**30,
+            )
 
     def _step_refusal(
         self, model: nn.Module, positions: torch.Tensor, x: Any
