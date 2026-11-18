@@ -329,3 +329,49 @@ def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor
         logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
         return dma.all_reduce(input_)
     return device_communicator.all_reduce(input_)
+
+
+def dbo_tp_all_reduce_add_rmsnorm_mxfp8(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    also_bf16: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
+    """A microbatch's TP all-reduce fused with the residual add + Gemma RMSNorm
+    + MXFP8 quant after it (`VLLM_DBO_TP_DMA_AR_FUSED_NORM`): the SDMA push on
+    the comm stream, then one kernel on the compute stream that reads the two
+    INT4 messages.
+
+    Returns:
+        `(x_q, x_scale, normed, residual_out)` as
+        `DmaAllReduce.add_rmsnorm_mxfp8`, or None where it does not apply (the
+        caller keeps the unfused path): flag off, not a microbatch, no SDMA
+        all-reduce for `input_`, graph capture, or a residual it does not take.
+
+    """
+    if not (
+        envs.VLLM_DBO_TP_DMA_AR_FUSED_NORM
+        and threading.get_ident() in _THREAD_ID_TO_CONTEXT
+    ):
+        return None
+    from vllm.distributed.parallel_state import get_tp_group
+
+    dma = getattr(get_tp_group().device_communicator, "dma_ar", None)
+    if (
+        dma is None
+        or input_.dim() != 2
+        or not dma.should_reduce(input_)
+        or torch.cuda.is_current_stream_capturing()
+        or residual.shape != input_.shape
+        or residual.dtype != input_.dtype
+        or residual.stride(-1) != 1
+    ):
+        return None
+    logger.info_once("DBO: all-reduce + add + RMSNorm + MXFP8 fused (SDMA push)")
+    # The hand-off of `GroupCoordinator._all_reduce_out_place`: launch the push on
+    # the comm stream, then let the other microbatch run while it is in flight.
+    dbo_switch_to_comm_sync("all-reduce-overlap")
+    pending = dma.push(input_)
+    dbo_yield_and_switch_from_comm_to_compute("all-reduce-overlap")
+    return dma.add_rmsnorm_mxfp8(pending, residual, weight, eps, also_bf16)

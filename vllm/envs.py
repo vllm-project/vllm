@@ -315,6 +315,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_DBO_TP_DMA_AR: bool = False
+    VLLM_DBO_TP_DMA_AR_FUSED_NORM: bool = False
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -2246,6 +2247,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which needs no CUs while the other microbatch computes. Ignored with a
     # warning elsewhere; fails at startup on a ROCm runtime without the HIP calls.
     "VLLM_DBO_TP_DMA_AR": lambda: bool(int(os.getenv("VLLM_DBO_TP_DMA_AR", "0"))),
+    # Fuse the DBO SDMA all-reduce (VLLM_DBO_TP_DMA_AR) with the residual add +
+    # Gemma RMSNorm + MXFP8 quant after it (MiniMax-M3's post-attention norm):
+    # one kernel on the compute stream reads the two INT4 messages, instead of a
+    # dequantize-add on the comm stream and the norm reading its output.
+    # 1 to enable; disabled by default.
+    "VLLM_DBO_TP_DMA_AR_FUSED_NORM": lambda: bool(
+        int(os.getenv("VLLM_DBO_TP_DMA_AR_FUSED_NORM", "0"))
+    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)

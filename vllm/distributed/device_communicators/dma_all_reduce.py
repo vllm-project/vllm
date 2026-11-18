@@ -15,7 +15,7 @@ sync):
 1. quantize x into send[slot]: INT4, one fp16 scale per 32 values (4.5 bits
    per value);
 2. wait until the peer has consumed our call k - 2 (own counter
-   `consumed` >= k - 1, hipStreamWaitValue64);
+   `consumed[slot]` >= k - 1, hipStreamWaitValue64);
 3. copy send[slot] into the peer's recv[slot] (hipMemcpyAsync with
    hipMemcpyDeviceToDeviceNoCU: the SDMA engines);
 4. peer.arrived = k + 1 (hipStreamWriteValue64 into the peer's memory);
@@ -24,7 +24,14 @@ sync):
    dtype. Both ranks add the same two exact fp32 values (a 4-bit integer times
    an fp16 scale is exact in fp32), so the outputs are bitwise identical on the
    two ranks;
-7. peer.consumed = k + 1.
+7. peer.consumed[slot] = k + 1.
+
+Steps 6 and 7 can instead run in the consumer of the sum (`push`, then
+`add_rmsnorm_mxfp8` on the compute stream: dequantize-add + residual add +
+Gemma RMSNorm + MXFP8 quant in one kernel). The next push into that slot waits
+for such a consumer (an event), and consumers on two streams can finish out of
+call order, hence one `consumed` counter per slot. Pushes all run on one stream
+(the DBO comm stream).
 
 Link bytes per direction: 0.5625 B per value, the same as a two-shot all-reduce
 at 4.5 bits, with one quantization instead of two. CU work: one quantize and
@@ -35,11 +42,11 @@ all-reduce buffers on ROCm), so the peer's SDMA writes are never hidden behind
 stale L2 lines. Each rank allocates its receive slots and counters on its own
 GPU and maps the peer's through IPC; the push is a copy into IPC-mapped memory.
 
-Invariants: every rank must call all_reduce in the same order with the same
-sizes (true for TP collectives), or the surviving rank's stream waits forever
-(hipStreamWaitValue64 has no timeout). Calls run on the current stream. Stream
-write/wait operations cannot be captured into a graph, so callers must not use
-this inside CUDA graph capture.
+Invariants: every rank must call all_reduce or push in the same order with the
+same sizes (true for TP collectives), or the surviving rank's stream waits
+forever (hipStreamWaitValue64 has no timeout). Calls run on the current stream.
+Stream write/wait operations cannot be captured into a graph, so callers must
+not use this inside CUDA graph capture.
 
 ROCm only. The constructor probes the HIP calls this module needs (the NoCU copy
 kind and the stream write/wait operations) and raises at startup if the
@@ -178,9 +185,13 @@ class DmaAllReduce:
         self.q_off_s = _align(self.max_elems // 2)
         self.slot_bytes = _align(self.q_off_s + self.max_elems // GROUP * 2)
         self.calls = 0
+        # Set when a slot's last consumer ran on another stream than its push.
+        self.slot_done: list[torch.Event | None] = [None] * _SLOTS
+        self.slot_events = [torch.Event(device=device) for _ in range(_SLOTS)]
         with torch.accelerator.device_index(device.index):
             self.send = self._malloc(_SLOTS * self.slot_bytes)
-            # shared region: [arrived u64][consumed u64] ... recv slots from _ALIGN on
+            # shared region: [arrived u64][consumed u64 per slot] ... recv slots
+            # from _ALIGN on
             self.shared = self._malloc(_ALIGN + _SLOTS * self.slot_bytes)
             self.hip("hipDeviceSynchronize")
             h = _IpcHandle()
@@ -265,7 +276,8 @@ class DmaAllReduce:
                 if time.monotonic() > deadline:
                     return "probe timed out"
                 time.sleep(0.001)
-            self.hip("hipMemset", ctypes.c_void_p(self.shared), 0, 16)  # counters
+            # counters
+            self.hip("hipMemset", ctypes.c_void_p(self.shared), 0, 8 + 8 * _SLOTS)
             self.hip("hipDeviceSynchronize")
         except Exception as e:  # missing symbol, HIP error, Triton failure
             return f"{type(e).__name__}: {e}"
@@ -298,11 +310,11 @@ class DmaAllReduce:
             and 0 < x.numel() <= self.max_elems
         )
 
-    def all_reduce(
-        self, x: torch.Tensor, out: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        assert self.should_reduce(x)
-        out = torch.empty_like(x) if out is None else out
+    def _push(self, x: torch.Tensor) -> tuple[int, int, int, int, int]:
+        """Steps 1-5 of a call on the current stream. Returns
+        `(k, slot, a, b, s_off)`: `a` and `b` are rank 0's and rank 1's
+        message (INT4 bytes, fp16 scales from `s_off` on). The call's consumer
+        must then `_release` it."""
         n = x.numel()
         ng = n // GROUP
         s_off = _align(n // 2)
@@ -312,9 +324,15 @@ class DmaAllReduce:
         send = self.send + slot * self.slot_bytes
         recv = self.recv + slot * self.slot_bytes
         peer_recv = self.peer_recv + slot * self.slot_bytes
-        stream = ctypes.c_void_p(torch.cuda.current_stream(self.device).cuda_stream)
+        torch_stream = torch.cuda.current_stream(self.device)
+        stream = ctypes.c_void_p(torch_stream.cuda_stream)
+        done = self.slot_done[slot]
+        if done is not None:
+            # send[slot] is free once that consumer has read it.
+            torch_stream.wait_event(done)
+            self.slot_done[slot] = None
         u8, f16 = torch.uint8, torch.float16
-        (qg, qw), (dg, dw) = _Q_LAUNCH, _DQ_LAUNCH
+        qg, qw = _Q_LAUNCH
         # No FMA contraction: floor(x * inv + 0.5) rounds twice, so a value on an
         # exact half-step tie quantizes the same as the reference.
         _quant_int4_kernel[(triton.cdiv(ng, qg),)](
@@ -330,7 +348,7 @@ class DmaAllReduce:
             self.hip(
                 "hipStreamWaitValue64",
                 stream,
-                ctypes.c_void_p(self.consumed),
+                ctypes.c_void_p(self.consumed + 8 * slot),
                 k - _SLOTS + 1,
                 _WAIT_GTE,
                 0xFFFFFFFFFFFFFFFF,
@@ -358,7 +376,38 @@ class DmaAllReduce:
             _WAIT_GTE,
             0xFFFFFFFFFFFFFFFF,
         )
+        # Counted only once the whole push is enqueued, so the ranks' counters
+        # stay equal if an enqueue raises.
+        self.calls = k + 1
         a, b = (send, recv) if self.rank == 0 else (recv, send)
+        return k, slot, a, b, s_off
+
+    def _release(
+        self, k: int, slot: int, push_stream: torch.cuda.Stream | None = None
+    ) -> None:
+        """Step 7 on the current stream, after the call's consumer."""
+        torch_stream = torch.cuda.current_stream(self.device)
+        self.hip(
+            "hipStreamWriteValue64",
+            ctypes.c_void_p(torch_stream.cuda_stream),
+            ctypes.c_void_p(self.peer_consumed + 8 * slot),
+            k + 1,
+            0,
+        )
+        if push_stream is not None and push_stream != torch_stream:
+            event = self.slot_events[slot]
+            event.record(torch_stream)
+            self.slot_done[slot] = event
+
+    def all_reduce(
+        self, x: torch.Tensor, out: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        assert self.should_reduce(x)
+        out = torch.empty_like(x) if out is None else out
+        ng = x.numel() // GROUP
+        k, slot, a, b, s_off = self._push(x)
+        u8, f16 = torch.uint8, torch.float16
+        dg, dw = _DQ_LAUNCH
         _dq_sum_kernel[(triton.cdiv(ng, dg),)](
             _Ptr(a, u8),
             _Ptr(a + s_off, f16),
@@ -369,14 +418,67 @@ class DmaAllReduce:
             BLOCK_G=dg,
             num_warps=dw,
         )
-        self.hip(
-            "hipStreamWriteValue64",
-            stream,
-            ctypes.c_void_p(self.peer_consumed),
-            k + 1,
-            0,
-        )
-        # Counted only once the whole call is enqueued, so the ranks' counters
-        # stay equal if an enqueue raises.
-        self.calls = k + 1
+        self._release(k, slot)
         return out
+
+    def push(self, x: torch.Tensor) -> "DmaPending":
+        """Steps 1-5 on the current stream. Finish the call with
+        `add_rmsnorm_mxfp8` on a stream ordered after this one, before the
+        next push into the same slot."""
+        assert self.should_reduce(x)
+        k, slot, a, b, s_off = self._push(x)
+        return DmaPending(k, slot, a, b, s_off, torch.cuda.current_stream(self.device))
+
+    def add_rmsnorm_mxfp8(
+        self,
+        pending: "DmaPending",
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        also_bf16: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """The pushed call's sum + residual -> Gemma RMSNorm -> MXFP8 in one
+        kernel, then step 7.
+
+        Returns:
+            `(x_q, x_scale, normed, residual_out)`, as
+            `gemma_fused_add_rmsnorm_mxfp8_and_bf16`; `normed` is None unless
+            `also_bf16`.
+
+        """
+        from vllm.distributed.device_communicators.dma_all_reduce_norm import (
+            dq_sum_add_gemma_rmsnorm_mxfp8,
+        )
+
+        p = pending
+        u8, f16 = torch.uint8, torch.float16
+        out = dq_sum_add_gemma_rmsnorm_mxfp8(
+            _Ptr(p.a, u8),
+            _Ptr(p.a + p.s_off, f16),
+            _Ptr(p.b, u8),
+            _Ptr(p.b + p.s_off, f16),
+            residual,
+            weight,
+            eps,
+            also_bf16,
+        )
+        self._release(p.k, p.slot, p.stream)
+        return out
+
+
+class DmaPending:
+    """A pushed call whose sum has not been consumed yet."""
+
+    __slots__ = ("k", "slot", "a", "b", "s_off", "stream")
+
+    def __init__(
+        self,
+        k: int,
+        slot: int,
+        a: int,
+        b: int,
+        s_off: int,
+        stream: torch.cuda.Stream,
+    ):
+        self.k, self.slot, self.a, self.b, self.s_off = k, slot, a, b, s_off
+        self.stream = stream
