@@ -11,7 +11,9 @@ post-load processing has the hazards found on real models:
     registered as a retired parameter (NVFP4 `weight_scale_2`);
 (e) post-load processing that must never run on converted bytes (packing);
 (f) post-load processing grows a weight (padding): a reload writes it into
-    the existing storage to keep its address.
+    the existing storage to keep its address;
+(g) online quantization: the kernel dtype cannot hold the checkpoint tensor,
+    which its loader quantizes as it arrives.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -25,10 +27,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
+from vllm.model_executor.layers.quantization.online.loading import quantize_on_load
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
@@ -74,6 +76,17 @@ def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init
     assert addresses == {
         name: param.data_ptr() for name, param in model.named_parameters()
     }
+
+
+@pytest.mark.parametrize("bias", [True, False])
+def test_output_padding_flagged_for_reload_fill(dist_init, bias):
+    padded = MergedColumnParallelLinear(4, [4, 4], bias=bias, padding_size=3)
+    plain = MergedColumnParallelLinear(4, [4, 4], bias=bias)
+    flagged = {
+        n for n, p in padded.named_parameters() if getattr(p, "fill_on_reload", 0)
+    }
+    assert flagged == ({"weight", "bias"} if bias else {"weight"})
+    assert not any(hasattr(p, "fill_on_reload") for p in plain.parameters())
 
 
 class _Method(QuantizeMethodBase):
@@ -127,6 +140,11 @@ def _pad(layer):  # (f): kernel layout larger than the checkpoint's
     replace_parameter(layer, "weight", torch.nn.functional.pad(layer.weight, (0, 4)))
 
 
+def _quantize_int8(weight):  # (g): bf16 checkpoint tensor, int8 kernel tensor
+    scale = weight.float().abs().amax() / 127
+    return (weight / scale).round().to(torch.int8), scale
+
+
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -135,6 +153,7 @@ _SHAPES = {
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
+    "online.weight": ((4, 6), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -143,6 +162,7 @@ _PWAL = {
     "nvfp4": _consume_scale_2,
     "engram": _pack,
     "pad": _pad,
+    "online": _transpose,
 }
 
 
@@ -164,8 +184,13 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
+            if name.startswith("online."):  # as an int8 checkpoint
+                parent.params_dtype, dtype = dtype, torch.int8
+                scale = torch.nn.Parameter(torch.empty(()), False)
+                parent.register_parameter("weight_scale", scale)
             param = torch.nn.Parameter(torch.empty(shape, dtype=dtype), False)
             parent.register_parameter(local, param)
+        quantize_on_load(self.online, "weight", _quantize_int8, "weight_scale")
 
     def load_weights(self, weights):
         params = dict(self.named_parameters())
@@ -281,6 +306,7 @@ class TestReloadEqualsColdStart:
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
             ["pad.weight"],
+            ["online.weight", "online.weight_scale"],
         ],
         ids=[
             "a-parent-derived",
@@ -289,6 +315,7 @@ class TestReloadEqualsColdStart:
             "d-consumed-scale",
             "e-not-idempotent",
             "f-grows",
+            "g-online-quant",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
@@ -527,6 +554,73 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     assert model.proj.weight._ckpt == ckpt
 
 
+def test_replace_parameter_keeps_only_the_target_reload_fill_flag():
+    model = _cold_start(_checkpoint())
+    model.mimo.weight.fill_on_reload = True
+    replace_parameter(model.proj, "weight", model.mimo.weight)
+    assert not hasattr(model.proj.weight, "fill_on_reload")
+    weight = model.mimo.weight
+    replace_parameter(model.mimo, "weight", weight.data.t().contiguous())  # kept
+    assert model.mimo.weight is weight and weight.fill_on_reload
+
+
+def _with_padded_rows(monkeypatch, fn=_pack, flag=True):
+    """Adds `rows.weight`: (6, 4), zero at construction; its loader writes
+    rows [:4] only."""
+    monkeypatch.setitem(_SHAPES, "rows.weight", ((4, 4), torch.float32))
+    monkeypatch.setitem(_PWAL, "rows", fn)
+    init = _ToyModel.__init__
+
+    def with_rows(self):
+        init(self)
+        weight = torch.nn.Parameter(torch.zeros(6, 4), requires_grad=False)
+        weight.weight_loader = lambda param, w: param.data[:4].copy_(w)
+        if flag:
+            weight.fill_on_reload = True
+        self.rows.weight = weight
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_rows)
+
+
+@pytest.mark.parametrize("dummy", [False, True], ids=["real", "dummy"])
+def test_flagged_padding_zeroed_at_begin(monkeypatch, dummy):
+    # (e) at runtime: viewed back, the padding rows hold transposed bytes,
+    # which the loader skips
+    _with_padded_rows(monkeypatch)
+    if dummy:  # `load_format=dummy`: no loader runs
+        with _DEVICE:
+            model = _ToyModel()
+        for param in model.parameters():
+            param.data.fill_(7)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    else:
+        model = _cold_start(_checkpoint())
+    assert model.rows.weight.fill_on_reload  # survives `replace_parameter`
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_unflagged_padding_keeps_stale_bytes(monkeypatch):
+    _with_padded_rows(monkeypatch, flag=False)
+    model = _cold_start(_checkpoint())
+    _reload(model, _checkpoint(1.01))
+    expected = _state(_cold_start(_checkpoint(1.01)))
+    assert not torch.equal(_state(model)["rows.weight"][1], expected["rows.weight"][1])
+
+
+def test_flagged_tensor_shared_from_another_model_not_zeroed(monkeypatch):
+    # a draft sharing a target layer: the target owns its flagged weight
+    _with_padded_rows(monkeypatch, fn=None)
+    target = _cold_start(_checkpoint())
+    draft = _cold_start(_checkpoint())
+    draft.rows = target.rows
+    before = _state(target)
+    begin_direct_reload(draft)
+    _assert_same(_state(target), before, addresses=True)
+
+
 def _config(**overrides) -> SimpleNamespace:
     offload = SimpleNamespace(
         offload_backend="auto",
@@ -542,9 +636,6 @@ def _config(**overrides) -> SimpleNamespace:
         weight_transfer_config=None,
     )
     return SimpleNamespace(**(fields | overrides))
-
-
-_ONLINE = object.__new__(OnlineQuantizationConfig)
 
 
 @pytest.mark.parametrize(
@@ -590,12 +681,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
-        (
-            "direct",
-            {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
-            "online quantization",
-        ),
         ("direct", {"lora_config": object()}, "LoRA"),
         (
             "direct",
@@ -615,8 +700,6 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "offload-prefetch",
         "offload-uva",
         "torchao",
-        "online-config",
-        "online-composed",
         "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
