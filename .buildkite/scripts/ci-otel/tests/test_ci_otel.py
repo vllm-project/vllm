@@ -1204,8 +1204,11 @@ def test_cdi_discovery_uses_only_cuda_visible_uuids(monkeypatch, is_mig):
     assert identifiers == [expected]
 
 
-@pytest.mark.parametrize("discovery_fails", [False, True])
-def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_fails):
+# A slow MIG driver start can time out discovery; later attempts may still succeed.
+@pytest.mark.parametrize("failed_discoveries", [0, 1, None])
+def test_cdi_sampling_switches_to_slice_or_keeps_unknown(
+    monkeypatch, failed_discoveries
+):
     monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
     monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
@@ -1215,14 +1218,19 @@ def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_
     commands = []
     records = []
 
+    discoveries = []
+
+    def discover(stop_event):
+        assert stop_event is stop
+        discoveries.append(1)
+        if failed_discoveries is None or len(discoveries) <= failed_discoveries:
+            return []
+        return ["MIG-assigned"]
+
     def query(command, **kwargs):
         assert kwargs["timeout"] == ci_gpu.QUERY_TIMEOUT_SECONDS
         commands.append(command)
-        if "--discover-mig" in command:
-            if discovery_fails:
-                raise subprocess.TimeoutExpired(command, 2)
-            return SimpleNamespace(stdout='["MIG-assigned"]')
-        if len(commands) == 4:
+        if len(commands) == 6:
             stop.set()
         if "--query-mig" in command:
             assert command[-1] == "MIG-assigned"
@@ -1243,15 +1251,76 @@ def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_
         return SimpleNamespace(stdout="0, GPU-parent, H200, 99, 100, 200, Enabled")
 
     monkeypatch.setattr(ci_gpu.subprocess, "run", query)
+    monkeypatch.setattr(ci_gpu, "discover_mig_devices", discover)
     monkeypatch.setattr(ci_gpu, "record_spans", lambda spans: records.extend(spans))
     ci_gpu.collect(os.getppid(), stop)
-    assert sum("--discover-mig" in command for command in commands) == 1
     attributes = [event["attributes"] for span in records for event in span.events]
-    if discovery_fails:
+    if failed_discoveries is None:
+        assert len(discoveries) == ci_gpu.DISCOVERY_ATTEMPTS
         assert all("gpu.memory.used" not in event for event in attributes)
     else:
+        assert len(discoveries) == failed_discoveries + 1
         assert any(event.get("gpu.memory.used") == 123 for event in attributes)
-        assert all(event["gpu.uuid"] == "MIG-assigned" for event in attributes)
+        assert all(
+            event["gpu.uuid"] == "MIG-assigned"
+            for event in attributes
+            if "gpu.memory.used" in event
+        )
+
+
+def _discovery_helper(monkeypatch, shell_command):
+    """Make the discovery helper a shell command, keeping the real Popen."""
+    real_popen = subprocess.Popen
+
+    def popen(command, **kwargs):
+        assert command[-1] == "--discover-mig"
+        return real_popen(["sh", "-c", shell_command], **kwargs)
+
+    monkeypatch.setattr(ci_gpu.subprocess, "Popen", popen)
+
+
+@pytest.mark.parametrize(
+    ("shell_command", "expected"),
+    [
+        ("""printf '["MIG-a"]'""", ["MIG-a"]),
+        ("""printf '["MIG-a"]'; exit 1""", []),
+        ("printf 'not json'", []),
+    ],
+)
+def test_mig_discovery_reads_helper_or_keeps_unknown(
+    monkeypatch, shell_command, expected
+):
+    _discovery_helper(monkeypatch, shell_command)
+    assert ci_gpu.discover_mig_devices(threading.Event()) == expected
+
+
+def test_mig_discovery_failure_to_start_keeps_unknown(monkeypatch):
+    def popen(command, **kwargs):
+        raise OSError("no interpreter")
+
+    monkeypatch.setattr(ci_gpu.subprocess, "Popen", popen)
+    assert ci_gpu.discover_mig_devices(threading.Event()) == []
+
+
+def test_mig_discovery_waits_longer_than_a_device_query(monkeypatch):
+    # A start-up slower than QUERY_TIMEOUT_SECONDS must still be read.
+    delay = ci_gpu.QUERY_TIMEOUT_SECONDS + 0.5
+    _discovery_helper(monkeypatch, f"""sleep {delay}; printf '["MIG-a"]'""")
+    assert ci_gpu.discover_mig_devices(threading.Event()) == ["MIG-a"]
+
+
+@pytest.mark.parametrize("ends_by", ["stop", "deadline"])
+def test_mig_discovery_gives_up_promptly(monkeypatch, ends_by):
+    # The shell waits three seconds for the sampler after SIGTERM, then kills it.
+    _discovery_helper(monkeypatch, "exec sleep 30")  # one process, like the real helper
+    stop = threading.Event()
+    if ends_by == "stop":
+        threading.Timer(0.3, stop.set).start()
+    else:
+        monkeypatch.setattr(ci_gpu, "DISCOVERY_TIMEOUT_SECONDS", 0.3)
+    started = time.monotonic()
+    assert ci_gpu.discover_mig_devices(stop) == []
+    assert time.monotonic() - started < 1
 
 
 def test_bundled_nvml_load_does_not_import_vllm_or_torch(tmp_path):

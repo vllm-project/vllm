@@ -27,6 +27,10 @@ INTERVAL_SECONDS = 1.0
 BATCH_SECONDS = 30
 MAX_DEVICES = 16
 QUERY_TIMEOUT_SECONDS = 2
+# CUDA driver start-up on a host with many MIG instances can exceed a query timeout.
+DISCOVERY_TIMEOUT_SECONDS = 10
+DISCOVERY_ATTEMPTS = 3
+DISCOVERY_POLL_SECONDS = 0.2
 QUERY = "index,uuid,name,utilization.gpu,memory.used,memory.total,mig.mode.current"
 
 
@@ -201,11 +205,43 @@ def sample_span(events: list[dict]) -> Span:
     )
 
 
+def discover_mig_devices(stop: threading.Event) -> list[str]:
+    """Run the CDI discovery helper; give up at the deadline or when stopped.
+
+    Discovery may take longer than the shell waits for the sampler at shutdown,
+    so the wait is polled against `stop` instead of blocking.
+    """
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, __file__, "--discover-mig"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return []
+    deadline = time.monotonic() + DISCOVERY_TIMEOUT_SECONDS
+    while True:
+        try:
+            stdout, _ = proc.communicate(timeout=DISCOVERY_POLL_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            if stop.is_set() or time.monotonic() >= deadline:
+                proc.kill()
+                proc.communicate()
+                return []
+    if proc.returncode:
+        return []
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+
+
 def collect(parent_pid: int, stop: threading.Event) -> None:
     events: list[dict] = []
     batch_started = time.monotonic()
     failures = 0
-    discovery_attempted = False
+    discovery_attempts = 0
     mig_devices = visible_mig_devices()
     query = (
         [sys.executable, __file__, "--query-mig", *mig_devices]
@@ -236,26 +272,16 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
                 )
                 if (
                     not mig_devices
-                    and not discovery_attempted
+                    and discovery_attempts < DISCOVERY_ATTEMPTS
                     and any(
                         sample["attributes"].get("gpu.status") == "unsupported_mig"
                         for sample in samples
                     )
                 ):
-                    discovery_attempted = True
+                    discovery_attempts += 1
                     # CDI can assign a MIG device without exporting its UUID.
                     # Only CUDA-visible devices are inspected, never NVML siblings.
-                    try:
-                        discovered = subprocess.run(
-                            [sys.executable, __file__, "--discover-mig"],
-                            capture_output=True,
-                            text=True,
-                            timeout=QUERY_TIMEOUT_SECONDS,
-                            check=True,
-                        )
-                        mig_devices = json.loads(discovered.stdout)
-                    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-                        mig_devices = []
+                    mig_devices = discover_mig_devices(stop)
                     if mig_devices:
                         query = [sys.executable, __file__, "--query-mig", *mig_devices]
                         continue  # Do not create an extra parent-device series.

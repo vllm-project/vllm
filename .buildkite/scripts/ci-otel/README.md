@@ -38,6 +38,8 @@ The binding is loaded directly to avoid vLLM/Torch import side effects. Numeric
 `NVIDIA_VISIBLE_DEVICES`. For CDI assignments without an explicit UUID, a bounded
 helper initializes the CUDA driver and reads only CUDA-visible device UUIDs,
 without creating CUDA contexts or importing Torch. NVML verifies each MIG handle.
+CUDA driver start-up is slow on hosts with many MIG instances, so this helper gets
+up to 10 seconds and three attempts per command; a shutdown stops it at once.
 Discovery or permission failures remain unknown; NVML sibling instances are never
 enumerated. MIG utilization stays absent.
 CPU jobs and AMD mirrors do not collect GPU samples.
