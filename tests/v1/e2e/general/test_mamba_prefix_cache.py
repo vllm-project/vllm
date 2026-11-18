@@ -151,7 +151,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -173,7 +173,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -192,11 +192,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 3, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 3, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_1": TestConfig(
@@ -213,11 +213,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_2": TestConfig(
@@ -232,7 +232,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -249,11 +249,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 4, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 4, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_1": TestConfig(
@@ -267,11 +267,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_2": TestConfig(
@@ -285,11 +285,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 6, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 6, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_3": TestConfig(
@@ -303,11 +303,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 7, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 7, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_4": TestConfig(
@@ -321,7 +321,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 4,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -559,7 +559,7 @@ def _run_mamba_prefix_cache_mrv2(
 ):
     backend = additional_config["gdn_prefill_backend"]
     internal_checkpoints = backend == "flashinfer" or (
-        backend == "triton" and current_platform.is_cuda()
+        backend == "triton" and current_platform.is_cuda_alike()
     )
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
