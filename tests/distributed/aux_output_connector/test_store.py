@@ -3800,8 +3800,9 @@ def test_worker_without_capture_skips_steps_without_session_rows():
         "hit-of-a-request-whose-id-starts-with-it",
     ],
 )
-def test_aux_owned_keys(segments, owned):
-    keys = ["j/s/a", "j/s/b", "j/s/c", "j/s/d", "j/s/tail/t"]
+@pytest.mark.parametrize("prefix", ["j", "tail", "j/tail"])
+def test_aux_owned_keys(segments, owned, prefix):
+    keys = [f"{prefix}/s/{name}" for name in ("a", "b", "c", "d", "tail/t")]
     assert aux_owned_keys("r", keys, segments) == [
         key for key in keys if key[-1] in owned
     ]

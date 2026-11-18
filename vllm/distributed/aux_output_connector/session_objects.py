@@ -162,7 +162,7 @@ def aux_owned_keys(
 ) -> list[str]:
     """The keys of a session response whose objects its request `request_id`
     wrote: the full objects from its first own segment on, and the tail."""
-    full = [key for key in keys if "/tail/" not in key]
+    full = [key for key in keys if key.rsplit("/", 2)[-2] != "tail"]
     end = segments[-1][0]
     start = next(
         (
