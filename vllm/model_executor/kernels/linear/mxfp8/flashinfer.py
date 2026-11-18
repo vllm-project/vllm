@@ -124,8 +124,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight  # [N padded to a multiple of 32, K]
         weight_scale = layer.weight_scale
         padded_n, K = weight.shape
-        # Modules that are not linear layers (e.g. in tests) use the weight's N.
-        N = getattr(layer, "output_size_per_partition", padded_n)
+        N = layer.output_size_per_partition
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -150,13 +149,13 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             backend="cutlass",
         )
         if padded_n != N:
-            output = output[:, :N]
+            output = output[:, :N].contiguous()
 
         if bias is not None:
             output = output + bias
 
         output_shape = (*input_shape[:-1], N)
-        return output.reshape(output_shape)
+        return output.view(output_shape)
 
 
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -215,8 +214,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         weight = layer.weight  # [K, N padded to a multiple of 8], column-major
         weight_scale = layer.weight_scale
         K, padded_n = weight.shape
-        # Modules that are not linear layers (e.g. in tests) use the weight's N.
-        N = getattr(layer, "output_size_per_partition", padded_n)
+        N = layer.output_size_per_partition
 
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
@@ -238,13 +236,13 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             backend="cute-dsl",
         )
         if padded_n != N:
-            output = output[:, :N]
+            output = output[:, :N].contiguous()
 
         if bias is not None:
             output = output + bias
 
         output_shape = (*input_shape[:-1], N)
-        return output.reshape(output_shape)
+        return output.view(output_shape)
 
 
 class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):

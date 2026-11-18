@@ -56,6 +56,7 @@ def _check_linear_numerics(kernel: Mxfp8LinearKernel, m: int) -> None:
 
     output = kernel.apply_weights(layer, x)
     assert output.shape == (m, n)
+    assert output.is_contiguous()
 
     x_mxfp8, x_scale = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
     x_dequant = dequant_mxfp8_to_bf16(x_mxfp8, x_scale.view(m, k // MXFP8_BLOCK_SIZE))
