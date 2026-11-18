@@ -1286,9 +1286,16 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
-        layer.register_buffer("_k_scale", layer.k_scale.detach() * fnuz_factor)
-        layer.register_buffer("_v_scale", layer.v_scale.detach() * fnuz_factor)
-        layer.register_buffer(
+        def _set_scale(name: str, value: torch.Tensor) -> None:
+            buf = getattr(layer, name, None)
+            if isinstance(buf, torch.Tensor) and buf.shape == value.shape:
+                buf.copy_(value)
+            else:
+                layer.register_buffer(name, value)
+
+        _set_scale("_k_scale", layer.k_scale.detach() * fnuz_factor)
+        _set_scale("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        _set_scale(
             "_q_scale",
             layer.q_scale.detach() * fnuz_factor
             if q_loaded

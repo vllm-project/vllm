@@ -60,6 +60,8 @@ def test_compressed_tensors_kv_scales_fnuz_doubling(
     assert layer._k_scale_cpu.item() == pytest.approx(kv_expected)
 
     # A second call must not compound the factor.
+    ptrs = [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()]
     method.process_weights_after_loading(layer)
+    assert [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()] == ptrs
     assert layer._k_scale_float == pytest.approx(kv_expected)
     assert layer._q_scale_float == pytest.approx(q_expected)
