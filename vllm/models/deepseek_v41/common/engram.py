@@ -41,6 +41,7 @@ from vllm.distributed import (
     get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    is_fake_distributed,
     tensor_model_parallel_all_gather,
 )
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -975,6 +976,8 @@ class DPSharedEngramStorage:
 
 def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     """Whether co-located DP replicas exist and can hold the full tables."""
+    if is_fake_distributed():
+        return False  # static memory estimation: no replicas to agree with
     if get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
@@ -1187,12 +1190,18 @@ class ParallelEngramEmbedding(nn.Module):
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
-            return (
-                torch.empty(
-                    self.part_num_embeddings, self.row_bytes, dtype=weight_dtype
-                ),
-                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+            weight = torch.empty(
+                self.part_num_embeddings, self.row_bytes, dtype=weight_dtype
             )
+            scales = torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8)
+            if self.cpu_offload:
+                # Meta stand-ins for the tables a real run keeps in host memory.
+                from vllm.model_executor.model_loader.meta_loader import (
+                    mark_host_tensors,
+                )
+
+                mark_host_tensors(weight, scales)
+            return weight, scales
         if self.peer_rows:
             peers = self._peer_group
             values = self.peer_rows * self.row_bytes

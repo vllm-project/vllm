@@ -9,6 +9,7 @@ To choose a distributed inference strategy for a single-model replica, use the f
 - **Multi-node multi-GPU using tensor parallel and pipeline parallel inference:** if the model is too large for a single node, combine *tensor parallelism* with *pipeline parallelism*. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes. For example, set `tensor_parallel_size=8` and `pipeline_parallel_size=2` when using 2 nodes with 8 GPUs per node.
 
 Increase the number of GPUs and nodes until there is enough GPU memory for the model. Set `tensor_parallel_size` to the number of GPUs per node and `pipeline_parallel_size` to the number of nodes.
+To check which layouts fit before launching, see [Estimate memory before launching](../configuration/conserving_memory.md#estimate-memory-before-launching).
 
 After you provision sufficient resources to fit the model, run `vllm`. Look for log messages like:
 

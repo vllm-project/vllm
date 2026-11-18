@@ -424,6 +424,16 @@ direct_register_custom_op(
 )
 
 
+def _fake_pg_options() -> Any:
+    """Options for groups on PyTorch's fake backend: every collective raises."""
+    # Importing this module registers the "fake" backend.
+    from torch.testing._internal.distributed.fake_pg import FakeProcessGroup
+
+    options = FakeProcessGroup.Options()
+    options.error_on_collective = True
+    return options
+
+
 class GroupCoordinator:
     """PyTorch ProcessGroup wrapper for a group of processes.
     PyTorch ProcessGroup is bound to one specific communication backend,
@@ -484,9 +494,13 @@ class GroupCoordinator:
 
         self.cpu_timeout = get_cpu_distributed_timeout_or_none()
 
+        # Static memory estimation: the topology only, with no communicators.
+        fake = torch_distributed_backend == "fake"
+        pg_options = _fake_pg_options() if fake else None
+
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
-        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP and not fake:
             self_device_group, self_cpu_group = _create_subgroups_split_group(
                 group_ranks, group_name, torch_distributed_backend
             )
@@ -504,12 +518,16 @@ class GroupCoordinator:
                     ranks,
                     backend=torch_distributed_backend,
                     timeout=device_timeout,
+                    pg_options=pg_options,
                 )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=self.cpu_timeout
+                        ranks,
+                        backend="fake" if fake else "gloo",
+                        timeout=self.cpu_timeout,
+                        pg_options=pg_options,
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -551,7 +569,7 @@ class GroupCoordinator:
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
-        if use_device_communicator and self.world_size > 1:
+        if use_device_communicator and self.world_size > 1 and not fake:
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls()
             )
@@ -566,7 +584,7 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
         self.mq_broadcaster: MessageQueue | None = None
-        if use_message_queue_broadcaster and self.world_size > 1:
+        if use_message_queue_broadcaster and self.world_size > 1 and not fake:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6
             )
@@ -1990,6 +2008,11 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment"
         )
+        pg_options = None
+        if backend == "fake":
+            from torch.testing._internal.distributed.fake_pg import FakeStore
+
+            world_pg_store, pg_options = FakeStore(), _fake_pg_options()
         if not torch.distributed.is_backend_available(backend):
             logger.warning(
                 "Distributed backend %s is not available; falling back to gloo.",
@@ -2032,6 +2055,7 @@ def init_distributed_environment(
                 world_size=world_size,
                 rank=rank,
                 timeout=timeout,
+                pg_options=pg_options,
             )
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
@@ -2065,6 +2089,8 @@ def init_distributed_environment(
         _WORLD = init_world_group(ranks, local_rank, backend)
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
+        elif backend == "fake":
+            _NODE_COUNT = 1  # one process stands in for the world; nothing to probe
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
@@ -2764,6 +2790,14 @@ def in_the_same_node_as(
             aggregated_data += rank_data
 
     return [x == 1 for x in aggregated_data.tolist()]
+
+
+def is_fake_distributed() -> bool:
+    """Whether the process groups are on PyTorch's fake backend (static memory
+    estimation): there are no communicators and every collective raises."""
+    return (
+        torch.distributed.is_initialized() and torch.distributed.get_backend() == "fake"
+    )
 
 
 def is_global_first_rank() -> bool:

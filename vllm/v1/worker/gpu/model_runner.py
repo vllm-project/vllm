@@ -49,6 +49,7 @@ from vllm.distributed.aux_output_connector.worker import (
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    is_fake_distributed,
     single_pp_stage,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -268,7 +269,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
         self.check_ep_fault = False
-        if self.dp_size > 1 and self.model_config.is_moe:
+        if self.dp_size > 1 and self.model_config.is_moe and not is_fake_distributed():
             self.check_ep_fault = get_ep_all2all_manager().support_fault_tolerance
 
         # Decode context parallelism.

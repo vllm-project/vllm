@@ -526,12 +526,13 @@ class Worker(WorkerBase):
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
             # available memory
+            fake = parallel_config.fake_distributed
             init_worker_distributed_environment(
                 self.vllm_config,
                 self.rank,
                 self.distributed_init_method,
                 self.local_rank,
-                current_platform.dist_backend,
+                "fake" if fake else current_platform.dist_backend,
             )
 
             warn_if_flashinfer_kernels_missing()
@@ -545,6 +546,10 @@ class Worker(WorkerBase):
             )
 
             self.localized_resources = maybe_init_localized_resources(self.device)
+
+            if fake:  # static memory estimation sizes nothing from free memory
+                self._init_workspace_and_model_runner()
+                return
 
             # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
             # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
@@ -606,7 +611,7 @@ class Worker(WorkerBase):
         )
         with self._maybe_get_memory_pool_context(tag="runtime"):
             self.model_runner: GPUModelRunner = self._make_model_runner()
-        if self.rank == 0:
+        if self.rank == 0 and not self.parallel_config.fake_distributed:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tp_group, is_fake_distributed
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
@@ -327,6 +327,7 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
         or parallel.enable_expert_parallel
         or config.hidden_size != 5120
         or config.hc_mult != 4
+        or is_fake_distributed()
     ):
         return False
     # The custom all-reduce's MNNVL buffers succeed exactly when NVLink
@@ -386,6 +387,7 @@ def supports_ampere_all_reduce(vllm_config: VllmConfig) -> bool:
         or tp_size not in (2, 4, 8)
         or parallel.enable_expert_parallel
         or config.hidden_size % (8 * tp_size)
+        or is_fake_distributed()
     ):
         return False
     comm = cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm

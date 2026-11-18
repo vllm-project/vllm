@@ -39,7 +39,7 @@ from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tp_group, is_fake_distributed
 from vllm.distributed.device_communicators.nvlink_fabric import (
     SymmetricMemoryTopology,
     get_symmetric_memory_topology,
@@ -1153,6 +1153,8 @@ def maybe_init_gemm_rs_ar(
         reason = "TP size does not divide 128"
     elif N % 128 != 0:
         reason = f"the output width {N} is not a multiple of 128"
+    elif is_fake_distributed():
+        reason = "the process groups are fake (static memory estimation)"
     else:
         reason = None
 

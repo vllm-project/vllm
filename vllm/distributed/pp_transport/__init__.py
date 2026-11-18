@@ -69,10 +69,10 @@ def create_pp_transport(
             ranks), which received tensors are copied into.
 
     """
-    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.parallel_state import get_pp_group, is_fake_distributed
 
     pp_group = get_pp_group()
-    if pp_group.world_size == 1:
+    if pp_group.world_size == 1 or is_fake_distributed():
         return None
     mode = envs.VLLM_PP_TRANSPORT
     assert mode in ("auto", "copy_engine")
