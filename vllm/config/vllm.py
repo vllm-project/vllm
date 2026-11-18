@@ -611,6 +611,8 @@ class VllmConfig:
     def gpu_iteration_timing(self) -> bool:
         """Whether the output worker times logged iterations with CUDA events.
         Otherwise they are logged without an elapsed time."""
+        # TODO: Drop this gate. Untimed iterations could be handled without the
+        # config knowing which frontend, executor and engine process are in use.
         parallel_config = self.parallel_config
         # With more API servers the frontend does not log iteration details.
         frontend_logs = (
