@@ -32,9 +32,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.request import RequestStatus
 
-from ..utils import make_moriio_writer
+from ..utils import create_request, make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -70,7 +72,7 @@ def _moriio_config(pp_rank, pp_size, tp_rank, tp_size, dp_rank=0, dp_size=1):
 
 @pytest.mark.parametrize(
     ("pp_size", "tp_size", "dp_size"),
-    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2)],
+    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2), (2, 2, 2)],
 )
 def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
     configs = [
@@ -86,7 +88,9 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         assert config.notify_port == NOTIFY_PORT + config.port_offset
         if config.pp_rank == 0:
             # Stage 0 keeps the ports of a pipeline-free instance.
-            assert config.port_offset == get_port_offset(config.dp_rank, config.tp_rank)
+            assert config.port_offset == get_port_offset(
+                config.dp_rank, config.tp_rank, config.tp_size
+            )
 
         # The first stage forwards to the same worker of every later stage.
         later = [
@@ -211,6 +215,32 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
     assert sorted(n["port"] for n in scheduler.notified) == first_stage
     assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
     assert sorted(scheduler.released) == first_stage
+
+
+def test_decode_allocation_notifies_both_tp_ranks_on_remote_dp1():
+    """A TP1 decode must send its allocation to both TP2 peers on DP1."""
+    scheduler = _decode_scheduler()
+    scheduler.tp_size = 1
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        transfer_id="tA",
+        remote_host="10.0.0.1",
+        remote_notify_port=NOTIFY_PORT,
+        remote_dp_size=2,
+        remote_dp_rank=1,
+        remote_tp_size=2,
+    )
+    blocks = KVCacheBlocks(([KVCacheBlock(block_id=i) for i in (5, 6, 7)],))
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=40)
+
+    assert [
+        (n["host"], n["port"], n["transfer_id"], n["block_notify_list"])
+        for n in scheduler.notified
+    ] == [
+        ("10.0.0.1", NOTIFY_PORT + 2, "tA", [5, 6, 7]),
+        ("10.0.0.1", NOTIFY_PORT + 3, "tA", [5, 6, 7]),
+    ]
 
 
 def _free_consecutive_ports(n: int) -> list[int]:
