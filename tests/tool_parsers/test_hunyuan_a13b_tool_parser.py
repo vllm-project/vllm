@@ -143,6 +143,35 @@ def test_hunyuan_a13b_tool_parser_extract(
             ],
             [make_tool_call("get_weather", {"city": "Boston"})],
         ),
+        (
+            [
+                '<tool_calls>[{"name": "get_time", ',
+                '"arguments": {}}, ',
+                '{"name": "get_weather", ',
+                '"arguments": {"city": ',
+                '"Boston"}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call("get_time", {}),
+                make_tool_call("get_weather", {"city": "Boston"}),
+            ],
+        ),
+        (
+            [
+                '<tool_calls>[{"name": "get_weather", ',
+                '"arguments": {"city": ',
+                '"Boston"}}, ',
+                '{"name": "get_time", ',
+                '"arguments": {"tz": ',
+                '"UTC"}}]',
+                "</tool_calls>",
+            ],
+            [
+                make_tool_call("get_weather", {"city": "Boston"}),
+                make_tool_call("get_time", {"tz": "UTC"}),
+            ],
+        ),
         pytest.param(
             [
                 '<tool_calls>[{"name": "complex_tool",',
