@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
@@ -146,11 +147,13 @@ pub struct CompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
-    /// Add spaces between special tokens during detokenization
+    /// Add spaces between special tokens during detokenization. Accepted as a
+    /// no-op: the detokenizers of the served tokenizers already emit adjacent
+    /// added tokens without a separator, which is what `false` asks for.
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
@@ -162,6 +165,9 @@ pub struct CompletionRequest {
 
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
+
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
 
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
@@ -205,8 +211,11 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
+
+    /// Skip the first N prompt tokens from the returned routed-expert rows.
+    pub routed_experts_prompt_start: Option<u32>,
 
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
@@ -250,6 +259,8 @@ pub(super) struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
     pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
@@ -268,6 +279,11 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// The request's routed-expert rows as a base64 NumPy `.npy`, when
+    /// `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Contiguous weight-version spans over output-token indexes.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
@@ -279,6 +295,10 @@ pub(super) struct CompletionStreamResponse {
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl CompletionStreamResponse {
@@ -289,6 +309,8 @@ impl CompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
+            kv_transfer_params: None,
         }
     }
 }
@@ -300,10 +322,14 @@ pub(super) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

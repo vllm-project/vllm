@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layout dispatch tests for ``QwenGatedDeltaNetAttention._forward_core_rocm``.
+"""Layout dispatch tests for `QwenGatedDeltaNetAttention._forward_core_rocm`.
 
-The AITER fused reshape+conv kernel learned Qwen3.5's flat ``[q|k|v|z]``
+The AITER fused reshape+conv kernel learned Qwen3.5's flat `[q|k|v|z]`
 packing in https://github.com/ROCm/aiter/pull/3251, so flat-layout models take
 the decode fast path too instead of falling back to the generic path.
 
 The dispatch tests run host-side with recording stubs. The prefill numerical
 tests exercise the production ChunkGatedDeltaRule wrapper on ROCm against a
 token-wise Torch reference, including ragged state and output-buffer layouts.
+The backend selection tests mock the device and op to check when the HIP
+prefill backend is chosen.
 """
 
 from __future__ import annotations
 
 import types
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -57,7 +60,7 @@ def _make_metadata(
 
 
 def _make_layer(gqa_interleaved_layout: bool):
-    """Stub layer running the real ``_forward_core_rocm``, recording dispatch."""
+    """Stub layer running the real `_forward_core_rocm`, recording dispatch."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.gqa_interleaved_layout = gqa_interleaved_layout
@@ -101,7 +104,7 @@ def test_pure_decode_takes_the_fast_path(gqa_interleaved_layout: bool) -> None:
 
 @pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
 def test_layout_string_matches_the_packing(gqa_interleaved_layout: bool) -> None:
-    """The value handed to the kernel's ``qkvz_layout`` parameter."""
+    """The value handed to the kernel's `qkvz_layout` parameter."""
     layer = _make_layer(gqa_interleaved_layout)
     expected = "interleaved" if gqa_interleaved_layout else "flat"
     assert layer.qkvz_layout == expected
@@ -122,6 +125,15 @@ def test_non_pure_decode_batches_use_the_generic_path(
 ) -> None:
     layer = _make_layer(gqa_interleaved_layout)
     assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
+
+
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_ds_conv_state_uses_the_generic_path(gqa_interleaved_layout: bool) -> None:
+    layer = _make_layer(gqa_interleaved_layout)
+    with patch.object(
+        qwen_gdn_linear_attn, "is_conv_state_dim_first", return_value=True
+    ):
+        assert _run(layer, _make_metadata()) == "generic"
 
 
 def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
@@ -159,11 +171,15 @@ def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
     [(torch.bfloat16, False), (torch.float32, False), (torch.float32, True)],
     ids=["ragged-bf16-state", "ragged-fp32-state", "correlated-keys"],
 )
+@pytest.mark.parametrize("backend", ["triton", "hip"])
 @torch.inference_mode()
-def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
+def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated, backend):
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
         ChunkGatedDeltaRule,
+    )
+    from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
+        is_hip_gdn_available,
     )
     from vllm.third_party.flash_linear_attention.ops.index import (
         prepare_chunk_indices,
@@ -172,6 +188,8 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
 
     if not torch.cuda.is_available():
         pytest.skip("ROCm prefill numerics require a GPU")
+    if backend == "hip" and not is_hip_gdn_available():
+        pytest.skip("The HIP GDN prefill kernel requires RDNA3.5")
     # Only the config is needed for production backend selection; no weights.
     config = VllmConfig(
         model_config=ModelConfig(
@@ -179,13 +197,16 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
             revision="2fc06364715b967f1860aea9cf38778875588b17",
             max_model_len=1024,
         ),
-        # auto picks AITER FlyDSL on gfx942/gfx950; this pins the Triton path.
-        additional_config={"gdn_prefill_backend": "triton"},
+        # auto picks AITER FlyDSL on gfx942/gfx950; this pins the path.
+        additional_config={"gdn_prefill_backend": backend},
     )
     with set_current_vllm_config(config):
         prefill = ChunkGatedDeltaRule()
-    assert prefill.gdn_prefill_backend == "triton"
-    assert prefill._forward_method == prefill.forward_native
+    assert prefill.gdn_prefill_backend == backend
+    expected_forward = (
+        prefill.forward_hip if backend == "hip" else prefill.forward_native
+    )
+    assert prefill._forward_method == expected_forward
 
     torch.manual_seed(1234)
     lengths = [64] if correlated else [1, 63, 64, 65, 129]
@@ -251,3 +272,73 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
     no_buffer_output, no_buffer_state = prefill(**kwargs)
     torch.testing.assert_close(no_buffer_output, output, atol=0, rtol=0)
     torch.testing.assert_close(no_buffer_state, final_state, atol=0, rtol=0)
+
+
+def _make_backend_config(
+    backend: str | None,
+    *,
+    head_k_dim: int = 128,
+    head_v_dim: int = 128,
+    dtype: torch.dtype = torch.bfloat16,
+):
+    return SimpleNamespace(
+        additional_config={} if backend is None else {"gdn_prefill_backend": backend},
+        model_config=SimpleNamespace(
+            dtype=dtype,
+            hf_text_config=SimpleNamespace(
+                linear_key_head_dim=head_k_dim,
+                linear_value_head_dim=head_v_dim,
+            ),
+        ),
+    )
+
+
+def _resolve_prefill_backend(config, *, gfx1151: bool = True, available: bool = True):
+    # Imported here: vllm.platforms.rocm resolves the GPU arch on import.
+    import vllm.platforms.rocm as rocm_platform
+
+    with (
+        patch.object(rocm_platform, "on_mi3xx", return_value=False),
+        patch.object(rocm_platform, "on_gfx1151", return_value=gfx1151),
+        patch.object(
+            qwen_gdn_linear_attn, "is_hip_gdn_available", return_value=available
+        ),
+    ):
+        return qwen_gdn_linear_attn._resolve_gdn_prefill_backend(config)[1]
+
+
+@pytest.mark.parametrize("backend", [None, "auto", "hip"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_hip_prefill_backend_selected_on_gfx1151(backend, dtype):
+    config = _make_backend_config(backend, dtype=dtype)
+    assert _resolve_prefill_backend(config) == "hip"
+
+
+def test_auto_prefill_backend_stays_on_triton_off_gfx1151():
+    """Auto is limited to gfx1151, the only RDNA3.5 part run on hardware."""
+    assert _resolve_prefill_backend(_make_backend_config("auto"), gfx1151=False) == (
+        "triton"
+    )
+    assert _resolve_prefill_backend(_make_backend_config("hip"), gfx1151=False) == (
+        "hip"
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"head_k_dim": 64}, {"head_v_dim": 64}, {"dtype": torch.float32}],
+)
+@pytest.mark.parametrize("backend", ["auto", "hip"])
+def test_hip_prefill_backend_unsupported_model_uses_triton(backend, overrides):
+    config = _make_backend_config(backend, **overrides)
+    assert _resolve_prefill_backend(config) == "triton"
+
+
+def test_hip_prefill_backend_without_kernel():
+    """Auto falls back to Triton; an explicit request fails closed."""
+    assert (
+        _resolve_prefill_backend(_make_backend_config("auto"), available=False)
+        == "triton"
+    )
+    with pytest.raises(RuntimeError, match="'hip'"):
+        _resolve_prefill_backend(_make_backend_config("hip"), available=False)

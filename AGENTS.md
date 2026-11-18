@@ -28,7 +28,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 - The submitting human must review every changed line and run relevant tests.
 - PR descriptions for AI-assisted work **must** include:
     - Why this is not duplicating an existing PR.
-    - Test commands run and results.
+    - Test commands run and results (for unit tests, reproducible pytest command and exact pytest summary line including time).
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
 - User-visible changes (features, CLI args, config fields, env vars, models,
@@ -124,6 +124,7 @@ pre-commit run ruff-check --all-files
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
 
 Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
+Docstrings render as Markdown: write code in single backticks, not double backticks or Sphinx roles like `:class:`, and wrap shapes and indexing like `[block][2][16]` in backticks so mkdocs does not read them as cross-references (the `check-docstring-style` hook enforces this).
 
 ### Coding style guidelines
 
@@ -161,3 +162,4 @@ vulnerability process.
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
 - **Rust frontend (`rust/`)**: [`rust/AGENTS.md`](rust/AGENTS.md)
   — Crate ownership, design principles, Python parity, and testing conventions.
+- **C++/CUDA kernels (`csrc/`)**: [`csrc/AGENTS.md`](csrc/AGENTS.md)

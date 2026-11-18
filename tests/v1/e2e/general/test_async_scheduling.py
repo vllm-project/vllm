@@ -196,6 +196,56 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     run_tests(monkeypatch, MODEL, test_configs, [{}])
 
 
+@single_gpu_only
+def test_async_spec_decode_structured_output(vllm_runner):
+    """Test async scheduling with speculative decoding and structured output.
+    Exercises both when a structured output request has sampling deferred and not.
+    """
+    with vllm_runner(
+        MODEL,
+        max_model_len=20,
+        max_num_seqs=1,
+        async_scheduling=True,
+        enforce_eager=True,
+        disable_log_stats=False,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_max": 1,
+            "prompt_lookup_min": 1,
+            "num_speculative_tokens": 7,
+        },
+    ) as runner:
+        assert runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        # After prefill, batch A proposes `a a a a a a a`.
+        # Batch B accepts `a a a a b` and proposes `c d`.
+        # Batch C is empty due to max_model_len.
+        # Batch D accepts `c e`.
+        prompt = "a a a a a a a a b c d"
+        constrained_output = "a a a a a b c e"
+        prompt_token_ids = runner.llm.get_tokenizer().encode(
+            prompt, add_special_tokens=False
+        )
+        assert len(prompt_token_ids) == 11
+        metrics_before = runner.llm.get_metrics()
+        outputs = runner.llm.generate(
+            runner.get_inputs([prompt_token_ids]),
+            SamplingParams(
+                temperature=0,
+                structured_outputs=StructuredOutputsParams(regex=constrained_output),
+            ),
+            use_tqdm=False,
+        )
+        metrics_after = runner.llm.get_metrics()
+
+    assert len(outputs) == 1
+    assert outputs[0].finished
+    assert outputs[0].outputs
+    assert outputs[0].outputs[0].finish_reason == "stop"
+    assert outputs[0].outputs[0].text == constrained_output
+    assert _get_count(metrics_before, metrics_after, "vllm:spec_decode_num_drafts") > 0
+
+
 @dynamo_config.patch(cache_size_limit=16)
 def run_tests(
     monkeypatch: pytest.MonkeyPatch,
@@ -241,15 +291,15 @@ def run_tests(
     print(f"BASELINE: config=[{baseline_config}], accept_rates={baseline_acceptances}")
 
     failure = None
-    for test_config, test_outputs, test_acceptance_rates in outputs[1:]:
-        for (base_outs, base_logprobs), base_acceptance_rate, (
+    for test_config, test_outputs, test_acceptance_lengths in outputs[1:]:
+        for (base_outs, base_logprobs), base_acceptance_length, (
             test_outs,
             test_logprobs,
-        ), test_acceptance_rate, params in zip(
+        ), test_acceptance_length, params in zip(
             baseline_tests,
             baseline_acceptances or repeat(None),
             test_outputs,
-            test_acceptance_rates or repeat(None),
+            test_acceptance_lengths or repeat(None),
             test_sampling_params,
         ):
             reason = None
@@ -272,8 +322,8 @@ def run_tests(
             if reason is None:
                 try:
                     if (
-                        base_acceptance_rate is not None
-                        and test_acceptance_rate is not None
+                        base_acceptance_length is not None
+                        and test_acceptance_length is not None
                     ):
                         if "spec_mml=None" in test_config:
                             # Preemption causes more variance in acceptance rates
@@ -285,14 +335,14 @@ def run_tests(
                             else:
                                 tolerance = 0.05
                             assert (
-                                test_acceptance_rate > base_acceptance_rate
-                                or test_acceptance_rate
-                                == pytest.approx(base_acceptance_rate, rel=tolerance)
+                                test_acceptance_length > base_acceptance_length
+                                or test_acceptance_length
+                                == pytest.approx(base_acceptance_length, rel=tolerance)
                             )
                         else:
                             # Currently the reported acceptance rate is expected to be
                             # lower when we sometimes skip drafting altogether.
-                            assert test_acceptance_rate > 0.1
+                            assert test_acceptance_length > 1.1
                 except AssertionError as e:
                     reason = "accept  ", e
 
@@ -300,14 +350,14 @@ def run_tests(
                 print(
                     f"\033[32mPASSED\033[0m:           "
                     f"config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
+                    f" accept_rate={test_acceptance_length}"
                 )
             else:
                 reason_str, _ = reason
                 print(
                     f"\033[31mFAILED\033[0m({reason_str}): "
                     f"config=[{test_config}], params={params}"
-                    f" accept_rate={test_acceptance_rate}"
+                    f" accept_rate={test_acceptance_length}"
                 )
                 if failure is None:
                     _, failure = reason
@@ -366,7 +416,7 @@ def run_test(
         **cache_arg,
     ) as vllm_model:
         results = []
-        acceptance_rates: list[float] | None = [] if spec_decoding else None
+        acceptance_lengths: list[float] | None = [] if spec_decoding else None
         for override_params in sampling_param_tests:
             metrics_before = vllm_model.llm.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
@@ -378,10 +428,13 @@ def run_test(
                 )
             )
             metrics_after = vllm_model.llm.get_metrics()
-            if acceptance_rates is not None:
-                acceptance_rate = _get_acceptance_rate(metrics_before, metrics_after)
-                acceptance_rates.append(acceptance_rate)
-                print(f"ACCEPTANCE RATE {acceptance_rate}")
+            if acceptance_lengths is not None:
+                acceptance_length = _get_acceptance_length(
+                    metrics_before, metrics_after
+                )
+                _check_draft_counts(metrics_before, metrics_after)
+                acceptance_lengths.append(acceptance_length)
+                print(f"ACCEPTANCE RATE {acceptance_length}")
 
             if test_preemption:
                 preemptions = _get_count(
@@ -404,7 +457,7 @@ def run_test(
                 )
                 assert _all_logprobs_match(results[0][1], other_test_logprobs)
 
-    return test_config, results, acceptance_rates
+    return test_config, results, acceptance_lengths
 
 
 def _all_logprobs_match(req_a, req_b) -> bool:
@@ -438,10 +491,17 @@ def _logprobs_match(
     )
 
 
-def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
-    draft = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+def _get_acceptance_length(before: list[Metric], after: list[Metric]) -> float:
+    draft = _get_count(before, after, "vllm:spec_decode_num_drafts")
     accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
-    return accept / draft if draft > 0 else 0.0
+    return 1 + accept / draft if draft > 0 else 1.0
+
+
+def _check_draft_counts(before: list[Metric], after: list[Metric]) -> None:
+    drafted = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+    verified = _get_count(before, after, "vllm:spec_decode_num_verified_tokens")
+    accepted = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
+    assert drafted >= verified >= accepted, (drafted, verified, accepted)
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:

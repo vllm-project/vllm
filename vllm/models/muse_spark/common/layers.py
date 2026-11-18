@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Platform-neutral Common MuseSpark1x layers and residual connections."""
+"""Platform-neutral Muse Spark building blocks shared by the NVIDIA and AMD stacks."""
 
 import math
 from collections.abc import Iterable
@@ -13,6 +13,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import fused_rmsnorm_fwd
 
 
@@ -41,10 +42,10 @@ def calculate_gain_center(
     raise ValueError(f"Unsupported gain_center_type: {gain_center_type}")
 
 
-class MuseSpark1xRMSNorm(nn.Module):
-    """RMSNorm in fp32, rounded once at the store to ``out_dtype``.
+class MuseSparkRMSNorm(nn.Module):
+    """RMSNorm in fp32, rounded once at the store to `out_dtype`.
 
-    Deliberately not ``F.rms_norm``: that path can flip greedy token selection.
+    Deliberately not `F.rms_norm`: that path can flip greedy token selection.
     """
 
     # Which side of the normalization the weight lands on; read by fused kernels.
@@ -88,7 +89,7 @@ class MuseSpark1xRMSNorm(nn.Module):
 
     @property
     def fused_gain_center(self) -> float:
-        """``gain_center`` as the fused kernels take it: 0.0 when unused."""
+        """`gain_center` as the fused kernels take it: 0.0 when unused."""
         return self.gain_center if self.has_weight and self.zero_centered_gamma else 0.0
 
     def forward_native(
@@ -155,7 +156,7 @@ class MuseSpark1xRMSNorm(nn.Module):
         return self.forward_native(x, residual, out_dtype)
 
     def supports_fused_kernel(self, x: torch.Tensor) -> bool:
-        """Whether the Triton kernel can serve this norm for input ``x``."""
+        """Whether the Triton kernel can serve this norm for input `x`."""
         return (
             self.variance_size_override is None
             and x.is_contiguous()
@@ -163,8 +164,8 @@ class MuseSpark1xRMSNorm(nn.Module):
         )
 
 
-class MuseSpark1xRMSNormWithInputScale(MuseSpark1xRMSNorm):
-    """Weight-first RMSNorm variant: ``rms_norm(x * weight)``."""
+class MuseSparkRMSNormWithInputScale(MuseSparkRMSNorm):
+    """Weight-first RMSNorm variant: `rms_norm(x * weight)`."""
 
     applies_weight_before_norm = True
 
@@ -195,7 +196,7 @@ class MuseSpark1xRMSNormWithInputScale(MuseSpark1xRMSNorm):
 
 
 class MulTanhSoftCap(nn.Module):
-    """Computes ``soft_cap_temp * tanh(x * multiplier / soft_cap_temp)`` in fp32."""
+    """Computes `soft_cap_temp * tanh(x * multiplier / soft_cap_temp)` in fp32."""
 
     def __init__(self, multiplier: float, soft_cap_temp: float) -> None:
         super().__init__()
@@ -214,17 +215,17 @@ class MulTanhSoftCap(nn.Module):
         return self.soft_cap_temp * torch.tanh(x / self.soft_cap_temp)
 
 
-class MuseSpark1xResidualConnection(nn.Module):
-    """Vanilla residual sum: ``stream + branch``."""
+class MuseSparkResidualConnection(nn.Module):
+    """Vanilla residual sum: `stream + branch`."""
 
     def forward(self, stream: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:
         return stream + branch.to(stream.dtype)
 
 
-class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection):
-    """Gated residual sum with norm-preserving weights: ``alpha*a + beta*b``.
+class MuseSparkNormPreservingResidualConnection(MuseSparkResidualConnection):
+    """Gated residual sum with norm-preserving weights: `alpha*a + beta*b`.
 
-    With ``a`` the stream and ``b`` the branch, and gate parameter ``w``:
+    With `a` the stream and `b` the branch, and gate parameter `w`:
 
         beta = sigmoid(w / temperature)
         alpha = sqrt(max(eps, sigmoid(-w) * (1 + beta)))   # = sqrt(1 - beta^2)
@@ -263,12 +264,12 @@ class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection)
         return alpha, beta
 
     def materialize_coefficients(self) -> None:
-        """Cache alpha/beta as fp32 buffers. Call once, after weight loading."""
+        """Cache alpha/beta as fp32 tensors, refilled in place on reload."""
         w = self.gate.detach().float() / self.temperature
         alpha, beta = self.coefficients(w)
-        self.register_buffer("beta", beta.contiguous(), persistent=False)
+        refill_derived(self, "beta", beta.contiguous())
         if isinstance(alpha, torch.Tensor):
-            self.register_buffer("alpha", alpha.contiguous(), persistent=False)
+            refill_derived(self, "alpha", alpha.contiguous())
         else:
             self.alpha = alpha
         self._coefficients_ready = True
@@ -287,21 +288,21 @@ class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection)
 
 
 @dataclass(slots=True)
-class MuseSpark1xResidualStream:
+class MuseSparkResidualStream:
     """A residual stream whose last blend is deferred to fuse with the next norm."""
 
     stream: torch.Tensor
     branch: torch.Tensor
-    post_norm: MuseSpark1xRMSNorm
-    connection: MuseSpark1xResidualConnection
+    post_norm: MuseSparkRMSNorm
+    connection: MuseSparkResidualConnection
 
 
-def norm_then_gated_residual(x: MuseSpark1xResidualStream) -> torch.Tensor:
-    """``alpha * stream + beta * norm(branch)``, in one kernel where possible."""
+def norm_then_gated_residual(x: MuseSparkResidualStream) -> torch.Tensor:
+    """`alpha * stream + beta * norm(branch)`, in one kernel where possible."""
     norm, connection = x.post_norm, x.connection
     branch, stream = x.branch, x.stream
     if (
-        isinstance(connection, MuseSpark1xNormPreservingResidualConnection)
+        isinstance(connection, MuseSparkNormPreservingResidualConnection)
         and getattr(connection, "_coefficients_ready", False)
         and branch.is_cuda
         and stream.shape == branch.shape
@@ -326,7 +327,7 @@ def materialize_residual_path_constants(model: nn.Module) -> int:
     """Precompute parameter-only constants after weight loading; idempotent."""
     n_gates = 0
     for module in model.modules():
-        if isinstance(module, MuseSpark1xNormPreservingResidualConnection):
+        if isinstance(module, MuseSparkNormPreservingResidualConnection):
             module.materialize_coefficients()
             n_gates += 1
         else:
@@ -336,7 +337,7 @@ def materialize_residual_path_constants(model: nn.Module) -> int:
     return n_gates
 
 
-class MuseSpark1xQKVOGateParallelLinear(ColumnParallelLinear):
+class MuseSparkQKVOGateParallelLinear(ColumnParallelLinear):
     """Fused [Q, K, V, O-gate] projection with head-aware TP sharding.
 
     Per-rank rows are [q, k, v, o_gate], so checkpoint tensors are sliced by
@@ -418,12 +419,12 @@ class MuseSpark1xQKVOGateParallelLinear(ColumnParallelLinear):
 
 __all__ = [
     "MulTanhSoftCap",
-    "MuseSpark1xNormPreservingResidualConnection",
-    "MuseSpark1xQKVOGateParallelLinear",
-    "MuseSpark1xRMSNorm",
-    "MuseSpark1xRMSNormWithInputScale",
-    "MuseSpark1xResidualConnection",
-    "MuseSpark1xResidualStream",
+    "MuseSparkNormPreservingResidualConnection",
+    "MuseSparkQKVOGateParallelLinear",
+    "MuseSparkRMSNorm",
+    "MuseSparkRMSNormWithInputScale",
+    "MuseSparkResidualConnection",
+    "MuseSparkResidualStream",
     "calculate_gain_center",
     "materialize_residual_path_constants",
     "norm_then_gated_residual",

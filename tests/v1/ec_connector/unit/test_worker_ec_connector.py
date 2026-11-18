@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the V2 GPU model runner's EC connector wrapper."""
+"""Unit tests for the GPU model runner's EC connector wrapper."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,9 +12,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.worker.ec_connector_model_runner_mixin import (
-    ECConnectorModelRunnerMixin,
-)
 from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR, ActiveECConnector
 
 pytestmark = pytest.mark.cpu_test
@@ -84,26 +81,6 @@ def test_connector_stats_are_reported_on_context_exit():
         assert output.ec_connector_stats is None
 
     assert output.ec_connector_stats is CONNECTOR_STATS
-
-
-def test_v1_producer_receives_existing_encoder_cache():
-    encoder_cache = {"mm_cached": None}
-    fake = MagicMock(spec=ECConnectorBase)
-    fake.is_producer = True
-    fake.is_consumer = False
-    fake.get_finished.return_value = (None, None)
-
-    module = "vllm.v1.worker.ec_connector_model_runner_mixin"
-    with (
-        patch(f"{module}.has_ec_transfer", return_value=True),
-        patch(f"{module}.get_ec_transfer", return_value=fake),
-        ECConnectorModelRunnerMixin.maybe_get_ec_connector_output(
-            _scheduler_output(), encoder_cache
-        ),
-    ):
-        pass
-
-    assert fake.start_save_caches.call_args.kwargs["encoder_cache"] is encoder_cache
 
 
 def test_no_forward_reports_without_running_the_model():

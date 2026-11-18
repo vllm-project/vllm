@@ -63,8 +63,6 @@ variants:
         extra_args:
           - "--kv-cache-dtype"
           - "fp8"
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--load-format"
           - "fastsafetensors"
           - "--max-num-batched-tokens"
@@ -79,8 +77,6 @@ variants:
           - "--enable-prefix-caching"
           - "--max-num-batched-tokens"
           - "8192"
-          - "--gpu-memory-utilization"
-          - "0.95"
 
 compatible_strategies:
   - single_node_tp
@@ -240,9 +236,8 @@ guide: |
     `cf3eacfe58fa9e745c2854782ada884a9f992cf7`.
   - **Verified accuracy:** Use the pinned commit
     `0f3ce4c74b1875791d6604e006b6e905fde9f698` if reproducing MiniMax's reported results.
-  - **DeepGEMM:** vLLM uses DeepGEMM by default; install via
-    [install_deepgemm.sh](https://github.com/vllm-project/vllm/blob/main/tools/install_deepgemm.sh)
-    if missing.
+  - **DeepGEMM:** vLLM uses DeepGEMM by default; it is bundled in vLLM wheels
+    since v0.20.0, so no separate install is needed.
   - **AITER first launch:** Initial AMD launch JIT-compiles optimized kernels; subsequent launches reuse cached kernels.
 
   ## References
