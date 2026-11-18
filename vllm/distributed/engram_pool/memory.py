@@ -13,7 +13,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.host_memory import pin_tensor
+from vllm.utils.host_memory import exclude_from_core_dump, pin_tensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.numa_utils import get_libnuma
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -55,6 +55,7 @@ class SharedHost:
         self.fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
         os.ftruncate(self.fd, self.nbytes)
         mapping = mmap.mmap(self.fd, self.nbytes, flags=mmap.MAP_SHARED)
+        exclude_from_core_dump(mapping)
         owner = np.frombuffer(mapping, dtype=np.uint8)
         pointer = owner.ctypes.data
         device = torch.accelerator.current_device_index()
@@ -120,7 +121,8 @@ class CuMem:
         )
 
     def map(self, handle=None) -> int:
-        """Map `handle` (this allocation by default) read-write for this GPU."""
+        """Map `handle` read-write for this GPU; by default this allocation, at
+        `self.address`."""
         cu = self.cu
         address = int(self.call(cu.cuMemAddressReserve, self.size, 0, 0, 0))
         self.call(cu.cuMemMap, address, self.size, 0, handle or self.handle, 0)
@@ -129,6 +131,8 @@ class CuMem:
         access.location.id = torch.accelerator.current_device_index()
         access.flags = cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         self.call(cu.cuMemSetAccess, address, self.size, [access], 1)
+        if handle is None:
+            self.address = address
         return address
 
     def import_fabric(self, exported: bytes):
@@ -139,9 +143,8 @@ class CuMem:
         """Drop a handle once mapped: the mapping keeps the memory alive."""
         self.call(self.cu.cuMemRelease, handle)
 
-    def dmabuf_fd(self, address: int) -> int:
+    def dmabuf_fd(self) -> int:
         cu = self.cu
         kind = cu.CUmemRangeHandleType.CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD
-        return int(
-            self.call(cu.cuMemGetHandleForAddressRange, address, self.size, kind, 0)
-        )
+        handle = cu.cuMemGetHandleForAddressRange
+        return int(self.call(handle, self.address, self.size, kind, 0))

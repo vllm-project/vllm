@@ -13,7 +13,6 @@ prefetch only their own tokens without DP gathers.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -368,7 +367,7 @@ def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
 
 def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
     """A peer that never arrives fails startup with its rank, not a bare timeout."""
-    monkeypatch.setattr(PeerGroup, "TIMEOUT", timedelta(milliseconds=200))
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", "1")
     group = PeerGroup(2, str(tmp_path / "peers"))
     with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach startup step 1"):
         group.barrier()

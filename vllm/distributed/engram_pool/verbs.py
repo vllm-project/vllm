@@ -55,9 +55,8 @@ MLX5_OPCODE_RDMA_WRITE_IMM = 0x09
 MLX5_SEND_WQE_BB = 64
 MLX5DV_OBJ_QP = 1 << 0
 
-# Access of registered memory that only this NIC reads (shards, descriptors);
-# that peers write in any order (landing); that peers write in order and read
-# back (flags, mailboxes).
+# Memory only this NIC reads (shards, descriptors), peers write in any order
+# (landing), or peers write in order and read back (flags, mailboxes).
 NIC_READ = IBV_ACCESS_RELAXED_ORDERING
 PEER_WRITE = (
     IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING
@@ -419,25 +418,23 @@ class Device:
     def address(self) -> tuple[bytes, int]:
         return bytes(self.gid.raw), self.lid
 
-    def reg_host(
-        self, address: int, num_bytes: int, access: int
-    ) -> tuple[int, int, int]:
+    def reg_host(self, address: int, num_bytes: int, access: int) -> tuple[int, int]:
         """Register memory with `access` NIC_READ, PEER_WRITE or PEER_ORDERED;
-        returns its MR, lkey and rkey."""
+        returns its lkey and rkey."""
         mr = _check(
             _lib().ibv_reg_mr(self.pd, address, num_bytes, access),
             f"ibv_reg_mr({num_bytes} B)",
         ).contents
-        return ctypes.addressof(mr), mr.lkey, mr.rkey
+        return mr.lkey, mr.rkey
 
     def reg_dmabuf(
         self, fd: int, address: int, num_bytes: int, access: int
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int]:
         mr = _check(
             _lib().ibv_reg_dmabuf_mr(self.pd, 0, num_bytes, address, fd, access),
             f"ibv_reg_dmabuf_mr({num_bytes} B)",
         ).contents
-        return ctypes.addressof(mr), mr.lkey, mr.rkey
+        return mr.lkey, mr.rkey
 
     def create_cq(self, depth: int, wakeable: bool = False) -> tuple[int, int]:
         """A CQ, and if `wakeable` a completion channel (else 0) whose events

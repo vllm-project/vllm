@@ -17,7 +17,7 @@ directly; with `rdma`, the owners' NICs gather rows from host or HBM shards.
 import json
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cache, cached_property
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -28,6 +28,7 @@ from vllm.distributed.engram_pool.group import PeerGroup, join_peer_group
 from vllm.distributed.engram_pool.rows import landed_row
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.torch_utils import current_stream
 
 if TYPE_CHECKING:
     from vllm.distributed.engram_pool.nvlink import NvlinkTransport
@@ -62,7 +63,7 @@ class EngramTable:
     row_start: int
     shard: torch.Tensor
     _meta: torch.Tensor
-    _keep: list = field(default_factory=list)
+    _keep: list
     _loaded: bool = False
 
 
@@ -89,8 +90,9 @@ class EngramFetch:
 
     def wait(self, index: int) -> torch.Tensor:
         """Table `index`'s rows; the current stream waits for them."""
-        self.pool.transport.wait(self.state, index, self.rows[index])
-        return self.rows[index]
+        rows = self.rows[index]
+        self.pool.transport.wait(self.state, index, rows)
+        return rows
 
     def landed(self, index: int) -> Landed:
         """Table `index`'s rows where they land, for a kernel that reads them
@@ -133,12 +135,8 @@ class EngramPool:
         rdma_inflight: int = 8,
         fetch_mode: str = "sync",
     ) -> None:
-        if transport not in ("nvlink", "rdma"):
-            raise ValueError(f"Unknown Engram pool transport {transport!r}")
-        if host_shards and transport != "rdma":
-            raise ValueError("Host shards require the rdma transport")
-        self._check_same(group, ("pool", transport, host_shards))
         self.group, self.fetch_mode = group, fetch_mode
+        self._check_same(("pool", transport, host_shards))
         self.max_row_bytes = round_up(max_row_bytes, _ROW_ALIGN)
         self.max_items, self.max_tables = max_items, max_tables
         self.transport: NvlinkTransport | RdmaTransport
@@ -161,15 +159,15 @@ class EngramPool:
         self._buffer: torch.Tensor | None = None
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
-    @staticmethod
-    def _check_same(group: PeerGroup, identity: tuple) -> None:
+    def _check_same(self, identity: tuple) -> None:
         """Fail startup on every GPU unless all of them passed `identity`."""
         mine = json.dumps(identity)
-        everyone = [v.decode() for v in group.all_gather(mine.encode())]
+        everyone = [v.decode() for v in self.group.all_gather(mine.encode())]
+        rank = self.group.rank_in_group
         if differ := [r for r, theirs in enumerate(everyone) if theirs != mine]:
             raise RuntimeError(
-                f"Engram pool GPUs {differ} disagree with GPU "
-                f"{group.rank_in_group}: {[everyone[r] for r in differ]} vs {identity}"
+                f"Engram pool GPUs {differ} disagree with GPU {rank}: "
+                f"{[everyone[r] for r in differ]} vs {identity}"
             )
 
     def table(self, num_rows: int, row_bytes: int, name: str = "") -> EngramTable:
@@ -178,7 +176,7 @@ class EngramPool:
         row_stride = round_up(row_bytes, _ROW_ALIGN)
         if row_stride > self.max_row_bytes:
             raise ValueError(f"Rows of {row_bytes} bytes exceed the pool's rows")
-        self._check_same(self.group, ("table", name, num_rows, row_bytes))
+        self._check_same(("table", name, num_rows, row_bytes))
         rank, world = self.group.rank_in_group, self.group.world_size
         rows_per_shard = cdiv(num_rows, world)
         row_start = min(rank * rows_per_shard, num_rows)
@@ -235,6 +233,8 @@ class EngramPool:
             raise ValueError(
                 f"ids {tuple(ids.shape)} do not match {len(tables)} tables"
             )
+        if len(tables) > self.max_tables or ids.numel() > self.max_items * len(tables):
+            raise ValueError(f"Fetching {tuple(ids.shape)} exceeds the pool's capacity")
         meta = self._meta(tables)
         shape = (len(tables), *ids.shape[:-2], ids.shape[-1], tables[0].row_stride)
         fetch = EngramFetch(self, shape)
@@ -307,7 +307,7 @@ class EngramPrefetch:
     @eager_break_during_capture
     def _start_async(self, ids: torch.Tensor) -> None:
         stream = self._stream
-        stream.wait_stream(torch.cuda.current_stream())
+        stream.wait_stream(current_stream())
         ids.record_stream(stream)
         with torch.cuda.stream(stream):
             fetch = self.pool.start(self.tables, ids)
@@ -317,4 +317,4 @@ class EngramPrefetch:
 
     @eager_break_during_capture
     def _wait_async(self, index: int) -> None:
-        torch.cuda.current_stream().wait_event(self._done[index])
+        current_stream().wait_event(self._done[index])

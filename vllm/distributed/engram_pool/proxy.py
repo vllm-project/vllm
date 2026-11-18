@@ -114,9 +114,8 @@ class Owner:
         depth = min(sq_depth, dev.max_qp_wr)
         # Gathers complete here unseen until a send queue fills, so it holds
         # every send queue's WRs.
-        self.data_cq, self.data_channel = dev.create_cq(
-            min(dev.max_cqe, len(self.gatherers) * qps_per_peer * depth),
-            wakeable=True,
+        self.data_cq, _ = dev.create_cq(
+            min(dev.max_cqe, len(self.gatherers) * qps_per_peer * depth)
         )
         # Requests complete receives, which wake this process.
         self.recv_cq, self.recv_channel = dev.create_cq(
@@ -128,6 +127,7 @@ class Owner:
         self.qpns: list[list[int]] = [[] for _ in range(world)]
         notices: list[int] = [0] * world
         self.receivers: dict[int, tuple[int, int]] = {}
+        self.by_qpn: dict[int, int] = {}
         for peer in self.gatherers:
             made = [
                 dev.create_qp(self.data_cq, self.recv_cq, depth, sge_cap, 64)
@@ -135,6 +135,7 @@ class Owner:
             ]
             self.qps[peer] = [qp for qp, _ in made]
             self.qpns[peer] = [qpn for _, qpn in made]
+            self.by_qpn.update((qpn, qp) for qp, qpn in made)
             qp, notices[peer] = dev.create_qp(
                 self.data_cq, self.recv_cq, 1, 1, 0, RECV_DEPTH
             )
@@ -151,11 +152,6 @@ class Owner:
         self.large_total, self.max_large = 0, max_large or 1 << 30
         self.chains: dict[int, collections.deque] = {
             qp: collections.deque() for qp in self.room
-        }
-        self.by_qpn = {
-            qpn: qp
-            for peer in self.qps
-            for qp, qpn in zip(self.qps[peer], self.qpns[peer])
         }
         gid, lid = dev.address()
         return {
@@ -192,7 +188,7 @@ class Owner:
         boxes = mmap.mmap(-1, sum(box_sizes) * max_tables)
         self.keep.append(boxes)
         self.boxes = ctypes.addressof(ctypes.c_char.from_buffer(boxes))
-        _, lkey, rkey = dev.reg_host(self.boxes, len(boxes), verbs.PEER_ORDERED)
+        lkey, rkey = dev.reg_host(self.boxes, len(boxes), verbs.PEER_ORDERED)
         return [self.boxes, rkey, lkey]
 
     def map_peer(self, pid, fd, size):
@@ -203,7 +199,7 @@ class Owner:
         os.close(opened)
         self.keep.append(mapping)
         address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
-        return address, self.device.reg_host(address, size, verbs.NIC_READ)[1]
+        return address, self.device.reg_host(address, size, verbs.NIC_READ)[0]
 
     def register(self, kind, size, iova, access, fds):
         """Register host memory or HBM; returns its address, lkey and rkey."""
@@ -213,8 +209,8 @@ class Owner:
             os.close(fd)
             address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
             self.keep.append(mapping)
-            return address, *self.device.reg_host(address, size, access)[1:]
-        keys = self.device.reg_dmabuf(fd, iova, size, access)[1:]
+            return address, *self.device.reg_host(address, size, access)
+        keys = self.device.reg_dmabuf(fd, iova, size, access)
         os.close(fd)
         return iova, *keys
 
@@ -231,7 +227,7 @@ class Owner:
                 device.cq_event(self.recv_channel)
                 device.notify_cq(self.recv_cq)
                 continue
-            self.retire(block=False)
+            self.retire()
             _check(wc, count, "request")
             for c in wc[:count]:
                 peer, qp = self.receivers[c.qp_num]
@@ -244,14 +240,13 @@ class Owner:
             if not ready:
                 continue
             # Small requests first; large ones take turns.
-            request = next((r for r in ready if r.num_wrs <= SMALL_WRS), ready[0])
+            request = next((r for r in ready if not r.large), ready[0])
             for _ in range(CHAINS_PER_TURN):
-                qp, wrs = request.next_qp, request.next_wrs
                 if request.posted == request.chains or not self.fits(request):
                     break
+                qp, wrs, large = request.next_qp, request.next_wrs, request.large
                 device.post_send(qp, request.next_wr)
                 self.room[qp] -= wrs
-                large = request.num_wrs > SMALL_WRS
                 self.large[qp] += large
                 self.large_total += large
                 self.chains[qp].append((wrs, large))
@@ -266,32 +261,21 @@ class Owner:
         qp = request.next_qp
         if self.room[qp] < request.next_wrs:
             return False
-        return request.num_wrs <= SMALL_WRS or (
+        return not request.large or (
             not self.large[qp] and self.large_total < self.max_large
         )
 
-    def retire(self, block: bool) -> None:
-        """Reap completed chains, returning their send queue room; with
-        `block`, sleep until one completes."""
-        device, wc = self.device, self.data_wc
-        while True:
-            count = device.poll_cq(self.data_cq, wc, 64)
-            if not count and block:
-                device.notify_cq(self.data_cq)
-                if not (count := device.poll_cq(self.data_cq, wc, 64)):
-                    device.cq_event(self.data_channel)
-                    continue
-            if not count:
-                return
-            _check(wc, count, "gather")
+    def retire(self) -> None:
+        """Reap completed chains, returning their send queue room."""
+        while count := self.device.poll_cq(self.data_cq, self.data_wc, 64):
+            _check(self.data_wc, count, "gather")
             # A QP completes its chains in order; each ends in a signaled WR.
-            for c in wc[:count]:
+            for c in self.data_wc[:count]:
                 qp = self.by_qpn[c.qp_num]
                 wrs, large = self.chains[qp].popleft()
                 self.room[qp] += wrs
                 self.large[qp] -= large
                 self.large_total -= large
-            block = False
 
 
 class _Request:
@@ -300,6 +284,7 @@ class _Request:
 
     def __init__(self, qps: list[int], box: int, num_wrs: int) -> None:
         self.qps, self.box, self.num_wrs = qps, box, num_wrs
+        self.large = num_wrs > SMALL_WRS
         self.chain = chain_length(num_wrs, len(qps))
         self.chains = -(-num_wrs // self.chain)
         self.posted = 0

@@ -60,6 +60,7 @@ from vllm.distributed.engram_pool.rows import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
@@ -67,6 +68,7 @@ SQ_DEPTH = 1024
 # Requests in flight per QP to a gatherer: a fetch posts one per table.
 REQUEST_DEPTH = 64
 MIN_CHAIN: tl.constexpr = tl.constexpr(proxy.MIN_CHAIN)
+MAX_CHAIN: tl.constexpr = tl.constexpr(proxy.MAX_CHAIN)
 # A failed transfer or dead proxy must not hang the GPU forever.
 TIMEOUT_NS = 60 * 10**9
 
@@ -161,7 +163,7 @@ def _with_sge(value, word, at, addr, length, lkey):
 
 
 @triton.jit
-def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
+def _wr_layout(rows, ROWS_PER_WR, QPS):
     """Gathering WRs, WRs per chain and QPs used for `rows` rows of one
     gatherer, chained as `proxy.chain_length` says."""
     num_wrs = tl.cdiv(rows, ROWS_PER_WR)
@@ -169,7 +171,7 @@ def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
     return num_wrs, chain, tl.minimum(tl.cdiv(num_wrs, chain), QPS)
 
 
-@triton.jit(do_not_specialize=["num_items", "num_vg"])
+@triton.jit(do_not_specialize=["num_items"])
 def _plan_kernel(
     ids,
     meta,
@@ -179,7 +181,6 @@ def _plan_kernel(
     keys,
     num_items,
     world,
-    num_vg,
     ticket,
     starts,
     wr_starts,
@@ -190,7 +191,6 @@ def _plan_kernel(
     WORDS: tl.constexpr,
     ROWS_PER_WR: tl.constexpr,
     QPS: tl.constexpr,
-    MAX_CHAIN: tl.constexpr,
     VG_P2: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -222,9 +222,9 @@ def _plan_kernel(
     tl.store(keys + item, lkey, mask=live)
     tl.debug_barrier()
     if _last_program(ticket):
-        in_vg = peers < num_vg
+        in_vg = peers < world * TABLES
         group_rows = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
-        group_wrs, _, group_qps = _wr_layout(group_rows, ROWS_PER_WR, QPS, MAX_CHAIN)
+        group_wrs, _, group_qps = _wr_layout(group_rows, ROWS_PER_WR, QPS)
         all_wrs = group_wrs + 2 * group_qps
         tl.store(starts + peers, tl.cumsum(group_rows, 0) - group_rows, mask=in_vg)
         tl.store(wr_starts + peers, tl.cumsum(all_wrs, 0) - all_wrs, mask=in_vg)
@@ -235,13 +235,11 @@ def _plan_kernel(
 @triton.jit(
     do_not_specialize=[
         "num_items",
-        "num_vg",
         "rank",
         "landing",
         "landing_rkey",
         "flags",
         "flags_rkey",
-        "desc_at",
         "desc_lkey",
     ]
 )
@@ -260,7 +258,6 @@ def _wr_kernel(
     flags_rkey,
     num_items,
     world,
-    num_vg,
     rank,
     ticket,
     starts,
@@ -268,7 +265,6 @@ def _wr_kernel(
     wr_counts,
     used,
     box_rkeys,
-    desc_at,
     desc_lkey,
     queues,
     slots,
@@ -276,7 +272,6 @@ def _wr_kernel(
     MAX_WRS: tl.constexpr,
     ROWS_PER_WR: tl.constexpr,
     QPS: tl.constexpr,
-    MAX_CHAIN: tl.constexpr,
     VG_P2: tl.constexpr,
     WORDS: tl.constexpr,
     TABLES: tl.constexpr,
@@ -294,7 +289,7 @@ def _wr_kernel(
     start = tl.load(starts + owner, mask=remote, other=0)
     wr_start = tl.load(wr_starts + owner, mask=remote, other=0)
     size = tl.load(counts + owner, mask=remote, other=0).to(tl.int64)
-    num_wrs, chain, num_qps = _wr_layout(size, ROWS_PER_WR, QPS, MAX_CHAIN)
+    num_wrs, chain, num_qps = _wr_layout(size, ROWS_PER_WR, QPS)
     box = tl.load(boxes + owner % world, mask=remote, other=0)
     box += owner // world * BOX_BYTES
     slot = start + position
@@ -352,7 +347,7 @@ def _wr_kernel(
     _fence_sys()
     tl.debug_barrier()
     if _last_program(ticket):
-        in_vg = peers < num_vg
+        in_vg = peers < world * TABLES
         sizes = tl.load(counts + peers, mask=in_vg, other=0).to(tl.int64)
         all_wrs = tl.load(wr_counts + peers, mask=in_vg, other=0)
         tl.debug_barrier()
@@ -371,7 +366,7 @@ def _wr_kernel(
                 world,
                 boxes,
                 box_rkeys,
-                desc_at,
+                desc.to(tl.int64),
                 desc_lkey,
                 queues,
                 BOX_BYTES,
@@ -533,8 +528,8 @@ class RdmaTransport:
         host_shards: bool,
         max_items: int,
         max_row_bytes: int,
-        max_tables: int = 1,
-        max_large_chains: int = 8,
+        max_tables: int,
+        rdma_inflight: int,
     ) -> None:
         self.group, self.host_shards = group, host_shards
         self.rank, self.world = group.rank_in_group, group.world_size
@@ -574,7 +569,7 @@ class RdmaTransport:
             self.rank,
             self.qps_per_peer,
             SQ_DEPTH,
-            max_large_chains,
+            rdma_inflight,
         )
         # This GPU posts its requests itself, on one QP per gatherer.
         self.verbs = verbs.Device(device)
@@ -588,27 +583,21 @@ class RdmaTransport:
             info["device"],
             self.qps_per_peer,
         )
+        requests = [qpn for _, qpn in made]
         everyone = self._all_gather(
-            [
-                info["address"],
-                info["qpns"],
-                info["max_sge"],
-                info["mtu"],
-                info["notices"],
-                [qpn for _, qpn in made],
-                max_items,
-            ]
+            {**info, "requests": requests, "max_items": max_items}
         )
         # Every owner posts our WRs, so they fit every NIC and path.
-        self.max_sge = min(e[2] for e in everyone)
-        self.mtu = min(e[3] for e in everyone)
+        self.max_sge = min(e["max_sge"] for e in everyone)
+        self.mtu = min(e["mtu"] for e in everyone)
         # Per (table, gatherer): a partial WR, and a READ and a flag WR per QP.
         rows_per_wr = self.rows_per_wr(max_row_bytes)
         # Owners keep a mailbox per requester and table, sized for that
         # requester's fetches (engines may batch differently, as P and D do).
         box_sizes = [
             proxy.mailbox_bytes(
-                triton.cdiv(e[6], rows_per_wr) + 1 + 2 * self.qps_per_peer, e[6]
+                triton.cdiv(e["max_items"], rows_per_wr) + 1 + 2 * self.qps_per_peer,
+                e["max_items"],
             )
             for e in everyone
         ]
@@ -619,16 +608,20 @@ class RdmaTransport:
         mailboxes = self._call(
             "connect",
             [
-                [peer, e[0], e[1][self.rank]]
+                [peer, e["address"], e["qpns"][self.rank]]
                 for peer, e in enumerate(everyone)
                 if peer != self.rank
             ],
-            [[peer, e[0], e[5][self.rank]] for peer, e in enumerate(everyone)],
+            [
+                [peer, e["address"], e["requests"][self.rank]]
+                for peer, e in enumerate(everyone)
+            ],
             box_sizes,
             max_tables,
         )
         for (qp, _), e in zip(made, everyone):
-            self.verbs.connect(qp, e[4][self.rank], (bytes.fromhex(e[0][0]), e[0][1]))
+            gid, lid = e["address"]
+            self.verbs.connect(qp, e["notices"][self.rank], (bytes.fromhex(gid), lid))
         peers = {qpn: peer for peer, (_, qpn) in enumerate(made)}
         threading.Thread(
             target=self._watch, args=(cq, channel, peers), daemon=True
@@ -643,13 +636,12 @@ class RdmaTransport:
         # NIC's writes there in order without a flush; else in host memory.
         landing_bytes = total * max_row_bytes
         flags_bytes = 8 * groups * self.qps_per_peer
-        landing: SharedHost | tuple[CuMem, int]
-        flags: SharedHost | tuple[CuMem, int]
+        landing: SharedHost | CuMem
+        flags: SharedHost | CuMem
         if ordering >= 100:  # CU_GPU_DIRECT_RDMA_WRITES_ORDERING_OWNER
-            hbm = [CuMem(n, rdma=True) for n in (landing_bytes, flags_bytes)]
-            landing, flags = [(memory, memory.map()) for memory in hbm]
-            self.landing = device_view(landing[1], landing_bytes, hbm[0])
-            self.flags = device_view(flags[1], flags_bytes, hbm[1])
+            landing, flags = (CuMem(n, rdma=True) for n in (landing_bytes, flags_bytes))
+            self.landing = device_view(landing.map(), landing_bytes, landing)
+            self.flags = device_view(flags.map(), flags_bytes, flags)
         else:
             landing = SharedHost(landing_bytes, "landing")
             flags = SharedHost(flags_bytes, "flags")
@@ -662,29 +654,23 @@ class RdmaTransport:
         self.flags_at, _, self.flags_rkey = self._register(flags, verbs.PEER_ORDERED)
         self.host_landing = isinstance(landing, SharedHost)
         self._keep = [landing, flags]
-        boxes = self._all_gather(mailboxes)
+        boxes, rkeys, lkeys = zip(*self._all_gather(mailboxes))
         # This GPU's first mailbox at each owner, in that owner proxy's
         # addresses; one follows per table.
         self.box_bytes = box_sizes[self.rank]
         mine = sum(box_sizes[: self.rank]) * max_tables
         self.boxes = torch.tensor(
-            [box + mine for box, _, _ in boxes],
-            dtype=torch.int64,
-            device=gpu,
+            [box + mine for box in boxes], dtype=torch.int64, device=gpu
         )
-        self.box_keys = torch.tensor(
-            [lkey for _, _, lkey in boxes], dtype=torch.int32, device=gpu
-        )
-        self.box_rkeys = torch.tensor(
-            [rkey for _, rkey, _ in boxes], dtype=torch.int32, device=gpu
-        )
-        desc_bytes = self.max_wrs * proxy.WR_BYTES + total * proxy.SGE_BYTES
+        self.box_keys = torch.tensor(lkeys, dtype=torch.int32, device=gpu)
+        self.box_rkeys = torch.tensor(rkeys, dtype=torch.int32, device=gpu)
+        desc_bytes = proxy.mailbox_bytes(self.max_wrs, total)
         memory = CuMem(desc_bytes, rdma=True)
-        address = memory.map()
-        self.desc = device_view(address, desc_bytes, memory).view(torch.int64)
-        fd = memory.dmabuf_fd(address)
-        _, self.desc_lkey, _ = self.verbs.reg_dmabuf(
-            fd, address, desc_bytes, verbs.NIC_READ
+        memory.map()
+        self.desc = device_view(memory.address, desc_bytes, memory).view(torch.int64)
+        fd = memory.dmabuf_fd()
+        self.desc_lkey, _ = self.verbs.reg_dmabuf(
+            fd, memory.address, desc_bytes, verbs.NIC_READ
         )
         os.close(fd)
         self.queues = torch.tensor(
@@ -699,7 +685,6 @@ class RdmaTransport:
         self.wr_starts = torch.zeros(groups, dtype=torch.int64, device=gpu)
         self.wr_counts = torch.zeros(groups, dtype=torch.int64, device=gpu)
         self.ticket = torch.zeros(1, dtype=torch.int32, device=gpu)
-        self.desc_at = self.desc.data_ptr()
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
         # Each table's last landed seq, and `wait_landed`'s view of a fetch.
         self.landed_seq = torch.full((max_tables,), -1, dtype=torch.int64, device=gpu)
@@ -792,31 +777,27 @@ class RdmaTransport:
             raise RuntimeError(f"Engram pool RDMA proxy {command} failed:\n{result}")
         return result
 
-    def _register(
-        self, memory: SharedHost | tuple[CuMem, int], access: int
-    ) -> list[int]:
+    def _register(self, memory: SharedHost | CuMem, access: int) -> list[int]:
         """Register host memory or HBM with the owner proxy; returns its address
         for the NIC, lkey and rkey."""
         if isinstance(memory, SharedHost):
             fd = os.dup(memory.fd)
             args = ["host", memory.nbytes, 0, access]
         else:
-            cumem, address = memory
-            fd = cumem.dmabuf_fd(address)
-            args = ["dmabuf", cumem.size, address, access]
+            fd = memory.dmabuf_fd()
+            args = ["dmabuf", memory.size, memory.address, access]
         return self._call("register", *args, fds=[fd])
 
     def shard(self, num_bytes: int, name: str) -> tuple[torch.Tensor, list, list]:
         """Allocate and register this GPU's shard; returns it (host memory for
         host shards), its `meta` arrays and what keeps them alive. Collective."""
-        registered: SharedHost | tuple[CuMem, int]
+        registered: SharedHost | CuMem
         if self.host_shards:
             registered = host = SharedHost(num_bytes, f"table_{name}")
             local, keep = host.cpu, [host]
         else:
-            cumem = CuMem(num_bytes, rdma=True)
-            registered = (cumem, cumem.map())
-            local, keep = device_view(registered[1], num_bytes, cumem), []
+            registered = cumem = CuMem(num_bytes, rdma=True)
+            local, keep = device_view(cumem.map(), num_bytes, cumem), []
         # No SM reads a shard: this GPU's NIC gathers its own and its node's
         # host shards (over loopback); owners gather everything else.
         address, lkey, _ = self._register(registered, verbs.NIC_READ)
@@ -849,25 +830,25 @@ class RdmaTransport:
         ]
         return local, [array.data_ptr() for array in arrays], keep + arrays
 
-    def start(self, meta: torch.Tensor, ids: torch.Tensor, fetch) -> list:
+    def start(
+        self, meta: torch.Tensor, ids: torch.Tensor, fetch
+    ) -> torch.Tensor | None:
         """Start gathering rows `ids` (`[..., TABLES, K]`) of the tables in `meta`
         on the current stream; the NICs move them while the stream goes on."""
         n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
-        if n > self.max_items * self.max_tables or tables > self.max_tables:
-            raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
         if self.failed.item():
             raise RuntimeError("Engram pool RDMA failed: a request or proxy failed")
         if not n:
-            return []
+            return None
         words = fetch.row_stride // 8
         rows_per_wr = self.rows_per_wr(fetch.row_stride)
-        num_vg, vg_p2 = self.world * tables, triton.next_power_of_2(self.world * tables)
+        vg_p2 = triton.next_power_of_2(self.world * tables)
         slots = self.slots[:n].view(tables, -1)
         self._launch(
             _plan_kernel,
             (triton.cdiv(n, 256),),
             (ids, meta, self.counts, self.owner_pos, self.remote_addr, self.keys)
-            + (n, self.world, num_vg, self.ticket, self.starts)
+            + (n, self.world, self.ticket, self.starts)
             + (self.wr_starts, self.wr_counts, self.used),
             dict(
                 TABLES=tables,
@@ -875,7 +856,6 @@ class RdmaTransport:
                 WORDS=words,
                 ROWS_PER_WR=rows_per_wr,
                 QPS=self.qps_per_peer,
-                MAX_CHAIN=proxy.MAX_CHAIN,
                 VG_P2=vg_p2,
                 BLOCK=256,
             ),
@@ -885,15 +865,14 @@ class RdmaTransport:
             (triton.cdiv(n, 128),),
             (self.owner_pos, self.counts, self.remote_addr, self.keys, self.boxes)
             + (self.box_keys, self.desc, self.seq, self.landing_at, self.landing_rkey)
-            + (self.flags_at, self.flags_rkey, n, self.world, num_vg, self.rank)
+            + (self.flags_at, self.flags_rkey, n, self.world, self.rank)
             + (self.ticket, self.starts, self.wr_starts, self.wr_counts, self.used)
-            + (self.box_rkeys, self.desc_at, self.desc_lkey, self.queues, slots),
+            + (self.box_rkeys, self.desc_lkey, self.queues, slots),
             dict(
                 BOX_BYTES=self.box_bytes,
                 MAX_WRS=self.max_wrs,
                 ROWS_PER_WR=rows_per_wr,
                 QPS=self.qps_per_peer,
-                MAX_CHAIN=proxy.MAX_CHAIN,
                 VG_P2=vg_p2,
                 WORDS=words,
                 TABLES=tables,
@@ -901,29 +880,32 @@ class RdmaTransport:
                 BLOCK=128,
             ),
         )
-        return [n, tables, k, words, slots]
+        return slots
 
-    def wait(self, fetch: list, table: int, out: torch.Tensor) -> None:
-        """Hold the current stream until table `table`'s rows of `fetch` have
-        landed, and place them into `out`."""
-        if not fetch:
+    def wait(self, slots: torch.Tensor | None, table: int, out: torch.Tensor) -> None:
+        """Hold the current stream until table `table`'s rows (`slots`, as
+        `start` returned) have landed, and place them into `out`."""
+        if slots is None:
             return
-        n, tables, k, words, _ = fetch
-        num_words = n // tables * words
+        words = out.shape[-1] // 8
         self._launch(
             _place_kernel,
-            (triton.cdiv(num_words, 1024),),
-            (self.owner_pos, self.starts, self.landing, out, num_words)
+            (triton.cdiv(out.numel() // 8, 1024),),
+            (self.owner_pos, self.starts, self.landing, out, out.numel() // 8)
             + (table, self.ready),
-            dict(TABLES=tables, K=k, HOST=self.host_landing, WORDS=words, BLOCK=1024),
+            dict(
+                TABLES=slots.shape[0],
+                K=out.shape[-2],
+                HOST=self.host_landing,
+                WORDS=words,
+                BLOCK=1024,
+            ),
         )
 
-    def landed(self, fetch: list, table: int) -> tuple | None:
-        """Where table `table`'s rows of `fetch` land: the landing buffer, each
-        row's slot in it, and the descriptor `wait_landed` reads."""
-        if not fetch:
-            return None
-        return self.landing, fetch[4][table], self.ready
+    def landed(self, slots: torch.Tensor | None, table: int) -> tuple | None:
+        """Where table `table`'s rows land: the landing buffer, each row's slot
+        in it, and the descriptor `wait_landed` reads."""
+        return None if slots is None else (self.landing, slots[table], self.ready)
 
     def _launch(self, kernel, grid, args: tuple, consts: dict) -> None:
         """Launch `kernel` on the current stream, compiled once per constexprs
@@ -939,7 +921,7 @@ class RdmaTransport:
             x,
             y,
             z,
-            torch.cuda.current_stream().cuda_stream,
+            current_stream().cuda_stream,
             compiled.function,
             compiled.packed_metadata,
             None,
