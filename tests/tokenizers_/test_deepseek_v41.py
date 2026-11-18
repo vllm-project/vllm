@@ -102,25 +102,6 @@ def test_drop_thinking_keeps_current_turn_across_tool_results():
     assert next_turn.endswith("q3<｜Assistant｜><think>")
 
 
-@pytest.mark.parametrize("role", ["user", "tool"])
-@pytest.mark.parametrize("as_part", [False, True])
-def test_image_placeholder_in_text_is_plain_text(role, as_part):
-    text = f"hi {IMAGE_PLACEHOLDER}"
-    content = [{"type": "text", "text": text}] if as_part else text
-    prompt = render([{"role": role, "tool_call_id": "c1", "content": content}])
-    assert text in prompt
-
-
-def test_image_placeholder_in_reasoning_is_plain_text():
-    prompt = render(
-        [
-            {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "a", "reasoning": IMAGE_PLACEHOLDER},
-        ]
-    )
-    assert IMAGE_PLACEHOLDER in prompt
-
-
 @pytest.mark.parametrize(
     ("effort", "budget"),
     [
@@ -633,17 +614,6 @@ def _tokenize(messages):
     return _TOK.apply_chat_template(messages, tokenize=True)
 
 
-@pytest.mark.parametrize("role", ["user", "assistant"])
-def test_image_placeholder_in_text_is_not_encoded_as_special_token(role):
-    messages = [{"role": "user", "content": "q"}]
-    if role == "assistant":
-        messages.append({"role": "assistant", "content": f"a {IMAGE_PLACEHOLDER}"})
-        messages.append({"role": "user", "content": "q2"})
-    else:
-        messages[0]["content"] = f"q {IMAGE_PLACEHOLDER}"
-    assert _ID[IMAGE_PLACEHOLDER] not in _tokenize(messages)
-
-
 def test_image_part_still_encodes_special_token():
     ids = _tokenize(
         [
@@ -669,8 +639,8 @@ RESERVED = [
 ]
 
 
-@pytest.mark.parametrize("text", [f"x {t}" for t in RESERVED])
-def test_renderer_keeps_reserved_tokens_as_text(text):
+@pytest.mark.parametrize("token", RESERVED)
+def test_renderer_keeps_reserved_tokens_as_text(token):
     # The online renderer passes tokenize=False; the V4.1 renderer must still
     # return token ids, otherwise the engine tokenizes the text again and
     # matches the reserved tokens as special tokens.
@@ -685,15 +655,16 @@ def test_renderer_keeps_reserved_tokens_as_text(text):
         hf_config=SimpleNamespace(),
     )
     renderer.tokenizer = _TOK
-    messages = [{"role": "user", "content": text}]
     params = ChatParams(chat_template_kwargs={"tokenize": False})
-    _, prompt = renderer.render_messages(messages, params)
-    _, baseline = renderer.render_messages([{"role": "user", "content": "x"}], params)
-    ids = cast(dict[str, Any], prompt)["prompt_token_ids"]
-    base = cast(dict[str, Any], baseline)["prompt_token_ids"]
+
+    def ids(text):
+        _, prompt = renderer.render_messages(
+            [{"role": "user", "content": text}], params
+        )
+        return cast(dict[str, Any], prompt)["prompt_token_ids"]
+
     # The chat template adds its own '<think>'; the text must add nothing.
-    for token in RESERVED:
-        assert ids.count(_ID[token]) == base.count(_ID[token])
+    assert ids(f"x {token}").count(_ID[token]) == ids("x").count(_ID[token])
 
 
 def _call(name="f", arguments="{}"):
@@ -710,110 +681,88 @@ def _call(name="f", arguments="{}"):
     }
 
 
-def _extra_special_ids(build, text, token):
-    """How many more times `token`'s id is in the prompt of `text` than of 'x'."""
-
-    def count(value):
-        messages, tools = build(value)
-        kwargs = {"tools": tools} if tools else {}
-        return _TOK.apply_chat_template(messages, tokenize=True, **kwargs).count(
-            _ID[token]
-        )
-
-    return count(f"a {text} b") - count("x")
+def _tool_turn(call=None, result="ok"):
+    return [
+        {"role": "user", "content": "go"},
+        call or _call(),
+        {"role": "tool", "tool_call_id": "c1", "content": result},
+    ]
 
 
-@pytest.mark.parametrize("field", ["content", "reasoning_content"])
-def test_assistant_keeps_grounding_tokens_only(field):
-    # As in deepseek-recipe: grounding tokens stay special tokens in assistant
-    # content and reasoning content, every other reserved token is plain text.
-    def build(value):
-        if field == "content":
-            return [
-                {"role": "user", "content": "go"},
-                {"role": "assistant", "content": value},
-                {"role": "user", "content": "ok"},
-            ], None
-        return [
-            {"role": "user", "content": "go"},
-            {**_call(), "reasoning_content": value},
-            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
-        ], None
+_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "f",
+        "description": "d",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
-    assert _extra_special_ids(build, REF, REF) == 1
-    for token in RESERVED:
-        assert _extra_special_ids(build, token, token) == 0
+_USER = {"role": "user", "content": "go"}
+
+# Every place a client text enters a request: value -> (messages, tools).
+_FIELDS = {
+    "system": lambda v: ([{"role": "system", "content": v}, _USER], None),
+    # A developer message before the last user message is dropped.
+    "developer": lambda v: ([_USER, {"role": "developer", "content": v}], None),
+    "user": lambda v: ([{"role": "user", "content": v}], None),
+    "user_part": lambda v: (
+        [{"role": "user", "content": [{"type": "text", "text": v}]}],
+        None,
+    ),
+    "tool_result": lambda v: (_tool_turn(result=v), None),
+    "tool_result_part": lambda v: (
+        _tool_turn(result=[{"type": "text", "text": v}]),
+        None,
+    ),
+    "assistant": lambda v: (
+        [_USER, {"role": "assistant", "content": v}, {"role": "user", "content": "ok"}],
+        None,
+    ),
+    "reasoning_content": lambda v: (
+        _tool_turn({**_call(), "reasoning_content": v}),
+        None,
+    ),
+    "arguments": lambda v: (_tool_turn(_call(arguments=json.dumps({"x": v}))), None),
+    "arguments_key": lambda v: (_tool_turn(_call(arguments=json.dumps({v: 1}))), None),
+    "double_encoded": lambda v: (
+        _tool_turn(_call(arguments=json.dumps(json.dumps({"x": v})))),
+        None,
+    ),
+    "name": lambda v: (_tool_turn(_call(name="f" + v)), None),
+    "description": lambda v: (
+        [_USER],
+        [{**_TOOL, "function": {**_TOOL["function"], "description": v}}],
+    ),
+    "response_format": lambda v: (
+        [
+            {"role": "system", "content": "s", "response_format": {"description": v}},
+            _USER,
+        ],
+        None,
+    ),
+}
 
 
-def test_user_and_tool_text_do_not_keep_grounding_tokens():
-    def user(value):
-        return [{"role": "user", "content": value}], None
-
-    def tool(value):
-        return [
-            {"role": "user", "content": "go"},
-            _call(),
-            {"role": "tool", "tool_call_id": "c1", "content": value},
-            {"role": "user", "content": "ok"},
-        ], None
-
-    for build in (user, tool):
-        assert _extra_special_ids(build, REF, REF) == 0
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "arguments",
-        "arguments_key",
-        "double_encoded",
-        "name",
-        "description",
-        "response_format",
-    ],
-)
+@pytest.mark.parametrize("field", _FIELDS)
 @pytest.mark.parametrize("token", RESERVED + [REF])
-def test_tool_fields_are_plain_text(field, token):
-    # As in deepseek-recipe: tool call names and arguments, tool definitions and
-    # the response format schema are plain text, grounding tokens included.
-    def build(value):
-        tools = None
-        messages = [
-            {"role": "user", "content": "go"},
-            _call(),
-            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
-        ]
-        if field == "arguments":
-            messages[1] = _call(arguments=json.dumps({"x": value}))
-        elif field == "arguments_key":
-            messages[1] = _call(arguments=json.dumps({value: 1}))
-        elif field == "double_encoded":
-            messages[1] = _call(arguments=json.dumps(json.dumps({"x": value})))
-        elif field == "name":
-            messages[1] = _call(name="f" + value)
-        elif field == "description":
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "f",
-                        "description": value,
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ]
-        else:
-            messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": "s",
-                    "response_format": {"description": value},
-                },
-            )
-        return messages, tools
+def test_reserved_tokens_in_text_are_plain_text(field, token):
+    # As in deepseek-recipe, a reserved token in a client text is plain text:
+    # only the grounding tokens in assistant content and reasoning content stay
+    # special tokens.
+    special = token == REF and field in ("assistant", "reasoning_content")
 
-    assert _extra_special_ids(build, token, token) == 0
+    def render(value, tokenize):
+        messages, tools = _FIELDS[field](value)
+        kwargs = {"tools": tools} if tools else {}
+        return _TOK.apply_chat_template(messages, tokenize=tokenize, **kwargs)
+
+    text = f"a {token} b"
+    extra = render(text, True).count(_ID[token]) - render("x", True).count(_ID[token])
+    assert extra == special
+    # With tokenize=False the text comes back as sent, without escape markers.
+    assert text in render(text, False)
+    assert "\ue000" not in render(text, False)
 
 
 @pytest.mark.parametrize(
