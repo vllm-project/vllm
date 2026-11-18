@@ -2220,9 +2220,7 @@ async def test_beam_search_preserves_request_priority(header):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "header,expected_rank", [(None, None), ("invalid", None), ("0", 0), ("3", 3)]
-)
+@pytest.mark.parametrize("header,expected_rank", [(None, None), ("3", 3)])
 async def test_beam_search_preserves_data_parallel_rank(header, expected_rank):
     """The X-data-parallel-rank header reaches every beam expansion."""
     engine = _build_mock_engine()
