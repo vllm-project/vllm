@@ -110,6 +110,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             else WNA16_SUPPORTED_TYPES_MAP[num_bits]
         )
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(
+            self.kernel, MarlinLinearKernel
+        ) and self.kernel.config.act_type in (torch.float16, torch.bfloat16)
+
     @classmethod
     def get_min_capability(cls) -> int:
         # Turing and up
@@ -246,9 +252,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 w_s_param_name="weight_scale",
                 w_zp_param_name="weight_zero_point",
             )
-            self.supports_pre_processed_weights = isinstance(
-                self.kernel, MarlinLinearKernel
-            ) and self.kernel.config.act_type in (torch.float16, torch.bfloat16)
             if self.symmetric and isinstance(self.kernel, MarlinLinearKernel):
                 # Marlin consumes an empty zero-point parameter for symmetric
                 # weights. Register it before processed tensors are attached.
