@@ -16,7 +16,7 @@ use vllm_tokenizer::{
     UnavailableTokenizer,
 };
 
-use self::config::{GenerationConfig, load_generation_config, parse_generation_config};
+use self::config::{GenerationConfig, load_generation_config, parse_sampling_defaults};
 pub use self::config::{
     HfChatTemplate, HfNamedChatTemplate, HfSpecialTokens, HfTokenizerConfig, ModelConfig,
     NamedSpecialToken, load_model_config, load_tokenizer_config,
@@ -25,7 +25,7 @@ pub use self::model_files::{
     HfToken, ModelFileSources, ModelSource, ResolvedModelFiles, TokenizerSource,
 };
 pub use self::overrides::HfOverrides;
-use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend};
+use crate::backend::{DefaultMaxTokens, GenerationConfigMode, SamplingHints, TextBackend};
 use crate::error::Result;
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
@@ -43,14 +43,8 @@ pub struct HfTextBackend {
     /// [`UnavailableTokenizer`] when the files resolve no tokenizer
     /// (`--skip-tokenizer-init`).
     tokenizer: DynTokenizer,
-    /// Primary EOS handled by engine-core's dedicated EOS path.
-    primary_eos_token_id: Option<u32>,
-    /// Additional EOS ids that should flow through stop-token handling.
-    extra_eos_token_ids: BTreeSet<u32>,
-    /// Model generation config (none in `vllm` mode) plus overrides.
-    sampling_defaults: GenerationConfig,
-    /// Override `max_new_tokens`, which caps every request.
-    max_tokens_cap: Option<u32>,
+    /// EOS ids and sampling defaults, fixed at load.
+    sampling_hints: SamplingHints,
     /// Model vocabulary size from the selected text config.
     model_vocab_size: usize,
     /// Model config (`config.json`).
@@ -72,22 +66,20 @@ impl HfTextBackend {
             Some(tokenizer) => load_tokenizer(tokenizer)?,
             None => Arc::new(UnavailableTokenizer::new(model_vocab_size)),
         };
-        let generation_config_json =
-            load_generation_config(files.generation_config_path.as_deref())?;
-        let generation_config = parse_generation_config(generation_config_json.clone())?;
-        let sampling_defaults = merge_sampling_defaults(
-            generation_config_mode,
-            generation_config_json,
-            override_generation_config,
-        )?;
-        let max_tokens_cap =
-            parse_generation_config(override_generation_config.clone())?.max_new_tokens;
+        let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
         let (primary_eos_token_id, extra_eos_token_ids) = resolve_eos_token_ids(
             &tokenizer_config,
             &model_config,
             &generation_config,
             tokenizer.as_ref(),
         );
+        let sampling_hints = build_sampling_hints(
+            generation_config_mode,
+            generation_config.sampling,
+            override_generation_config,
+            primary_eos_token_id,
+            extra_eos_token_ids,
+        )?;
 
         info!(
             model_id,
@@ -98,10 +90,7 @@ impl HfTextBackend {
             model_id,
             files,
             tokenizer,
-            primary_eos_token_id,
-            extra_eos_token_ids,
-            sampling_defaults,
-            max_tokens_cap,
+            sampling_hints,
             model_vocab_size,
             model_config,
         })
@@ -176,51 +165,48 @@ impl TextBackend for HfTextBackend {
     }
 
     fn sampling_hints(&self) -> Result<SamplingHints> {
-        Ok(build_sampling_hints(
-            &self.sampling_defaults,
-            self.max_tokens_cap,
-            self.primary_eos_token_id,
-            self.extra_eos_token_ids.clone(),
-        ))
+        Ok(self.sampling_hints.clone())
     }
 }
 
-/// Mirrors Python's `get_diff_sampling_param`. A `null` override clears a default.
-// TODO: Python also takes a `skip_special_tokens` default from this config.
-fn merge_sampling_defaults(
-    mode: GenerationConfigMode,
-    mut generation_config: Map<String, Value>,
-    overrides: &Map<String, Value>,
-) -> Result<GenerationConfig> {
-    match mode {
-        GenerationConfigMode::Auto => {}
-        // Vllm skips model-provided sampling defaults. `lower_sampling_params`
-        // applies vLLM fallback values; separately resolved EOS tokens remain.
-        GenerationConfigMode::Vllm => generation_config.clear(),
-    }
-    generation_config.extend(overrides.clone());
-    parse_generation_config(generation_config)
-}
-
+/// Merge `--override-generation-config` over the model's sampling keys, which
+/// `vllm` mode skips; a `null` override clears a default.
 fn build_sampling_hints(
-    sampling_defaults: &GenerationConfig,
-    max_tokens_cap: Option<u32>,
+    mode: GenerationConfigMode,
+    model_sampling: Map<String, Value>,
+    overrides: &Map<String, Value>,
     primary_eos_token_id: Option<u32>,
     extra_eos_token_ids: BTreeSet<u32>,
-) -> SamplingHints {
-    SamplingHints {
+) -> Result<SamplingHints> {
+    // TODO: Python also takes a `skip_special_tokens` default from this config.
+    let mut sampling = match mode {
+        GenerationConfigMode::Auto => model_sampling,
+        // `lower_sampling_params` applies vLLM fallback values instead.
+        GenerationConfigMode::Vllm => Map::new(),
+    };
+    sampling.extend(overrides.clone());
+    let defaults = parse_sampling_defaults(sampling)?;
+    // An operator-set `max_new_tokens` caps every request; the model's is a fallback.
+    let default_max_tokens = defaults.max_new_tokens.map(|max_tokens| {
+        if overrides.contains_key("max_new_tokens") {
+            DefaultMaxTokens::Cap(max_tokens)
+        } else {
+            DefaultMaxTokens::Fallback(max_tokens)
+        }
+    });
+
+    Ok(SamplingHints {
         primary_eos_token_id,
         extra_eos_token_ids,
-        default_temperature: sampling_defaults.temperature,
-        default_top_p: sampling_defaults.top_p,
-        default_top_k: sampling_defaults.top_k,
-        default_min_p: sampling_defaults.min_p,
-        default_repetition_penalty: sampling_defaults.repetition_penalty,
-        default_presence_penalty: sampling_defaults.presence_penalty,
-        default_frequency_penalty: sampling_defaults.frequency_penalty,
-        default_max_tokens: sampling_defaults.max_new_tokens,
-        max_tokens_cap,
-    }
+        default_temperature: defaults.temperature,
+        default_top_p: defaults.top_p,
+        default_top_k: defaults.top_k,
+        default_min_p: defaults.min_p,
+        default_repetition_penalty: defaults.repetition_penalty,
+        default_presence_penalty: defaults.presence_penalty,
+        default_frequency_penalty: defaults.frequency_penalty,
+        default_max_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -233,7 +219,7 @@ mod tests {
     use super::{
         GenerationConfig, GenerationConfigMode, HfTextBackend, HfTokenizerConfig, ModelConfig,
         ModelFileSources, ModelSource, ResolvedModelFiles, build_sampling_hints,
-        merge_sampling_defaults, resolve_eos_token_ids,
+        resolve_eos_token_ids,
     };
     use crate::backend::TextBackend as _;
 
@@ -362,7 +348,6 @@ mod tests {
     fn vllm_generation_config_keeps_eos_and_uses_neutral_sampling_defaults() {
         let generation_config = json_object(
             r#"{
-                "eos_token_id": [2, 3],
                 "temperature": 0.6,
                 "top_p": 0.95,
                 "top_k": 20,
@@ -375,9 +360,14 @@ mod tests {
         );
         let extra_eos_token_ids = BTreeSet::from([3]);
         let hints_for = |mode| {
-            let defaults =
-                merge_sampling_defaults(mode, generation_config.clone(), &Map::new()).unwrap();
-            build_sampling_hints(&defaults, None, Some(2), extra_eos_token_ids.clone())
+            build_sampling_hints(
+                mode,
+                generation_config.clone(),
+                &Map::new(),
+                Some(2),
+                extra_eos_token_ids.clone(),
+            )
+            .unwrap()
         };
 
         let hints = (
@@ -416,9 +406,10 @@ mod tests {
                         0.5,
                     ),
                     default_max_tokens: Some(
-                        4096,
+                        Fallback(
+                            4096,
+                        ),
                     ),
-                    max_tokens_cap: None,
                 },
                 SamplingHints {
                     primary_eos_token_id: Some(
@@ -435,7 +426,6 @@ mod tests {
                     default_presence_penalty: None,
                     default_frequency_penalty: None,
                     default_max_tokens: None,
-                    max_tokens_cap: None,
                 },
             )
         "#]]
@@ -499,10 +489,9 @@ mod tests {
                     default_presence_penalty: None,
                     default_frequency_penalty: None,
                     default_max_tokens: Some(
-                        64,
-                    ),
-                    max_tokens_cap: Some(
-                        64,
+                        Cap(
+                            64,
+                        ),
                     ),
                 },
                 SamplingHints {
@@ -520,10 +509,9 @@ mod tests {
                     default_presence_penalty: None,
                     default_frequency_penalty: None,
                     default_max_tokens: Some(
-                        64,
-                    ),
-                    max_tokens_cap: Some(
-                        64,
+                        Cap(
+                            64,
+                        ),
                     ),
                 },
             )

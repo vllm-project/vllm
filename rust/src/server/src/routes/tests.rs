@@ -5064,7 +5064,7 @@ async fn chat_generation_config_overrides_reach_engine() {
     let backend = FakeChatBackend {
         sampling_hints: vllm_text::SamplingHints {
             default_temperature: Some(0.25),
-            max_tokens_cap: Some(5),
+            default_max_tokens: Some(vllm_text::DefaultMaxTokens::Cap(5)),
             ..Default::default()
         },
         ..FakeChatBackend::new()

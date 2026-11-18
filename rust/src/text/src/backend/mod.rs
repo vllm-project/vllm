@@ -67,9 +67,16 @@ pub struct SamplingHints {
     pub default_repetition_penalty: Option<f32>,
     pub default_presence_penalty: Option<f32>,
     pub default_frequency_penalty: Option<f32>,
-    pub default_max_tokens: Option<u32>,
-    /// Server-wide cap that also bounds client-provided `max_tokens`.
-    pub max_tokens_cap: Option<u32>,
+    pub default_max_tokens: Option<DefaultMaxTokens>,
+}
+
+/// Server-side `max_tokens` from the generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultMaxTokens {
+    /// Applies only when a request omits `max_tokens` (the model's config).
+    Fallback(u32),
+    /// Also bounds a client-provided `max_tokens` (`--override-generation-config`).
+    Cap(u32),
 }
 
 /// Effective bounds used to validate and lower sampling requests.
