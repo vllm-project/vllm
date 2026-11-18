@@ -249,7 +249,7 @@ def _exited_cleanly(proc: BaseProcess) -> bool:
     if not hasattr(os, "waitid"):  # macOS before Python 3.13
         return proc.exitcode == 0
     try:
-        info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        info = os.waitid(os.P_PID, cast(int, proc.pid), os.WEXITED | os.WNOWAIT)
     except ChildProcessError:  # already reaped by shutdown()
         return True
     return info is not None and info.si_code == os.CLD_EXITED and info.si_status == 0
