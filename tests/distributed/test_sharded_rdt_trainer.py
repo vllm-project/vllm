@@ -207,7 +207,8 @@ def test_metadata_disagreement_across_ranks_fails_at_init(monkeypatch):
 # ------------------------------------------------------------ gather loop
 
 
-def test_the_sender_drives_the_workers_around_its_gathers(cpu_ipc):
+def test_the_sender_drives_the_workers_around_its_gathers(cpu_ipc, monkeypatch):
+    monkeypatch.setattr(trainer_mod, "_EXPORT_RING_MAX_BYTES", 0)  # no export slot
     client = RecordingClient()
     engine = _engine(_Source(_pairs(2)), client=client, num_consumers=2)
     server = _attach_server(engine)

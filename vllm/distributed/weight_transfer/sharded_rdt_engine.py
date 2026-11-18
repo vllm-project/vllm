@@ -564,8 +564,7 @@ class ShardedRDTWeightTransferEngine(
         def land(ready: list[Any]) -> None:
             # NIXL writes a slot during `get`, so the copy-out that last read
             # it must be done by then; issuing a pull into it may go ahead.
-            for handle in ready:
-                slot = inflight[handle][1]
+            for _, slot in (inflight[h] for h in ready):
                 if pending[slot]:
                     copied[slot].synchronize()
                     pending[slot] = False

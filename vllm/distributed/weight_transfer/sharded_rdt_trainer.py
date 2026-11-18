@@ -206,9 +206,7 @@ def _sources(
 
 @dataclass(slots=True)
 class _Published:
-    """One unit's last publish. Its generation changes only when its tensors
-    move. At release the import is dropped except for the storages in `keep`,
-    so the trainer can reuse the rest."""
+    """One unit's last publish; `gen` changes only when its tensors move."""
 
     signature: Any
     gen: int
@@ -315,15 +313,24 @@ class _RDTProducerServer:
             cond.notify_all()
 
     def _wait_for(
-        self, cond: threading.Condition, blocked: Callable[[], bool], what: str
+        self,
+        cond: threading.Condition,
+        blocked: Callable[[], bool],
+        what: str,
+        sync_idx: int | None = None,
     ) -> None:
-        """Wait on `cond` while `blocked()`, returning early on an error;
-        fail the sync when nothing on this producer progressed for the stall
-        timeout. Caller holds `_lock`."""
-        while blocked() and self._error is None:
+        """Wait on `cond` while `blocked()`, returning early on an error of
+        sync `sync_idx` (default: the current one); fail the sync when nothing
+        on this producer progressed for the stall timeout. Caller holds `_lock`."""
+
+        def failed() -> bool:
+            target = self._sync_idx if sync_idx is None else sync_idx
+            return self._error is not None and self._failed_sync == target
+
+        while blocked() and not failed():
             cond.wait(_STALL_POLL_S)
             stalled = time.monotonic() - self._last_progress
-            if blocked() and self._error is None and stalled >= self._stall_timeout:
+            if blocked() and not failed() and stalled >= self._stall_timeout:
                 msg = (
                     f"RDT stall: no progress for {stalled:.0f}s waiting for "
                     f"{what}. A consumer most likely died mid-sync: "
@@ -331,8 +338,9 @@ class _RDTProducerServer:
                 )
                 logger.error("[rdt-stall] %s", msg)
                 self._error = RuntimeError(msg)
+                self._failed_sync = self._sync_idx
                 self._notify_all()
-        if self._error is not None:
+        if failed():
             raise RuntimeError(f"sharded RDT sync failed: {self._error!r}")
 
     # ---------------- engine-facing ----------------
@@ -461,6 +469,8 @@ class _RDTProducerServer:
     def set_gather_error(self, message: str, sync_idx: int | None = None) -> None:
         """Fail sync `sync_idx` (default: the current one) on this producer."""
         with self._lock:
+            if sync_idx is not None and sync_idx < self._sync_idx:
+                return  # a late message for a sync this rank already left
             self._error = RuntimeError(message)
             self._failed_sync = self._sync_idx if sync_idx is None else sync_idx
             self._notify_all()
@@ -547,6 +557,7 @@ class _RDTProducerServer:
                     or (self._sync_idx == sync_idx and spec.unit not in self._resident)
                 ),
                 f"unit {spec.unit} of sync {sync_idx}",
+                sync_idx,
             )
             # the unit stays resident until this bucket is served and freed
             self._wait_for(
@@ -556,22 +567,28 @@ class _RDTProducerServer:
                     and self._carve(spec.nbytes, dry_run=True) < 0
                 ),
                 f"arena room for unit {spec.unit} of sync {sync_idx}",
+                sync_idx,
             )
-            if self._sync_idx != sync_idx:
+            published = self._published.get(spec.unit)
+            if (
+                self._sync_idx != sync_idx
+                or published is None
+                or published.tensors is None
+            ):
                 raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
             offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            published = self._published[spec.unit]
+            tensors, gen = published.tensors, published.gen
             ready = self._ready.get(spec.unit)
             sources = self._sources[consumer_id]
             self._last_progress = time.monotonic()
         try:
-            flat = self._pack_bucket(sources, seq, spec, offset, published, ready)
+            flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
         except BaseException:
             self._freed_bucket(-1, spec.unit, sync_idx, offset)  # only the block
             raise
-        del published
+        del published, tensors
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
 
@@ -595,7 +612,8 @@ class _RDTProducerServer:
         seq: int,
         spec: _ServedBucket,
         offset: int,
-        published: _Published,
+        tensors: dict[str, torch.Tensor],
+        gen: int,
         ready: torch.cuda.Event | None,
     ) -> torch.Tensor:
         """Pack bucket `seq` into its arena block, one pack at a time, and
@@ -604,8 +622,7 @@ class _RDTProducerServer:
         strided ones (e.g. TP column slices) typed, in runs. One strided box
         or a second dtype would otherwise put every box on the per-tensor
         path, a kernel each."""
-        assert self._arena is not None and published.tensors is not None
-        tensors, gen = published.tensors, published.gen
+        assert self._arena is not None
         flat = self._arena[offset : offset + spec.nbytes]
         with self._pack_lock:
             if ready is not None:
@@ -1104,6 +1121,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         views: dict[str, tuple] = {}
         refs: dict[str, torch.Tensor] = {}
         small: list = []
+        slot_sid = None
         for name, tensor in zip(names, tensors):
             tensor = tensor.detach()
             if not tensor.is_cuda:
@@ -1140,9 +1158,9 @@ class ShardedRDTTrainerWeightTransferEngine(
             assert free, "no free export slot past the credit gate"
             slot = self._slot_of_unit[unit] = free[0]
             st, vw, rf = self._pack_for_export(small, slot)
-            ((sid, reduce_args),) = st.items()
+            ((slot_sid, reduce_args),) = st.items()
             ust = next(iter(rf.values())).untyped_storage()
-            handle_cache[sid] = (StorageWeakRef(ust), reduce_args)
+            handle_cache[slot_sid] = (StorageWeakRef(ust), reduce_args)
             storages.update(st)
             views.update(vw)
             refs.update(rf)
@@ -1157,12 +1175,16 @@ class ShardedRDTTrainerWeightTransferEngine(
             handle = ready.ipc_handle()
         # Storages exported last sync too (parameters, export slots) stay
         # imported; only temporaries are dropped, so the trainer can reuse them.
+        # Export slots are reused within a sync, so they are always kept.
         keep = tuple(
             sid
             for sid in storages
-            if (last := self._last_exported.get(sid)) is not None
-            and not last.expired()
-            and last == handle_cache[sid][0]
+            if sid == slot_sid
+            or (
+                (last := self._last_exported.get(sid)) is not None
+                and not last.expired()
+                and last == handle_cache[sid][0]
+            )
         )
         return (storages, views, handle, keep), refs, ready
 
