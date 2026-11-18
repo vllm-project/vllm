@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import dataclasses
 import inspect
 import os
 import queue
@@ -4328,10 +4329,11 @@ def test_transfer_setup_failure_returns_finished(
     if multiple_kv_cache_groups:
         # HiSparse adds groups that take no part in the transfer.
         kv_cache_config = make_kv_cache_config(block_size=block_size)
+        group = kv_cache_config.kv_cache_groups[0]
         kv_cache_config.kv_cache_groups.append(
-            KVCacheGroupSpec(
-                ["hisparse0"],
-                kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+            dataclasses.replace(
+                group,
+                kv_cache_specs={"hisparse0": next(iter(group.kv_cache_specs.values()))},
                 enable_kv_transfer=False,
             )
         )
