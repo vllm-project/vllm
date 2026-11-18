@@ -12,11 +12,11 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.models.falcon_h1 import FalconH1ForCausalLM
 from vllm.model_executor.models.granitemoehybrid import GraniteMoeHybridForCausalLM
+from vllm.model_executor.models.mamba2 import MambaMixer2
 from vllm.model_executor.models.zamba2 import Zamba2ForCausalLM
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend

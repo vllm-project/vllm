@@ -669,7 +669,7 @@ def test_replayssm_mixer_selects_mtp_layout(
 ):
     import vllm.model_executor.layers.mamba.mamba2_ssm as mod
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as dispatch
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.models.mamba2 import MambaMixer2
 
     mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
