@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
@@ -97,8 +98,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self._localized_kwargs: dict = {}
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        if not is_weights_pre_processed():
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         self._localized_kwargs = {}
         res = get_localized_resources()
         shards = getattr(layer, "localized_shards", None)
