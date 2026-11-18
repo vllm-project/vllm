@@ -143,9 +143,9 @@ class MambaStateDtypeCalculator:
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
-        """Append the GDN ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(d_cache, k_cache, g_cache)``. The ``d``/``k`` input caches use fp16
-        for bf16 activations; ``g_cache`` is float32.
+        """Append the GDN ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
+        `(d_cache, k_cache, g_cache)`. The `d`/`k` input caches use fp16
+        for bf16 activations; `g_cache` is float32.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         cache_dtype = (
@@ -331,9 +331,9 @@ class MambaStateShapeCalculator:
         tuple[int, int],
     ]:
         """Append the GDN ReplaySSM ring shapes (d_cache, k_cache, g_cache) to a
-        base ``(conv, ssm)`` tuple. ``base_shapes[1]`` is the ssm shape
-        ``(num_v_heads // tp, head_v_dim, head_k_dim)``; k_cache uses the
-        un-extended ``num_k_heads``.
+        base `(conv, ssm)` tuple. `base_shapes[1]` is the ssm shape
+        `(num_v_heads // tp, head_v_dim, head_k_dim)`; k_cache uses the
+        un-extended `num_k_heads`.
         """
         local_v_heads, head_v_dim, head_k_dim = base_shapes[1]
         local_k_heads = divide(num_k_heads, tp_world_size)

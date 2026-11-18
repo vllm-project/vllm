@@ -3,15 +3,15 @@
 """Prefill(chunk) == decode equivalence for the GDN ReplaySSM kernel.
 
 The GDN analog of the Mamba2 prefill-teacher: the chunked prefill kernel
-(``chunk_gated_delta_rule``, the path the model runs at prefill) and
+(`chunk_gated_delta_rule`, the path the model runs at prefill) and
 step-by-step decode must produce the same per-position outputs and final state
-over a sequence. We build q/k/v/g/beta with ``fused_post_conv_prep`` (the same
+over a sequence. We build q/k/v/g/beta with `fused_post_conv_prep` (the same
 shared prep the model's prefill uses, so the teacher's inputs match what the
-decode kernels compute internally from ``mixed_qkv``), then feed:
+decode kernels compute internally from `mixed_qkv`), then feed:
 
   * the chunked prefill kernel (the teacher),
-  * the baseline step decode (``..._packed_decode``),
-  * the ReplaySSM step decode (ring buffer, ``..._replayssm``),
+  * the baseline step decode (`..._packed_decode`),
+  * the ReplaySSM step decode (ring buffer, `..._replayssm`),
 
 and check the step decoders reproduce the teacher's per-position outputs and
 final state. The chunked prefill kernel only supports bf16 *activations*
@@ -24,7 +24,7 @@ Prefill (a chunked scan) and decode (a step recurrence) are different code
 paths, so they differ numerically; we use chunked-scan tolerances (the same
 regime as the Mamba2 prefill-teacher).
 
-``seqlen`` is a multiple of the buffer length, so the final step flushes and
+`seqlen` is a multiple of the buffer length, so the final step flushes and
 ReplaySSM's stored checkpoint is the full final state.
 """
 

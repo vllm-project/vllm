@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Standard (autoregressive) decode correctness for the GDN ReplaySSM kernel.
 
-GDN ReplaySSM caches the per-step delta-rule inputs (the corrected value ``u``,
+GDN ReplaySSM caches the per-step delta-rule inputs (the corrected value `u`,
 the key, and the gate) in a small ring buffer and reconstructs the recurrent
 state on the fly, writing it back to HBM only when the buffer flushes. This
-checks the cached decode kernel ``fused_recurrent_gated_delta_rule_replayssm``
-against the upstream baseline ``fused_recurrent_gated_delta_rule_packed_decode``
+checks the cached decode kernel `fused_recurrent_gated_delta_rule_replayssm`
+against the upstream baseline `fused_recurrent_gated_delta_rule_packed_decode`
 over a multi-step decode, across the flush boundaries and with sparse
 (continuous-batching) state allocation including padding rows.
 
 GDN uses only the state-reconstruction route (it reads the state at both k and
 q, so there is no output-only variant). State precision and activation/buffer
 precision are swept independently; Qwen3.5 defaults to fp32 SSM state, though
-bf16 state is also supported. ``g_cache`` is always fp32.
+bf16 state is also supported. `g_cache` is always fp32.
 """
 
 import pytest
@@ -99,9 +99,9 @@ def _run_gdn_standard_decode(
     strided: bool = False,
     seed: int = 0,
 ) -> None:
-    """Drive ``num_steps`` decode steps; check the ReplaySSM kernel matches the
+    """Drive `num_steps` decode steps; check the ReplaySSM kernel matches the
     baseline packed decode each step (and the checkpoint state at flushes).
-    State follows ``state_dtype``; BF16 activations use FP16 ring storage."""
+    State follows `state_dtype`; BF16 activations use FP16 ring storage."""
     device = "cuda"
     o_rtol, o_atol = _output_tolerances(act_dtype)
     s_rtol, s_atol = _state_tolerances(act_dtype, state_dtype)
