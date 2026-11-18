@@ -422,13 +422,17 @@ pub struct ServerUnsupportedArgs {
 
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-enable-offline-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_offline_docs: Option<Unsupported>,
+    pub enable_offline_docs: Option<Noop>,
 
     /// If set, run pooling score MaxSim on GPU in the API server process.
     /// Can significantly improve late-interaction scoring performance.
