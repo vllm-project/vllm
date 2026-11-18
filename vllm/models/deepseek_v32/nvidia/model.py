@@ -228,7 +228,10 @@ class DeepseekV32Model(torch.nn.Module):
         attention_config = vllm_config.attention_config
         # Preserve LoRA's global row mapping and auxiliary-state layouts.
         self.shardq_sequence_parallel = (
-            parallel_config.use_sequence_parallel_attention
+            parallel_config.tensor_parallel_size > 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
             and vllm_config.lora_config is None
             and attention_config.hisparse_config is None
             and (

@@ -998,19 +998,6 @@ class ParallelConfig:
         )
 
     @property
-    def use_sequence_parallel_attention(self) -> bool:
-        """Whether the parallel layout permits token sharding around attention.
-
-        Models must also check their implementation and feature compatibility.
-        """
-        return (
-            self.tensor_parallel_size > 1
-            and self.pipeline_parallel_size == 1
-            and self.prefill_context_parallel_size == 1
-            and self.decode_context_parallel_size == 1
-        )
-
-    @property
     def use_all2all(self) -> bool:
         return (
             self.data_parallel_size > 1
