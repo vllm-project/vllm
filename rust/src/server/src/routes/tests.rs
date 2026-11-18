@@ -824,7 +824,6 @@ fn test_render_state(
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
-        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::new(backend, None, None)
             .with_parser_selections(tool_call_parser, reasoning_parser),
@@ -1344,9 +1343,7 @@ async fn scale_out_abort_requests_finishes_generate_stream() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
-    const ROUTES: [&str; 6] = [
-        "/v1/chat/completions/render",
-        "/v1/completions/render",
+    const ROUTES: [&str; 4] = [
         "/v1/messages/render",
         "/v1/responses/render",
         "/v1/chat/completions/derender",
@@ -1685,6 +1682,122 @@ fn add_lora_script(
             check(args[0].as_array().expect("lora request tuple"));
             send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
         })
+    }
+}
+
+/// With scale-out enabled, the engine-backed server renders chat and
+/// completions with its own processors, so the engine's context window bounds
+/// the output budget; with scale-out disabled both routes answer 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_routes_follow_scale_out_gate() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let mut enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/chat/completions/render",
+        json!({
+            "request_id": "chat",
+            "messages": [{"role": "user", "content": "hello"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["request_id"], "chatcmpl-chat");
+    assert_eq!(json["model"], "model");
+    assert!(!json["token_ids"].as_array().expect("token IDs").is_empty());
+
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/completions/render",
+        json!({"request_id": "completion", "prompt": "hello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let [request] = json.as_array().expect("generate requests").as_slice() else {
+        panic!("expected one generate request: {json}");
+    };
+    assert_eq!(request["request_id"], "cmpl-completion");
+    assert_eq!(request["model"], "model");
+
+    let (status, json) = post_json(
+        &mut enabled,
+        "/v1/completions/render",
+        json!({"prompt": "hello", "max_tokens": DEFAULT_MOCK_MAX_MODEL_LEN + 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["param"], "max_tokens");
+
+    let disabled = build_router_with_gates(state, RouteGates::default());
+    for uri in ["/v1/chat/completions/render", "/v1/completions/render"] {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+/// Like `/inference/v1/generate`, the engine-backed render routes resolve the
+/// model against the loaded LoRA adapters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_accepts_loaded_lora_adapter() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(true, |_| {})).await;
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&module).await.expect("load static lora");
+    let mut app = build_router_with_gates(
+        state,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    for (model, expected) in [("alice", StatusCode::OK), ("bob", StatusCode::NOT_FOUND)] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        )
+        .await;
+        assert_eq!(status, expected, "{model}: {json}");
+        if status == StatusCode::OK {
+            assert_eq!(json["model"], model);
+        }
     }
 }
 
@@ -2457,7 +2570,6 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             model: "glm-test".into(),
             served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
-            max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::new(backend.clone(), None, None)
                 .with_exclude_tools_when_tool_choice_none(exclude),
@@ -13724,6 +13836,7 @@ async fn n_limit_follows_max_n_sequences_option() {
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
                 max_n_sequences: 2,
+                enable_scale_out: true,
                 ..Default::default()
             },
         ),
@@ -13743,16 +13856,8 @@ async fn n_limit_follows_max_n_sequences_option() {
         assert_eq!(json["error"]["param"], "n", "{uri} {body}");
     }
 
-    let backend = Arc::new(FakeChatBackend::new());
-    let mut render_app = build_render_router(Arc::new(RenderState {
-        model: "backend-model".to_string(),
-        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
-        max_model_len: Some(128),
-        max_n_sequences: 2,
-        text: TextRequestProcessor::new(backend.clone(), 128),
-        chat: ChatRequestProcessor::new(backend, None, None),
-        lora_modules: Vec::new(),
-    }));
+    // Render leaves the limit to `/inference/v1/generate`, which fans out the
+    // samples: the rendered request carries `n` as asked and generate rejects it.
     for (uri, body) in [
         (
             "/v1/chat/completions/render",
@@ -13760,11 +13865,15 @@ async fn n_limit_follows_max_n_sequences_option() {
         ),
         ("/v1/completions/render", json!({"prompt": "hello", "n": 3})),
     ] {
-        let mut body = body;
-        body["model"] = json!("render-model");
-        let (status, json) = post_json(&mut render_app, uri, body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
-        assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::OK, "{uri} {json}");
+        // Completions render answers with a list of requests.
+        let rendered = json.as_array().map_or(&json, |requests| &requests[0]).clone();
+        assert_eq!(rendered["sampling_params"]["n"], 3, "{uri} {json}");
+        let (status, json) = post_json(&mut app, "/inference/v1/generate", rendered).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+        assert_eq!(json["error"]["message"], expected_message, "{uri} {json}");
+        assert_eq!(json["error"]["param"], "n", "{uri} {json}");
     }
 }
 
