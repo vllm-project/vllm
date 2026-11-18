@@ -117,6 +117,23 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
             pre_trained_config["dflash_config"][key] = config_dict[key]
 
 
+@register_speculator("dspine")
+def update_dspine(config_dict: dict, pre_trained_config: dict) -> None:
+    """Apply DSpine's causal injection and transition-cache configuration."""
+    update_dflash(config_dict, pre_trained_config)
+    pre_trained_config["architectures"] = ["DSpineDraftModel"]
+    pre_trained_config["dflash_config"]["causal"] = True
+    for key in (
+        "block_size",
+        "transfer_dim",
+        "message_dim",
+        "transition_top_k",
+        "transfer_space_eps",
+    ):
+        if config_dict.get(key) is not None:
+            pre_trained_config["dflash_config"][key] = config_dict[key]
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """Apply DSpark specific configuration transformations to the `dict` used to

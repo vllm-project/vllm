@@ -79,6 +79,9 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 
         # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
         # DSA models would silently keep their FP8 one.
+        # TODO: allow Kimi-K3.1 once AITER's row-group FP4 MQA logits kernel
+        # accepts physical page strides; its decode scorer reads the merged
+        # index cache in place.
         model_config = vllm_config.model_config
         if model_config is None or model_config.hf_config.model_type not in (
             "deepseek_v4",
@@ -112,7 +115,7 @@ class PrepareUniformDecodeKernel(
 ):
     BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         block_table_stride: int
@@ -156,7 +159,7 @@ class PrepareUniformDecodeKernel(
         # All reqs now have decode_len = 1.
         tl.store(decode_lens_ptr + idx, 1)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         block_size: int,
@@ -250,7 +253,7 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if kv_cache_spec is not None:
-            # Worker get_kv_cache_spec: runs without the current config.
+            # Worker get_kv_cache_layer_configs: runs without the current config.
             index_kpool = int(kv_cache_spec.tokens_per_state)
         else:
             # Platform block-size selection: no spec yet, under the current config.
@@ -286,10 +289,9 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # ROCm runs adaptive verification through the per-token flattened
-        # indexer path, which derives row ownership from device decode lengths.
         return (
             current_platform.is_rocm()
+            or current_platform.is_xpu()
             or super().supports_device_cpu_query_lens_mismatch()
         )
 
@@ -323,7 +325,7 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PCPGlobalChunkPlan:
     """PCP packing for one indexer prefill chunk under PCP + DCP."""
 
@@ -408,7 +410,7 @@ def build_pcp_global_chunk_plan(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
     # Under DCP (dcp_world_size > 1) these hold this rank's local row bounds;
@@ -437,7 +439,7 @@ class BuildPrefillChunkMetadataKernel(
 ):
     BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         query_slice_start: int
         query_slice_stop: int
@@ -532,7 +534,7 @@ class BuildPrefillChunkMetadataKernel(
             mask = offset < compressed_seq_len
             tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         query_slice_start: int,
@@ -679,7 +681,7 @@ class BuildPrefillChunkMetadataKernel(
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
@@ -689,7 +691,7 @@ class DeepseekV32IndexerPrefillMetadata:
     shardq_gather_indices: torch.Tensor | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     # seq_lens: per-token effective context lengths.
@@ -705,6 +707,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
 
 
 @dataclass
@@ -931,10 +934,10 @@ def _supports_flattened_device_query_lens() -> bool:
     )
 
 
-def _rocm_supports_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
+def _supports_deepseek_v4_flattened_device_query_lens(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
     return (
-        current_platform.is_rocm()
+        (current_platform.is_rocm() or current_platform.is_xpu())
         and model_config is not None
         and (
             "DeepseekV4ForCausalLM" in model_config.architectures
@@ -965,7 +968,7 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
         and speculative_config.enable_adaptive_verification
         and (
             _supports_flattened_device_query_lens()
-            or _rocm_supports_flattened_device_query_lens(vllm_config)
+            or _supports_deepseek_v4_flattened_device_query_lens(vllm_config)
         )
     )
 
@@ -1854,6 +1857,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

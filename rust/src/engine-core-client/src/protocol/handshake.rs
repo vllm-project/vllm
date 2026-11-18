@@ -168,6 +168,14 @@ pub struct EngineCoreReadyResponse {
     /// How peers reach this engine for a KV prefix lookup, if it serves them.
     #[serde(default)]
     pub peer_lookup: Option<PeerLookupInfo>,
+    /// Whether the engine computes prompt logprobs. `false` under
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
+    #[serde(default = "supports_prompt_logprobs_default")]
+    pub supports_prompt_logprobs: bool,
+}
+
+fn supports_prompt_logprobs_default() -> bool {
+    true
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

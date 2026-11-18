@@ -61,7 +61,7 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 NIXL_CONNECTOR_VERSION: int = 17
 
 
-@dataclass
+@dataclass(slots=True)
 class NixlAgentMetadata:
     engine_id: str
     agent_metadata: bytes
@@ -270,7 +270,7 @@ def compute_nixl_compatibility_hash(
     return compat_hash
 
 
-@dataclass
+@dataclass(slots=True)
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""
 
@@ -287,7 +287,7 @@ class HeartbeatInfo:
     leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteMeta:
     block_ids: BlockIds
     host: str
@@ -300,7 +300,7 @@ class RemoteMeta:
     registration_generation: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     local_block_ids: BlockIds
     # To be used when logical block size does not match the kernel block size

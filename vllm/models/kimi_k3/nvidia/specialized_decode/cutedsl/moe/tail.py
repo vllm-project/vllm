@@ -102,10 +102,19 @@ class MoeTail:
     threads = 128
     options: dict = {}
 
-    def __init__(self, tp: int, batch: int, *, mode="front", trigger=2):
+    def __init__(
+        self, tp: int, batch: int, *, mode="front", trigger=2, gate=False, poll_ns=None
+    ):
         self.tp, self.batch, self.mode, self.trigger = tp, batch, mode, trigger
         self.cluster, self.tokens = (7 if tp == 8 else 8), min(batch, 2)
         self.poll_ns, self.front_poll_ns = (0, 0) if tp == 8 else (64, 128)
+        # ``poll_ns``: the latent/RS poll's sleep between rounds (None: the default
+        # above). ``gate``: one CTA barrier after ``front``, so every thread has issued
+        # its finalize and shared-shard tasks before any thread of the CTA polls.
+        # Neither changes what is loaded, summed or stored (tail_runtime.TAIL_GATE).
+        if poll_ns is not None:
+            self.poll_ns = poll_ns
+        self.gate = gate
         self.cols, self.shard = 3584 // self.cluster, 7168 // tp
         self.frags, self.nc = self.cols // 8, self.shard // 32
         self.grid = self.cluster * self.nc * ((batch + self.tokens - 1) // self.tokens)
@@ -289,6 +298,8 @@ class MoeTail:
         cute.arch.cluster_arrive_relaxed()
         io = (latent, shared, gemm2, weights, shared_output, peers)
         self.front(io, latent_mc, par, rank, capacity, block, warp, lane)
+        if cutlass.const_expr(self.gate):
+            cute.arch.sync_threads()
         pt, pk = tid // 64, tid % 64
         lat_thread = (pt < local_tokens) & (pk < self.frags)
         rs_j = tid - 64 if self.tokens == 1 else pk if self.tp == 8 else pk - self.frags

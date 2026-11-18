@@ -90,7 +90,7 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixHashConfig:
     """What a frontend needs to compute a request's prompt block hashes itself
     (see `EngineCoreRequest.block_hashes`)."""
@@ -106,7 +106,7 @@ class PrefixHashConfig:
     num_lookahead_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class PeerLookupInfo:
     """How a peer reaches one engine rank to look up and pin a KV prefix.
 
@@ -128,7 +128,7 @@ class PeerLookupInfo:
     layout_fingerprint: str
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -183,6 +183,10 @@ class EngineCoreReadyResponse:
     enable_expert_parallel: bool = False
     # Set when the KV connector serves peer lookups (see PeerLookupInfo).
     peer_lookup: PeerLookupInfo | None = None
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
 
 
 class EngineCoreRequest(
