@@ -215,7 +215,7 @@ def _skip_worker(rank, world_size, port, result_queue):
             dist.destroy_process_group()
 
 
-def _run_distributed(worker_fn, world_size):
+def _run_distributed(worker_fn, world_size, extra=()):
     import multiprocessing as mp
 
     from vllm.utils.network_utils import get_open_port
@@ -224,7 +224,9 @@ def _run_distributed(worker_fn, world_size):
     result_queue = ctx.Queue()
     port = get_open_port()
     procs = [
-        ctx.Process(target=worker_fn, args=(rank, world_size, port, result_queue))
+        ctx.Process(
+            target=worker_fn, args=(rank, world_size, port, result_queue, *extra)
+        )
         for rank in range(world_size)
     ]
     for p in procs:
@@ -301,6 +303,182 @@ def test_tp_consensus_missing_rank_times_out():
     # teardown abort can precede the timeout; the safety property is
     # "raises, within the watchdog", not "waits exactly the timeout".)
     assert elapsed <= _WATCHDOG_S, f"took too long: {elapsed:.1f}s"
+
+
+class _RaisingWorks(dict):
+    """A works mapping whose getitem raises for one key (a rank-local
+    corruption of the broadcast structure that the step-level set
+    asserts cannot see)."""
+
+    def __init__(self, base, raise_key):
+        super().__init__(base)
+        self._raise_key = raise_key
+
+    def __getitem__(self, key):
+        if key == self._raise_key:
+            raise KeyError(key)
+        return super().__getitem__(key)
+
+
+def _parity_worker(rank, world_size, port, result_queue, mode):
+    """Run execute_repair_only over two works under a rank-local
+    corruption (mode 'lookup': the works mapping raises on one key;
+    mode 'duplicate': the batch carries one request id twice) and report
+    the number of consensus collectives issued plus the verdicts. The
+    collective CALL COUNT must match the peers' on every path -- an
+    unpaired collective leaves a peer inside all_gather until the
+    process-group timeout."""
+    import os
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+
+    import torch
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=_PG_TIMEOUT_S),
+    )
+    try:
+        from types import SimpleNamespace
+
+        from tests.v1.kv_connector.unit.utils import create_vllm_config
+        from vllm.forward_context import set_forward_context
+        from vllm.v1.attention.backends.cpu_attn import CPUAttentionMetadata
+        from vllm.v1.core.sched.output import (
+            CachedRequestData,
+            RepairWork,
+            SchedulerOutput,
+        )
+        from vllm.v1.worker.gpu import repair_executor
+
+        calls = []
+        real_agree = repair_executor._ranks_repair_agree
+
+        def _counting(*args, **kwargs):
+            calls.append(1)
+            return real_agree(*args, **kwargs)
+
+        repair_executor._ranks_repair_agree = _counting
+
+        def _work(req_id, span, plan_id):
+            # Empty authorization: the fence refuses before any layer
+            # runs, so the parity being measured is the collective
+            # sequence, not kernel behavior.
+            return RepairWork(
+                request_id=req_id,
+                repair_span=span,
+                layer_end=1,
+                restored_extent=16,
+                plan_id=plan_id,
+                epoch=3,
+                expected_write_block_ids=(),
+            )
+
+        works = {
+            "req-a": _work("req-a", (0, 8), 1),
+            "req-b": _work("req-b", (8, 16), 2),
+        }
+        broadcast_works = (
+            _RaisingWorks(works, "req-a") if (mode == "lookup" and rank == 0) else works
+        )
+        batch = ["req-a", "req-b"]
+        if mode == "duplicate" and rank == 0:
+            batch = ["req-a", "req-a", "req-b"]
+        sub = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={"req-a": 8, "req-b": 8},
+            total_num_scheduled_tokens=16,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+            repair_works=broadcast_works,
+        )
+        positions = torch.arange(16, dtype=torch.int64)
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                layers=[
+                    SimpleNamespace(
+                        self_attn=SimpleNamespace(
+                            attn=SimpleNamespace(
+                                kv_cache=torch.zeros(2, 8, 8),
+                                layer_name="model.layers.0",
+                            )
+                        )
+                    )
+                ],
+                embed_input_ids=lambda ids: torch.zeros(ids.shape[0], 8),
+            )
+        )
+        meta = CPUAttentionMetadata(
+            num_actual_tokens=16,
+            max_query_len=16,
+            query_start_loc=torch.arange(3, dtype=torch.int32),
+            max_seq_len=16,
+            seq_lens=torch.full((2,), 16, dtype=torch.int32),
+            block_table=torch.zeros(2, 1, dtype=torch.int32),
+            slot_mapping=torch.arange(16, dtype=torch.int64),
+            scheduler_metadata=None,
+        )
+        with set_forward_context(
+            {"model.layers.0": meta},
+            create_vllm_config(model="facebook/opt-125m"),
+        ):
+            results = repair_executor.execute_repair_only(
+                model, sub, positions.clone(), positions, batch
+            )
+        verdicts = [(r.request_id, r.aborted, r.structural_check) for r in results]
+        result_queue.put((rank, None, (len(calls), verdicts)))
+    except BaseException as exc:  # noqa: BLE001 - recorded for the parent
+        result_queue.put((rank, f"{type(exc).__name__}: {exc}", None))
+    finally:
+        with contextlib.suppress(Exception):
+            dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_work_lookup_failure_keeps_collective_parity(world_size):
+    """A rank whose works lookup fails mid-step must still issue ONE
+    consensus collective per scheduled work (the placeholder-identity
+    call): the per-work iteration count is identical across ranks, so
+    skipping one leaves a peer inside all_gather until the backend
+    timeout instead of failing promptly."""
+    results = _run_distributed(_parity_worker, world_size, extra=("lookup",))
+
+    counts = {}
+    for rank, err, payload in results:
+        assert err is None, f"rank {rank} raised: {err}"
+        n_calls, verdicts = payload
+        counts[rank] = n_calls
+        assert len(verdicts) == 2
+        assert all(aborted and not sc for _rid, aborted, sc in verdicts), verdicts
+    assert len(set(counts.values())) == 1, f"collective count diverged: {counts}"
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_duplicate_batch_id_takes_step_error_path(world_size):
+    """A duplicated request id in the worker-local batch must trip the
+    step-level validation (the count-preserving all-failed path), not
+    slip through the set-equality asserts and issue one collective per
+    duplicate -- an unpaired trailing collective strands a peer until
+    the backend timeout."""
+    results = _run_distributed(_parity_worker, world_size, extra=("duplicate",))
+
+    counts = {}
+    for rank, err, payload in results:
+        assert err is None, f"rank {rank} raised: {err}"
+        n_calls, verdicts = payload
+        counts[rank] = n_calls
+        assert len(verdicts) == 2
+        assert all(aborted and not sc for _rid, aborted, sc in verdicts), verdicts
+    assert len(set(counts.values())) == 1, f"collective count diverged: {counts}"
 
 
 def test_single_rank_consensus_semantics():
