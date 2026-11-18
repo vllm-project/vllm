@@ -34,17 +34,6 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
-### GDN prefill checkpoints
-
-On CUDA, Qwen3-Next, Qwen3.5 and OLMo Hybrid can save internal prefill
-checkpoints with the Triton GDN backend. In Mamba cache mode `align`, this
-allows a prefill to cross its last prefix-cache boundary in one forward pass.
-Offsets must align to the 64-token chunk grid, and every Mamba layer must
-support internal checkpoints; other cases retain split prefills.
-
-OLMo Hybrid always uses the Triton GDN prefill backend, including when
-`gdn_prefill_backend` is `auto`.
-
 ### FlashInfer ReplaySSM
 
 FlashInfer ReplaySSM caches recent inputs to reduce full-state writes during Mamba2 decoding. It is disabled by default. Both Model Runners V1 and V2 support prefix caching with ReplaySSM, including MTP speculative decoding.
