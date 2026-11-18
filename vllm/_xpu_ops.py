@@ -52,10 +52,14 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         weight_scale: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        input_2d = input.view(-1, input.shape[-1])
-        M = input_2d.size(0)
-        N = q_weight.size(1)
-        return torch.empty((M, N), dtype=input.dtype, device=input.device)
+        # The real oneDNN kernel preserves input rank: 2D in -> 2D out,
+        # 3D in -> 3D out (batch dim kept), see
+        # check_and_create_output_tensor in onednn_matmul.cpp. Mirror that
+        # here instead of always collapsing to 2D, so the traced (fake)
+        # output shape matches what the op actually produces at runtime.
+        N = q_weight.size(-1)
+        out_shape = (*input.shape[:-1], N)
+        return torch.empty(out_shape, dtype=input.dtype, device=input.device)
 
 
 if hasattr(torch.ops._xpu_C, "fp4_gemm"):
