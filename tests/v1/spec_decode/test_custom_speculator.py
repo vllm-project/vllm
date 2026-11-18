@@ -323,6 +323,9 @@ def test_speculator_config_selection(method, declared, multi_module, expected):
     [
         ("MuseGlimmerAssistantModel", "DFlashSpeculatorConfig"),
         ("LiLiCorrDraftModel", "LiLiCorrSpeculatorConfig"),
+        ("DFlashLiLiCorrDraftModel", "LiLiCorrSpeculatorConfig"),
+        ("DSpineDraftModel", "DSpineSpeculatorConfig"),
+        ("DFlashDSpineDraftModel", "DSpineSpeculatorConfig"),
         ("DFlashQwen3XPressModel", "XPressSpeculatorConfig"),
         ("MuseSparkDSparkModel", "DSparkSpeculatorConfig"),
         ("DFlash2DraftModel", "DFlash2SpeculatorConfig"),
