@@ -556,7 +556,7 @@ class RdmaTransport:
         # Set once a request fails or the proxy exits, so every wait fails then:
         # `start` reads the host copy, kernels the HBM one.
         gpu = torch.device("cuda", torch.accelerator.current_device_index())
-        self.failed = torch.zeros(1, dtype=torch.int64, pin_memory=True)
+        self.failed = torch.zeros(1, dtype=torch.int64, device="cpu", pin_memory=True)
         self.failed_gpu = torch.zeros(1, dtype=torch.int64, device=gpu)
         self._fail_stream = torch.cuda.Stream(gpu)
 
