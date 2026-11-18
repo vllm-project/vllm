@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from dataclasses import replace
-
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -26,7 +24,10 @@ from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
 )
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
     kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -50,7 +51,6 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -199,15 +199,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
         self,
@@ -320,7 +313,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
@@ -367,7 +364,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
+        if self.kda_prefill_backend == "triton":
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -392,9 +401,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     (1, max_tokens, self.local_num_heads, self.head_dim),
                     vllm_config.model_config.dtype,
                 ),
-            )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
-                state_len=self.conv_size - 1
             )
 
     def _flashkda_prefill(
@@ -729,6 +735,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     recurrent_state=recurrent_state,
                 )
             else:
+                checkpoint = attn_metadata_narrowed.checkpoint
+                checkpoint_state, checkpoint_offsets = get_triton_kda_checkpoint_buffer(
+                    checkpoint,
+                    self._triton_checkpoint_spec,
+                    initial_state.shape[0],
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -748,7 +760,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     cu_seqlens=non_spec_query_start_loc,
                     safe_gate=safe_gate,
                     lower_bound=lower_bound,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
                 )
+                if checkpoint is not None:
+                    assert self._checkpoint_exporter is not None
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=raw_qkv_ns,
+                        conv_state=conv_state,
+                        recurrent_checkpoint=checkpoint_state,
+                        recurrent_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
             # Init cache
             scatter_states(
                 recurrent_state,

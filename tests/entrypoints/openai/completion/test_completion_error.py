@@ -51,12 +51,12 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -88,12 +88,12 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -258,8 +258,8 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
 def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
     # Two verify steps: accept 3 drafts, then 1 -> histogram [0, 1, 0, 1].
     m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    m.observe(num_draft_tokens=3, num_accepted=3)
-    m.observe(num_draft_tokens=3, num_accepted=1)
+    m.observe(num_draft_tokens=3, num_accepted=3, num_verified_tokens=3)
+    m.observe(num_draft_tokens=3, num_accepted=1, num_verified_tokens=3)
     return m
 
 

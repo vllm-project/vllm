@@ -875,7 +875,8 @@ def test_engram_head_shards_reconstruct_checkpoint(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 def test_engram_lookup_reuses_jit_across_token_shapes():
-    """Runtime token counts and launch grids must share one JIT variant."""
+    """Runtime token counts and launch grids share one JIT variant per tile
+    size, on either side of the 128-row tile threshold on any SM count."""
     layer = _make_embedding(cpu_offload=False)
     kernel = engram_ops._engram_lookup_kernel
     kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
@@ -883,7 +884,10 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 
     cache_sizes = []
     for background in (False, True):
-        for num_tokens in (1, 7, 256):
+        grid = layer._num_sms // 2 if background else layer._num_sms
+        # The fewest tokens whose rows fill the grid with 128-row tiles.
+        large = -(-128 * grid // 24)
+        for num_tokens in (1, 7, large - 1, large, 2 * large):
             ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
             out = torch.empty(
                 num_tokens,
@@ -895,7 +899,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
             layer.lookup(ids, out, background=background)
             cache_sizes.append(len(kernel_cache))
 
-    assert cache_sizes == [1] * len(cache_sizes)
+    # 16-row tiles, then 128-row tiles; the background grid adds neither.
+    assert cache_sizes == [1, 1, 1, 2, 2] + [2] * 5
 
 
 @pytest.mark.skipif(
@@ -904,7 +909,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [1, 7, 256, 1024])
 def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute

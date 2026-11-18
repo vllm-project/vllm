@@ -17,7 +17,8 @@ from vllm.models.inkling.nvidia.ops import qkvr_prep as nvidia_qkvr_prep
 from vllm.models.inkling.nvidia.ops import sconv as nvidia_sconv
 from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_planning import unify_kv_cache_spec_page_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _is_rocm = current_platform.is_rocm()
 qkvr_prep = amd_qkvr_prep if _is_rocm else nvidia_qkvr_prep
@@ -293,16 +294,18 @@ def test_short_conv_indexes_planner_enlarged_conv_blocks(monkeypatch):
     owner.stream_ranges = ((0, head_dim),)
     owner.kv_cache = torch.tensor([])
 
-    attn_spec = FullAttentionSpec(
-        block_size=64,
-        num_kv_heads=kv_heads,
-        head_size=head_dim,
-        dtype=torch.bfloat16,
+    attn_config = FullAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=64,
+            num_kv_heads=kv_heads,
+            head_size=head_dim,
+            dtype=torch.bfloat16,
+        )
     )
     unified = unify_kv_cache_spec_page_size(
-        {"conv": owner.get_kv_cache_spec(None), "attn": attn_spec}
+        {"conv": owner.get_kv_cache_config(None), "attn": attn_config}
     )
-    block_size = unified["conv"].block_size
+    block_size = unified["conv"].spec.block_size
     assert block_size == 4 * kernel_size
 
     torch.manual_seed(0)
