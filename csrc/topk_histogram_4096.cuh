@@ -120,11 +120,16 @@ __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   // 0x7FFFFFFF (the key of -0.0) while the FP16 coarse bin puts NaN on top.
 #ifdef USE_ROCM
   const uint32_t bits = __float_as_uint(x);
+  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 #else
   uint32_t bits;
   asm("mov.b32 %0, %1;" : "=r"(bits) : "f"(x));
+  // cvt.rn.f16.f32 drops a NaN's sign, so the FP16 coarse bins put every NaN
+  // on top; key sign-set NaNs above +inf too.
+  return static_cast<int32_t>(bits) > static_cast<int32_t>(0xFF800000u)
+             ? (bits | 0x80000000u)
+             : ~bits;
 #endif
-  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->

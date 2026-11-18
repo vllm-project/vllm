@@ -88,6 +88,7 @@ def create_scheduler(
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     kv_cache_layer_config: KVCacheLayerConfig | None = None,
+    mamba_layer_config: KVCacheLayerConfig | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     cache_aware_admission_window: int = 0,
@@ -117,7 +118,6 @@ def create_scheduler(
     """
     model_config = ModelConfig(
         model=model,
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
@@ -155,6 +155,11 @@ def create_scheduler(
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
+        mamba_cache_mode=(
+            mamba_layer_config.manager_config.params.mamba_cache_mode
+            if mamba_layer_config
+            else "none"
+        ),
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):
@@ -238,7 +243,12 @@ def create_scheduler(
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[new_kv_cache_group(["layer"], kv_cache_layer_config)],
+        kv_cache_groups=[new_kv_cache_group(["layer"], kv_cache_layer_config)]
+        + (
+            [new_kv_cache_group(["mamba"], mamba_layer_config)]
+            if mamba_layer_config
+            else []
+        ),
     )
     cache_config.num_gpu_blocks = num_blocks
     if scheduler_cls is None:
