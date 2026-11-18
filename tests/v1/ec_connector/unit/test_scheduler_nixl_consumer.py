@@ -184,6 +184,48 @@ def test_no_remote_announcement_is_ready(monkeypatch, params):
     s.shutdown()
 
 
+@pytest.mark.parametrize("missing_remote_item", [False, True])
+@pytest.mark.cpu_test
+def test_runner_cache_hit_skips_remote_read(monkeypatch, missing_remote_item):
+    """A runner hit survives CPU-cache eviction and a dead producer."""
+    s = _consumer_sched(monkeypatch)
+    started = []
+
+    def fail_start(mm_hash, *args):
+        started.append(mm_hash)
+        raise RuntimeError("producer unavailable")
+
+    monkeypatch.setattr(s, "_start_xfer", fail_start)
+    data = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(
+                torch.tensor([1, 2, 2]), MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
+    features = [_Feature("cached", data=data)]
+    params = _params("cached", 1)
+    if missing_remote_item:
+        features.append(_Feature("missing", data=data))
+        params.update(_params("missing", 1))
+    req = _Request(features, params=params)
+
+    try:
+        assert s._cache.alloc("cached", 1) is not None
+        s._cache.mark_ready("cached")
+        assert s._cache.alloc("replacement", _N) is not None
+        assert s._cache.get("cached") is None
+        assert s.ensure_cache_available(req, 0, local_cache_hashes={"cached"}) is (
+            not missing_remote_item
+        )
+        assert started == (["missing"] if missing_remote_item else [])
+        assert s.take_unavailable_requests() == (
+            {req.request_id} if missing_remote_item else set()
+        )
+    finally:
+        s.shutdown()
+
+
 @pytest.mark.parametrize("payload", [None, "metadata", "pixels", "embeds", "shm"])
 def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload):
     """A remote miss is fatal only when local model input is unavailable."""

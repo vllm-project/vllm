@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -89,7 +90,10 @@ class ECMooncakeConnector(ECConnectorBase):
         return self._scheduler.has_cache_item(identifier)
 
     def ensure_cache_available(
-        self, request: Request, num_computed_tokens: int
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         assert self._scheduler is not None
         return self._scheduler.ensure_cache_available(request, num_computed_tokens)

@@ -217,10 +217,15 @@ class ECCPUScheduler:
             return True
         if first:
             self._poll_step()
-        return self._nixl_consumer_admit(request, num_computed_tokens)
+        return self._nixl_consumer_admit(
+            request, num_computed_tokens, local_cache_hashes
+        )
 
     def _nixl_consumer_admit(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         """Admit a request once its required remote encodings are ready.
 
@@ -238,6 +243,9 @@ class ECCPUScheduler:
         now = time.monotonic()
         pending = False
         for feature in request.mm_features:
+            if local_cache_hashes and feature.identifier in local_cache_hashes:
+                self._deferred_since.pop((request.request_id, feature.identifier), None)
+                continue
             try:
                 if not self._admit_item(request, feature, num_computed_tokens, now):
                     pending = True
