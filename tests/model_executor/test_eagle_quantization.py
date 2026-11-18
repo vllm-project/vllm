@@ -64,41 +64,40 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     if current_platform.is_cuda_alike():
         torch.accelerator.set_device_index(device)
 
-    torch.set_default_device(device)
+    with torch.device(device):
+        input_size = 256
+        output_size = 128
 
-    input_size = 256
-    output_size = 128
+        fc_no_quant = ReplicatedLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=False,
+            params_dtype=torch.float16,
+            quant_config=None,
+            prefix="fc",
+        )
 
-    fc_no_quant = ReplicatedLinear(
-        input_size=input_size,
-        output_size=output_size,
-        bias=False,
-        params_dtype=torch.float16,
-        quant_config=None,
-        prefix="fc",
-    )
+        assert fc_no_quant.quant_config is None
+        assert fc_no_quant.input_size == input_size
+        assert fc_no_quant.output_size == output_size
 
-    assert fc_no_quant.quant_config is None
-    assert fc_no_quant.input_size == input_size
-    assert fc_no_quant.output_size == output_size
+        mock_quant_config = Mock()
+        mock_quant_config.online_quantization_config = None
+        fc_with_quant = ReplicatedLinear(
+            input_size=input_size,
+            output_size=output_size,
+            bias=False,
+            params_dtype=torch.float16,
+            quant_config=mock_quant_config,
+            prefix="fc",
+        )
 
-    mock_quant_config = Mock()
-    mock_quant_config.online_quantization_config = None
-    fc_with_quant = ReplicatedLinear(
-        input_size=input_size,
-        output_size=output_size,
-        bias=False,
-        params_dtype=torch.float16,
-        quant_config=mock_quant_config,
-        prefix="fc",
-    )
+        assert fc_with_quant.quant_config == mock_quant_config
 
-    assert fc_with_quant.quant_config == mock_quant_config
-
-    # Check forward pass
-    x = torch.randn(2, input_size, dtype=torch.float16)
-    output, _ = fc_no_quant(x)
-    assert output.shape == (2, output_size)
+        # Check forward pass
+        x = torch.randn(2, input_size, dtype=torch.float16)
+        output, _ = fc_no_quant(x)
+        assert output.shape == (2, output_size)
 
 
 def test_maybe_remap_kv_scale_name():
