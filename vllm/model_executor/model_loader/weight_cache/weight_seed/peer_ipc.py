@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+    storage_bytes,
+)
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
     TensorEntry,
 )
@@ -14,14 +17,12 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
     WeightMover,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    storage_bytes,
-)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
         IPCBackend,
+        StorageRecord,
     )
 
 
@@ -41,23 +42,22 @@ class PeerIpcMover(WeightMover):
         self._device_index = device_index
         self._ipc_backend = ipc_backend
 
-    def prepare_seed(self, storages: list[torch.UntypedStorage]) -> dict:
+    def prepare_seed(self, storages: list["StorageRecord"]) -> dict:
         if self._device_index is not None:
             torch.accelerator.set_device_index(self._device_index)
         index = torch.accelerator.current_device_index()
         gpu_uuid = None
         if torch.accelerator.device_count() > 0 and current_platform.is_cuda_alike():
             gpu_uuid = current_platform.get_device_uuid(index)
-        export = (
-            TensorEntry.from_tensor
+        exporter = lambda record: (
+            TensorEntry.from_storage(record.storage)
             if self._ipc_backend is None
-            else self._ipc_backend.export_tensor
+            else self._ipc_backend.export_storage(record)
         )
+        entries = [exporter(record) for record in storages]
         return {
             "backend": self.name,
-            "storages": [
-                export(storage_bytes(storage), "buffer") for storage in storages
-            ],
+            "storages": entries,
             "source_device_index": index,
             "source_gpu_uuid": gpu_uuid,
         }
@@ -92,6 +92,7 @@ class PeerIpcMover(WeightMover):
             for entry, buffer in zip(entries, buffers):
                 source = entry.rebuild(source_index)
                 sources.append(source)
-                buffer.copy_(source, non_blocking=True)
+                source_bytes = storage_bytes(source.storage)
+                buffer.copy_(source_bytes[: buffer.nbytes], non_blocking=True)
         finally:
             torch.accelerator.synchronize()

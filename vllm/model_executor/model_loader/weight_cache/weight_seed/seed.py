@@ -21,7 +21,6 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     WeightsSeedPayload,
-    build_manifest,
     validate_weights_payload,
 )
 
@@ -118,8 +117,7 @@ class WeightShardSeed(Seedable):
                 raise ValueError("Weights were released")
             mover = self._mover(backend)
             snapshot = daemon._seed_state()
-            manifest, storages = build_manifest(snapshot.tensors, snapshot.kinds)
-            seed = mover.prepare_seed(storages)
+            seed = mover.prepare_seed(snapshot.storages)
             with self._lease_condition:
                 self._active_copies += 1
             return {
@@ -127,7 +125,7 @@ class WeightShardSeed(Seedable):
                 # Matched instead of the checkpoint fingerprint by a mirror
                 # without the safetensors to hash (see seed_mismatches).
                 "model": daemon.model_config.model,
-                "manifest": manifest,
+                "manifest": snapshot.manifest,
                 "aliases": snapshot.aliases,
                 "attrs": snapshot.attrs,
                 "seed": seed,

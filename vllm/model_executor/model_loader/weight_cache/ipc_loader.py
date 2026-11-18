@@ -4,7 +4,6 @@
 
 import contextlib
 import dataclasses
-import gc
 import socket
 import threading
 import time
@@ -40,6 +39,7 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
+    storage_bytes,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
@@ -61,6 +61,9 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     record_external_weight_charge,
     record_external_weight_fallback,
 )
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    rebuild_tensors,
+)
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)
@@ -78,7 +81,7 @@ class IpcModelLoader(BaseModelLoader):
     The model is initialized on the meta device and every parameter/buffer is
     replaced by the daemon's post-quantized tensor, so
     process_weights_after_loading is skipped entirely. In "zero_copy" mode the
-    engine shares the daemon's GPU memory; in "copy" mode the tensors are
+    engine shares the daemon's GPU memory; in "copy" mode the storages are
     cloned into engine-owned memory and the daemon is asked to release its
     cache afterwards.
 
@@ -207,21 +210,22 @@ class IpcModelLoader(BaseModelLoader):
         cache_key = self._cache_key
         if cache_key is None:
             vllm_config = get_current_vllm_config()
-            entries = self._fetch_entries(
+            state = self._fetch_state(
                 model_config,
                 vllm_config.cache_config,
                 vllm_config.parallel_config,
                 vllm_config.kernel_config,
                 is_reload=True,
-            ).entries
+            )
         else:
-            entries = self._state_for_key(cache_key, is_reload=True).entries
+            state = self._state_for_key(cache_key, is_reload=True)
+        records = [entry.rebuild(device_index) for entry in state.storages]
+        buffers = [storage_bytes(record.storage)[: record.nbytes] for record in records]
+        tensors = rebuild_tensors(state.manifest, buffers)
         params = dict(model.named_parameters())
         named_buffers = dict(model.named_buffers())
-        rebuild_buffers: dict[object, torch.Tensor] = {}
-        for name, entry in entries.items():
+        for name, source in tensors.items():
             target = params.get(name, named_buffers.get(name))
-            source = entry.rebuild(device_index, rebuild_buffers)
             if target is None or target.shape != source.shape:
                 logger.warning("Skipping mismatched cached tensor %s", name)
                 continue
@@ -237,26 +241,16 @@ class IpcModelLoader(BaseModelLoader):
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
         )
-        model, entry_count, fetched = self._attempt_cached_model(
-            vllm_config, model_config, prefix
-        )
+        model = self._attempt_cached_model(vllm_config, model_config, prefix)
         if model is not None:
             if self.mode == "copy":
                 self._send_release()
             else:
                 self._watch_daemon()
             logger.info(
-                "Mapped %d tensors from the weight cache daemon (%s mode)",
-                entry_count,
-                self.mode,
+                "Mapped tensors from the weight cache daemon (%s mode)", self.mode
             )
             return model
-        # Once the helper returns, its state and partially built tensors are no
-        # longer referenced. Release the daemon's copy-mode cache before
-        # collecting consumer-side mappings so disk loading does not OOM.
-        if self.mode == "copy" and fetched:
-            self._send_release()
-        gc.collect()
         torch.accelerator.empty_cache()
         model = self._fallback_load(vllm_config, model_config, prefix)
         if self.mode == "zero_copy":
@@ -265,10 +259,10 @@ class IpcModelLoader(BaseModelLoader):
 
     def _attempt_cached_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str
-    ) -> tuple[nn.Module | None, int, bool]:
+    ) -> nn.Module | None:
         fetched = False
         try:
-            state = self._fetch_entries(
+            state = self._fetch_state(
                 model_config,
                 vllm_config.cache_config,
                 vllm_config.parallel_config,
@@ -282,6 +276,8 @@ class IpcModelLoader(BaseModelLoader):
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
+            if self.mode == "copy" and fetched:
+                self._send_release()
         except UnsupportedQuantForIPCError:
             # Unsupported quantization is a permanent misconfiguration rather
             # than a transient daemon outage, so it is raised even when
@@ -293,9 +289,11 @@ class IpcModelLoader(BaseModelLoader):
             logger.exception(
                 "Weight cache loading failed; falling back to disk loading"
             )
+            if self.mode == "copy" and fetched:
+                self._send_release()
         else:
-            return model, len(state.entries), fetched
-        return None, 0, fetched
+            return model
+        return None
 
     def _build_model(
         self,
@@ -305,7 +303,7 @@ class IpcModelLoader(BaseModelLoader):
         state: WeightCacheState,
     ) -> nn.Module:
         _, device_index = _load_device(self.load_config, vllm_config)
-        tensors, kinds = self._apply_entries(state, device_index)
+        tensors, kinds = self._rebuild_storages(state, device_index)
         model = build_model_from_processed_weights(
             vllm_config,
             model_config,
@@ -318,26 +316,26 @@ class IpcModelLoader(BaseModelLoader):
         )
         return model
 
-    def _apply_entries(
+    def _rebuild_storages(
         self, state: WeightCacheState, device_index: int
     ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind]]:
-        """Resolve the daemon's entries to this process's tensors and kinds.
+        """Rebuild manifest tensors from one imported buffer per storage.
 
-        In "copy" mode every tensor is cloned into engine-owned memory so the
-        daemon can be asked to release its cache afterwards.
+        In "copy" mode every whole storage is cloned into engine-owned memory
+        so the daemon can be asked to release its cache afterwards.
         """
-        tensors: dict[str, torch.Tensor] = {}
-        kinds: dict[str, TensorKind] = {}
-        rebuild_buffers: dict[object, torch.Tensor] = {}
-        for name, entry in state.entries.items():
-            tensor = entry.rebuild(device_index, rebuild_buffers)
-            if self.mode == "copy":
-                tensor = tensor.clone()
-            tensors[name] = tensor
-            kinds[name] = entry.kind
+        records = [entry.rebuild(device_index) for entry in state.storages]
+        buffers = [storage_bytes(record.storage)[: record.nbytes] for record in records]
+        if self.mode == "copy":
+            buffers = [buffer.clone() for buffer in buffers]
+        tensors = rebuild_tensors(state.manifest, buffers)
+        kinds: dict[str, TensorKind] = {
+            name: "param" if view["is_param"] else "buffer"
+            for name, view in state.manifest["tensors"].items()
+        }
         return tensors, kinds
 
-    def _fetch_entries(
+    def _fetch_state(
         self,
         model_config: ModelConfig,
         cache_config: CacheConfig,
@@ -414,7 +412,6 @@ class IpcModelLoader(BaseModelLoader):
             IPC_BACKENDS,
         )
 
-        supported = tuple(IPC_BACKENDS)
         with self._connect(self.state_timeout_s) as conn:
             send_msg(
                 conn,
@@ -422,7 +419,7 @@ class IpcModelLoader(BaseModelLoader):
                     "cmd": "get_state",
                     "cache_key": cache_key,
                     "is_reload": is_reload,
-                    "backends": supported,
+                    "backends": tuple(IPC_BACKENDS),
                 },
             )
             response = recv_msg(conn)
@@ -436,15 +433,16 @@ class IpcModelLoader(BaseModelLoader):
                 f"Weight cache daemon error: {response.get('message')}"
             )
         self._check_gpu_uuid(response.get("gpu_uuid"))
-        backend = response.get("backend", "cuda_ipc")
-        if backend not in supported:
+        backend = response["backend"]
+        if backend not in IPC_BACKENDS:
             raise CacheConfigMismatchError(
                 f"Weight cache daemon uses unsupported backend {backend!r}"
             )
         return WeightCacheState(
-            entries=response["entries"],
-            aliases=response.get("aliases", {}),
-            attrs=response.get("attrs", {}),
+            storages=response["storages"],
+            manifest=response["manifest"],
+            aliases=response["aliases"],
+            attrs=response["attrs"],
         )
 
     def _connect(self, timeout: float) -> socket.socket:

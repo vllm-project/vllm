@@ -659,8 +659,9 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
         )
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
-        tensors, kinds = loader._apply_entries(
-            WeightCacheState(entries, {}, {}), device_index
+        storages, manifest = entries
+        tensors, kinds = loader._rebuild_storages(
+            WeightCacheState(storages, manifest, {}, {}), device_index
         )
         _register_processed_tensors(layer, tensors, kinds, {})
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
@@ -695,6 +696,9 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
         TensorEntry,
     )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        build_manifest,
+    )
 
     method, layer = _make_unquantized_flashinfer_test_layer(
         monkeypatch, 192, is_gated=True, device="meta"
@@ -705,10 +709,18 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         torch.randn_like(layer.w2_weight, device="cuda"),
     )
     expected = [weight.cpu() for weight in packed]
-    entries = {}
+    tensors = {}
     for name, weight in zip(("w13_weight", "w2_weight"), packed):
-        cached = weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
-        entries[name] = TensorEntry.from_tensor(cached, kind="param")
+        tensors[name] = (
+            weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
+        )
+    manifest, source_storages = build_manifest(
+        tensors, {name: "param" for name in tensors}
+    )
+    entries = (
+        [TensorEntry.from_storage(storage) for storage in source_storages],
+        manifest,
+    )
     consumer = multiprocessing.get_context("spawn").Process(
         target=_check_flashinfer_ipc_weights,
         args=(

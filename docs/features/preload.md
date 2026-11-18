@@ -78,27 +78,33 @@ A backend mismatch follows the ordinary cache-mismatch policy: disk fallback
 when enabled, an error otherwise. New engines can connect to existing CUDA IPC
 daemons; VMM daemons reject engines that do not advertise VMM support.
 
-After loading, post-processing and warmup, the daemon collects the model's
-final canonical parameters and buffers, including any tensors created or
-replaced during warmup. It then drops the model and releases startup runtime
-resources. CUDA IPC exports these tensors directly, preserving their storage
-sharing. VMM materializes each distinct GPU storage into an exportable
-`cuMemCreate` allocation and rebinds its views, preserving tied parameters,
-shared storages, offsets and strides. Storages move one at a time to avoid
-retaining a second complete model. Allocations are rounded to the driver's
-granularity; that padding counts in the external-weight memory budget. CPU
-tensors continue to use the existing by-value transfer path.
+After loading, post-processing and warmup, the daemon calls `build_manifest`
+to record the final canonical parameters and buffers as logical views over
+distinct storages, including any tensors created or replaced during warmup. It
+then materializes the storages, drops the model and releases startup runtime
+resources. VMM moves each GPU storage into an exportable `cuMemCreate`
+allocation, one storage at a time to avoid retaining a second complete model.
+VMM handles only allocation and FD export/import; the manifest preserves the
+logical layout, including tied parameters, shared storages, offsets and
+strides. Each `StorageRecord` holds `owner`, `storage`, logical `nbytes` and
+`allocation_nbytes`. Allocations are rounded to the driver's granularity, and
+that padding counts in the external-weight memory budget. CPU tensors continue
+to use the existing by-value transfer path.
 
-The resulting `WeightSnapshot` is published before the daemon starts its
-listeners or reports readiness. For each consumer, CUDA IPC creates fresh
-handle reductions from the snapshot. VMM passes descriptors with `SCM_RIGHTS`
-over the owner-verified Unix socket, not as serialized process-local integers.
-Each engine imports the handles and owns its mappings until the last tensor
-view is destroyed. A connected engine does not need the daemon to stay alive
-to retain its imported allocations, but future engines need a live daemon to
-fetch them. Both `zero_copy` and `copy` loader modes work with either backend.
-Same-host peer seeding detects VMM storage and transfers its descriptors;
-remote seeding continues to use its configured copy mover.
+The resulting `WeightSnapshot` holds `manifest`, `storages`, `aliases`, `attrs`
+and `backend`, and is published before the daemon starts its listeners or
+reports readiness. For each `get_state` consumer, `export_storages()` exports
+every storage once. CUDA IPC still creates fresh per-consumer handle
+reductions. VMM passes FDs with `SCM_RIGHTS` over the owner-verified Unix
+socket, not as serialized process-local integers. Each
+`StorageEntry.rebuild(device)` returns a `StorageRecord`; the consumer then
+uses the manifest to rebuild all tensor views. Each engine owns its imported
+mappings until the last view is destroyed. A connected engine does not need
+the daemon to stay alive to retain its imported allocations, but future
+engines need a live daemon to fetch them. Both `zero_copy` and `copy` loader
+modes work with either backend. Same-host peer seeding detects VMM storage and
+transfers its descriptors; remote seeding continues to use its configured copy
+mover.
 
 Both backends can be deployed independently of the serving Pod, provided GPU
 access, socket mounts, ownership and container settings allow it. VMM does not
@@ -107,10 +113,10 @@ initializes CUDA; this backend does not implement a separate CUDA-free FD
 holder. It also does not add EPLB or sleep-mode support.
 
 The built-in `cuda_ipc` and `vmm` backends are the only statically supported
-backends. They implement `IPCBackend`, whose `materialize(tensors)` and
-`export_tensor(tensor, kind)` methods cover post-warmup materialization and
-per-consumer tensor export. Tensor reconstruction remains separate from the
-model's processed-weight contract and daemon-to-daemon copy movers.
+backends. They implement `IPCBackend`, whose `materialize(storages)` returns
+`StorageRecord`s and whose `export_storage(record)` returns a rebuildable
+`StorageEntry`. Tensor reconstruction remains separate from the model's
+processed-weight contract and daemon-to-daemon copy movers.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -134,7 +140,7 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
 
 After warmup and snapshotting, the daemon releases its communication resources
 and, on CUDA, cached cuBLAS workspaces before accepting engine connections. The
-snapshot's tensors remain resident for sharing through the selected backend.
+snapshot's storages remain resident for sharing through the selected backend.
 This reduces the daemon's GPU memory overhead; the amount reclaimed depends on
 the model and allocator state.
 
@@ -249,10 +255,12 @@ without the checkpoint's safetensors cannot fingerprint them, so it matches
 the source by `--model` path instead, as an engine without the files matches
 its daemon; give both sides the same `--model` in that case.
 
-The mirror copies each of the source's allocations once and rebuilds every
-tensor on it at the source's offset and strides, so views that post-processing
-leaves on one allocation (such as MLA's `W_UV` and `W_UK_T`) keep their layout
-and stay shared, and the mirror uses as much memory as the source.
+D2D seeding copies each source storage once, transferring only the logical
+`nbytes` prefix rather than the `allocation_nbytes` padding. The mirror then
+uses the manifest to rebuild every view at its recorded offset and strides, so
+views that post-processing leaves on one storage (such as MLA's `W_UV` and
+`W_UK_T`) keep their layout and stay shared, and the mirror uses as much memory
+as the source.
 
 A same-host mirror keeps every GPU visible — a CUDA IPC handle names its
 device by index, so the source's indices must resolve — and the launcher
@@ -341,13 +349,15 @@ daemons at a trusted deployment.
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads and
-   post-processes its shard, runs warmup, then publishes a `WeightSnapshot` of
-   the final canonical parameters and buffers through the selected sharing
-   backend (CUDA IPC by default). It drops the model and startup runtime
-   resources before accepting engine connections.
+   post-processes its shard, runs warmup, then publishes a `WeightSnapshot`
+   containing a manifest of the final canonical parameters and buffers and
+   their storage records through the selected sharing backend (CUDA IPC by
+   default). It drops the model and startup runtime resources before accepting
+   engine connections.
 2. An engine started with `--load-format ipc_cache` builds its model on the
-   meta device (no storage) and requests the tensors from the daemon on its
-   GPU.
+   meta device (no storage) and requests the storage entries and manifest from
+   the daemon on its GPU. It rebuilds each storage, then uses the manifest to
+   rebuild all tensor views.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
@@ -359,8 +369,8 @@ daemons at a trusted deployment.
    stale socket cannot serve weights for the wrong GPU.
 
 Tied weights (e.g. `lm_head.weight` sharing storage with
-`embed_tokens.weight`) are exported once and re-established as aliases in the
-engine, preserving parameter identity.
+`embed_tokens.weight`) share a storage export; the manifest and aliases
+re-establish their views and parameter identity in the engine.
 
 Shared weights count toward the engine's `gpu_memory_utilization` budget.
 If IPC loading falls back to disk, the engine removes the corresponding external

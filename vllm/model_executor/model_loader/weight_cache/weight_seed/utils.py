@@ -11,8 +11,9 @@ import torch
 from pydantic import TypeAdapter
 
 from vllm.config import replace
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import TensorKind
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    TensorKind,
+    storage_bytes as storage_bytes,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
@@ -124,11 +125,6 @@ def allocate_storage(storage: Mapping[str, Any], device: torch.device) -> torch.
     """A fresh byte buffer for one manifest storage, on the source's device type."""
     target = torch.device("cpu") if storage["device"] == "cpu" else device
     return torch.empty(storage["nbytes"], dtype=torch.uint8, device=target)
-
-
-def storage_bytes(storage: torch.UntypedStorage) -> torch.Tensor:
-    """A flat byte tensor covering the whole storage."""
-    return torch.empty(0, dtype=torch.uint8, device=storage.device).set_(storage)
 
 
 def seed_mismatches(

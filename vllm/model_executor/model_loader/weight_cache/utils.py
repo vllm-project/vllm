@@ -22,8 +22,9 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        CachedTensorEntry,
         IPCBackend,
+        StorageEntry,
+        StorageRecord,
         TensorKind,
     )
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
@@ -223,34 +224,21 @@ def collect_tensors(
 
 @dataclass(slots=True)
 class WeightSnapshot:
-    """Canonical post-warmup weights and their sharing backend."""
+    """Canonical post-warmup storage records and their tensor manifest."""
 
-    tensors: dict[str, torch.Tensor]
-    kinds: dict[str, "TensorKind"]
+    manifest: dict
+    storages: list["StorageRecord"]
     aliases: dict[str, str]
     attrs: dict[str, bool]
-    backend_name: str
     backend: "IPCBackend"
 
-    def export_entries(self) -> dict[str, "CachedTensorEntry"]:
-        """Export fresh entries and CUDA IPC reductions for one consumer."""
-        return {
-            name: self.backend.export_tensor(tensor, self.kinds[name])
-            for name, tensor in self.tensors.items()
-        }
+    def export_storages(self) -> list["StorageEntry"]:
+        """Export fresh sharing handles for one consumer."""
+        return [self.backend.export_storage(record) for record in self.storages]
 
 
-def _unique_cuda_storage_bytes(tensors: Iterable[torch.Tensor]) -> int:
-    storages: dict[int, int] = {}
-    for tensor in tensors:
-        if tensor.is_cuda:
-            storage = tensor.untyped_storage()
-            storages[storage.data_ptr()] = storage.nbytes()
-    return sum(storages.values())
-
-
-def exported_weight_bytes(tensors: Iterable[torch.Tensor] | None) -> int:
-    """Bytes of the distinct CUDA storages an engine maps from a snapshot.
+def exported_weight_bytes(storages: Iterable["StorageRecord"] | None) -> int:
+    """Allocation bytes of the non-CPU storages an engine maps from a snapshot.
 
     This is the memory the engine would otherwise allocate for the weights
     itself. `memory_allocated()` also counts daemon-only state the engine
@@ -258,6 +246,10 @@ def exported_weight_bytes(tensors: Iterable[torch.Tensor] | None) -> int:
     parameters/buffers that the engine rebuilds itself), so reporting it
     would shrink the engine's KV cache below that of a disk load.
     """
-    if tensors is None:
+    if storages is None:
         return 0
-    return _unique_cuda_storage_bytes(tensors)
+    return sum(
+        record.allocation_nbytes
+        for record in storages
+        if record.storage.device.type != "cpu"
+    )

@@ -83,8 +83,9 @@ def receive_descriptors(sock: socket.socket, count: int) -> list[SharedFileDescr
                 or len(descriptors) > count
             ):
                 raise ConnectionError("Invalid or truncated weight-cache descriptors")
-            for fd in batch:
-                os.set_inheritable(fd, False)
+            if not flags:
+                for fd in batch:
+                    os.set_inheritable(fd, False)
         return descriptors
     except BaseException:
         for descriptor in descriptors:

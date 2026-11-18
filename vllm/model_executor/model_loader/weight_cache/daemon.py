@@ -3,7 +3,7 @@
 """Weight cache daemon for fast engine restarts.
 
 One daemon process per GPU holds the post-quantized, TP-sharded weights of its
-rank in GPU memory and serves shared tensor entries to vLLM engines over a Unix
+rank in GPU memory and serves shared storage handles to vLLM engines over a Unix
 domain socket. Restarting engines map the weights zero-copy instead of reloading
 from disk.
 
@@ -117,7 +117,7 @@ from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    CachedTensorEntry,
+    StorageEntry,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
@@ -156,6 +156,7 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autot
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed import (
     WeightShardSeed,
+    build_manifest,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
@@ -169,7 +170,7 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 class WeightCacheDaemon:
-    """Per-GPU process that loads one shard and serves its shared tensor entries."""
+    """Per-GPU process that loads one shard and serves its shared storage handles."""
 
     def __init__(
         self,
@@ -316,23 +317,22 @@ class WeightCacheDaemon:
         )
 
     def snapshot_weights(self) -> None:
-        """Materialize canonical post-warmup tensors and drop the model."""
+        """Materialize canonical post-warmup storages and drop the model."""
         assert self.model is not None
         tensors, kinds, aliases = collect_tensors(self.model)
+        manifest, source_storages = build_manifest(tensors, kinds)
         attrs = export_model_attrs(self.model)
-        tensors = {name: tensor.detach() for name, tensor in tensors.items()}
         self.model = None
+        del tensors, kinds
         gc.collect()
         torch.accelerator.empty_cache()
-        tensors = self.backend.materialize(tensors)
-        self.snapshot = WeightSnapshot(
-            tensors, kinds, aliases, attrs, self.backend_name, self.backend
-        )
+        storages = self.backend.materialize(source_storages)
+        self.snapshot = WeightSnapshot(manifest, storages, aliases, attrs, self.backend)
 
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
 
-        Serving only exports shared tensor entries, so the communicators (NCCL,
+        Serving only exports shared storage handles, so the communicators (NCCL,
         custom all-reduce and FlashInfer workspaces) and cached BLAS scratch
         would otherwise pin GPU memory for the daemon's lifetime.
         """
@@ -548,11 +548,16 @@ class WeightCacheDaemon:
 
     def _export_state(
         self,
-    ) -> tuple[dict[str, CachedTensorEntry], dict[str, str], dict]:
-        """Export this rank's tensors, aliases and flags for one client."""
+    ) -> tuple[list[StorageEntry], dict, dict[str, str], dict[str, bool]]:
+        """Export this rank's storage handles, manifest, aliases and flags."""
         assert self.snapshot is not None
         snapshot = self.snapshot
-        return snapshot.export_entries(), snapshot.aliases, snapshot.attrs
+        return (
+            snapshot.export_storages(),
+            snapshot.manifest,
+            snapshot.aliases,
+            snapshot.attrs,
+        )
 
     def _seed_state(self) -> WeightSnapshot:
         """Return this rank's canonical post-warmup snapshot."""
@@ -573,7 +578,7 @@ class WeightCacheDaemon:
                     {
                         "status": "ok",
                         "memory_bytes": exported_weight_bytes(
-                            None if snapshot is None else snapshot.tensors.values()
+                            None if snapshot is None else snapshot.storages
                         ),
                         # The launcher maps source GPUs to local device indices
                         # when it places a same-host mirror.
@@ -618,31 +623,30 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
         supported = request.get("backends", ["cuda_ipc"])
-        if not isinstance(supported, (list, tuple)) or not all(
-            isinstance(name, str) for name in supported
-        ):
+        if not isinstance(supported, (list, tuple)):
             send_msg(conn, {"status": "error", "message": "Invalid sharing backends"})
             return
         if self.backend_name not in supported:
             send_msg(conn, {"status": "mismatch", "fields": ["weight_cache_backend"]})
             return
-        entries, aliases, attrs = self._export_state()
+        storages, manifest, aliases, attrs = self._export_state()
         send_msg(
             conn,
             {
                 "status": "ok",
                 "backend": self.backend_name,
-                "entries": entries,
+                "storages": storages,
+                "manifest": manifest,
                 "aliases": aliases,
                 "attrs": attrs,
                 "gpu_uuid": get_current_device_uuid(),
             },
         )
         logger.info_once(
-            "Weight cache %s daemon rank %d sent %d tensors (+%d aliases) to engine",
+            "Weight cache %s daemon rank %d sent %d storages (+%d aliases) to engine",
             self.role,
             self.global_rank,
-            len(entries),
+            len(storages),
             len(aliases),
         )
 

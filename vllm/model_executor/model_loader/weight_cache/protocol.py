@@ -29,7 +29,7 @@ from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    CachedTensorEntry,
+    StorageEntry,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     _LEN_STRUCT,
@@ -81,8 +81,8 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from `TensorEntry`; other
-    platforms (e.g. XPU) would silently ship every tensor by value instead.
+    Only CUDA/ROCm storages get a real IPC handle from `TensorEntry`; other
+    platforms (e.g. XPU) would silently ship every storage by value instead.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
@@ -437,10 +437,12 @@ class WeightCacheKey:
 class WeightCacheState(NamedTuple):
     """Client-side decode of a daemon's get_state response payload."""
 
-    entries: dict[str, CachedTensorEntry]
-    """Model tensors exported through the selected local sharing backend."""
+    storages: list[StorageEntry]
+    """Storage handles exported through the selected local sharing backend."""
+    manifest: dict
+    """Logical tensor views over the exported storages."""
     aliases: dict[str, str]
-    """Duplicate (tied) weight names aliased to their canonical entry."""
+    """Duplicate (tied) weight names aliased to their canonical tensor."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 

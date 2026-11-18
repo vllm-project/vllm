@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Weight movers: copy whole storages so views keep their sharing and footprint."""
+"""Weight movers: copy storage bytes so views keep their sharing and footprint."""
 
 import time
 from abc import ABC, abstractmethod
@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
         IPCBackend,
+        StorageRecord,
     )
 
 SeedBackend = Literal["peer_ipc", "mooncake"]
@@ -56,7 +57,7 @@ class WeightMover(ABC):
     name: SeedBackend
 
     @abstractmethod
-    def prepare_seed(self, storages: list[torch.UntypedStorage]) -> dict[str, Any]:
+    def prepare_seed(self, storages: list["StorageRecord"]) -> dict[str, Any]:
         """Publish how a mirror can read each storage, in manifest order."""
 
     @abstractmethod
@@ -66,7 +67,7 @@ class WeightMover(ABC):
         seed: Mapping[str, Any],
         buffers: list[torch.Tensor],
     ) -> None:
-        """Copy every source storage into its local byte buffer."""
+        """Copy each source storage's logical bytes into its local byte buffer."""
 
     def fill(
         self,

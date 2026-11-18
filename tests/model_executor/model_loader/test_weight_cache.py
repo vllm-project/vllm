@@ -61,13 +61,16 @@ def _snapshot_model(model, backend_name):
         collect_tensors,
         export_model_attrs,
     )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        build_manifest,
+    )
 
     backend = IPC_BACKENDS[backend_name]()
     tensors, kinds, aliases = collect_tensors(model)
-    tensors = {name: tensor.detach() for name, tensor in tensors.items()}
-    tensors = backend.materialize(tensors)
+    manifest, source_storages = build_manifest(tensors, kinds)
+    records = backend.materialize(source_storages)
     return WeightSnapshot(
-        tensors, kinds, aliases, export_model_attrs(model), backend_name, backend
+        manifest, records, aliases, export_model_attrs(model), backend
     )
 
 
@@ -89,15 +92,25 @@ def _export_vmm_test_model(connection):
         snapshot = _snapshot_model(model, "vmm")
         send_msg(
             connection,
-            {"entries": snapshot.export_entries(), "aliases": snapshot.aliases},
+            {
+                "storages": snapshot.export_storages(),
+                "manifest": snapshot.manifest,
+                "aliases": snapshot.aliases,
+            },
         )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
     """The FD holder imports after the producer exits; tensor views own the mapping."""
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        storage_bytes,
+    )
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
         recv_msg,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        rebuild_tensors,
     )
 
     client, server = socket.socketpair()
@@ -111,34 +124,33 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
             state = recv_msg(client)
         process.join(timeout=60)
         assert process.exitcode == 0
-        entries = state["entries"]
-        rebuild_buffers: dict[tuple[int, int], torch.Tensor] = {}
-        tensors = {}
-        for name, entry in entries.items():
-            tensors[name] = entry.rebuild(0, rebuild_buffers)
+        entries = state["storages"]
+        records = [entry.rebuild(0) for entry in entries]
+        buffers = [storage_bytes(record.storage) for record in records]
+        views = rebuild_tensors(state["manifest"], buffers)
         assert state["aliases"] == {"tied": "weight"}
         assert (
             len(
                 {
-                    tensors[name].untyped_storage().data_ptr()
+                    views[name].untyped_storage().data_ptr()
                     for name in ("weight", "transposed", "offset", "bytes_view")
                 }
             )
             == 1
         )
-        assert tensors["offset"].storage_offset() == 8
-        assert tensors["offset"].stride() == (8, 2)
-        assert tensors["empty"].shape == (0,)
-        del state, entries, rebuild_buffers
+        assert views["offset"].storage_offset() == 8
+        assert views["offset"].stride() == (8, 2)
+        assert views["empty"].shape == (0,)
+        del state, records, entries, buffers
         gc.collect()
         expected = torch.arange(48, dtype=torch.float32).reshape(6, 8)
-        assert torch.equal(tensors["weight"].cpu(), expected)
-        assert torch.equal(tensors["transposed"].cpu(), expected.T)
-        assert torch.equal(tensors["offset"].cpu(), expected[1:5, ::2])
-        assert torch.equal(tensors["bytes_view"].cpu(), expected.view(torch.uint8))
-        assert torch.equal(tensors["host_table"], torch.arange(3))
-        tensors["offset"].fill_(17)
-        assert torch.equal(tensors["weight"][1:5, ::2], tensors["offset"])
+        assert torch.equal(views["weight"].cpu(), expected)
+        assert torch.equal(views["transposed"].cpu(), expected.T)
+        assert torch.equal(views["offset"].cpu(), expected[1:5, ::2])
+        assert torch.equal(views["bytes_view"].cpu(), expected.view(torch.uint8))
+        assert torch.equal(views["host_table"], torch.arange(3))
+        views["offset"].fill_(17)
+        assert torch.equal(views["weight"][1:5, ::2], views["offset"])
     finally:
         process.join(timeout=5)
         if process.is_alive():
@@ -159,22 +171,20 @@ def test_vmm_peer_copy_preserves_views_and_current_device():
     from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
         PeerIpcMover,
     )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        build_manifest,
-    )
 
     model = torch.nn.Module()
     model.register_buffer("weight", torch.arange(48, device="cuda:0").reshape(6, 8))
     model.register_buffer("view", model.weight[1:5, ::2])
     snapshot = _snapshot_model(model, "vmm")
-    manifest, storages = build_manifest(snapshot.tensors, snapshot.kinds)
     source = PeerIpcMover(0, snapshot.backend)
     client, server = socket.socketpair()
     with client, server:
-        send_msg(server, source.prepare_seed(storages))
+        send_msg(server, source.prepare_seed(snapshot.storages))
         seed = recv_msg(client)
     with torch.accelerator.device_index(1):
-        copied = get_mover("peer_ipc").fill(manifest, seed, torch.device("cuda", 1))
+        copied = get_mover("peer_ipc").fill(
+            snapshot.manifest, seed, torch.device("cuda", 1)
+        )
         assert torch.accelerator.current_device_index() == 1
         assert torch.equal(copied["weight"].cpu(), model.weight.cpu())
         assert torch.equal(copied["view"].cpu(), model.view.cpu())
@@ -1368,9 +1378,15 @@ def test_ipc_rope_matching(
 
     from vllm.config import LoadConfig, ModelConfig, VllmConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        storage_bytes,
+    )
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
         hash_rope_parameters,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        rebuild_tensors,
     )
 
     is_reload, rope_type, theta, factor, max_position, rank, mismatch = case
@@ -1435,7 +1451,7 @@ def test_ipc_rope_matching(
                 if is_reload:
                     loader.load_weights(model, model_config)
                 else:
-                    loader._fetch_entries(
+                    loader._fetch_state(
                         model_config,
                         default_vllm_config.cache_config,
                         default_vllm_config.parallel_config,
@@ -1445,7 +1461,13 @@ def test_ipc_rope_matching(
                 expected = (
                     torch.zeros(2)
                     if mismatch
-                    else server.snapshot.tensors["rotary_cache"]
+                    else rebuild_tensors(
+                        server.snapshot.manifest,
+                        [
+                            storage_bytes(record.storage)
+                            for record in server.snapshot.storages
+                        ],
+                    )["rotary_cache"]
                 )
                 torch.testing.assert_close(model.rotary_cache, expected)
         finally:
@@ -1677,7 +1699,12 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     def request_state(key, *, is_reload=False):
         requested_keys.append(key)
-        return WeightCacheState(entries={}, aliases={}, attrs={})
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
 
     monkeypatch.setattr(loader, "_request_state", request_state)
     monkeypatch.setattr(
@@ -1764,7 +1791,12 @@ def test_ipc_cache_key_tracks_kernel_backends(
 
     def request_state(key, *, is_reload=False):
         requested_keys.append(key)
-        return WeightCacheState(entries={}, aliases={}, attrs={})
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
 
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     monkeypatch.setattr(loader, "_request_state", request_state)
