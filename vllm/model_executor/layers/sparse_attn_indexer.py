@@ -82,6 +82,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -573,7 +574,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )
