@@ -249,13 +249,13 @@ DEFAULT_ITERS_WARMUP = 20
 DEFAULT_ITERS_TIMED = 200
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["src_col", "dst_col", "token_bias", "num_reqs"])
 def bench_copy_mamba_state_block(
     src_col,
     dst_col,
     token_bias,
     block_table_ptrs_ptr,
-    block_table_stride_req,
+    block_table_stride_req: tl.int64,
     state_base_addrs_ptr,
     state_block_strides_ptr,
     state_elem_sizes_ptr,
