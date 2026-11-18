@@ -1917,12 +1917,16 @@ class Qwen3VLForConditionalGeneration(
             quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "language_model.model.embed_tokens"),
         )
-        mapper = type(self).hf_to_vllm_mapper
-        self.hf_to_vllm_mapper = replace(
+        self.hf_to_vllm_mapper = self._get_marker_embed_weights_mapper()
+
+    @classmethod
+    def _get_marker_embed_weights_mapper(cls) -> WeightsMapper:
+        mapper = cls.hf_to_vllm_mapper
+        return replace(
             mapper,
             orig_to_new_prefix={
-                "model.language_model.embed_tokens.": "marker_embed_tokens.",
                 **mapper.orig_to_new_prefix,
+                "language_model.model.embed_tokens.": "marker_embed_tokens.",
             },
         )
 
