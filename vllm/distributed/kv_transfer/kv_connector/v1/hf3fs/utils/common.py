@@ -25,7 +25,7 @@ class AtomicCounter:
             return current
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadBlockInfo:
     """Operation for loading blocks from external storage."""
 
@@ -34,14 +34,14 @@ class LoadBlockInfo:
     need_fetch_block_ids: list[int]
 
 
-@dataclass
+@dataclass(slots=True)
 class SaveBlockInfo:
     """Operation for saving blocks to external storage."""
 
     skip_leading_blocks: int
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestSchedulingState:
     """Unified request scheduling state management."""
 

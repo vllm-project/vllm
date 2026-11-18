@@ -54,6 +54,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "Lfm3Config": "vllm.transformers_utils.configs.lfm3",
     "Lfm3AudioConfig": "vllm.transformers_utils.configs.lfm3_audio",
+    "Lfm3OmniConfig": "vllm.transformers_utils.configs.lfm3_omni",
     "Lfm3VlConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "Lfm3VlVisionConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
@@ -63,6 +64,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
+    "NemotronLabsDiffusionConfig": (
+        "vllm.transformers_utils.configs.nemotron_labs_diffusion"
+    ),
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
@@ -82,6 +86,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "InklingAudioConfig": "vllm.models.inkling.configs",
     "InklingVisionConfig": "vllm.models.inkling.configs",
     "InklingMMConfig": "vllm.models.inkling.configs",
+    "Inkling2ModelConfig": "vllm.models.inkling2.configs",
+    "Inkling2MMConfig": "vllm.models.inkling2.configs",
     # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
@@ -119,6 +125,7 @@ __all__ = [
     "MingV3ASRConfig",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3VLConfig",
+    "NemotronLabsDiffusionConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
@@ -129,6 +136,7 @@ __all__ = [
     "Kimi_K25Config",
     "Lfm3Config",
     "Lfm3AudioConfig",
+    "Lfm3OmniConfig",
     "Lfm3VlConfig",
     "Lfm3VlVisionConfig",
     "MuseSparkTextConfig",
@@ -158,6 +166,8 @@ __all__ = [
     "InklingAudioConfig",
     "InklingVisionConfig",
     "InklingMMConfig",
+    "Inkling2ModelConfig",
+    "Inkling2MMConfig",
 ]
 
 

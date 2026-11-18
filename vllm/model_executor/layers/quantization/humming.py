@@ -642,6 +642,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
             input_schema=self.force_input_schema or self.input_schema,
             param_dtype=moe.in_dtype,
             allow_fallback=quant_config.allow_input_schema_fallback,
+            # Keep the BF16 fallback on SM100-SM119 (see the MoE weight
+            # processing call site in utils/humming/moe.py).
+            allow_fp8_sm100=False,
         )
         activation_key = input_schema_to_quant_key(runtime_input_schema, moe.in_dtype)
 

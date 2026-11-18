@@ -559,9 +559,22 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         ds_ratio = int(round(1.0 / (vision_config.pixel_shuffle_ratio**2)))
         return (image_size // patch_size) ** 2 // ds_ratio
 
-    def get_max_num_tiles(self) -> int:
+    def get_images_kwargs(
+        self,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
         image_processor = self.get_hf_processor().image_processor
-        return image_processor.max_patches
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(
+            mm_processor_kwargs or {}
+        )
+        return {
+            "max_patches": image_processor.max_patches,
+            "resize_to_max_canvas": image_processor.resize_to_max_canvas,
+            **merged_mm_kwargs.get("images_kwargs", {}),
+        }
+
+    def get_max_num_tiles(self) -> int:
+        return self.get_images_kwargs()["max_patches"]
 
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
@@ -583,8 +596,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         if not mm_data:
             return processed_data
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = processor.image_processor
+        images_kwargs = self.info.get_images_kwargs(hf_processor_mm_kwargs)
         vision_config = self.info.get_hf_config().vision_config
 
         if processed_data.get("pixel_values") is not None:
@@ -598,7 +610,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
 
             tile_size = vision_config.image_size
             possible_resolutions = find_supported_resolutions(
-                max_num_chunks=self.info.get_max_num_tiles(),
+                max_num_chunks=images_kwargs["max_patches"],
                 patch_size=SizeDict(height=tile_size, width=tile_size),
             )
             best_fit_sizes = []
@@ -608,7 +620,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                     get_best_fit(
                         (image.size[1], image.size[0]),
                         torch.tensor(possible_resolutions),
-                        resize_to_max_canvas=image_processor.resize_to_max_canvas,
+                        resize_to_max_canvas=images_kwargs["resize_to_max_canvas"],
                     )
                 )
             # TODO tile height/width do not necessarily need to match
@@ -942,11 +954,11 @@ class Llama4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
-            inputs["pixel_values"],
+            values["pixel_values"],
             use_data_parallel=False,
         ).flatten(0, 1)
 
