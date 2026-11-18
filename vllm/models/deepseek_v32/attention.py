@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -53,6 +54,26 @@ from vllm.v1.attention.ops.shardq import shard_q, unshard_out
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 logger = init_logger(__name__)
+
+
+def tp_routing_blockers(impl: object, projections: tuple[nn.Module, ...]) -> list[str]:
+    """Why replicated DSA attention can't run small steps head-sharded, if at all.
+
+    The small-step path slices the whole q_b_proj/o_proj weights with F.linear and
+    hands the backend a query of this rank's heads only, so it needs unquantized
+    projections and a backend that reads the head count from the query."""
+    blockers = []
+    if not all(
+        isinstance(getattr(p, "quant_method", None), UnquantizedLinearMethod)
+        for p in projections
+    ):
+        blockers.append("quantized q_b_proj/o_proj")
+    if not getattr(impl, "supports_runtime_num_heads", False):
+        blockers.append(
+            f"{type(impl).__name__}, which is sized for the replicated head count"
+        )
+    return blockers
+
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -322,6 +343,15 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
+
+        if self.tp_min_tokens:
+            blockers = tp_routing_blockers(self.impl, (self.q_b_proj, self.o_proj))
+            if blockers:
+                logger.warning_once(
+                    "VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS is ignored with %s.",
+                    "; ".join(blockers),
+                )
+                self.tp_min_tokens = 0
 
     def _sort_topk_indices(self, num_tokens: int) -> None:
         """Sort each token's selected indices ascending, invalid (-1) entries last."""
