@@ -51,11 +51,10 @@ class WeightShardSeed(Seedable):
     def _mover(self, backend: SeedBackend) -> WeightMover:
         mover = self._movers.get(backend)
         if mover is None:
-            snapshot = self._daemon.snapshot
             mover = get_mover(
                 backend,
                 device_index=self._daemon.device_index,
-                ipc_backend=None if snapshot is None else snapshot.backend,
+                ipc_backend=self._daemon.backend,
             )
             self._movers[backend] = mover
         return mover
@@ -116,8 +115,9 @@ class WeightShardSeed(Seedable):
             if not daemon.has_weights or self._release_pending:
                 raise ValueError("Weights were released")
             mover = self._mover(backend)
-            snapshot = daemon._seed_state()
-            seed = mover.prepare_seed(snapshot.storages)
+            state = daemon.state
+            assert state is not None
+            seed = mover.prepare_seed(state.storages)
             with self._lease_condition:
                 self._active_copies += 1
             return {
@@ -125,9 +125,9 @@ class WeightShardSeed(Seedable):
                 # Matched instead of the checkpoint fingerprint by a mirror
                 # without the safetensors to hash (see seed_mismatches).
                 "model": daemon.model_config.model,
-                "manifest": snapshot.manifest,
-                "aliases": snapshot.aliases,
-                "attrs": snapshot.attrs,
+                "manifest": state.manifest,
+                "aliases": state.aliases,
+                "attrs": state.attrs,
                 "seed": seed,
             }
 

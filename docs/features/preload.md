@@ -36,9 +36,9 @@ vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4
 ```
 
 The daemon process loads, post-processes and warms up the weights once, then
-publishes their final snapshot and waits for engines. Each rank binds its Unix
-socket only after that snapshot is ready, so engines connecting before then
-simply fall back to disk loading.
+publishes their final state and waits for engines. Each rank binds its Unix
+socket only after that state is ready, so engines connecting before then simply
+fall back to disk loading.
 
 Then start (or restart) engines with the `ipc_cache` load format:
 
@@ -91,20 +91,22 @@ strides. Each `StorageRecord` holds `owner`, `storage`, logical `nbytes` and
 that padding counts in the external-weight memory budget. CPU tensors continue
 to use the existing by-value transfer path.
 
-The resulting `WeightSnapshot` holds `manifest`, `storages`, `aliases`, `attrs`
-and `backend`, and is published before the daemon starts its listeners or
-reports readiness. For each `get_state` consumer, `export_storages()` exports
-every storage once. CUDA IPC still creates fresh per-consumer handle
+`WeightCacheState` carries `manifest`, `storages`, `aliases` and `attrs` on both
+sides; the producer and consumer differ only in where they use the same state
+type. The daemon captures its state before starting listeners or reporting
+readiness. For each `get_state` consumer, the daemon's backend exports every
+storage in the state once. CUDA IPC still creates fresh per-consumer handle
 reductions. VMM passes FDs with `SCM_RIGHTS` over the owner-verified Unix
-socket, not as serialized process-local integers. Each
-`StorageEntry.rebuild(device)` returns a `StorageRecord`; the consumer then
-uses the manifest to rebuild all tensor views. Each engine owns its imported
-mappings until the last view is destroyed. A connected engine does not need
-the daemon to stay alive to retain its imported allocations, but future
-engines need a live daemon to fetch them. Both `zero_copy` and `copy` loader
-modes work with either backend. Same-host peer seeding detects VMM storage and
-transfers its descriptors; remote seeding continues to use its configured copy
-mover.
+socket, not as serialized process-local integers. After receiving the handles,
+the consumer first calls each `StorageEntry.rebuild(device)` to obtain
+`StorageRecord`s, then decodes those records and the received manifest, aliases
+and attrs into `WeightCacheState`. It uses the manifest to rebuild all tensor
+views. Each engine owns its imported mappings until the last view is destroyed.
+A connected engine does not need the daemon to stay alive to retain its
+imported allocations, but future engines need a live daemon to fetch them. Both
+`zero_copy` and `copy` loader modes work with either backend. Same-host peer
+seeding detects VMM storage and transfers its descriptors; remote seeding
+continues to use its configured copy mover.
 
 Both backends can be deployed independently of the serving Pod, provided GPU
 access, socket mounts, ownership and container settings allow it. VMM does not
@@ -138,9 +140,9 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
-After warmup and snapshotting, the daemon releases its communication resources
+After warmup and state capture, the daemon releases its communication resources
 and, on CUDA, cached cuBLAS workspaces before accepting engine connections. The
-snapshot's storages remain resident for sharing through the selected backend.
+state's storages remain resident for sharing through the selected backend.
 This reduces the daemon's GPU memory overhead; the amount reclaimed depends on
 the model and allocator state.
 
@@ -349,15 +351,16 @@ daemons at a trusted deployment.
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads and
-   post-processes its shard, runs warmup, then publishes a `WeightSnapshot`
+   post-processes its shard, runs warmup, then publishes a `WeightCacheState`
    containing a manifest of the final canonical parameters and buffers and
    their storage records through the selected sharing backend (CUDA IPC by
    default). It drops the model and startup runtime resources before accepting
    engine connections.
 2. An engine started with `--load-format ipc_cache` builds its model on the
-   meta device (no storage) and requests the storage entries and manifest from
-   the daemon on its GPU. It rebuilds each storage, then uses the manifest to
-   rebuild all tensor views.
+   meta device (no storage) and requests the storage handles and state metadata
+   from the daemon on its GPU. It first rebuilds each handle into a
+   `StorageRecord` and decodes a `WeightCacheState` from those records and the
+   received metadata, then uses the manifest to rebuild all tensor views.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model

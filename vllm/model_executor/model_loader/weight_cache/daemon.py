@@ -125,6 +125,7 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils imp
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheKey,
+    WeightCacheState,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     ensure_private_socket_dir,
@@ -139,7 +140,6 @@ from vllm.model_executor.model_loader.weight_cache.transport import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
     DaemonRole,
-    WeightSnapshot,
     build_weight_cache_key,
     collect_tensors,
     export_model_attrs,
@@ -260,7 +260,7 @@ class WeightCacheDaemon:
         self.role = format_daemon_role(is_draft)
         self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
         self.model: torch.nn.Module | None = None
-        self.snapshot: WeightSnapshot | None = None
+        self.state: WeightCacheState | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
         # Fingerprint before loading: process_weights_after_loading may
@@ -316,7 +316,7 @@ class WeightCacheDaemon:
             format_gib(torch.accelerator.memory_reserved()),
         )
 
-    def snapshot_weights(self) -> None:
+    def capture_state(self) -> None:
         """Materialize canonical post-warmup storages and drop the model."""
         assert self.model is not None
         tensors, kinds, aliases = collect_tensors(self.model)
@@ -327,7 +327,12 @@ class WeightCacheDaemon:
         gc.collect()
         torch.accelerator.empty_cache()
         storages = self.backend.materialize(source_storages)
-        self.snapshot = WeightSnapshot(manifest, storages, aliases, attrs, self.backend)
+        self.state = WeightCacheState(
+            storages=storages,
+            manifest=manifest,
+            aliases=aliases,
+            attrs=attrs,
+        )
 
     def release_distributed(self) -> None:
         """Release process groups and BLAS workspaces after loading and warmup.
@@ -544,25 +549,25 @@ class WeightCacheDaemon:
 
     @property
     def has_weights(self) -> bool:
-        return self.snapshot is not None
+        return self.state is not None
 
     def _export_state(
         self,
     ) -> tuple[list[StorageEntry], dict, dict[str, str], dict[str, bool]]:
         """Export this rank's storage handles, manifest, aliases and flags."""
-        assert self.snapshot is not None
-        snapshot = self.snapshot
+        assert self.state is not None
+        state = self.state
         return (
-            snapshot.export_storages(),
-            snapshot.manifest,
-            snapshot.aliases,
-            snapshot.attrs,
+            [self.backend.export_storage(record) for record in state.storages],
+            state.manifest,
+            state.aliases,
+            state.attrs,
         )
 
-    def _seed_state(self) -> WeightSnapshot:
-        """Return this rank's canonical post-warmup snapshot."""
-        assert self.snapshot is not None
-        return self.snapshot
+    def _seed_state(self) -> WeightCacheState:
+        """Return this rank's canonical post-warmup state."""
+        assert self.state is not None
+        return self.state
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -572,13 +577,13 @@ class WeightCacheDaemon:
                 self._handle_get_state(conn, request)
         elif cmd == "get_memory":
             with self._state_lock:
-                snapshot = self.snapshot
+                state = self.state
                 send_msg(
                     conn,
                     {
                         "status": "ok",
                         "memory_bytes": exported_weight_bytes(
-                            None if snapshot is None else snapshot.storages
+                            None if state is None else state.storages
                         ),
                         # The launcher maps source GPUs to local device indices
                         # when it places a same-host mirror.
@@ -680,7 +685,7 @@ class WeightCacheDaemon:
                 # Unregister from the NIC before the memory returns to the driver.
                 self.weight_seed.release()
                 with self._state_lock:
-                    self.snapshot = None
+                    self.state = None
                     torch.accelerator.empty_cache()
                 logger.info(
                     "Weight cache %s daemon rank %d released cached weights",
@@ -731,7 +736,7 @@ def _run_daemon(
         daemon.release_distributed()
         return
     daemon.warmup()
-    daemon.snapshot_weights()
+    daemon.capture_state()
     # FlashInfer warmup has populated the compiler caches before the source
     # listener becomes available to target daemons.
     daemon.d2d.start_listener()

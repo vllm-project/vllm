@@ -647,9 +647,7 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
 def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
     from vllm.model_executor.model_loader.utils import _register_processed_tensors
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
-    from vllm.model_executor.model_loader.weight_cache.protocol import (
-        WeightCacheState,
-    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
     from vllm.model_executor.utils import weights_already_processed
 
     torch.accelerator.set_device_index(device_index)
@@ -660,8 +658,9 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
         loader = object.__new__(IpcModelLoader)
         loader.mode = mode
         storages, manifest = entries
+        records = [entry.rebuild(device_index) for entry in storages]
         tensors, kinds = loader._rebuild_storages(
-            WeightCacheState(storages, manifest, {}, {}), device_index
+            WeightCacheState(manifest, records, {}, {})
         )
         _register_processed_tensors(layer, tensors, kinds, {})
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())

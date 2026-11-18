@@ -22,8 +22,6 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        IPCBackend,
-        StorageEntry,
         StorageRecord,
         TensorKind,
     )
@@ -222,23 +220,8 @@ def collect_tensors(
     return tensors, kinds, aliases
 
 
-@dataclass(slots=True)
-class WeightSnapshot:
-    """Canonical post-warmup storage records and their tensor manifest."""
-
-    manifest: dict
-    storages: list["StorageRecord"]
-    aliases: dict[str, str]
-    attrs: dict[str, bool]
-    backend: "IPCBackend"
-
-    def export_storages(self) -> list["StorageEntry"]:
-        """Export fresh sharing handles for one consumer."""
-        return [self.backend.export_storage(record) for record in self.storages]
-
-
 def exported_weight_bytes(storages: Iterable["StorageRecord"] | None) -> int:
-    """Allocation bytes of the non-CPU storages an engine maps from a snapshot.
+    """Allocation bytes of the non-CPU storages an engine maps from cached state.
 
     This is the memory the engine would otherwise allocate for the weights
     itself. `memory_allocated()` also counts daemon-only state the engine

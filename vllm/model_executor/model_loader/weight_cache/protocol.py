@@ -29,7 +29,7 @@ from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    StorageEntry,
+    StorageRecord,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     _LEN_STRUCT,
@@ -435,12 +435,12 @@ class WeightCacheKey:
 
 
 class WeightCacheState(NamedTuple):
-    """Client-side decode of a daemon's get_state response payload."""
+    """Consumer-side DTO decoded from a daemon's get_state response."""
 
-    storages: list[StorageEntry]
-    """Storage handles exported through the selected local sharing backend."""
     manifest: dict
-    """Logical tensor views over the exported storages."""
+    """Logical tensor views over the imported storages."""
+    storages: list[StorageRecord]
+    """Storage records rebuilt on the consumer's device."""
     aliases: dict[str, str]
     """Duplicate (tied) weight names aliased to their canonical tensor."""
     attrs: dict[str, bool]

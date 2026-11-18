@@ -52,12 +52,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _snapshot_model(model, backend_name):
+def _state_for_model(model, backend_name):
     from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
         IPC_BACKENDS,
     )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
     from vllm.model_executor.model_loader.weight_cache.utils import (
-        WeightSnapshot,
         collect_tensors,
         export_model_attrs,
     )
@@ -69,9 +69,8 @@ def _snapshot_model(model, backend_name):
     tensors, kinds, aliases = collect_tensors(model)
     manifest, source_storages = build_manifest(tensors, kinds)
     records = backend.materialize(source_storages)
-    return WeightSnapshot(
-        manifest, records, aliases, export_model_attrs(model), backend
-    )
+    state = WeightCacheState(manifest, records, aliases, export_model_attrs(model))
+    return state, backend
 
 
 def _export_vmm_test_model(connection):
@@ -89,13 +88,15 @@ def _export_vmm_test_model(connection):
         model.register_buffer("bytes_view", storage.view(torch.uint8))
         model.register_buffer("host_table", torch.arange(3))
         model.register_buffer("empty", torch.empty(0, device="cuda:0"))
-        snapshot = _snapshot_model(model, "vmm")
+        state, backend = _state_for_model(model, "vmm")
         send_msg(
             connection,
             {
-                "storages": snapshot.export_storages(),
-                "manifest": snapshot.manifest,
-                "aliases": snapshot.aliases,
+                "storages": [
+                    backend.export_storage(record) for record in state.storages
+                ],
+                "manifest": state.manifest,
+                "aliases": state.aliases,
             },
         )
 
@@ -109,6 +110,7 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
         recv_msg,
     )
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
     )
@@ -121,14 +123,15 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
     try:
         with client:
             client.settimeout(180)
-            state = recv_msg(client)
+            payload = recv_msg(client)
         process.join(timeout=60)
         assert process.exitcode == 0
-        entries = state["storages"]
+        entries = payload["storages"]
         records = [entry.rebuild(0) for entry in entries]
+        state = WeightCacheState(payload["manifest"], records, payload["aliases"], {})
         buffers = [storage_bytes(record.storage) for record in records]
-        views = rebuild_tensors(state["manifest"], buffers)
-        assert state["aliases"] == {"tied": "weight"}
+        views = rebuild_tensors(state.manifest, buffers)
+        assert state.aliases == {"tied": "weight"}
         assert (
             len(
                 {
@@ -141,7 +144,7 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
         assert views["offset"].storage_offset() == 8
         assert views["offset"].stride() == (8, 2)
         assert views["empty"].shape == (0,)
-        del state, records, entries, buffers
+        del payload, state, records, entries, buffers
         gc.collect()
         expected = torch.arange(48, dtype=torch.float32).reshape(6, 8)
         assert torch.equal(views["weight"].cpu(), expected)
@@ -175,15 +178,15 @@ def test_vmm_peer_copy_preserves_views_and_current_device():
     model = torch.nn.Module()
     model.register_buffer("weight", torch.arange(48, device="cuda:0").reshape(6, 8))
     model.register_buffer("view", model.weight[1:5, ::2])
-    snapshot = _snapshot_model(model, "vmm")
-    source = PeerIpcMover(0, snapshot.backend)
+    state, backend = _state_for_model(model, "vmm")
+    source = PeerIpcMover(0, backend)
     client, server = socket.socketpair()
     with client, server:
-        send_msg(server, source.prepare_seed(snapshot.storages))
+        send_msg(server, source.prepare_seed(state.storages))
         seed = recv_msg(client)
     with torch.accelerator.device_index(1):
         copied = get_mover("peer_ipc").fill(
-            snapshot.manifest, seed, torch.device("cuda", 1)
+            state.manifest, seed, torch.device("cuda", 1)
         )
         assert torch.accelerator.current_device_index() == 1
         assert torch.equal(copied["weight"].cpu(), model.weight.cpu())
@@ -1420,8 +1423,8 @@ def test_ipc_rope_matching(
     model_config.hf_text_config.max_position_embeddings = max_position
     server.model = torch.nn.Module()
     server.model.register_buffer("rotary_cache", torch.ones(2), persistent=False)
-    server.snapshot_weights()
-    assert server.snapshot is not None
+    server.capture_state()
+    assert server.state is not None
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
     for name in ("get_dp_group", "get_pp_group"):
@@ -1456,16 +1459,17 @@ def test_ipc_rope_matching(
                         default_vllm_config.cache_config,
                         default_vllm_config.parallel_config,
                         default_vllm_config.kernel_config,
+                        device_index=0,
                     )
             if is_reload:
                 expected = (
                     torch.zeros(2)
                     if mismatch
                     else rebuild_tensors(
-                        server.snapshot.manifest,
+                        server.state.manifest,
                         [
                             storage_bytes(record.storage)
-                            for record in server.snapshot.storages
+                            for record in server.state.storages
                         ],
                     )["rotary_cache"]
                 )
