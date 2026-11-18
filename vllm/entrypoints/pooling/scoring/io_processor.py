@@ -39,7 +39,6 @@ from ..types import (
     AnyRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
-    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflineScoringInputsContext,
     PoolingEngineInput,
@@ -48,7 +47,7 @@ from ..types import (
     RequestGenerator,
     ScoringRenderParams,
 )
-from ..utils import reserve_tokens
+from ..utils import merge_chat_template_kwargs, reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .types import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -316,14 +315,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         prompts = data_1 + data_2
 
         return super().get_request_factory_offline(
-            OfflineEncodeInputsContext(
-                pooling_task=self.pooling_task,
-                prompts=prompts,
-                tokenization_kwargs=ctx.tokenization_kwargs,
-                pooling_params=ctx.pooling_params,
-                lora_request=ctx.lora_request,
-                priorities=ctx.priorities,
-            )
+            ctx.to_encode_context(inputs_seq=prompts)
         )
 
     def post_process_offline(
@@ -560,11 +552,20 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
+        chat_template_kwargs = merge_chat_template_kwargs(
+            ctx.prompt_extras.get("chat_template_kwargs")
+            if ctx.prompt_extras
+            else None,
+            getattr(request, "add_generation_prompt", None),
+            getattr(request, "continue_final_message", None),
+        )
+
         requests = [
             ScoringRenderParams(
                 data_1=data_1[i],
                 data_2=data_2[i],
                 chat_template=self.chat_template,
+                chat_template_kwargs=chat_template_kwargs,
                 chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
@@ -598,24 +599,50 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
+
+        # `add_special_tokens` is tri-state on the offline context. The
+        # cross-encoder path is completion-only, so when unset (`None`) we
+        # keep the renderer default (`True`, matching
+        # `CompletionRequestMixin.add_special_tokens`). An explicit `True` /
+        # `False` overrides it, and user-provided `tokenization_kwargs` wins
+        # over the default.
+        tok_kwargs: dict[str, Any] = {}
+        if ctx.add_special_tokens is not None:
+            tok_kwargs["add_special_tokens"] = ctx.add_special_tokens
+        tok_kwargs.update(ctx.tokenization_kwargs or {})
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+
+        extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
+
+        prompt_extras_dict = dict(ctx.build_prompt_extras() or {})
+        for key in ("mm_processor_kwargs", "cache_salt"):
+            if key not in prompt_extras_dict and extra_kwargs.get(key) is not None:
+                prompt_extras_dict[key] = extra_kwargs[key]
+        prompt_extras: dict[str, Any] | None = prompt_extras_dict or None
+
+        merged_chat_template_kwargs = merge_chat_template_kwargs(
+            merge_kwargs(
+                extra_kwargs.get("chat_template_kwargs"),
+                ctx.chat_template_kwargs,
+            ),
+            getattr(ctx, "add_generation_prompt", None),
+            getattr(ctx, "continue_final_message", None),
         )
-        prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        chat_template = (
+            self.chat_template if ctx.chat_template is None else ctx.chat_template
+        )
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=(
-                        self.chat_template
-                        if ctx.chat_template is None
-                        else ctx.chat_template
-                    ),
+                    chat_template=chat_template,
+                    chat_template_kwargs=merged_chat_template_kwargs,
                     chat_template_content_format=ctx.chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
@@ -671,9 +698,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
-            chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
-            if prompt_extras
-            else None,
+            chat_template_kwargs=render_params.get("chat_template_kwargs"),
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -725,7 +750,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -736,19 +761,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.saved_chat_template_kwargs, chat_template_kwargs
             )
 
-        given_format = chat_template_content_format or self.chat_template_content_format
+        given_format = (
+            chat_template_content_format
+            if chat_template_content_format != "auto"
+            else self.chat_template_content_format
+        )
         content_format: ChatTemplateContentFormat = "string"
         if chat_template is not None:
-            content_format = (
-                resolve_chat_template_content_format(
-                    chat_template,
-                    tools=None,
-                    given_format=given_format,
-                    tokenizer=tokenizer,
-                    model_config=model_config,
-                )
-                if given_format == "auto"
-                else given_format
+            content_format = resolve_chat_template_content_format(
+                chat_template,
+                tools=None,
+                given_format=given_format,
+                tokenizer=tokenizer,
+                model_config=model_config,
             )
 
         conversation, mm_data, mm_uuids = parse_score_messages(
@@ -1027,15 +1052,23 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
-        prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
-        chat_template_kwargs = (
-            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
+
+        extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
+        merged_chat_template_kwargs = merge_chat_template_kwargs(
+            merge_kwargs(
+                extra_kwargs.get("chat_template_kwargs"),
+                ctx.chat_template_kwargs,
+            ),
+            ctx.add_generation_prompt,
+            ctx.continue_final_message,
         )
         instruction = (
-            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+            merged_chat_template_kwargs.get("instruction")
+            if merged_chat_template_kwargs
+            else None
         )
 
         if len(queries) == 1:
@@ -1052,17 +1085,17 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        return PoolingIOProcessor.get_request_factory_offline(
-            self,
-            OfflineEncodeInputsContext(
-                pooling_task=self.pooling_task,
-                prompts=prompts,
-                tokenization_kwargs=ctx.tokenization_kwargs,
-                pooling_params=ctx.pooling_params,
-                lora_request=ctx.lora_request,
-                priorities=ctx.priorities,
-            ),
-        )
+        encode_ctx = ctx.to_encode_context(inputs_seq=prompts)
+        encode_ctx.chat_template_kwargs = merged_chat_template_kwargs
+        if (
+            encode_ctx.mm_processor_kwargs is None
+            and extra_kwargs.get("mm_processor_kwargs") is not None
+        ):
+            encode_ctx.mm_processor_kwargs = extra_kwargs["mm_processor_kwargs"]
+        if encode_ctx.cache_salt is None and extra_kwargs.get("cache_salt") is not None:
+            encode_ctx.cache_salt = extra_kwargs["cache_salt"]
+
+        return PoolingIOProcessor.get_request_factory_offline(self, encode_ctx)
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         final_res_batch: list[PoolingRequestOutput] = []

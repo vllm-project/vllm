@@ -3,6 +3,7 @@
 """Unit tests for JinaRankingIOProcessor request building."""
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -23,23 +24,27 @@ def offline_processor_and_context():
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
     proc.tokenizer = TokenizersBackend(tokenizer_object=backend)
-    proc.model_config = SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
-    proc.renderer = SimpleNamespace(
-        default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)
+    proc.model_config = SimpleNamespace(
+        max_model_len=1024, is_encoder_decoder=False, multimodal_config=None
     )
+    proc.renderer = SimpleNamespace(
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024),
+        tokenizer=proc.tokenizer,
+    )
+    proc.chat_template = None
+    proc.template_kwargs = None
+    proc.tool_dicts = None
+    cast(Any, proc).chat_template_content_format = "auto"
     ctx = OfflineScoringInputsContext(
         pooling_task="token_embed",
         scoring_data=ScoringData(
             data_1=["query alpha beta", "query gamma delta"],
             data_2=["document one two", "document three four"],
         ),
-        pooling_params=PoolingParams(
-            extra_kwargs={
-                "chat_template_kwargs": {"instruction": "Keep this instruction"}
-            }
-        ),
+        pooling_params=PoolingParams(extra_kwargs={}),
         tokenization_kwargs=None,
         chat_template=None,
+        chat_template_kwargs={"instruction": "Keep this instruction"},
         lora_request=None,
         priorities=None,
     )

@@ -44,9 +44,11 @@ from ..types import (
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingEngineInput,
+    PoolingInput,
     PoolingServeContext,
     RequestFactory,
     RequestGenerator,
+    is_conversations,
 )
 from .protocol import (
     CohereEmbedContent,
@@ -699,10 +701,12 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
     ) -> tuple[RequestFactory, int]:
         factory, num_requests = super().get_request_factory_offline(ctx)
         assert isinstance(ctx, OfflineEncodeInputsContext)
-        if ctx.pooling_params is None or not any(
-            p.late_chunking_params is not None
-            for p in self._params_to_seq(ctx.pooling_params, num_requests)
-        ):
+
+        if ctx.pooling_params is None:
+            return factory, num_requests
+
+        params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+        if not any(p.late_chunking_params is not None for p in params_seq):
             return factory, num_requests
 
         if (ctx.tokenization_kwargs or {}).get("padding") not in (
@@ -711,6 +715,21 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
             "do_not_pad",
         ):
             raise VLLMValidationError("Late chunking does not support input padding")
+
+        # Late chunking slices the *original* input text into chunks and
+        # needs `prompt_token_offsets` from the tokenizer. The chat path
+        # renders through the chat template first and does not produce
+        # those offsets, and the chunk boundaries would additionally cut
+        # through template control tokens (e.g. `<|im_start|>` /
+        # `<|im_end|>`). Reject this combination up front with a clear
+        # error rather than failing later inside `render`
+        # (`prepare_late_chunking_input` / `prompt["type"] != "token"`).
+        for i, inp in enumerate(ctx.inputs_seq):
+            if params_seq[i].late_chunking_params is not None and is_conversations(inp):
+                raise VLLMValidationError(
+                    "Late chunking does not support chat inputs. "
+                    "Pass pre-rendered text or disable late_chunking_params."
+                )
 
         def request_factory() -> RequestGenerator:
             for request in factory():
@@ -791,15 +810,21 @@ class JinaRankingTokenEmbedIOProcessor(
         self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
-        if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
+        text_prompts = self.ensure_str(ctx.inputs_seq)
+        if not isinstance(ctx.inputs_seq, Sequence) or len(ctx.inputs_seq) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
-
-        text_prompts = self.ensure_str(ctx.prompts)
 
         # The JinaForRanking model concatenates docs first, then query.
         # Let's stay consistent with this novel design.
-        ctx.prompts = self.format_docs_prompts_func(
-            query=text_prompts[-1], docs=text_prompts[:-1]
-        )
+        new_inputs_seq: list[PoolingInput] = [
+            self.format_docs_prompts_func(
+                query=text_prompts[-1], docs=text_prompts[:-1]
+            )
+        ]
 
-        return super().get_request_factory_offline(ctx)
+        return super().get_request_factory_offline(
+            ctx.to_encode_context(
+                inputs_seq=new_inputs_seq,
+                pooling_params=ctx.pooling_params,
+            )
+        )

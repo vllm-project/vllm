@@ -33,6 +33,7 @@ from vllm.entrypoints.pooling.types import (
     OfflineScoringInputsContext,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
@@ -480,3 +481,99 @@ def test_scoring_detects_structured_content_with_saved_template(
         "a", "bc", {}, chat_template_content_format="auto"
     )
     assert prompt == "query:adocument:bc"
+
+
+class TestOfflineScoringTemplateKwargs:
+    """Integration tests: offline chat template kwargs reach the rendered request."""
+
+    @pytest.fixture
+    def processor(self, llm_reranker_processor: CrossEncoderIOProcessor):
+        # Replace the renderer with the minimal surface used by the offline
+        # factory, mirroring `test_offline_scoring_uses_default_template_*`.
+        llm_reranker_processor.renderer = SimpleNamespace(
+            default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+        )
+        return llm_reranker_processor
+
+    def _make_ctx(self, **kwargs) -> OfflineScoringInputsContext:
+        defaults: dict = dict(
+            pooling_task="classify",
+            tokenization_kwargs=None,
+            lora_request=None,
+            priorities=None,
+            scoring_data=ScoringData(data_1=["a"], data_2=["bc"]),
+            chat_template=None,
+            pooling_params=PoolingParams(),
+        )
+        defaults.update(kwargs)
+        return OfflineScoringInputsContext(**defaults)
+
+    @pytest.mark.parametrize(
+        "flag_name",
+        ["add_generation_prompt", "continue_final_message"],
+    )
+    def test_flag_reaches_chat_template_kwargs(self, processor, flag_name):
+        ctx = self._make_ctx(**{flag_name: True})
+
+        factory, num_requests = processor.get_request_factory_offline(ctx)
+        assert num_requests == 1
+        (request,) = factory()
+
+        assert (
+            flag_name in request["chat_template_kwargs"]
+            and request["chat_template_kwargs"][flag_name]
+        )
+
+    def test_no_flags_leaves_chat_template_kwargs_as_default(self, processor):
+        ctx = self._make_ctx()
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"] == {
+            "add_generation_prompt": False,
+            "continue_final_message": False,
+        }
+
+    def test_legacy_extra_kwargs_still_lose_to_explicit_kwargs(self, processor):
+        """`pooling_params.extra_kwargs["chat_template_kwargs"]` must keep its
+        existing precedence when a generation flag is also set."""
+        ctx = self._make_ctx(
+            chat_template_kwargs={"existing": "explicit"},
+            pooling_params=PoolingParams(
+                extra_kwargs={
+                    "chat_template_kwargs": {"existing": "legacy", "from_extra": 1}
+                }
+            ),
+            add_generation_prompt=True,
+        )
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"] == {
+            "existing": "explicit",
+            "from_extra": 1,
+            "add_generation_prompt": True,
+            "continue_final_message": False,
+        }
+
+    def test_explicit_chat_template_kwargs_win_over_top_level_flag(self, processor):
+        ctx = self._make_ctx(
+            chat_template_kwargs={"add_generation_prompt": False},
+            add_generation_prompt=True,
+        )
+
+        factory, _ = processor.get_request_factory_offline(ctx)
+        (request,) = factory()
+
+        assert request["chat_template_kwargs"]["add_generation_prompt"] is False
+
+    def test_rejects_mutually_exclusive_flags(self, processor):
+        """Mutually exclusive flags must be rejected before rendering."""
+        with pytest.raises(VLLMValidationError, match="Cannot set both"):
+            ctx = self._make_ctx(
+                add_generation_prompt=True,
+                continue_final_message=True,
+            )
+            processor.get_request_factory_offline(ctx)

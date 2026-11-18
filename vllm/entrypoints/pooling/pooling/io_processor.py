@@ -12,7 +12,6 @@ from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeCMPLRenderParams,
-    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflinePluginInputsContext,
     PoolingServeContext,
@@ -160,13 +159,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
                 p.task = "plugin"
 
         return super().get_request_factory_offline(
-            OfflineEncodeInputsContext(
-                prompts=prompts_seq,
+            ctx.to_encode_context(
+                inputs_seq=prompts_seq,
                 pooling_params=params_seq,
-                pooling_task="plugin",
-                tokenization_kwargs=ctx.tokenization_kwargs,
-                lora_request=ctx.lora_request,
-                priorities=ctx.priorities,
             )
         )
 

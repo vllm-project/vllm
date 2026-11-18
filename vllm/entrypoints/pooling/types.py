@@ -3,23 +3,35 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
+from typing import (
+    Any,
+    Generic,
+    NotRequired,
+    TypeAlias,
+    TypedDict,
+    TypeGuard,
+    TypeVar,
+    cast,
+)
 
 from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
-from vllm.renderers.chat_utils import (
+from vllm.renderers.chat_utils.types import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    OpenAIHarmonyMessage,
 )
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
+from ..generate.base.protocol import validate_cache_salt
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -44,6 +56,7 @@ from .pooling.protocol import (
 from .scoring.protocol import ScoringRequest, ScoringResponse
 from .scoring.types import ScoreData, ScoringData
 from .token_embed.protocol import TokenEmbeddingRequest, TokenEmbeddingResponse
+from .utils import merge_chat_template_kwargs
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
@@ -79,6 +92,10 @@ AnyPoolingResponse: TypeAlias = (
 )
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
+
+
+ChatType: TypeAlias = list[ChatCompletionMessageParam]
+PoolingInput: TypeAlias = PromptType | ChatType
 
 
 @dataclass(kw_only=True, slots=True)
@@ -133,29 +150,124 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     late_interaction_doc_keys: list[str] | None = None
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: int | Sequence[int] | None
-    late_chunking: list[LateChunkingSlot | None] = field(
-        default_factory=list, kw_only=True
-    )
+    late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
+
+    # Mirror ChatRequestOptionsMixin.
+    add_generation_prompt: bool = False
+    continue_final_message: bool = False
+    # Tri-state: `None` means "not specified" and falls back to the per-path
+    # default — `True` for completion, `False` for chat (mirroring
+    # `CompletionRequestMixin` and `ChatRequestOptionsMixin` respectively).
+    # Explicit `True`/`False` overrides both.
+    add_special_tokens: bool | None = None
+    chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+
+    # Mirror PoolingBasicRequestMixin.
+    mm_processor_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = None
+
+    def __post_init__(self) -> None:
+        # Mirror ChatRequestOptionsMixin.check_generation_prompt.
+        if self.continue_final_message and self.add_generation_prompt:
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True.",
+            )
+
+        if self.cache_salt is not None:
+            validate_cache_salt(self.cache_salt)
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        # Mirror ChatRequestOptionsMixin.build_chat_params.
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=(
+                self.chat_template_content_format
+                if self.chat_template_content_format != "auto"
+                else default_template_content_format
+            ),
+            chat_template_kwargs=merge_chat_template_kwargs(
+                self.chat_template_kwargs,
+                self.add_generation_prompt,
+                self.continue_final_message,
+            ),
+            media_io_kwargs=self.media_io_kwargs,
+        )
+
+    def build_prompt_extras(self) -> dict[str, Any] | None:
+        """Pack the renderer-side `prompt_extras` payload."""
+        extras: dict[str, Any] = {}
+        if self.mm_processor_kwargs is not None:
+            extras["mm_processor_kwargs"] = self.mm_processor_kwargs
+        if self.cache_salt is not None:
+            extras["cache_salt"] = self.cache_salt
+        return extras or None
+
+    def to_encode_context(
+        self,
+        *,
+        inputs_seq: Sequence[PoolingInput],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None,
+    ) -> "OfflineEncodeInputsContext":
+        """Derive an `OfflineEncodeInputsContext` from this context."""
+        # `late_chunking` is intentionally dropped: inputs are re-composed,
+        #  so per-document source ranges no longer line up with the new inputs.
+        return OfflineEncodeInputsContext(
+            pooling_task=self.pooling_task,
+            tokenization_kwargs=self.tokenization_kwargs,
+            lora_request=self.lora_request,
+            priorities=self.priorities,
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            add_special_tokens=self.add_special_tokens,
+            chat_template=self.chat_template,
+            chat_template_kwargs=self.chat_template_kwargs,
+            chat_template_content_format=self.chat_template_content_format,
+            media_io_kwargs=self.media_io_kwargs,
+            mm_processor_kwargs=self.mm_processor_kwargs,
+            cache_salt=self.cache_salt,
+            inputs_seq=inputs_seq,
+            pooling_params=pooling_params,
+        )
 
 
 @dataclass(slots=True)
 class OfflineEncodeInputsContext(OfflineInputsContext):
-    prompts: PromptType | Sequence[PromptType]
+    inputs_seq: Sequence[PoolingInput]
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
 @dataclass(slots=True)
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
-    chat_template: str | None
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+
+    def to_encode_context(
+        self,
+        *,
+        inputs_seq: Sequence[PoolingInput],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+    ) -> "OfflineEncodeInputsContext":
+        return OfflineInputsContext.to_encode_context(
+            self,
+            inputs_seq=inputs_seq,
+            pooling_params=(
+                self.pooling_params if pooling_params is None else pooling_params
+            ),
+        )
 
 
 @dataclass(slots=True)
@@ -205,6 +317,7 @@ class ScoringRenderParams(RenderParams):
     data_2: ScoreData
     chat_template: str | None
     chat_template_content_format: ChatTemplateContentFormatOption
+    chat_template_kwargs: NotRequired[dict[str, Any] | None]
     max_tokens_per_query: int
     max_tokens_per_doc: int
 
@@ -221,3 +334,45 @@ class PoolingEngineInput(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
+
+
+def _is_chat_message(item: Any) -> bool:
+    # harmony messages are pydantic models, not dicts
+    if OpenAIHarmonyMessage is not None and isinstance(item, OpenAIHarmonyMessage):
+        return True
+    # OpenAI / Custom chat messages are TypedDicts (plain dicts at runtime)
+    return isinstance(item, dict) and "role" in item
+
+
+def is_conversations(prompt_or_conversations: PoolingInput) -> TypeGuard[ChatType]:
+    """Return True if a single PoolingInput is a chat conversation."""
+    if not isinstance(prompt_or_conversations, list):
+        return False
+    if len(prompt_or_conversations) == 0:
+        return False
+    return all(_is_chat_message(x) for x in prompt_or_conversations)
+
+
+def input_to_seq(
+    input_or_inputs: PoolingInput | Sequence[PoolingInput],
+) -> Sequence[PoolingInput]:
+    # Treat non-Sequence, str, bytes, and dict as a single prompt.
+    if not isinstance(input_or_inputs, Sequence) or isinstance(
+        input_or_inputs, (str, bytes, dict)
+    ):
+        return [cast(PoolingInput, input_or_inputs)]
+
+    # Empty sequence: nothing to normalize.
+    if len(input_or_inputs) == 0:
+        return input_or_inputs  # type: ignore[return-value]
+
+    # list[int] is a single tokenized prompt, not a batch of inputs.
+    if all(isinstance(x, int) for x in input_or_inputs):
+        return [input_or_inputs]  # type: ignore[list-item]
+
+    # A sequence of chat messages is a single conversation, not a batch of inputs.
+    if all(_is_chat_message(x) for x in input_or_inputs):
+        return [input_or_inputs]  # type: ignore[list-item]
+
+    # Any other Sequence is already a batch of prompts / conversations.
+    return input_or_inputs  # type: ignore[return-value]

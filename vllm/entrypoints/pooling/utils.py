@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers import TokenizeParams
@@ -250,3 +251,20 @@ def reserve_tokens(tok_params: TokenizeParams, num_tokens: int) -> TokenizeParam
         truncate_prompt_tokens=shrink(tok_params.truncate_prompt_tokens),
         pad_prompt_tokens=shrink(tok_params.pad_prompt_tokens),
     )
+
+
+def merge_chat_template_kwargs(
+    chat_template_kwargs: dict[str, Any] | None,
+    add_generation_prompt: bool,
+    continue_final_message: bool,
+) -> dict[str, Any]:
+    merged = dict(chat_template_kwargs or {})
+    merged.setdefault("add_generation_prompt", add_generation_prompt)
+    merged.setdefault("continue_final_message", continue_final_message)
+
+    if merged.get("add_generation_prompt") and merged.get("continue_final_message"):
+        raise VLLMValidationError(
+            "Cannot set both `continue_final_message` and "
+            "`add_generation_prompt` to True."
+        )
+    return merged
