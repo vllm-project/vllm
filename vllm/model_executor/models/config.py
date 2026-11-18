@@ -949,14 +949,57 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
                 "a bidirectional prompt's keys depend on later tokens."
             )
             cache_config.enable_prefix_caching = False
-        # A prompt chunk would not attend to the later chunks.
+        # A prompt chunk would not attend to the later chunks, so each prompt
+        # runs in one step. As EngineArgs does with chunked prefill off, raise
+        # the step budget to --max-model-len so every admitted prompt fits.
         scheduler_config = vllm_config.scheduler_config
         scheduler_config.enable_chunked_prefill = False
+        scheduler_config.long_prefill_token_threshold = 0
+        # Without a KV cache there is no full-budget profile run, so
+        # torch.compile sizes its index dtype from a small warmup batch and
+        # uses 32-bit offsets. Keep the widest activation, gate_up
+        # (tokens x 2 * intermediate_size), below 2**31 elements per step.
+        model_config = vllm_config.model_config
+        intermediate_size = model_config.hf_text_config.intermediate_size
+        max_step_tokens = (2**31 - 1) // (2 * intermediate_size)
+        if model_config.original_max_model_len is None:
+            model_config.max_model_len = min(
+                model_config.max_model_len, max_step_tokens
+            )
+        max_model_len = model_config.max_model_len
+        budget = max(scheduler_config.max_num_batched_tokens, max_model_len)
+        if budget > max_step_tokens:
+            raise ValueError(
+                "Nemotron with is_causal=False runs at most "
+                f"{max_step_tokens} tokens per step (32-bit indexing of the "
+                f"MLP activation); set --max-model-len and "
+                f"--max-num-batched-tokens to at most {max_step_tokens}."
+            )
+        if scheduler_config.max_num_batched_tokens < max_model_len:
+            logger.info(
+                "Raising max_num_batched_tokens from %d to %d: Nemotron with "
+                "is_causal=False runs each prompt in one step.",
+                scheduler_config.max_num_batched_tokens,
+                max_model_len,
+            )
+            scheduler_config.max_num_batched_tokens = max_model_len
+        scheduled = scheduler_config.max_num_scheduled_tokens
+        if scheduled is not None and scheduled < max_model_len:
+            raise ValueError(
+                "Nemotron with is_causal=False runs each prompt in one step, so "
+                f"--max-num-scheduled-tokens ({scheduled}) must be at least "
+                f"--max-model-len ({max_model_len})."
+            )
         # Later decode steps would not see the prompt, so admission rejects
         # requests for more than one token; requests without max_tokens
         # (e.g. chat completions) default to one.
-        model_config = vllm_config.model_config
-        model_config.override_generation_config.setdefault("max_new_tokens", 1)
+        overrides = model_config.override_generation_config
+        if overrides.setdefault("max_new_tokens", 1) != 1:
+            raise ValueError(
+                "Nemotron with is_causal=False reads one token per request; "
+                "--override-generation-config max_new_tokens must be 1, not "
+                f"{overrides['max_new_tokens']}."
+            )
         validator = (
             "vllm.model_executor.models.nemotron_dllm:"
             "NemotronBidirectionalReadValidator"
@@ -964,18 +1007,6 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         processors = list(model_config.logits_processors or ())
         if validator not in processors:
             model_config.logits_processors = [*processors, validator]
-        max_prompt_len = scheduler_config.max_num_batched_tokens
-        if scheduler_config.max_num_scheduled_tokens is not None:
-            max_prompt_len = min(
-                max_prompt_len, scheduler_config.max_num_scheduled_tokens
-            )
-        logger.info(
-            "Nemotron with is_causal=False reads the last prompt position in "
-            "one bidirectional forward without chunked prefill. Requests must "
-            "use max_tokens=1, and prompts are limited to %d tokens (one "
-            "scheduling step); raise --max-num-batched-tokens for longer ones.",
-            max_prompt_len,
-        )
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
