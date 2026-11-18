@@ -30,8 +30,19 @@ BYTES = (
     17179869184.0,
     68719476736.0,
 )
+RDMA_FAILURE_REASONS = (
+    "deadline_before_post",
+    "deadline_after_post",
+    "status_failed",
+    "exception",
+    "queue_full",
+    "owner_changed",
+    "cancelled",
+)
 
 COUNTERS = {
+    "reader_rdma_cooldowns": "Owner failure feedback applying RDMA backoff.",
+    "reader_rdma_quarantine_stops": "RDMA quarantine disable episodes.",
     **{
         f"owner_deferred_reject_{reason}": "Deferred plans rejected by the owner."
         for reason in ("frozen", "lease_expiry", "missing_key", "cap", "budget")
@@ -39,7 +50,11 @@ COUNTERS = {
     "reader_lookups": "Calls to peer prefix matching, including retries.",
     "reader_quarantined_rows": "Target rows held against uncertain RDMA writes.",
     "worker_rdma_reads": "RDMA read grants submitted.",
-    "worker_rdma_failures": "Failed asynchronous receive requests.",
+    "worker_rdma_successes": "Requests completing an RDMA receive within deadline.",
+    **{
+        f"worker_rdma_failure_{reason}": "Failed asynchronous receive requests."
+        for reason in RDMA_FAILURE_REASONS
+    },
     "worker_rdma_bytes": "Bytes submitted for RDMA reads.",
     "reader_peer_tokens": "Eligible lookup tokens by peer or no-peer source.",
     "reader_none_tokens": "Eligible lookup tokens by peer or no-peer source.",
@@ -66,6 +81,11 @@ COUNTERS = {
     "worker_timing_dropped": "Load steps without timing due to a full event queue.",
 }
 GAUGES = {
+    "reader_rdma_owners_cooling": "Owners cooling at the last scheduler snapshot.",
+    "reader_rdma_quarantine_disabled": "RDMA selection disabled by quarantine.",
+    "reader_rdma_quarantine_limit_rows": "Quarantine threshold for RDMA selection.",
+    "owner_external_refs": "Outstanding external row references after absorb.",
+    "reader_quarantine_refs": "Current target row references held for uncertain DMA.",
     "owner_withheld_high_water": "Lifetime peak of physically withheld blocks.",
     "owner_withheld_blocks": "Physically withheld blocks after the last absorb.",
     "owner_reserve_before_absorb": "Reserve before the last window reset.",
@@ -117,6 +137,10 @@ HISTOGRAMS = {
 }
 # Each label has a fixed vocabulary; request IDs never enter the payload.
 LABELS = {
+    **{
+        f"worker_rdma_failure_{reason}": ("worker_rdma_failures", "reason", reason)
+        for reason in RDMA_FAILURE_REASONS
+    },
     **{
         f"owner_deferred_reject_{reason}": (
             "owner_deferred_rejections",

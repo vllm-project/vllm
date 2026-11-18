@@ -24,7 +24,7 @@ class PeerMemory:
     compatibility: str
     num_blocks: int
     segments: tuple[tuple[tuple[int, int, int], ...], ...]
-    # Exported once per receiver. Descriptors never enter the scheduler metadata.
+    # IPC handles are exported once per receiver, then removed before scheduling.
     handles: dict[int, tuple[Any, ...]] = field(repr=False)
     instance_id: str = ""
     kv_compatibility_id: str = ""
@@ -62,6 +62,7 @@ class PeerWorkerMetadata(KVConnectorWorkerMetadata):
     quarantined: dict[str, tuple[int, ...]] = field(default_factory=dict)
     drained: set[str] = field(default_factory=set)
     failed_peers: set[str] = field(default_factory=set)
+    successful_peers: dict[str, float] = field(default_factory=dict)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> "PeerWorkerMetadata":
         if not isinstance(other, PeerWorkerMetadata):
@@ -71,4 +72,11 @@ class PeerWorkerMetadata(KVConnectorWorkerMetadata):
             {**self.quarantined, **other.quarantined},
             self.drained | other.drained,
             self.failed_peers | other.failed_peers,
+            {
+                key: max(
+                    self.successful_peers.get(key, float("-inf")),
+                    other.successful_peers.get(key, float("-inf")),
+                )
+                for key in self.successful_peers.keys() | other.successful_peers.keys()
+            },
         )

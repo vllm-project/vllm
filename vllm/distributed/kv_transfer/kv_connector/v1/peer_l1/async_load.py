@@ -9,9 +9,13 @@ from time import monotonic
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
+from vllm.logger import init_logger
 
 from .data import CopyJob, PeerWorkerMetadata
 from .session import Grant
+from .stats import PeerL1Stats
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -26,6 +30,7 @@ class AsyncRead:
     reported: bool = False
     quarantined: bool = False
     released: bool = False
+    num_bytes: int = 0
     failure_reason: str | None = None
     resources: list[Any] = field(default_factory=list)
     drain_query: Callable[[], bool] | None = None
@@ -36,7 +41,7 @@ class AsyncRead:
         grant = self.job.grant
         return f"{grant.endpoint}/{grant.epoch}/{grant.reader}/{grant.sequence}"
 
-    def begin(self) -> bool:
+    def begin(self, num_bytes: int = 0) -> bool:
         """Close the timeout-versus-submit race before a possible device post."""
         with self._lock:
             if self.terminal:
@@ -49,6 +54,7 @@ class AsyncRead:
             if not self.submitted:
                 self.deadline = min(self.deadline, now + self.timeout_s)
             self.submitted = True
+            self.num_bytes += num_bytes
             return True
 
     def complete(
@@ -96,11 +102,21 @@ class AsyncRead:
 
 
 class AsyncReceives:
-    def __init__(self, release: Callable[[Grant], None]):
+    def __init__(
+        self,
+        release: Callable[[Grant], None],
+        stats: PeerL1Stats | None = None,
+        retire: Callable[[str], None] | None = None,
+    ):
         self.release = release
         self.reads: dict[str, AsyncRead] = {}
         self.quarantined: dict[str, tuple[int, ...]] = {}
         self.drained: set[str] = set()
+        self.failed_peers: set[str] = set()
+        self.successful_peers: dict[str, float] = {}
+        self.stats = stats
+        self.retire = retire
+        self._failure_logs: dict[tuple[str, str], float] = {}
 
     def add(self, job: CopyJob, timeout: float) -> AsyncRead:
         grant = job.grant
@@ -133,6 +149,29 @@ class AsyncReceives:
                 result.finished_recving.add(read.job.request_id)
                 if failed:
                     result.failed_recving.add(read.job.request_id)
+                    self.failed_peers.add(read.job.grant.endpoint)
+                    reason = read.failure_reason or "exception"
+                    key = read.job.grant.endpoint, reason
+                    now = monotonic()
+                    if now - self._failure_logs.get(key, float("-inf")) >= 60:
+                        logger.info(
+                            "Peer L1 RDMA receive failed owner=%s reason=%s; "
+                            "recomputing request",
+                            *key,
+                        )
+                        self._failure_logs[key] = now
+                else:
+                    endpoint = read.job.grant.endpoint
+                    self.successful_peers[endpoint] = max(
+                        self.successful_peers.get(endpoint, float("-inf")),
+                        read.job.grant.acquired_before,
+                    )
+                if self.stats is not None:
+                    self.stats.inc("worker_rdma_reads", int(read.submitted))
+                    self.stats.inc("worker_rdma_bytes", read.num_bytes)
+                    if failed:
+                        self.stats.inc(f"worker_rdma_failure_{reason}")
+                    self.stats.inc("worker_rdma_successes", int(not failed))
                 if not drained:
                     self.quarantined[identity] = tuple(
                         sorted({target for _, _, target in read.job.blocks})
@@ -145,10 +184,19 @@ class AsyncReceives:
                     read.released = True
                 if read.quarantined:
                     self.drained.add(identity)
+                if self.retire is not None:
+                    self.retire(identity)
                 del self.reads[identity]
         return result
 
     def metadata(self, step: int) -> PeerWorkerMetadata:
-        result = PeerWorkerMetadata(step, self.quarantined, self.drained)
-        self.quarantined, self.drained = {}, set()
+        result = PeerWorkerMetadata(
+            step,
+            self.quarantined,
+            self.drained,
+            self.failed_peers,
+            self.successful_peers,
+        )
+        self.quarantined, self.drained, self.failed_peers = {}, set(), set()
+        self.successful_peers = {}
         return result

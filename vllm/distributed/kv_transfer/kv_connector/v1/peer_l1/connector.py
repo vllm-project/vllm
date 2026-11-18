@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -142,6 +143,13 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("Peer L1 requires prefix caching")
         if self._kv_transfer_config.kv_role != "kv_both":
             raise ValueError("Peer L1 requires kv_role=kv_both")
+        if (
+            self._kv_transfer_config.kv_connector_extra_config.get("instance_id")
+            and self._kv_transfer_config.kv_load_failure_policy != "recompute"
+        ):
+            raise ValueError(
+                "Cross-instance peer L1 requires kv_load_failure_policy=recompute"
+            )
         supported = supported_groups(kv_cache_config)
         self._supported = supported
         self._scheduler: PeerScheduler | None = None
@@ -241,6 +249,12 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self._worker is not None
         return self._worker.report()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self._worker is not None
+        return self._worker.transfer_results(finished_req_ids)
 
     def shutdown(self) -> None:
         if self._scheduler is not None:

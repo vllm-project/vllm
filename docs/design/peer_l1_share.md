@@ -56,7 +56,7 @@ IPC batches share a copy stream and one completion callback releases all grants
 for the step. A possible failed load retains ownership under fail-stop; there is
 no timer that can release a possibly active IPC read.
 
-Leased async grants retain their original lease clock. Queueing, setup and the GPU fence
+RDMA grants retain their original lease clock. Queueing, setup and the GPU fence
 must fit within half that lease. The first possible post starts the transfer
 budget, capped by the same bound; subsequent segments do not renew it.
 
@@ -67,4 +67,11 @@ abort or normal finish can free the request's references. Quarantine belongs to
 the transfer identity, independently of the request, until drain or process exit.
 An elapsed lease or failed status alone is not drain proof.
 
-Discovery validates epoch, geometry and hash settings before selecting an owner.
+After failure, that live admission excludes RDMA sources; source cooldown and the
+quarantine circuit breaker apply independently. Source cleanup uses epoch and
+sequence, so a restarted owner cannot lose a newer grant through stale cleanup.
+
+MoRI registrations and potentially referenced argument/status objects live until
+process exit when revocation or drain cannot be proven. Discovery and replica
+refresh run off the request ingress path; HELLO revalidation before a post rejects
+an already observable owner restart while the job was queued.

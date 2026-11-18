@@ -5,6 +5,7 @@
 import hashlib
 import ipaddress
 import math
+import os
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -33,22 +34,25 @@ class Domain:
     credential: bytes = field(default=b"", repr=False)
     lease_ms: int = 30000
     timeout_s: float = 1.0
-    min_gain_pages: int = 1
+    min_gain_pages: int = 4
 
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> "Domain":
+        secret = str(options.get("shared_secret", ""))
+        if options.get("shared_secret_env"):
+            secret = os.environ.get(str(options["shared_secret_env"]), "")
+            if not secret:
+                raise ValueError("Peer shared_secret_env is not set")
         result = cls(
             instance_id=str(options.get("instance_id", "")),
             compatibility_id=str(options.get("kv_compatibility_id", "")),
             host=str(options.get("control_host", "")),
             port=int(options.get("control_port", 0)),
             seeds=tuple(options.get("peer_seeds", ())),
-            credential=hashlib.sha256(str(options["shared_secret"]).encode()).digest()
-            if options.get("shared_secret")
-            else b"",
+            credential=hashlib.sha256(secret.encode()).digest() if secret else b"",
             lease_ms=int(options.get("lease_ms", 30000)),
             timeout_s=float(options.get("read_timeout_s", 1.0)),
-            min_gain_pages=int(options.get("min_gain_pages", 1)),
+            min_gain_pages=int(options.get("min_gain_pages", 4)),
         )
         configured = (
             result.instance_id

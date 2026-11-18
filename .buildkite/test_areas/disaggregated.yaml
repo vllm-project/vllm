@@ -532,6 +532,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/peer_l1/
+    - vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_engine.py
     - vllm/distributed/kv_transfer/kv_connector/lookup.py
     - vllm/distributed/kv_transfer/kv_connector/factory.py
     - vllm/v1/core/block_pool.py

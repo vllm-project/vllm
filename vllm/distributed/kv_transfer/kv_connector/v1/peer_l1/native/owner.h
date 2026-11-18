@@ -53,7 +53,7 @@ class Owner {
   uint64_t sequence_ = 0, refs_ = 0;
   int64_t generation_ = 0;
   // Order matches NativeOwner.STATS.
-  std::array<uint64_t, 17> stats_{};
+  std::array<uint64_t, 18> stats_{};
   uint64_t withheld_current_ = 0;
   uint64_t queued_keys_ = 0;
   uint64_t deferred_serial_ = 0;
@@ -554,6 +554,7 @@ class Owner {
     }
     stats_[8] = window_;
     stats_[9] = window_;
+    stats_.back() = refs_;
     std::copy(stats_.begin(), stats_.end(), stats);
     std::fill(stats_.begin(), stats_.begin() + 5, 0);
     std::fill(stats_.begin() + 10, stats_.begin() + 17, 0);

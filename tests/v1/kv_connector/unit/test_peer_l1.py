@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.native import (
     PlacementReplica,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.session import (
+    Grant,
     NativeOwnerChannel,
     OwnerBusy,
     peer_key,
@@ -387,6 +388,10 @@ def scheduler_resources(tmp_path, request):
     scheduler = PeerScheduler(
         config, cache, (4,) if flash else tuple(range(5)) if large else (0, 1)
     )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    init_none_hash(sha256)
     scheduler.bind(manager)
     endpoint = f"vllm-peer-l1/scheduler/{uuid4().hex}"
     member = PeerMemory(
@@ -1306,6 +1311,52 @@ def test_async_receives_keep_uncertain_dma_targets_and_grants(
     wait_until(lambda: owner.refs == 0)
 
 
+@pytest.mark.parametrize("reason", ["deadline_before_post", "deadline_after_post"])
+def test_receive_failure_reason_is_counted_once_and_info_is_rate_limited(
+    owner_resources, monkeypatch, caplog, reason
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import async_load
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import CopyJob
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.stats import PeerL1Stats
+
+    owner, _, cleanup = owner_resources
+    channel = NativeOwnerChannel(owner.endpoint, owner.epoch, 76, cleanup, lease_s=1.0)
+    key = peer_key(b"failure-reason")
+    owner.publish([key], [1])
+    stats = PeerL1Stats()
+    receives = async_load.AsyncReceives(channel.release, stats)
+    now = [time.monotonic()]
+    monkeypatch.setattr(async_load, "monotonic", lambda: now[0])
+    caplog.set_level("INFO", logger=async_load.__name__)
+    for index in range(2):
+        grant = channel.acquire_exact([key])
+        now[0] = grant.acquired_before
+        rid = f"failure-{index}"
+        read = receives.add(CopyJob(0, grant, ((0, 1, 17),), rid), 0.01)
+        if reason == "deadline_before_post":
+            now[0] += 1.0
+        elif reason == "deadline_after_post":
+            assert read.begin()
+            now[0] += 1.0
+            read.complete(True, drained=True)
+        elif reason in ("queue_full", "cancelled"):
+            read.cancel_unsubmitted(reason)
+        else:
+            read.complete(False, drained=True, reason=reason)
+        result = receives.poll()
+        assert result.failed_recving == result.finished_recving == {rid}
+        assert not receives.poll().finished_recving
+        wait_until(lambda: owner.refs == 0)
+    assert stats.reduce()[f"worker_rdma_failure_{reason}"] > 0
+    assert stats.reduce().get("worker_rdma_successes", 0) == 0
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            f"Peer L1 RDMA receive failed owner={owner.endpoint} reason={reason}; "
+            "recomputing request"
+        )
+    ]
+
+
 def test_leased_deferred_grant_does_not_renew_on_retry(owner_resources, clock):
     owner, _, cleanup = owner_resources
     key = peer_key(b"leased-queue")
@@ -1471,7 +1522,7 @@ def tcp_members(unused_tcp_port_factory, clock):
                 restart_group="source",
                 session_kinds=("rdma",),
                 rdma=b"registered memory",
-                lease_s=1.0,
+                lease_s=lease_ms / 1000,
             )
             publish([(owner, member)])
             return owner, member
@@ -1540,7 +1591,15 @@ def test_members_snapshot_hello_authentication_and_tcp_subscription(tcp_members)
 
 @pytest.mark.parametrize(
     "difference",
-    ["kv_compatibility_id", "hash_settings", "compatibility", "schema", "hello"],
+    [
+        "kv_compatibility_id",
+        "hash_settings",
+        "compatibility",
+        "schema",
+        "hello",
+        "partial",
+        "sessions",
+    ],
 )
 def test_resolver_rejects_incompatible_or_inconsistent_members(tcp_members, difference):
     import msgspec
@@ -1554,7 +1613,9 @@ def test_resolver_rejects_incompatible_or_inconsistent_members(tcp_members, diff
     create, _, _, auth, replace = tcp_members
     owner, member = create()
     local = replace(member, instance_id="reader")
-    if difference in ("schema", "hello"):
+    if difference == "sessions":
+        member = replace(member, session_kinds=("ipc",), rdma=b"")
+    if difference in ("schema", "hello", "partial", "sessions"):
         owner.describe(
             msgspec.json.encode(member),
             msgspec.json.encode(
@@ -1562,7 +1623,7 @@ def test_resolver_rejects_incompatible_or_inconsistent_members(tcp_members, diff
                     2 if difference == "schema" else 1,
                     "source",
                     (replace(member, epoch=77) if difference == "hello" else member,),
-                    1,
+                    2 if difference == "partial" else 1,
                 )
             ),
         )
@@ -1626,6 +1687,698 @@ def test_resolver_replaces_epoch_without_releasing_the_new_owner_grant(
         assert new.refs == 1
         current.cancel_unsubmitted(grant.sequence)
         assert new.refs == 0
+    finally:
+        resolver.close()
+
+
+@pytest.fixture
+def async_scheduler(scheduler_resources, tcp_members):
+    from copy import deepcopy
+
+    from tests.v1.core.test_prefix_caching import make_request
+    from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import PeerHandshake
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import (
+        init_none_hash,
+        make_block_hash_with_group_id,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    base, _, _ = scheduler_resources
+    create, publish, _, _, replace_member = tcp_members
+    with ExitStack() as stack:
+
+        def start(*, flash=False, ipc_tokens=0, min_gain=1, quarantine_fraction=1 / 16):
+            config = deepcopy(base.config)
+            if flash:
+                config = VllmConfig(
+                    model_config=config.model_config,
+                    cache_config=config.cache_config,
+                    parallel_config=config.parallel_config,
+                    device_config=config.device_config,
+                    scheduler_config=config.scheduler_config,
+                    kv_transfer_config=config.kv_transfer_config,
+                )
+            remote, member = create(window=512, lease_ms=30000)
+            prepared, local = create(epoch=911, window=512, lease_ms=30000)
+            prepared.close()
+            local = replace_member(
+                local, instance_id="reader", restart_group="reader", host="reader"
+            )
+            config.kv_transfer_config.kv_load_failure_policy = "recompute"
+            config.kv_transfer_config.kv_connector_extra_config.update(
+                instance_id="reader",
+                kv_compatibility_id="weights",
+                control_host="127.0.0.1",
+                control_port=int(local.endpoint.rsplit(":", 1)[1]),
+                peer_seeds=[member.endpoint],
+                shared_secret="deployment secret",
+                min_gain_pages=min_gain,
+                rdma_quarantine_fraction=quarantine_fraction,
+            )
+            config.cache_config.num_gpu_blocks = base.cache.num_blocks
+            scheduler = Scheduler(
+                config,
+                base.cache,
+                StructuredOutputManager(config),
+                block_size=128 if flash else 256,
+                hash_block_size=128 if flash else 4,
+                log_stats=True,
+            )
+            stack.callback(scheduler.shutdown)
+            members = [local]
+            ipc = None
+            if ipc_tokens:
+                ipc, ipc_member = create(rank=1, window=512, lease_ms=30000)
+                members.append(
+                    replace_member(ipc_member, instance_id="reader", host="reader")
+                )
+            scheduler.connector.set_xfer_handshake_metadata({0: PeerHandshake(members)})
+            init_none_hash(sha256)
+            request = make_request(
+                "real-async",
+                list(range(1027)),
+                128 if flash else 4,
+                sha256,
+                num_hash_lookahead_tokens=0 if flash else 2,
+            )
+            policy = scheduler.connector._scheduler
+
+            def seed(owner, length):
+                length, hashes = policy._lookup.find_longest_cache_hit(
+                    request.block_hashes, length, lambda h, g: True
+                )
+                keys = [
+                    peer_key(make_block_hash_with_group_id(h, g))
+                    for g, group in enumerate(hashes)
+                    for h in group
+                    if h is not None
+                ]
+                owner.publish(keys, list(range(1, len(keys) + 1)))
+                return keys
+
+            keys = seed(remote, 1024)
+            if ipc is not None:
+                ipc_keys = seed(ipc, ipc_tokens)
+                wait_until(lambda: policy._replica.query(ipc_keys)[:, 0].all())
+            wait_until(
+                lambda: (
+                    policy._resolver.snapshot() is not None
+                    and policy._resolver.snapshot().replica.query(keys).all()
+                )
+            )
+            scheduler.add_request(request)
+            expected = (
+                (ipc_tokens, False)
+                if ipc_tokens and 1024 - ipc_tokens < min_gain * policy.alignment
+                else (1024, True)
+            )
+            wait_until(
+                lambda: (
+                    scheduler.connector.get_num_new_matched_tokens(request, 0)
+                    == expected
+                )
+            )
+            scheduled = scheduler.schedule()
+            return scheduler, request, scheduled, remote, ipc
+
+        yield start
+
+
+@pytest.mark.parametrize(
+    "scheduler_resources", [{"mtp": True}, {"mtp": True, "flash": True}], indirect=True
+)
+def test_real_hma_scheduler_resumes_async_pro_and_flash(
+    async_scheduler, scheduler_resources
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.async_load import (
+        AsyncReceives,
+    )
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+    from vllm.v1.request import RequestStatus
+
+    base, _, _ = scheduler_resources
+    flash = base.supported == (4,)
+    scheduler, request, scheduled, owner, _ = async_scheduler(flash=flash)
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert scheduler.connector.get_loaded_kv_cache_group_ids(request) == (
+        (4,) if flash else (0, 1, 2, 3, 4)
+    )
+    job = scheduled.kv_connector_metadata.jobs[0]
+    released: list[Grant] = []
+    receives = AsyncReceives(released.append)
+    read = receives.add(job, 1.0)
+    assert read.begin()
+    read.complete(True, drained=True)
+    results = receives.poll()
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving=results.finished_recving,
+                failed_recving=results.failed_recving,
+                kv_connector_worker_meta=receives.metadata(0),
+            ),
+        ),
+    )
+    resumed = scheduler.schedule()
+    assert request.request_id in resumed.num_scheduled_tokens
+    assert request.status == RequestStatus.RUNNING
+    assert request.replay_start > 0 if flash else request.replay_start == 0
+    assert released == [job.grant]
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+@pytest.mark.parametrize("finish", ["recompute", "abort", "finish"])
+def test_real_scheduler_quarantines_late_dma_across_request_lifecycles(
+    async_scheduler, finish
+):
+    from concurrent.futures import Future
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.async_load import (
+        AsyncReceives,
+    )
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+    from vllm.v1.request import RequestStatus
+
+    scheduler, request, scheduled, _, _ = async_scheduler()
+    job = scheduled.kv_connector_metadata.jobs[0]
+    targets = {target for _, _, target in job.blocks}
+    released: list[Grant] = []
+    receives = AsyncReceives(released.append)
+    read = receives.add(job, 1.0)
+    assert read.begin()
+    late: Future[bool] = Future()
+    read.complete(False, drained=False, drain_query=late.done)
+    if finish != "recompute":
+        scheduler.finish_requests(
+            [request.request_id],
+            RequestStatus.FINISHED_ABORTED
+            if finish == "abort"
+            else RequestStatus.FINISHED_STOPPED,
+        )
+    results = receives.poll()
+    assert results.failed_recving == results.finished_recving == {request.request_id}
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving=results.finished_recving,
+                failed_recving=results.failed_recving,
+                kv_connector_worker_meta=receives.metadata(0),
+            ),
+        ),
+    )
+    if finish == "recompute":
+        scheduler.schedule()
+        recompute_rows = {
+            row
+            for group in scheduler.kv_cache_manager.get_blocks(
+                request.request_id
+            ).get_block_ids()
+            for row in group
+        }
+        assert not targets.intersection(recompute_rows)
+    else:
+        assert request.request_id not in scheduler.requests
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[row].ref_cnt == 1
+        for row in targets
+    )
+    assert not released
+    late.set_result(True)
+    receives.poll()
+    scheduler.connector.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=receives.metadata(0))
+    )
+    assert all(
+        scheduler.kv_cache_manager.block_pool.blocks[row].ref_cnt == 0
+        for row in targets
+    )
+    assert released == [job.grant]
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+@pytest.mark.parametrize(
+    ("ipc_tokens", "gain", "asynchronous"),
+    [(1024, 1, False), (768, 2, False), (768, 1, True)],
+)
+def test_source_tiering_requires_a_remote_gain(
+    async_scheduler, ipc_tokens, gain, asynchronous
+):
+    _, _, scheduled, remote, ipc = async_scheduler(ipc_tokens=ipc_tokens, min_gain=gain)
+    job = scheduled.kv_connector_metadata.jobs[0]
+    assert (job.grant.lease_s is not None) is asynchronous
+    assert (remote.refs > 0) is asynchronous
+    assert (ipc.refs > 0) is not asynchronous
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+def test_pro_async_read_starts_transfer_budget_after_the_step_fence(
+    async_scheduler, tcp_members, monkeypatch
+):
+    """A five-group MTP load succeeds after a step longer than its read timeout."""
+    from concurrent.futures import Future
+    from dataclasses import replace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        MoRIIOOwnedRead,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import async_load, rdma
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+    scheduler, request, scheduled, owner, _ = async_scheduler()
+    _, publish, cleanup, credential, _ = tcp_members
+    job = scheduled.kv_connector_metadata.jobs[0]
+    assert {group for group, _, _ in job.blocks} == set(range(5))
+    rows = scheduler.kv_cache_config.num_blocks
+    segments = tuple(((group * rows, 1, 1),) for group in range(5))
+    memory = replace(job.memory, segments=segments)
+    publish([(owner, memory)])
+    source = bytes(i % 251 for i in range(5 * rows))
+    target = bytearray(5 * rows)
+    completed: Future[bool] = Future()
+
+    class Status:
+        def Succeeded(self):
+            return completed.done()
+
+        def Failed(self):
+            return False
+
+    class Transport:
+        def prepare_owned_read(self, sizes, local, remote, memory):
+            return MoRIIOOwnedRead(Status(), (sizes, local, remote))
+
+        def submit_owned_read(self, submission):
+            sizes, local, remote = submission.arguments
+            for size, dst, src in zip(sizes, local, remote):
+                target[dst : dst + size] = source[src : src + size]
+            completed.set_result(True)
+
+    channel = NativeOwnerChannel(
+        memory.endpoint, memory.epoch, job.grant.reader, cleanup, lease_s=30.0
+    )
+    receives = async_load.AsyncReceives(channel.release)
+    now = [job.grant.acquired_before]
+    monkeypatch.setattr(async_load, "monotonic", lambda: now[0])
+    monkeypatch.setattr(rdma, "monotonic", lambda: now[0])
+    # save() hands this real admission and an incomplete main-stream fence to
+    # the receive machinery. CPU time is controlled instead of running a GPU step.
+    read = receives.add(replace(job, memory=memory), 1.0)
+    ready, queried = threading.Event(), threading.Event()
+
+    def query():
+        queried.set()
+        return ready.is_set()
+
+    session = rdma.RdmaReadSession(
+        Transport(), object(), rows, segments, memory, credential
+    )
+    thread = threading.Thread(target=session.run, args=(read, query, threading.Event()))
+    thread.start()
+    assert queried.wait(5)
+    now[0] += 2.0
+    try:
+        assert not receives.poll().finished_recving
+    finally:
+        ready.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    result = receives.poll()
+    assert result.finished_recving == {request.request_id} and not result.failed_recving
+    assert read.deadline == pytest.approx(job.grant.acquired_before + 3.0)
+    for group, src, dst in job.blocks:
+        assert target[group * rows + dst] == source[group * rows + src]
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving=result.finished_recving
+            ),
+        ),
+    )
+    assert request.request_id in scheduler.schedule().num_scheduled_tokens
+    wait_until(lambda: owner.refs == 0)
+
+
+@pytest.mark.parametrize("mode", ["late", "partial"])
+def test_rdma_session_uses_deadlines_and_never_releases_unknown_dma(
+    tcp_members, monkeypatch, mode
+):
+    from concurrent.futures import Future
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import async_load, rdma
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import CopyJob
+
+    create, _, cleanup, auth, _ = tcp_members
+    owner, member = create(lease_ms=30000)
+    channel = NativeOwnerChannel(member.endpoint, member.epoch, 81, cleanup, lease_s=30)
+    key = peer_key(b"read")
+    owner.publish([key], [1])
+    grant = channel.acquire_exact([key])
+    now = [grant.acquired_before]
+    monkeypatch.setattr(async_load, "monotonic", lambda: now[0])
+    monkeypatch.setattr(rdma, "monotonic", lambda: now[0])
+    receives = async_load.AsyncReceives(channel.release)
+    read = receives.add(CopyJob("source", grant, ((0, 1, 17),), "read", member), 1)
+    posted = threading.Event()
+    future: Future[bool] = Future()
+
+    class Status:
+        def Succeeded(self):
+            return future.done()
+
+        def Failed(self):
+            return False
+
+    class Transport:
+        def prepare_owned_read(self, sizes, local, remote, memory):
+            return moriio_engine.MoRIIOOwnedRead(Status(), (sizes, local, remote))
+
+        def submit_owned_read(self, submission):
+            assert submission.arguments == ([1], [17], [1])
+            posted.set()
+            if mode == "partial":
+                raise RuntimeError("partial native post")
+
+    session = rdma.RdmaReadSession(
+        Transport(), object(), 128, (((0, 1, 1),),), member, auth
+    )
+    thread = threading.Thread(
+        target=session.run, args=(read, lambda: True, threading.Event())
+    )
+    thread.start()
+    assert posted.wait(5)
+    now[0] += 2
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    result = receives.poll()
+    assert result.failed_recving == result.finished_recving == {"read"}
+    assert receives.metadata(0).quarantined == {read.identity: (17,)}
+    assert any(isinstance(r, moriio_engine.MoRIIOOwnedRead) for r in read.resources)
+    assert owner.refs == 1
+    future.set_result(True)
+    receives.poll()
+    if mode == "late":
+        assert receives.metadata(0).drained == {read.identity}
+        wait_until(lambda: owner.refs == 0)
+    else:
+        assert not receives.metadata(0).drained
+        assert owner.refs == 1
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+def test_membership_refresh_keeps_grant_sequences_for_unchanged_owners(
+    async_scheduler, tcp_members
+):
+    from tests.v1.core.test_prefix_caching import make_request
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import (
+        PeerWorkerMetadata,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.outputs import KVConnectorOutput
+
+    scheduler, request, scheduled, owner, _ = async_scheduler()
+    original = scheduled.kv_connector_metadata.jobs[0]
+    create, publish, _, _, _ = tcp_members
+    added, member = create(rank=1, epoch=20, window=512, lease_ms=30000)
+    publish([(owner, original.memory), (added, member)])
+    scheduler.connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=PeerWorkerMetadata(
+                0, failed_peers={original.memory.endpoint}
+            )
+        )
+    )
+    policy = scheduler.connector._scheduler
+    wait_until(lambda: len(policy._resolver.snapshot().members) == 2)
+    newer = make_request(
+        "second-outstanding",
+        request.prompt_token_ids,
+        4,
+        sha256,
+        num_hash_lookahead_tokens=2,
+    )
+    scheduler.add_request(newer)
+    wait_until(
+        lambda: scheduler.connector.get_num_new_matched_tokens(newer, 0) == (1024, True)
+    )
+    following = scheduler.schedule().kv_connector_metadata.jobs[0]
+    assert following.grant.epoch == original.grant.epoch
+    assert following.grant.sequence > original.grant.sequence
+    assert owner.refs == 2 * len(set(original.grant.rows))
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+@pytest.mark.parametrize("ipc_tokens", [0, 768])
+def test_failed_rdma_admission_retries_only_ipc_or_recompute(
+    async_scheduler, monkeypatch, ipc_tokens
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import scheduler as policy
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.async_load import (
+        AsyncReceives,
+    )
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+    from vllm.v1.request import RequestStatus
+
+    scheduler, request, scheduled, _, _ = async_scheduler(ipc_tokens=ipc_tokens)
+    now = [time.monotonic()]
+    monkeypatch.setattr(policy, "monotonic", lambda: now[0])
+    first_job = scheduled.kv_connector_metadata.jobs[0]
+    released: list[Grant] = []
+    receives = AsyncReceives(released.append)
+    first = receives.add(first_job, 1.0)
+    assert first.begin()
+    first.complete(False, drained=False)
+    result = receives.poll()
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving=result.finished_recving,
+                failed_recving=result.failed_recving,
+                kv_connector_worker_meta=receives.metadata(0),
+            ),
+        ),
+    )
+    now[0] += 2.0
+    retry = scheduler.schedule()
+    assert bool(retry.kv_connector_metadata.jobs) is bool(ipc_tokens)
+    for job in retry.kv_connector_metadata.jobs:
+        assert job.grant.lease_s is None
+        assert not {t for _, _, t in first_job.blocks}.intersection(
+            t for _, _, t in job.blocks
+        )
+    assert request.request_id in retry.num_scheduled_tokens
+    assert request.status == RequestStatus.RUNNING
+    assert first.identity in receives.reads and not released
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    # Admission memory is cleared on finish; late failure feedback cannot add it.
+    scheduler.connector.update_connector_output(
+        KVConnectorOutput(failed_recving={request.request_id})
+    )
+    now[0] += 2.0
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (1024, True)
+    scheduler.connector.request_finished(request, [])
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+def test_rdma_failures_back_off_and_a_new_success_resets_the_owner(
+    async_scheduler, monkeypatch
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import scheduler as policy
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import (
+        PeerWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    scheduler, request, scheduled, _, _ = async_scheduler()
+    endpoint = scheduled.kv_connector_metadata.jobs[0].grant.endpoint
+    now = [0.0]
+    monkeypatch.setattr(policy, "monotonic", lambda: now[0])
+
+    def outcome(*, failed=False, success=None):
+        scheduler.connector.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=PeerWorkerMetadata(
+                    0,
+                    failed_peers={endpoint} if failed else set(),
+                    successful_peers={} if success is None else {endpoint: success},
+                )
+            )
+        )
+
+    outcome(failed=True)  # Session setup/before-submit failures use the same feedback.
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    now[0] = 1.1
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (1024, True)
+    scheduler.connector.request_finished(request, [])
+    outcome(failed=True)
+    now[0] = 2.2
+    outcome(success=0.0)  # A success acquired before the failure cannot heal it.
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    now[0] = 3.2
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (1024, True)
+    scheduler.connector.request_finished(request, [])
+    outcome(success=3.2)
+    outcome(failed=True)
+    now[0] = 4.3
+    assert scheduler.connector.get_num_new_matched_tokens(request, 0) == (1024, True)
+    scheduler.connector.request_finished(request, [])
+
+
+@pytest.mark.parametrize("scheduler_resources", [{"mtp": True}], indirect=True)
+def test_quarantine_budget_stops_rdma_but_preserves_ipc_and_recovers_on_drain(
+    async_scheduler, monkeypatch, caplog
+):
+    from concurrent.futures import Future
+
+    from tests.v1.core.test_prefix_caching import make_request
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import scheduler as policy
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.async_load import (
+        AsyncReceives,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+    scheduler, request, scheduled, _, _ = async_scheduler(
+        ipc_tokens=768, quarantine_fraction=0.0001
+    )
+    now = [0.0]
+    monkeypatch.setattr(policy, "monotonic", lambda: now[0])
+    receives = AsyncReceives(lambda grant: None)
+    read = receives.add(scheduled.kv_connector_metadata.jobs[0], 1.0)
+    assert read.begin()
+    late: Future[bool] = Future()
+    read.complete(False, drained=False, drain_query=late.done)
+    results = receives.poll()
+    meta = receives.metadata(0)
+    output = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                failed_recving=results.failed_recving,
+                finished_recving=results.finished_recving,
+                kv_connector_worker_meta=meta,
+            ),
+        ),
+    )[0]
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.stats import PeerL1Stats
+
+    assert (
+        PeerL1Stats(output.scheduler_stats.kv_connector_stats).reduce()[
+            "reader_rdma_quarantine_stops"
+        ]
+        == 1
+    )
+    scheduler.connector.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=meta)
+    )
+    values = scheduler.connector.get_kv_connector_stats().reduce()
+    assert values["reader_rdma_quarantine_disabled"] == 1
+    assert values.get("reader_rdma_quarantine_stops", 0) == 0
+    assert sum("Peer L1 RDMA disabled:" in r.message for r in caplog.records) == 1
+    assert all(
+        job.grant.lease_s is None
+        for job in scheduler.schedule().kv_connector_metadata.jobs
+    )
+    now[0] = 2.0
+    probe = make_request(
+        "budget-probe", request.prompt_token_ids, 4, sha256, num_hash_lookahead_tokens=2
+    )
+    assert scheduler.connector.get_num_new_matched_tokens(probe, 0) == (768, False)
+    scheduler.connector.request_finished(probe, [])
+    late.set_result(True)
+    receives.poll()
+    scheduler.connector.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=receives.metadata(0))
+    )
+    assert (
+        scheduler.connector.get_kv_connector_stats().reduce()[
+            "reader_rdma_quarantine_disabled"
+        ]
+        == 0
+    )
+    assert scheduler.connector.get_num_new_matched_tokens(probe, 0) == (1024, True)
+    scheduler.connector.request_finished(probe, [])
+
+
+def test_receive_feedback_survives_worker_serialization_and_aggregation():
+    from multiprocessing import Pipe
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import (
+        PeerWorkerMetadata,
+    )
+
+    first = PeerWorkerMetadata(
+        3, failed_peers={"failed"}, successful_peers={"healthy": 4.0}
+    )
+    second = PeerWorkerMetadata(2, successful_peers={"healthy": 5.0, "other": 1.0})
+    receiver, sender = Pipe(duplex=False)
+    with receiver, sender:
+        sender.send(first.aggregate(second))
+        combined = receiver.recv()
+    assert combined.completed_step == 2
+    assert combined.failed_peers == {"failed"}
+    assert combined.successful_peers == {"healthy": 5.0, "other": 1.0}
+
+
+def test_resolver_fetches_one_snapshot_per_instance_and_only_changed_hellos(
+    tcp_members, monkeypatch
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import registry
+
+    create, publish, _, auth, replace = tcp_members
+    a, first = create()
+    b, second = create(rank=1, epoch=20)
+    publish([(a, first), (b, second)])
+    calls = []
+    real = registry.description
+
+    def observed(endpoint, epoch, **kwargs):
+        calls.append((endpoint, kwargs.get("members", False)))
+        return real(endpoint, epoch, **kwargs)
+
+    monkeypatch.setattr(registry, "description", observed)
+    now = [0.0]
+    monkeypatch.setattr(registry, "monotonic", lambda: now[0])
+    resolver = registry.Resolver(
+        registry.Domain(
+            instance_id="reader",
+            seeds=(first.endpoint, second.endpoint),
+            credential=auth,
+        ),
+        replace(first, instance_id="reader"),
+    )
+    try:
+        resolver.refresh()
+        assert len(resolver.snapshot().members) == 2
+        assert sum(members for _, members in calls) == 1
+        assert sum(not members for _, members in calls) == 2
+        calls.clear()
+        now[0] = 1.1
+        resolver.refresh()
+        assert calls == [(first.endpoint, True)]
+        a.close()
+        calls.clear()
+        now[0] = 2.2
+        resolver.refresh()
+        now[0] = 2.21
+        resolver.refresh()
+        assert calls == [(first.endpoint, True)]
+        now[0] = 2.3
+        resolver.refresh()
+        assert calls[-1] == (second.endpoint, True)
+        assert sum(not members for _, members in calls) == 0
     finally:
         resolver.close()
 

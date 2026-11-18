@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scheduler policy and external block leases for peer L1 sharing."""
 
+import math
 import os
 import select
 import threading
@@ -104,6 +105,12 @@ class _Busy:
     terminal: bool = False
 
 
+@dataclass
+class _Cooldown:
+    failures: int
+    retry_after: float
+
+
 class PeerScheduler:
     def __init__(
         self,
@@ -133,7 +140,24 @@ class PeerScheduler:
         self._published: memoryview | None = None
         self._pending: dict[int, dict[BlockHashWithGroupId, int]] = {}
         self._quarantined: dict[str, tuple[KVCacheBlock, ...]] = {}
+        self._quarantine_rows = 0
+        self._rdma_disabled = False
+        self._cooldowns: dict[str, _Cooldown] = {}
+        self._cooldown_s = float(self.options.get("rdma_cooldown_s", 1.0))
+        self._cooldown_max_s = float(self.options.get("rdma_cooldown_max_s", 30.0))
+        fraction = float(self.options.get("rdma_quarantine_fraction", 1 / 16))
+        if not (
+            0 < self._cooldown_s <= self._cooldown_max_s < math.inf and 0 < fraction < 1
+        ):
+            raise ValueError(
+                "RDMA cooldowns must be finite and positive; "
+                "quarantine fraction must be in (0, 1)"
+            )
+        self._quarantine_limit = int(max(0, cache.num_blocks - 1) * fraction)
         self._reads: dict[str, _Read] = {}
+        # Live allocated RDMA admissions; True after a failed receive. An
+        # unallocated grant is not an attempt, and late results cannot resurrect it.
+        self._rdma_admissions: dict[str, bool] = {}
         self._busy: dict[str, _Busy] = {}
         self._round_robin = 0
         self._pool: BlockPool | None = None
@@ -147,6 +171,7 @@ class PeerScheduler:
         self._peer_memory: dict[int | str, PeerMemory] = {}
         self._cleanup = CleanupQueue(self.timeout, credential=self.domain.credential)
         self._channels: list[NativeOwnerChannel] = []
+        self._remote_channels: dict[tuple[str, int], NativeOwnerChannel] = {}
         self._ranks: list[int | str] = []
         self._wake_stop = threading.Event()
         self._wake_thread: threading.Thread | None = None
@@ -209,7 +234,12 @@ class PeerScheduler:
         self._peer_memory = {m.rank: m for m in peers}
         self._channels = [
             NativeOwnerChannel(
-                m.endpoint, m.epoch, local.epoch, self._cleanup, self.timeout
+                m.endpoint,
+                m.epoch,
+                local.epoch,
+                self._cleanup,
+                self.timeout,
+                lease_s=m.lease_s if m.host != local.host else None,
             )
             for m in peers
         ]
@@ -248,8 +278,10 @@ class PeerScheduler:
             identity = f"{member.instance_id}/{member.rank}/{member.epoch}"
             self._ranks.append(identity)
             self._peer_memory[identity] = member
-            self._channels.append(
-                NativeOwnerChannel(
+            key = member.endpoint, member.epoch
+            channel = self._remote_channels.get(key)
+            if channel is None:
+                channel = NativeOwnerChannel(
                     member.endpoint,
                     member.epoch,
                     self._owner.epoch,
@@ -257,7 +289,8 @@ class PeerScheduler:
                     self.timeout,
                     lease_s=member.lease_s,
                 )
-            )
+                self._remote_channels[key] = channel
+            self._channels.append(channel)
         self._replica = CandidateReplicas(
             self._local_replica, snapshot.replica, self._local_count
         )
@@ -423,6 +456,25 @@ class PeerScheduler:
             waiting.deferred = True
         return None, False
 
+    def _rdma_blocked(self, peer: int, request_id: str) -> bool:
+        channel = self._channels[peer]
+        if channel.lease_s is None:
+            return False
+        cooldown = self._cooldowns.get(channel.endpoint)
+        return (
+            self._rdma_admissions.get(request_id, False)
+            or self._rdma_disabled
+            or (cooldown is not None and monotonic() < cooldown.retry_after)
+        )
+
+    def _rdma_health_metrics(self) -> None:
+        self._stats.gauge(
+            "reader_rdma_owners_cooling",
+            sum(monotonic() < state.retry_after for state in self._cooldowns.values()),
+        )
+        self._stats.gauge("reader_rdma_quarantine_disabled", int(self._rdma_disabled))
+        self._stats.gauge("reader_rdma_quarantine_limit_rows", self._quarantine_limit)
+
     def _deadline_fallback(
         self, request: Request, waiting: _Busy, eligible: int
     ) -> tuple[int, bool]:
@@ -510,7 +562,11 @@ class PeerScheduler:
             return 0, False
         if waiting is not None and waiting.queued is not None:
             queued = waiting.queued
-            if queued.local_tokens != local_tokens:
+            if self._rdma_blocked(queued.peer, request.request_id):
+                self._finish_wait(waiting, "fallback")
+                self._cancel_queued(waiting)
+                waiting.generations.pop(queued.peer, None)
+            elif queued.local_tokens != local_tokens:
                 self._finish_wait(waiting, "local")
                 self._cancel_queued(waiting)
                 waiting.generations.clear()
@@ -606,7 +662,7 @@ class PeerScheduler:
         order = sorted(
             available,
             key=lambda peer: (
-                int(peer >= self._local_count),
+                int(self._channels[peer].lease_s is not None),
                 -bounds[peer],
                 (peer - self._round_robin) % len(self._channels),
             ),
@@ -614,6 +670,15 @@ class PeerScheduler:
         best = local_tokens
         fallback_reason, fallback_positions = "no_match", 0
         for peer in order:
+            if self._rdma_blocked(peer, request.request_id):
+                fallback_reason = (
+                    "rdma_request_failed"
+                    if self._rdma_admissions.get(request.request_id, False)
+                    else "rdma_quarantine_budget"
+                    if self._rdma_disabled
+                    else "rdma_cooldown"
+                )
+                continue
             if bounds[peer] <= best:
                 continue
 
@@ -687,7 +752,7 @@ class PeerScheduler:
             if length <= best:
                 continue
             if (
-                peer >= self._local_count
+                self._channels[peer].lease_s is not None
                 and length - best < self.domain.min_gain_pages * self.alignment
             ):
                 continue
@@ -783,9 +848,12 @@ class PeerScheduler:
             request.request_id,
             self._peer_memory.get(identity) if read.grant.lease_s is not None else None,
         )
+        if read.grant.lease_s is not None:
+            self._rdma_admissions.setdefault(request.request_id, False)
 
     @_timed
     def build(self) -> PeerMetadata:
+        self._rdma_health_metrics()
         jobs = []
         for read in self._reads.values():
             if read.job is None:
@@ -831,18 +899,38 @@ class PeerScheduler:
 
     @_timed
     def update(self, output: KVConnectorOutput) -> None:
+        for request_id in output.failed_recving or ():
+            if request_id in self._rdma_admissions:
+                self._rdma_admissions[request_id] = True
         meta = output.kv_connector_worker_meta
         if not isinstance(meta, PeerWorkerMetadata):
             return
         if self._resolver is not None:
             for endpoint in meta.failed_peers:
                 self._resolver.invalidate(endpoint)
+        for endpoint, acquired_before in meta.successful_peers.items():
+            cooldown = self._cooldowns.get(endpoint)
+            if (
+                endpoint not in meta.failed_peers
+                and cooldown is not None
+                and acquired_before >= cooldown.retry_after
+            ):
+                del self._cooldowns[endpoint]
+        for endpoint in meta.failed_peers:
+            previous = self._cooldowns.get(endpoint)
+            failures = 1 if previous is None else previous.failures + 1
+            delay = min(
+                self._cooldown_max_s, self._cooldown_s * 2 ** min(failures - 1, 30)
+            )
+            self._cooldowns[endpoint] = _Cooldown(failures, monotonic() + delay)
+            self._stats.inc("reader_rdma_cooldowns")
         assert self._pool is not None
         for transfer, quarantined_rows in meta.quarantined.items():
             if transfer not in self._quarantined:
                 blocks = tuple(self._pool.blocks[row] for row in set(quarantined_rows))
                 self._pool.touch(blocks)
                 self._quarantined[transfer] = blocks
+                self._quarantine_rows += len(blocks)
                 self._stats.inc("reader_quarantined_rows", len(blocks))
                 logger.error(
                     "Peer L1 quarantined transfer=%s rows=%d; "
@@ -853,6 +941,19 @@ class PeerScheduler:
         for transfer in meta.drained:
             blocks = self._quarantined.pop(transfer, ())
             self._pool.free_blocks(blocks)
+            self._quarantine_rows -= len(blocks)
+        self._stats.gauge("reader_quarantine_refs", self._quarantine_rows)
+        disabled = self._quarantine_rows > self._quarantine_limit
+        if disabled and not self._rdma_disabled:
+            logger.error(
+                "Peer L1 RDMA disabled: quarantined rows=%d limit=%d; "
+                "inspect RDMA failures",
+                self._quarantine_rows,
+                self._quarantine_limit,
+            )
+            self._stats.inc("reader_rdma_quarantine_stops")
+        self._rdma_disabled = disabled
+        self._rdma_health_metrics()
         assert self._owner is not None
         keys, rows = [], []
         for row, pending in list(self._pending.items()):
@@ -868,6 +969,7 @@ class PeerScheduler:
 
     @_timed
     def finished(self, request_id: str) -> None:
+        self._rdma_admissions.pop(request_id, None)
         waiting = self._busy.pop(request_id, None)
         self._finish_wait(waiting, "cancel")
         self._cancel_queued(waiting)
