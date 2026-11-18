@@ -4799,7 +4799,6 @@ def create_scheduler_with_priority(
     num_speculative_tokens: int | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
-    ec_transfer_config: ECTransferConfig | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -4853,12 +4852,15 @@ def create_scheduler_with_priority(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
 
-    if ec_transfer_config is None and use_ec_connector:
-        ec_transfer_config = ECTransferConfig(
+    ec_transfer_config = (
+        ECTransferConfig(
             ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )
+        if use_ec_connector
+        else None
+    )
 
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
