@@ -36,6 +36,9 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
     is_sparse = True
     supports_dense_mha_prefill = False
+    # forward_mqa takes the head count from the query, so replicated DSA layers
+    # may hand it this rank's heads only (VLLM_DSA_REPLICATE_ATTN_MIN_TOKENS).
+    supports_runtime_num_heads = True
 
     def get_fp8_ds_mla_row_bytes(self) -> int:
         if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:
