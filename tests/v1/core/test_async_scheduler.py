@@ -1317,6 +1317,21 @@ def test_held_session_response_the_frontend_dropped_leaves_no_objects():
     assert set(engine.client.objects) == set(engine.keys["first"])
 
 
+def test_held_session_abort_output_nobody_takes_leaves_no_objects():
+    engine = _tier_engine(connector=None, hash_block_size=4)
+    scheduler = engine.scheduler
+    engine.set_version(1)
+    (request,) = _session_requests(["first"], 40, 20, hash_block_size=4, aux_held=0)
+    scheduler.add_request(request)
+    for _ in range(6):
+        engine.step(engine.schedule(), {"first": [0]})
+    engine.worker._object_writer.drain(timeout_s=10)
+    assert engine.client.objects
+    scheduler.finish_requests("first", RequestStatus.FINISHED_ABORTED)
+    engine.pause()
+    assert not engine.client.objects
+
+
 def test_session_retry_after_an_abort_keeps_the_products_of_the_aborted_attempt():
     engine = _tier_engine(connector=None, hash_block_size=4)
     scheduler = engine.scheduler

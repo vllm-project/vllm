@@ -349,6 +349,7 @@ class AuxOutputSchedulerConnector:
         )
         self._flushed_hashes = {}
         metadata.session_orphans, self._orphans = self._orphans, {}
+        self._abort_outputs.clear()
         self._retained_hashes, self._released_hashes = [], []
         self._session_tails = {}
         return metadata
@@ -613,7 +614,8 @@ class AuxOutputSchedulerConnector:
             if segment[0] < token_end or segment[0] == 0
         ]
         segments.append((token_end, None))
-        self._listed[request.request_id] = set(keys)
+        if not aborted:
+            self._listed[request.request_id] = set(keys)
         return keys, segments
 
     def lists_written(self, request: Request) -> bool:
@@ -638,7 +640,16 @@ class AuxOutputSchedulerConnector:
     def pop_abort_output(
         self, request_id: str
     ) -> tuple[list[str], list[tuple[int, str | None]]] | None:
-        return self._abort_outputs.pop(request_id, None)
+        """Take an aborted request's output for delivery; its objects are then
+        no longer removed as orphans. An output not taken before the next
+        metadata is dropped, and its objects are removed."""
+        output = self._abort_outputs.pop(request_id, None)
+        if output is not None and request_id in self._orphans:
+            delivered = set(output[0])
+            self._orphans[request_id] = [
+                key for key in self._orphans[request_id] if key not in delivered
+            ]
+        return output
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
