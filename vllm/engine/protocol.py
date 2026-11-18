@@ -204,8 +204,8 @@ class EngineClient(ABC):
         """Deliver a generic control RPC to the scheduler-side KV connector.
 
         The payload is opaque to vLLM and forwarded verbatim to the
-        connector's ``on_rpc`` hook. Returns the connector's response bytes, or
-        ``None`` if the connector does not implement the hook.
+        connector's `on_rpc` hook. Returns the connector's response bytes, or
+        `None` if the connector does not implement the hook.
         """
         ...
 

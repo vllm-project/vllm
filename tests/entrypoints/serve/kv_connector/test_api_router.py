@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/entrypoints/serve/kv_connector/api_router.py``.
+"""Unit tests for `vllm/entrypoints/serve/kv_connector/api_router.py`.
 
-Exercises the HTTP status-code mapping of ``POST /v1/kv_connector/rpc`` (RFC
-#51639) against a fake ``EngineClient``:
+Exercises the HTTP status-code mapping of `POST /v1/kv_connector/rpc` (RFC
+#51639) against a fake `EngineClient`:
 
-* 200 with the response bytes when the connector returns ``bytes`` (including
-  empty ``b""``);
+* 200 with the response bytes when the connector returns `bytes` (including
+  empty `b""`);
 * 404 when no KV connector is configured;
-* 501 when the connector returns ``None`` (not implemented);
+* 501 when the connector returns `None` (not implemented);
 * 500 when the connector handler raises.
 """
 
@@ -31,10 +31,10 @@ URL = "/v1/kv_connector/rpc"
 
 
 class _FakeEngineClient:
-    """Stand-in for ``EngineClient`` used by the router.
+    """Stand-in for `EngineClient` used by the router.
 
-    ``result`` is either the bytes/None to return, or an ``Exception`` to
-    raise. ``has_connector`` controls whether a KV connector is "configured"
+    `result` is either the bytes/None to return, or an `Exception` to
+    raise. `has_connector` controls whether a KV connector is "configured"
     (drives the 404 branch).
     """
 

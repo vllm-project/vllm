@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the generic connector control RPC (RFC #51639).
 
-Covers the ``bytes -> bytes`` control channel at the layers below the HTTP
+Covers the `bytes -> bytes` control channel at the layers below the HTTP
 transport:
 
-* ``KVConnectorBase_V1.on_rpc`` default (not-implemented sentinel).
-* ``MultiConnector.on_rpc`` first-non-None dispatch, empty-bytes success, and
+* `KVConnectorBase_V1.on_rpc` default (not-implemented sentinel).
+* `MultiConnector.on_rpc` first-non-None dispatch, empty-bytes success, and
   exception propagation.
-* ``Scheduler.invoke_kv_connector`` guarding on ``self.connector``.
+* `Scheduler.invoke_kv_connector` guarding on `self.connector`.
 """
 
 import pytest
@@ -23,7 +23,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 class _StubConnector(KVConnectorBase_V1):
     """Minimal concrete connector that skips the config-bound __init__.
 
-    Only ``on_rpc`` behavior is under test, so the abstract methods are
+    Only `on_rpc` behavior is under test, so the abstract methods are
     stubbed and no vllm_config is required.
     """
 

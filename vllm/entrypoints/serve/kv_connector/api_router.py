@@ -26,7 +26,7 @@ async def kv_connector_rpc(raw_request: Request):
 
     The request body is the connector-defined request payload (raw bytes);
     vLLM never parses it. The bytes are routed unchanged to the connector's
-    ``on_rpc`` hook running in the EngineCore scheduler process, and its
+    `on_rpc` hook running in the EngineCore scheduler process, and its
     response bytes are returned verbatim.
 
     Status codes:
