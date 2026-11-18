@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -109,6 +110,23 @@ def compute_token_logprobs(
     return logprobs
 
 
+def _topk_token_ids(logits: torch.Tensor, k: int) -> torch.Tensor:
+    """Ids of the `k` largest logits in each row, largest first.
+
+    `k` is the largest number of logprobs any request in the batch asks for,
+    and `torch.topk` orders tied logits differently for different `k`. With
+    batch invariance on, order tied logits by token id, so that a request's top
+    logprobs don't depend on what the rest of the batch asks for.
+    """
+    values, token_ids = torch.topk(logits, k, dim=-1)
+    if envs.VLLM_BATCH_INVARIANT:
+        token_ids, order = token_ids.sort(dim=-1)
+        values = values.gather(-1, order)
+        order = values.sort(dim=-1, descending=True, stable=True).indices
+        token_ids = token_ids.gather(-1, order)
+    return token_ids
+
+
 def compute_topk_scores(
     logits: torch.Tensor,
     num_logprobs: int,
@@ -126,7 +144,7 @@ def compute_topk_scores(
         # Fast path: no request asked for custom logprob_token_ids.
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
         if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_indices = _topk_token_ids(logits, num_logprobs)
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
         if logits_mode:
             scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
@@ -141,7 +159,7 @@ def compute_topk_scores(
         assert expanded_idx_mapping is not None
 
         if num_logprobs > 0:
-            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = _topk_token_ids(logits, num_logprobs)
             topk_token_ids = topk_token_ids.to(torch.int32)
         else:
             # This tensor just used as an int32 pointer, data not accessed.
