@@ -45,7 +45,6 @@ const SCALE_OUT_DISABLED_MESSAGE: &str =
 /// Scale-out routes that Python registers together with
 /// `/inference/v1/generate` but the Rust frontend does not implement yet.
 const UNIMPLEMENTED_SCALE_OUT_ROUTES: &[&str] = &[
-    "/inference/v1/abort_requests",
     "/v1/messages/render",
     "/v1/responses/render",
     "/v1/chat/completions/derender",
@@ -169,8 +168,12 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
-    let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 3] = [
+    let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 4] = [
         ("/inference/v1/generate", post(inference::generate)),
+        (
+            "/inference/v1/abort_requests",
+            post(inference::abort_requests),
+        ),
         (
             "/v1/chat/completions/render",
             post(render::render_chat::<AppState>),

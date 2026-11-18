@@ -184,7 +184,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
     validate_max_output_tokens(
         "max_completion_tokens",
@@ -226,7 +226,7 @@ pub(crate) async fn render_completion<S: RenderContext>(
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let text_request = lower_completion_request(
         body,
         &lora_resolution,

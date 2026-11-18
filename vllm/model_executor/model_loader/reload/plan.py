@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import direct_reload_active, direct_reload_enabled
+from .direct import direct_reload_active, direct_reload_enabled, mark_loaded
 from .geometry import (
     Box,
     Fallback,
@@ -125,7 +125,13 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
 
     t0 = time.perf_counter()
     targets = Targets(model)
-    traced = trace_loads(model, metas, targets)
+    # the trace loads nothing: keep it out of the update's completeness record
+    loaded = model.__dict__.pop("_loaded_params", None)
+    try:
+        traced = trace_loads(model, metas, targets)
+    finally:
+        if loaded is not None:
+            model._loaded_params = loaded
     if traced.lonely:
         lonely = traced.lonely
         raise RuntimeError(
@@ -163,13 +169,16 @@ def load_planned(
         for box, tensor in dest or ():
             part = full[tuple(slice(start, stop) for start, stop in box)]
             tensor.copy_(part.reshape(tensor.shape))
+        for w in plan.entries[name].writes or ():  # loaded without load_weights
+            mark_loaded(model, f"{w.module}.{w.tensor}" if w.module else w.tensor)
     if fallbacks:
         model.load_weights(fallbacks)
 
 
 def check_plannable(model: torch.nn.Module) -> None:
     """Refuse a configuration no load plan supports: a reload mode other than
-    direct, and EPLB. Reads only configuration, so an engine can call it
+    direct, EPLB, and online quantization (its loaders quantize what they
+    load). Reads only configuration, so an engine can call it
     before `start_reload` changes the model. Direct reload's own refusals
     run in `begin_direct_reload`.
 
@@ -184,6 +193,8 @@ def check_plannable(model: torch.nn.Module) -> None:
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
+        if getattr(module, "quantizes_on_load", False):
+            raise RuntimeError(f"load plan: online quantization ({name})")
 
 
 def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:
