@@ -33,6 +33,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    reset_parameter_renames,
     storage_view,
 )
 
@@ -270,17 +271,6 @@ def _checkpoint_views(
     return views
 
 
-def _undo_parameter_renames(model: torch.nn.Module) -> None:
-    """Undo move_parameter/retire_parameter: the rerun sees cold-start names."""
-    for module in model.modules():
-        for name in module.__dict__.pop("_runtime_aliases", ()):
-            del module._parameters[name]
-        for p in module._parameters.values():
-            if p is not None and (not hasattr(p, "_ckpt") or _owned(model, p)):
-                p.__dict__.pop("retired", None)
-                p.__dict__.pop("runtime_name", None)
-
-
 @torch.no_grad()
 def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
@@ -308,7 +298,10 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
             # Reset padding: loaders skip it or fill it, and a load plan skips
             # loader fills. Erases the checkpoint region too.
             t.data.zero_()
-    _undo_parameter_renames(model)
+    for module in model.modules():
+        params = [p for p in module._parameters.values() if p is not None]
+        if all(_owned(model, p) for p in params if hasattr(p, "_ckpt")):
+            reset_parameter_renames(module)  # not a module shared from another model
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

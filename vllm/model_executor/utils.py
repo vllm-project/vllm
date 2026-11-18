@@ -300,7 +300,7 @@ def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None
     existing = layer._parameters.get(dst_name)
     if existing is not None and existing is not param:
         raise ValueError(f"{dst_name!r} is already registered as another parameter")
-    if existing is None:  # direct reload unregisters it before rerunning
+    if existing is None:  # for reset_parameter_renames
         layer.__dict__.setdefault("_runtime_aliases", []).append(dst_name)
     layer.register_parameter(dst_name, param)
     param.runtime_name = dst_name
@@ -312,6 +312,16 @@ def retire_parameter(layer: torch.nn.Module, name: str) -> None:
     It stays registered with its loaded data (so it can be loaded again);
     `kernel_parameters` and `get_live_param` skip it."""
     getattr(layer, name).retired = True
+
+
+def reset_parameter_renames(layer: torch.nn.Module) -> None:
+    """Undo `move_parameter` and `retire_parameter`, so post-processing can rerun."""
+    for name in layer.__dict__.pop("_runtime_aliases", ()):
+        del layer._parameters[name]
+    for param in layer._parameters.values():
+        if param is not None:
+            param.__dict__.pop("retired", None)
+            param.__dict__.pop("runtime_name", None)
 
 
 def set_kernel_parameter(
