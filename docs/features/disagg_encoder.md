@@ -106,12 +106,13 @@ Enable them on the scheduler with `--ec-events-config`:
 
 ```bash
 vllm serve <model> \
-  --ec-events-config '{"enable_ec_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5658", "topic": "ec-events"}'
+  --ec-events-config '{"enable_ec_cache_events": true, "publisher": "zmq", "topic": "ec-events"}'
 ```
 
-The default endpoint is `tcp://*:5559`, distinct from the KV events
-endpoint, so both streams can be enabled at once without an explicit
-`endpoint`.
+The default endpoint is `tcp://*:6558`. Like KV events, the port is shifted up
+by the data-parallel rank; the block starts 1000 ports above the 5557/5558 KV
+events block, so both streams can be enabled at once on hosts with up to 1000
+DP ranks without an explicit `endpoint`.
 
 The event types are `ECStored(mm_hashes, medium)`, `ECRemoved(mm_hashes,
 medium)` and `AllECCleared()`, delivered in an `ECEventBatch`. The GPUs of the

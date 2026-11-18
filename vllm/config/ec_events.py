@@ -16,9 +16,12 @@ class ECEventsConfig(PublisherConfig):
     using the event publisher config.
     """
 
-    endpoint: str = "tcp://*:5559"
-    """The zmq endpoint for EC events. Defaults to a port distinct from the KV
-    events endpoint so both streams can be enabled at once.
+    endpoint: str = "tcp://*:6558"
+    """The zmq endpoint for EC events.
+
+    Ports are offset by the data parallel rank like KV events. The block starts
+    1000 ports above the 5557/5558 KV events block, so the two stay disjoint for
+    up to 1000 DP ranks on one host, replay included.
     """
 
     @property
