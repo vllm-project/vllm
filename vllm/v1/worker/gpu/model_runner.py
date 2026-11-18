@@ -1730,6 +1730,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         shard_metadata = None
         global_input_batch = input_batch
+        if (
+            self.batch_sharder is None
+            and grammar_output is None
+            # A custom rejection sampler (model_state.custom_sampler) reads logits.
+            and type(self.rejection_sampler) is RejectionSampler
+            and input_batch.num_reqs > 0
+            and input_batch.num_draft_tokens > 0
+            and self.rejection_sampler.can_skip_logits(input_batch)
+        ):
+            top_tokens = self.model_state.compute_sample_top_tokens(
+                hidden_states[input_batch.logits_indices]
+            )
+            if top_tokens is not None:
+                output = self.rejection_sampler.sample_synthetic(
+                    top_tokens, input_batch
+                )
+                return output, output.num_sampled, output.num_rejected
         if self.batch_sharder is not None:
             # Shard the inputs along the batch dimension to sample in parallel
             # across TP ranks.

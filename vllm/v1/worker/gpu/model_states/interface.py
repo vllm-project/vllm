@@ -268,6 +268,18 @@ class ModelState(ABC):
         """Project the sampled hidden states to the logits fed to the sampler."""
         return cast(Any, self.model).compute_logits(hidden_states)
 
+    def compute_sample_top_tokens(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Argmax vocab ids of `compute_sample_logits`, or None if unsupported.
+
+        Uses the model's `get_top_tokens` (vocab-parallel argmax) when present.
+        """
+        get_top_tokens = getattr(cast(Any, self.model), "get_top_tokens", None)
+        if get_top_tokens is None:
+            return None
+        return get_top_tokens(hidden_states)
+
     def dummy_sampler_run(self, sampler: Any, hidden_states: torch.Tensor) -> bool:
         """Run a model-specific sampler profiling pass.
 

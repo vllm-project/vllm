@@ -1466,3 +1466,103 @@ def rejection_sample(
         num_warps=1,
     )
     return sampled, num_sampled
+
+
+@triton.jit
+def _synthetic_argmax_verify_kernel(
+    # [num_reqs, num_speculative_steps + 1]
+    sampled_ptr,
+    sampled_stride,
+    # [num_reqs]
+    num_sampled_ptr,
+    # [num_logits]
+    top_tokens_ptr,
+    # [num_logits]
+    draft_sampled_ptr,
+    # [num_logits]
+    pos_ptr,
+    # [num_reqs + 1]
+    cu_num_logits_ptr,
+    # [num_reqs]
+    idx_mapping_ptr,
+    # [max_num_reqs]
+    seed_ptr,
+    # [num_speculative_steps]
+    synthetic_conditional_rates_ptr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_draft_tokens = end_idx - start_idx - 1
+    seed = tl.load(seed_ptr + req_state_idx)
+
+    accepted_length = tl.zeros((), tl.int64)
+    verifying = True
+    for i in range(num_draft_tokens):
+        if verifying:
+            logit_idx = start_idx + i
+            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+            pos = tl.load(pos_ptr + logit_idx)
+            # Same draw as `_rejection_kernel` in synthetic mode.
+            u = tl_rand32(seed, pos, includes_zero=False)
+            rate = tl.load(synthetic_conditional_rates_ptr + i)
+            # -1 is a placeholder draft token id that is always rejected.
+            accepted = (u < rate) & (draft_sampled >= 0)
+            if accepted:
+                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                accepted_length += 1
+            else:
+                tl.store(
+                    sampled_ptr + req_idx * sampled_stride + i,
+                    tl.load(top_tokens_ptr + logit_idx),
+                )
+                verifying = False
+    if verifying:
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + num_draft_tokens,
+            tl.load(top_tokens_ptr + end_idx - 1),
+        )
+    tl.store(num_sampled_ptr + req_idx, accepted_length + 1)
+
+
+def synthetic_argmax_verify(
+    top_tokens: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    pos: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    seeds: torch.Tensor,
+    synthetic_conditional_rates: torch.Tensor,
+    num_speculative_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Synthetic-acceptance verification from per-row target argmax ids.
+
+    Draft tokens are accepted left to right with the synthetic per-position
+    rates and the same uniform draws as `rejection_sample`. The token after
+    the accepted prefix (recovery or bonus) is read from `top_tokens`
+    (`[num_logits]` global vocab ids).
+
+    Returns:
+        `(sampled, num_sampled)` with the same layout as `rejection_sample`.
+
+    """
+    num_reqs = idx_mapping.shape[0]
+    sampled = top_tokens.new_empty(
+        num_reqs, num_speculative_steps + 1, dtype=torch.int64
+    )
+    num_sampled = torch.empty(num_reqs, dtype=torch.int32, device=top_tokens.device)
+    _synthetic_argmax_verify_kernel[(num_reqs,)](
+        sampled,
+        sampled.stride(0),
+        num_sampled,
+        top_tokens,
+        draft_sampled,
+        pos,
+        cu_num_logits,
+        idx_mapping,
+        seeds,
+        synthetic_conditional_rates,
+        num_warps=1,
+    )
+    return sampled, num_sampled

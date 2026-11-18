@@ -1290,6 +1290,19 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
         return self._apply_output_transform(logits)
 
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        """Argmax ids of `compute_logits`, without gathering full logits.
+
+        `_apply_output_transform` is monotonic for a positive output
+        multiplier, so the argmax is taken before it; returns None otherwise.
+        """
+        if self.metap_output_multiplier <= 0:
+            return None
+        if self.model.mono is not None:
+            self.model.mono.poll_health()
+        hidden_states = hidden_states.to(self.lm_head.weight.dtype)
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def _apply_output_transform(self, logits: torch.Tensor) -> torch.Tensor:
         if logits.dtype != torch.float32:
             logits = logits.to(torch.float32)
