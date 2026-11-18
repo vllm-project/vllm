@@ -3,6 +3,7 @@
 """K3 dense MLA draft model for DSpark speculative decoding."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -30,7 +31,7 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, is_quantized_kv_cache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -62,9 +63,12 @@ def _duplicate_context_kv_weights(
 
 
 class K3DSparkAttention(MultiHeadLatentAttention):
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SelfAddressedMLASpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # DFlash derives the slots of every draft KV write from the block table.
-        return SelfAddressedMLASpec.from_spec(super().get_kv_cache_spec(vllm_config))
+        layer_config = super().get_kv_cache_config(vllm_config)
+        return replace(
+            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
+        )
 
 
 class K3DSparkDecoderLayer(nn.Module):

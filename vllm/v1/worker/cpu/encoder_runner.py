@@ -21,6 +21,7 @@ from vllm.multimodal.utils import (
 from vllm.v1.worker.cpu.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    reserve_encoder_cache_residency,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -108,6 +109,11 @@ class EncoderRunner:
         )
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
+        )
+        reserve_encoder_cache_residency(
+            self.encoder_cache.encoder_outputs,
+            dummy_encoder_outputs,
+            budget.encoder_cache_size,
         )
 
     @torch.inference_mode()

@@ -152,10 +152,7 @@ _TEXT_GENERATION_MODELS = {
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "Lfm3ForCausalLM": ("lfm3", "Lfm3ForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
-    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
-    # For decapoda-research/llama-*
-    "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
     "LongcatFlashNgramForCausalLM": (
         "longcat_flash_ngram",
@@ -178,6 +175,10 @@ _TEXT_GENERATION_MODELS = {
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
+    "MistralLarge4ForCausalLM": (
+        "vllm.models.mistral.mistral_large4",
+        "MistralLarge4ForCausalLM",
+    ),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "MiMoForCausalLM": ("mimo", "MiMoForCausalLM"),
     "MiMoV2FlashForCausalLM": ("mimo_v2", "MiMoV2FlashForCausalLM"),
@@ -185,6 +186,14 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
+    "NemotronLabsDiffusionForCausalLM": (
+        "nemotron_dllm",
+        "NemotronLabsDiffusionForBlockDiffusion",
+    ),
+    "NemotronLabsDiffusionModel": (
+        "nemotron_dllm",
+        "NemotronLabsDiffusionForBlockDiffusion",
+    ),
     "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -195,7 +204,6 @@ _TEXT_GENERATION_MODELS = {
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
-    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "Qwen3_5ForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5ForCausalLM"),
@@ -229,18 +237,8 @@ _EMBEDDING_MODELS = {
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "Lfm2BidirectionalModel": ("lfm2", "Lfm2BidirectionalModel"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
-    "LlamaModel": ("llama", "LlamaForCausalLM"),
-    **{
-        # Multiple models share the same architecture, so we include them all
-        k: (mod, arch)
-        for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
-        if arch == "LlamaForCausalLM"
-    },
-    "MistralModel": ("llama", "LlamaForCausalLM"),
     "ModernBertModel": ("modernbert", "ModernBertModel"),
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
-    "Qwen2Model": ("qwen2", "Qwen2ForCausalLM"),
-    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "VoyageQwen3BidirectionalEmbedModel": (
@@ -480,6 +478,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2ForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2ForConditionalGeneration",
+    ),
     "KimiK31ForConditionalGeneration": (
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
@@ -497,6 +499,10 @@ _MULTIMODAL_MODELS = {
     "Lfm3AudioForConditionalGeneration": (
         "lfm3_audio",
         "Lfm3AudioForConditionalGeneration",
+    ),
+    "Lfm3OmniForConditionalGeneration": (
+        "lfm3_omni",
+        "Lfm3OmniForConditionalGeneration",
     ),
     "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
@@ -566,10 +572,6 @@ _MULTIMODAL_MODELS = {
         "MuseSparkForConditionalGeneration",
     ),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
-    "OpenPanguVLForConditionalGeneration": (
-        "openpangu_vl",
-        "OpenPanguVLForConditionalGeneration",
-    ),
     "OpenVLAForActionPrediction": ("openvla", "OpenVLAForActionPrediction"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
@@ -626,6 +628,7 @@ _MULTIMODAL_MODELS = {
         "vllm.models.qwen3_5",
         "Qwen3_5ForConditionalGeneration",
     ),
+    "Qwen3_5ForSlotDecision": ("qwen3_5_slot", "Qwen3_5ForSlotDecision"),
     "Qwen3_5MoeForConditionalGeneration": (
         "vllm.models.qwen3_5",
         "Qwen3_5MoeForConditionalGeneration",
@@ -681,6 +684,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "ricursive_dflash2",
         "RicursiveDFlash2ForCausalLM",
     ),
+    "DSpineDraftModel": ("qwen3_dspine", "DSpineQwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
@@ -709,9 +713,14 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
+    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
+    ),
+    "MistralLarge4DSparkModel": (
+        "vllm.models.mistral.mistral_large4",
+        "MistralLarge4DSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
@@ -778,6 +787,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "Jais2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Kolibri1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -786,12 +796,17 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "OlmoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Phi3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Qwen2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Qwen2MoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
+    # Embedding models
+    "LlamaModel": ("transformers", "TransformersEmbeddingModel"),
+    "MistralModel": ("transformers", "TransformersEmbeddingModel"),
+    "Qwen2Model": ("transformers", "TransformersEmbeddingModel"),
     # Multimodal models
     "AriaForConditionalGeneration": (
         "transformers",
@@ -873,45 +888,47 @@ _VLLM_MODELS = {
 _SUBPROCESS_COMMAND = [sys.executable, "-m", "vllm.model_executor.models.registry"]
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
-    "MotifForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
-    "Phi4FlashForCausalLM": "0.10.2",
-    "Phi4MultimodalForCausalLM": "0.12.0",
-    "JAISLMHeadModel": "0.22.0",
-    "ErnieModel": "0.23.0",
-    "ErnieForSequenceClassification": "0.23.0",
-    "ErnieForTokenClassification": "0.23.0",
-    "InternLM2VEForCausalLM": "0.23.0",
-    "QWenLMHeadModel": "0.23.0",
-    "QwenVLForConditionalGeneration": "0.23.0",
-    "InternLMForCausalLM": "0.23.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
-    "XverseForCausalLM": "0.23.0",
-    "Dots1ForCausalLM": "0.23.0",
-    "BambaForCausalLM": "0.23.0",
-    "MiniMaxForCausalLM": "0.23.0",
-    "MiniMaxText01ForCausalLM": "0.23.0",
-    "MiniMaxM1ForCausalLM": "0.23.0",
-    "MiniMaxVL01ForConditionalGeneration": "0.23.0",
+    "MotifForCausalLM": "0.10.2",
+    "Phi4FlashForCausalLM": "0.10.2",
+    "Phi4MultimodalForCausalLM": "0.12.0",
+    "JAISLMHeadModel": "0.22.0",
     "BaiChuanForCausalLM": "0.23.0",
     "BaichuanForCausalLM": "0.23.0",
-    "AquilaModel": "0.24.0",
+    "BambaForCausalLM": "0.23.0",
+    "Dots1ForCausalLM": "0.23.0",
+    "ErnieForSequenceClassification": "0.23.0",
+    "ErnieForTokenClassification": "0.23.0",
+    "ErnieModel": "0.23.0",
+    "InternLM2VEForCausalLM": "0.23.0",
+    "InternLMForCausalLM": "0.23.0",
+    "MiniMaxForCausalLM": "0.23.0",
+    "MiniMaxM1ForCausalLM": "0.23.0",
+    "MiniMaxText01ForCausalLM": "0.23.0",
+    "MiniMaxVL01ForConditionalGeneration": "0.23.0",
+    "QWenLMHeadModel": "0.23.0",
+    "QwenVLForConditionalGeneration": "0.23.0",
+    "XverseForCausalLM": "0.23.0",
+    # Last version with Transformers v4
+    "OpenPanguVLForConditionalGeneration": "0.23.0",
+    "Tarsier2ForConditionalGeneration": "0.23.0",
     "AquilaForCausalLM": "0.24.0",
-    "Grok1ModelForCausalLM": "0.24.0",
+    "AquilaModel": "0.24.0",
+    "AyaVisionForConditionalGeneration": "0.24.0",
     "Grok1ForCausalLM": "0.24.0",
-    "TarsierForConditionalGeneration": "0.24.0",
-    "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
+    "Grok1ModelForCausalLM": "0.24.0",
     "MantisForConditionalGeneration": "0.24.0",
     "MusicFlamingoForConditionalGeneration": "0.24.0",
-    "AyaVisionForConditionalGeneration": "0.24.0",
-    "TeleChatForCausalLM": "0.25.0",
-    "PersimmonForCausalLM": "0.25.0",
+    "TarsierForConditionalGeneration": "0.24.0",
     "FuyuForCausalLM": "0.25.0",
-    "Plamo2ForCausalLM": "0.26.0",
+    "PersimmonForCausalLM": "0.25.0",
+    "TeleChatForCausalLM": "0.25.0",
     "OuroForCausalLM": "0.26.0",
+    "Plamo2ForCausalLM": "0.26.0",
     "ArcticForCausalLM": "0.28.0",
     "ChameleonForConditionalGeneration": "0.28.0",
     "Cheers": "0.28.0",
@@ -922,10 +939,10 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "HCXVisionForCausalLM": "0.28.0",
     "MPTForCausalLM": "0.28.0",
     "MptForCausalLM": "0.28.0",
-    "RWForCausalLM": "0.28.0",
-    "StableLMEpochForCausalLM": "0.28.0",
     # Superseded by the generic "Terratorch" architecture
     "PrithviGeoSpatialMAE": "0.28.0",
+    "RWForCausalLM": "0.28.0",
+    "StableLMEpochForCausalLM": "0.28.0",
     "KeyeForConditionalGeneration": "0.33.0",
     "KeyeVL1_5ForConditionalGeneration": "0.33.0",
     "TeleChat2ForCausalLM": "0.34.0",
@@ -941,7 +958,7 @@ _OOT_SUPPORTED_MODELS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
@@ -1592,46 +1609,6 @@ class _ModelRegistry:
         """Check support for HC SP without changing MoE parallelism."""
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
-
-    def model_has_inner_state(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_inner_state
-
-    def is_attention_free_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_attention_free
-
-    def is_hybrid_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.is_hybrid
-
-    def is_noops_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.has_noops
-
-    def is_transcription_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.supports_transcription
 
     def is_transcription_only_model(
         self,
