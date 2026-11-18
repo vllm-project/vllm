@@ -1519,6 +1519,15 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
+def get_world_group_or_none() -> GroupCoordinator | None:
+    return _WORLD
+
+
+def world_group_superseded(world_group: GroupCoordinator | None) -> bool:
+    """Whether a newer world group has replaced `world_group`."""
+    return _WORLD is not None and _WORLD is not world_group
+
+
 def get_inner_dp_world_group() -> GroupCoordinator:
     assert _INNER_DP_WORLD is not None, "inner dp world group is not initialized"
     return _INNER_DP_WORLD

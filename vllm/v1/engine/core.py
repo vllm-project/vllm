@@ -33,6 +33,10 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.parallel_state import (
+    get_world_group_or_none,
+    world_group_superseded,
+)
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -162,6 +166,8 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        # See shutdown().
+        self._world_group = get_world_group_or_none()
         self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -888,6 +894,12 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
+        # A late-collected in-process engine must not tear down a newer one's state.
+        if world_group_superseded(self._world_group):
+            logger.debug(
+                "[shutdown] EngineCore: superseded by a newer engine; skipping"
+            )
+            return
         # Undo the gc.freeze() from __init__ so that the objects allocated
         # during engine startup (model weights, KV caches, etc.) become
         # visible to the garbage collector again. Without this, deleting

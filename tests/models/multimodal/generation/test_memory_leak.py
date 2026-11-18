@@ -120,6 +120,9 @@ def llm(monkeypatch):
 
     yield weakref.proxy(llm)
 
+    # Shut down now rather than when the LLM is garbage-collected, which can
+    # happen in the middle of the next test's engine startup.
+    llm.llm_engine.engine_core.shutdown()
     del llm
 
     cleanup_dist_env_and_memory()

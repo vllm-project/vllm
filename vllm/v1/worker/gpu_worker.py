@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
@@ -57,8 +58,10 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     get_world_group,
+    get_world_group_or_none,
     resume_device_comms,
     suspend_device_comms,
+    world_group_superseded,
 )
 from vllm.distributed.pp_transport import (
     PPTransport,
@@ -245,6 +248,8 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
+        # See shutdown().
+        self._world_group: GroupCoordinator | None = None
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -533,6 +538,7 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+            self._world_group = get_world_group_or_none()
 
             warn_if_flashinfer_kernels_missing()
 
@@ -1864,13 +1870,17 @@ class Worker(WorkerBase):
             self.model_runner.on_target_weights_replaced()
 
     def shutdown(self) -> None:
-        gc.unfreeze()
-
-        # has_kv_transfer_group can be None during interpreter shutdown.
-        if ensure_kv_transfer_shutdown is not None:
-            ensure_kv_transfer_shutdown()
-        if ensure_ec_transfer_shutdown is not None:
-            ensure_ec_transfer_shutdown()
+        # Leave process-wide state alone if a newer in-process engine owns it.
+        owns_process_state = self._world_group is None or not (
+            world_group_superseded(self._world_group)
+        )
+        if owns_process_state:
+            gc.unfreeze()
+            # These can be None during interpreter shutdown.
+            if ensure_kv_transfer_shutdown is not None:
+                ensure_kv_transfer_shutdown()
+            if ensure_ec_transfer_shutdown is not None:
+                ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
 
@@ -1887,7 +1897,7 @@ class Worker(WorkerBase):
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).
-        if current_platform.is_cuda_alike():
+        if owns_process_state and current_platform.is_cuda_alike():
             from vllm.device_allocator.cumem import CuMemAllocator
 
             if CuMemAllocator.instance is not None:
