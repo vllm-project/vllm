@@ -3,6 +3,7 @@
 
 import importlib
 import inspect
+import sys
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
@@ -12,6 +13,7 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    dynamic_module_utils,
     processing_utils,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
@@ -20,7 +22,7 @@ from transformers.models.auto.processing_auto import PROCESSOR_MAPPING_NAMES
 from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, is_typeddict
 
 from vllm.logger import init_logger
 from vllm.transformers_utils import processors
@@ -76,8 +78,46 @@ def _transformers_v4_compatibility_init() -> Any:
         ProcessorMixin.__init__ = __init__
 
 
+def _remote_code_kwargs_not_total() -> None:
+    """Some remote code processors define their kwargs `TypedDict`s without
+    `total=False`, which makes every kwarg required when Transformers validates
+    them. For backward compatibility, we mark these kwargs as optional as soon as
+    the remote code is imported, before any processor is constructed."""
+    original = dynamic_module_utils.get_class_in_module
+    if hasattr(original, "_vllm_patched"):
+        return
+
+    def get_class_in_module(*args, **kwargs):
+        cls = original(*args, **kwargs)
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("transformers_modules"):
+                continue
+            for obj in vars(module).values():
+                if (
+                    is_typeddict(obj)
+                    and obj.__module__ == name
+                    and obj.__name__.endswith("Kwargs")
+                    and obj.__total__
+                ):
+                    obj.__total__ = False
+                    logger.warning_once(
+                        "Remote code `%s.%s` does not specify `total=False`, "
+                        "which makes all kwargs required. vLLM has set it for you, "
+                        "but please update the remote code.",
+                        name,
+                        obj.__name__,
+                    )
+        return cls
+
+    # Only patch if Transformers is not mocked (for docs builds)
+    if not hasattr(ProcessorMixin, "_mock_name"):
+        get_class_in_module._vllm_patched = True  # type: ignore[attr-defined]
+        dynamic_module_utils.get_class_in_module = get_class_in_module
+
+
 _transformers_v4_compatibility_import()
 _transformers_v4_compatibility_init()
+_remote_code_kwargs_not_total()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)

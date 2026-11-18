@@ -23,7 +23,7 @@ class Olmo3ReasoningState(enum.Enum):
     CONTENT = 2
 
 
-@dt.dataclass(frozen=True)
+@dt.dataclass(frozen=True, slots=True)
 class Indices:
     start: int
     end: int
@@ -73,7 +73,7 @@ def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
     return None, None
 
 
-@dt.dataclass
+@dt.dataclass(slots=True)
 class Olmo3ReasoningBuffer:
     think_start: str = "<think>"
     think_end: str = "</think>"

@@ -44,7 +44,7 @@ use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::schema::{JsonType, OptionSource, SchemaRoot};
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta};
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 
 const START: &str = "<|start|>";
@@ -194,7 +194,9 @@ impl MuseUnifiedParser {
                             (key, value)
                         })
                         .collect();
-                    let arguments = Value::Object(arguments).to_string();
+                    // The template renders JSON values with Python separators.
+                    let arguments =
+                        JsonStyle::Spaced.to_string(&arguments).expect("a JSON map serializes");
                     let tool_index = self.emitted_call_count;
                     self.emitted_call_count += 1;
                     output.push_call(ToolCallDelta {
@@ -832,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn muse_arguments_preserve_order_and_compact_number_formatting() {
+    fn muse_arguments_preserve_order_and_number_formatting() {
         let text = format!(
             " to=add{MESSAGE}{}{EOT}",
             atem(
@@ -847,7 +849,7 @@ mod tests {
 
         assert_eq!(
             output.calls()[0].arguments,
-            r#"{"y":1.0,"x":2,"items":["left","right"]}"#
+            r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#
         );
     }
 
@@ -868,7 +870,7 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].tool_index, 0);
         assert_eq!(calls[0].name.as_deref(), Some("first"));
-        assert_eq!(calls[0].arguments, r#"{"a":1}"#);
+        assert_eq!(calls[0].arguments, r#"{"a": 1}"#);
         assert_eq!(calls[1].tool_index, 1);
         assert_eq!(calls[1].name.as_deref(), Some("second"));
         assert_eq!(calls[1].arguments, "{}");
@@ -995,7 +997,7 @@ mod tests {
         let calls = output.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name.as_deref(), Some("calc"));
-        assert_eq!(calls[0].arguments, r#"{"x":42}"#);
+        assert_eq!(calls[0].arguments, r#"{"x": 42}"#);
     }
 
     #[test]
@@ -1143,7 +1145,7 @@ mod tests {
                             name: Some(
                                 "weather.get",
                             ),
-                            arguments: "{\"city\":\"Paris\"}",
+                            arguments: "{\"city\": \"Paris\"}",
                         },
                     ),
                     Reasoning(

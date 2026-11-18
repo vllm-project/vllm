@@ -8,6 +8,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
@@ -87,9 +88,11 @@ def _create_mamba2_builder(
         block_size=MAMBA_BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
-        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-        prefill_checkpoint_alignment=prefill_checkpoint_alignment,
+    )
+    register_mamba_layers(
+        vllm_config,
+        ["layer.0"],
+        prefill_checkpoint_alignment if num_prefill_checkpoint_blocks else None,
     )
     builder = Mamba2AttentionMetadataBuilder(
         kv_cache_spec=spec,

@@ -46,13 +46,3 @@ class SuffixSpeculatorConfig(SpeculatorConfig):
                 f"suffix_decoding_max_cached_requests="
                 f"{spec.suffix_decoding_max_cached_requests} must be >= 0"
             )
-        if spec.suffix_decoding_max_spec_factor < 0:
-            raise ValueError(
-                f"suffix_decoding_max_spec_factor="
-                f"{spec.suffix_decoding_max_spec_factor} must be >= 0"
-            )
-        if not 0 <= spec.suffix_decoding_min_token_prob <= 1:
-            raise ValueError(
-                f"suffix_decoding_min_token_prob="
-                f"{spec.suffix_decoding_min_token_prob} must be in [0, 1]"
-            )

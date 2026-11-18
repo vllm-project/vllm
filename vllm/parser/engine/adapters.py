@@ -10,7 +10,7 @@ any changes to the serving layer itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -54,7 +54,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self._streaming_count_valid = False
 
     @contextmanager
-    def _skip_tool_parsing(self) -> Iterator[None]:
+    def _skip_tool_parsing(self) -> Generator[None]:
         saved = self._parser_engine.skip_tool_parsing
         self._parser_engine.skip_tool_parsing = True
         try:

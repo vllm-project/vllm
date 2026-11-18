@@ -18,10 +18,12 @@ from vllm.multimodal.utils import (
     group_and_batch_mm_kwargs,
     set_mm_embedding_modality,
 )
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    reserve_encoder_cache_residency,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -145,6 +147,18 @@ class EncoderRunner:
         self.encoder_cache.encoder_outputs.update(
             (f"tmp_{i}", output) for i, output in enumerate(dummy_encoder_outputs)
         )
+        cache_bytes = reserve_encoder_cache_residency(
+            self.encoder_cache.encoder_outputs,
+            dummy_encoder_outputs,
+            budget.encoder_cache_size,
+        )
+        logger.info_once(
+            "Encoder cache can hold %s tokens of %s embeddings across requests "
+            "(%s GiB, taken from the KV cache).",
+            budget.encoder_cache_size,
+            dummy_modality,
+            format_gib(cache_bytes),
+        )
 
     @torch.inference_mode()
     def execute_mm_encoder(
@@ -162,7 +176,7 @@ class EncoderRunner:
                 cg_manager.execute(mm_kwargs_batch)
                 if cg_manager is not None
                 and cg_manager.is_captured()
-                and cg_manager.supports_modality(modality)
+                and cg_manager.supports_batch(modality, mm_kwargs_batch)
                 else None
             )
             batch_outputs = (
