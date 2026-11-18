@@ -38,6 +38,12 @@ class _HfExamplesInfo:
     The method to use for speculative decoding.
     """
 
+    num_speculative_tokens: int = 1
+    """
+    The number of speculative tokens to test with; drafts that propose a fixed
+    block of tokens need their block size.
+    """
+
     min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
@@ -964,6 +970,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InklingForConditionalGeneration": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4", tokenizer_mode="inkling", max_model_len=4096
     ),
+    "Inkling2ForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+    ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
@@ -1563,6 +1574,15 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "Inkling2DSparkModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        speculative_model="thinkingmachines/Inkling-2-Small",  # mtp.safetensors
+        speculative_method="dspark",
+        num_speculative_tokens=7,
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+        use_original_num_layers=True,
     ),
     "DSparkMiniMaxDraftModel": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",

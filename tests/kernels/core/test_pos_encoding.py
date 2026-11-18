@@ -7,7 +7,7 @@ from itertools import product
 import pytest
 import torch
 
-from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+from vllm import ir
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.utils.torch_utils import set_random_seed
 
@@ -102,22 +102,23 @@ def test_rotary_embedding(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_query, ref_key = rope.forward_native(positions, query, key)
-    out_query, out_key = rope.forward(positions, query, key)
-    # Compare the results.
-    torch.testing.assert_close(
-        out_query,
-        ref_query,
-        atol=get_default_atol(out_query),
-        rtol=get_default_rtol(out_query),
-    )
+    with (
+        ir.ops.rotary_embedding.set_priority(["native"]),
+        ir.ops.rotary_embedding_query_only.set_priority(["native"]),
+    ):
+        ref_query, ref_key = rope.forward_native(positions, query, key)
+    # Base RoPE dispatches through vLLM IR; select the kernel explicitly.
+    with (
+        ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]),
+        ir.ops.rotary_embedding_query_only.set_priority(["vllm_c", "native"]),
+    ):
+        out_query, out_key = rope.forward(positions, query, key)
+    # The kernel computes in fp32 while native rounds every op, so compare
+    # with the RoPE IR op tolerances.
+    tol = ir.ops.rotary_embedding.get_tolerance(out_query.dtype)
+    torch.testing.assert_close(out_query, ref_query, **tol)
     if use_key:
-        torch.testing.assert_close(
-            out_key,
-            ref_key,
-            atol=get_default_atol(out_key),
-            rtol=get_default_rtol(out_key),
-        )
+        torch.testing.assert_close(out_key, ref_key, **tol)
     else:
         assert ref_key is None and out_key is None, "expected returned key to be None"
 
@@ -164,7 +165,12 @@ def test_rope_module_cache(default_vllm_config):
         )
         # different settings cannot share the same rope module
         assert id(rope) not in rope_setting_id_map.values()
-        assert all(x.dtype == dtype for x in rope.buffers())
+        # The AITER bf16 cache copy is bf16 by design.
+        assert all(
+            x.dtype == dtype
+            for name, x in rope.named_buffers()
+            if name != "cos_sin_cache_bf16"
+        )
         assert all(x.dtype == dtype for x in rope.parameters())
         rope_setting_id_map[str(setting)] = id(rope)
 
