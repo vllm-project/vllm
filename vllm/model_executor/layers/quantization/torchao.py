@@ -24,6 +24,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 logger = init_logger(__name__)
 
@@ -316,6 +318,80 @@ def torchao_quantize_param_data(
     return dummy_linear[0].weight
 
 
+def _int4_tile_packed_to_humming(
+    weight: torch.Tensor, params_dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Unpack a torchao `Int4TilePackedTo4dTensor` (tinygemm layout) into Humming's
+    packed uint4 weight `[N, K // 8]`, group scale and float zero point
+    `[N, K // group_size]`, or None if the layout has no Humming equivalent.
+
+    tinygemm dequantizes `(q - 8) * scale + zero` and Humming dequantizes
+    `(q - zero_point) * scale`, so `zero_point = 8 - zero / scale`.
+    """
+    from torchao.quantization.utils import unpack_tinygemm_scales_and_zeros
+
+    from vllm.model_executor.layers.quantization.utils.quant_utils import pack_cols
+
+    n, k = weight.shape
+    group_size = weight.block_size[-1]
+    if weight.block_size[0] != 1 or k % group_size or weight.act_pre_scale is not None:
+        return None
+    num_groups = k // group_size
+    scale, zero = (
+        t.squeeze(-1)[:n, :num_groups].float()
+        for t in unpack_tinygemm_scales_and_zeros(weight.scale_and_zero)
+    )
+
+    # tinygemm has no unpack op. Running it on identity rows with unit scales
+    # and zero zeros returns q - 8, which bf16 holds exactly.
+    unit_scale_and_zero = torch.zeros_like(weight.scale_and_zero)
+    unit_scale_and_zero[..., 0] = 1
+    padded_k = weight.scale_and_zero.shape[0] * group_size
+    device = weight.qdata.device
+    q = torch.empty(n, k, dtype=torch.int32, device=device)
+    chunk = group_size * max(1, 4096 // group_size)
+    for k0 in range(0, k, chunk):
+        k1 = min(k0 + chunk, k)
+        rows = torch.arange(k1 - k0, device=device)
+        eye = torch.zeros(k1 - k0, padded_k, dtype=torch.bfloat16, device=device)
+        eye[rows, rows + k0] = 1
+        out = torch.ops.aten._weight_int4pack_mm(
+            eye, weight.qdata, group_size, unit_scale_and_zero
+        )
+        q[:, k0:k1] = out[:, :n].T.to(torch.int32) + 8
+
+    # A zero scale makes tinygemm return `zero` for the whole group; Humming gets
+    # it from q = 8, zero_point = 7 and scale = zero.
+    zero_scale = scale == 0
+    q.view(n, num_groups, group_size)[zero_scale] = 8
+    zero_point = 8 - zero / scale.masked_fill(zero_scale, 1)
+    zero_point = torch.where(zero_scale, 7.0, zero_point)
+    scale = torch.where(zero_scale, zero, scale)
+    return (
+        pack_cols(q, 4, n, k),
+        scale.to(params_dtype),
+        zero_point.to(params_dtype),
+    )
+
+
+def _humming_supports_layer(weight: torch.Tensor) -> bool:
+    if not (current_platform.is_cuda() and has_humming()):
+        return False
+    from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+        HummingLinearKernel,
+    )
+
+    if not current_platform.has_device_capability(
+        HummingLinearKernel.get_min_capability()
+    ):
+        return False
+    try:
+        from torchao.quantization import Int4TilePackedTo4dTensor
+    except ImportError:
+        return False
+    return isinstance(weight, Int4TilePackedTo4dTensor)
+
+
 class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
@@ -362,6 +438,20 @@ class TorchAOLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        humming_layer_config = getattr(layer, "humming_layer_config", None)
+        if humming_layer_config is not None:
+            from vllm.model_executor.layers.quantization.utils.humming import (
+                apply_humming_linear,
+            )
+
+            return apply_humming_linear(
+                layer,
+                x,
+                skip_bias_add=bias is None,
+                layer_config=humming_layer_config,
+                compute_config=layer.humming_compute_config,
+                locks=layer.humming_locks,
+            )
         return F.linear(x, layer.weight, bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -379,6 +469,7 @@ class TorchAOLinearMethod(LinearMethodBase):
             )
 
             _restore_weight_attrs(layer.weight, recorded_weight_attr)
+            self._maybe_use_humming(layer)
             return
 
         # online quantize the weight if the checkpoint is not already
@@ -395,3 +486,37 @@ class TorchAOLinearMethod(LinearMethodBase):
 
         _restore_weight_attrs(weight, recorded_weight_attr)
         layer.register_parameter("weight", weight)
+        self._maybe_use_humming(layer)
+
+    @staticmethod
+    def _maybe_use_humming(layer: torch.nn.Module) -> None:
+        """Run tinygemm-packed int4 weights on Humming, whose kernel keeps up with
+        batch sizes above 1; tinygemm is tuned for batch size 1."""
+        if not _humming_supports_layer(layer.weight):
+            return
+        group_size = layer.weight.block_size[-1]
+        tensors = _int4_tile_packed_to_humming(layer.weight, layer.params_dtype)
+        if tensors is None:
+            return
+        from vllm.model_executor.layers.quantization.utils.humming import (
+            get_humming_linear_compute_config,
+            prepare_humming_linear_layer_config,
+        )
+        from vllm.utils.humming import create_humming_locks
+
+        weight, weight_scale, zero_point = tensors
+        layer.weight = Parameter(weight, requires_grad=False)
+        layer.register_parameter("weight_scale", Parameter(weight_scale, False))
+        layer.register_parameter("zero_point", Parameter(zero_point, False))
+        layer.humming_layer_config = prepare_humming_linear_layer_config(
+            layer,
+            {
+                "quant_method": "humming",
+                "dtype": "uint4",
+                "group_size": group_size,
+                "has_zero_point": True,
+                "is_fp_zero_point": True,
+            },
+        )
+        layer.humming_compute_config = get_humming_linear_compute_config()
+        layer.humming_locks = create_humming_locks(weight.device)

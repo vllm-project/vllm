@@ -398,5 +398,67 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         assert output
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA")
+def test_int4_tile_packed_runs_on_humming(vllm_runner, hf_runner, enable_pickle):
+    """tinygemm-packed int4 weights run on Humming and match transformers,
+    which runs the same weights on tinygemm."""
+    torch._dynamo.reset()
+    import json
+
+    from torchao.core.config import config_to_dict
+    from torchao.quantization import Int4WeightOnlyConfig
+    from transformers import TorchAoConfig
+
+    from tests.models.utils import check_logprobs_close
+
+    model_name = "facebook/opt-125m"
+    prompts = ["The capital of France is", "def fibonacci(n):"]
+    torchao_quant_config = Int4WeightOnlyConfig(
+        group_size=128, int4_packing_format="tile_packed_to_4d"
+    )
+    with hf_runner(
+        model_name,
+        dtype="bfloat16",
+        model_kwargs={
+            "quantization_config": TorchAoConfig(torchao_quant_config),
+            "device_map": DEVICE_TYPE,
+        },
+    ) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            prompts, max_tokens=16, num_logprobs=5
+        )
+
+    hf_overrides = {
+        "quantization_config_dict_json": json.dumps(
+            config_to_dict(torchao_quant_config)
+        )
+    }
+    with vllm_runner(
+        model_name=model_name,
+        dtype="bfloat16",
+        quantization="torchao",
+        hf_overrides=hf_overrides,
+    ) as llm:
+
+        def num_humming_layers(model):
+            return sum(
+                getattr(m, "humming_layer_config", None) is not None
+                for m in model.modules()
+            )
+
+        assert all(n > 0 for n in llm.apply_model(num_humming_layers))
+        vllm_outputs = llm.generate_greedy_logprobs(
+            prompts, max_tokens=16, num_logprobs=5
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf_tinygemm",
+        name_1="vllm_humming",
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

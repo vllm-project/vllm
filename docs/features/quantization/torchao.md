@@ -41,3 +41,7 @@ You can quantize your own huggingface model with torchao, e.g. [transformers](ht
     ```
 
 Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.
+
+## Kernels
+
+On CUDA, int4 weights in tinygemm layout (`Int4WeightOnlyConfig(int4_packing_format="tile_packed_to_4d")`, as in [`pytorch/Qwen3-8B-INT4`](https://huggingface.co/pytorch/Qwen3-8B-INT4)) run on [Humming](https://github.com/vllm-project/humming) instead of tinygemm, which torchao tunes for batch size 1. Other torchao tensors run on torchao's own kernels.
