@@ -23,6 +23,7 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from vllm.v1.worker.gpu.repair_executor import (
+    _repair_cache_views,
     _repair_sync_profile_enabled,
     _slots_cover_span,
     _slots_owned_by_request,
@@ -450,6 +451,114 @@ def test_duplicated_slots_refused_under_authorization():
     assert ra.executed_layers == 0
     assert ra.commit_check["authorized_ownership"] is False
     assert not ra.structural_check
+
+
+# ---- Authorization-shape battery: aliasing and grid-range geometry ----
+
+
+def test_aliased_authorization_refused():
+    """An authorization naming the same block twice -- with the worker's
+    block table and slot window aliased to match -- passes every multiset
+    the fence derives from it: two span tokens would write one cache row
+    and half the span's KV would be silently lost. The authorization must
+    name distinct blocks."""
+    slots = torch.cat([_span_slots(5), _span_slots(5)])
+    meta = _cpu_meta([torch.tensor([5, 5])], slots)
+    works = {
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=(0, 2 * BS),
+            layer_end=1,
+            restored_extent=512,
+            plan_id=1,
+            epoch=7,
+            expected_write_block_ids=(5, 5),
+        )
+    }
+    tokens = {"req-a": 2 * BS}
+    positions = torch.arange(2 * BS)
+    sub = _sub_output(works, tokens)
+    model = _FakeModel(n_layers=4)
+
+    with set_forward_context(
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
+    ):
+        results = execute_repair_only(
+            model, sub, positions, positions.clone(), ["req-a"]
+        )
+
+    ra = results[0]
+    assert ra.executed_layers == 0
+    assert ra.aborted
+    assert ra.commit_check["authorized_distinct"] is False
+    assert not ra.structural_check
+
+
+def test_unaligned_span_grid_range_authorization_accepted():
+    """The worker's block-count formula must match the scheduler's grid
+    range (req_block_ids[rollback // bs : ceil(corrupt_end / bs)]): a span
+    starting mid-block covers one block more than its rounded-up length.
+    With the scheduler-correct grid-range authorization the fence accepts
+    the unaligned geometry."""
+    span = (10, 138)
+    slots = torch.cat(
+        [
+            torch.arange(2 * BS + 10, 2 * BS + BS),
+            torch.arange(3 * BS, 3 * BS + 10),
+        ]
+    )
+    meta = _cpu_meta([torch.tensor([2, 3])], slots)
+    works = {
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=span,
+            layer_end=1,
+            restored_extent=512,
+            plan_id=1,
+            epoch=7,
+            expected_write_block_ids=(2, 3),
+        )
+    }
+    tokens = {"req-a": span[1] - span[0]}
+    positions = torch.arange(span[0], span[1])
+    sub = _sub_output(works, tokens)
+    model = _FakeModel(n_layers=4)
+
+    with set_forward_context(
+        {"model.layers.0": meta}, create_vllm_config(model="facebook/opt-125m")
+    ):
+        results = execute_repair_only(
+            model, sub, positions, positions.clone(), ["req-a"]
+        )
+
+    ra = results[0]
+    assert ra.executed_layers == 1
+    assert not ra.aborted
+    assert ra.commit_check["authorized_table"] is True
+    assert ra.structural_check
+
+
+def test_ambiguous_three_dim_cache_refused():
+    """A 3-D cache with leading dim 2 and equal trailing dims is ambiguous
+    between the core [num_blocks, block_size, C] layout (2 blocks) and
+    the Ascend [2, num_blocks, block_size] K/V stack: both readings derive
+    the same block size, so the fence cannot separate them. Refuse loudly
+    instead of guessing (a wrong guess re-zeros the wrong cells)."""
+
+    def _layer(cache):
+        return SimpleNamespace(
+            self_attn=SimpleNamespace(
+                attn=SimpleNamespace(kv_cache=cache, layer_name="model.layers.0")
+            )
+        )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        _repair_cache_views(_layer(torch.zeros(2, 8, 8)))
+    # The unambiguous neighbors keep their readings.
+    views = _repair_cache_views(_layer(torch.zeros(3, 8, 8)))
+    assert len(views) == 1
+    views = _repair_cache_views(_layer(torch.zeros(2, 8, 6)))
+    assert len(views) == 2
 
 
 # ---- Port-discriminating battery: the 0003 port onto the #68140 stack ----
