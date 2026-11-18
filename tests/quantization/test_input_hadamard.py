@@ -6,6 +6,7 @@ rotation of linear-layer inputs."""
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
@@ -256,8 +257,8 @@ def _online_mxfp4(
 @pytest.mark.skipif(
     not current_platform.supports_mx(), reason="MXFP4 kernels need MX support."
 )
-# AITER picks its ASM GEMM for (N, K) it has tuned configs for, such as
-# (3072, 1536), and its Triton GEMM otherwise.
+# AITER picks its ASM GEMM for (N, K) it has tuned configs for and its Triton
+# GEMM otherwise. The aiter-asm case forces the ASM path.
 @pytest.mark.parametrize(
     "kernel_cls, input_size, output_size, fused",
     [
@@ -268,6 +269,8 @@ def _online_mxfp4(
     ids=["emulation", "aiter-triton", "aiter-asm"],
 )
 @pytest.mark.parametrize("num_tokens", [16, 256])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_hadamard(
     kernel_cls,
     input_size,
@@ -275,7 +278,6 @@ def test_online_mxfp4_hadamard(
     fused,
     num_tokens,
     default_vllm_config,
-    dist_init,
     monkeypatch,
 ):
     """The rotated layer computes the same GEMM with less MXFP4 error, and
@@ -289,6 +291,13 @@ def test_online_mxfp4_hadamard(
         monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if fused and not rocm_aiter_ops.is_asm_fp4_gemm_supported():
         pytest.skip("AITER's ASM FP4 GEMM needs gfx950.")
+    if fused:
+        # AITER's tuned tables are keyed by CU count, so a GPU with fewer CUs
+        # (such as an MI355 in DPX mode) finds no rows for any shape.
+        monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: True)
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_triton_gemm_afp4wfp4_presh_ws_tuned", lambda n, k: True
+        )
     default_vllm_config.model_config = ModelConfig()
     set_random_seed(0)
     with torch.device(current_platform.device_type):
