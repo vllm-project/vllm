@@ -407,7 +407,6 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
 def vllm_runner_kwargs(args: ArgsTest) -> dict[str, Any]:
     kwargs = dict(
         block_size=None,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         speculative_config={

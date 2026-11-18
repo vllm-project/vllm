@@ -82,6 +82,7 @@ def test_dots_ocr_tensor_parallel_without_host_sync(vllm_runner, monkeypatch):
     for tp_size in (1, 2):
         with vllm_runner(
             "rednote-hilab/dots.ocr",
+            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             distributed_executor_backend="mp",
             dtype="bfloat16",
