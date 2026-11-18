@@ -321,7 +321,11 @@ class KernelConfig:
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
     requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
-    deployment that cannot run it is refused at startup."""
+    deployment that cannot run it is refused at startup.
+
+    Same switch as `--additional-config '{"decode_backend":
+    "latency_specialized"}'`, the specialized decode of RFC #60904: setting
+    either one enables the model's specialized decode, whichever it reads."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -364,6 +368,13 @@ class KernelConfig:
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
+    """
+
+    step5_attention_backend: Literal["native", "prims_ts"] = "native"
+    """Step5 attention backend. PrimTS supports SM100, SM103 and SM107 and
+    handles all FP8 attention and BF16 prefill.
+    BF16 decode uses PrimTS for MTP=3/Q=4 batches with at least 32 requests,
+    using the padded batch size for full CUDA graphs.
     """
 
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
