@@ -57,6 +57,8 @@ if envs.VLLM_USE_SPINLOOP_EXT:
             "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
         )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
+# The spinloop extension treats a timeout at or below this as unlimited.
+_SPINLOOP_MIN_TIMEOUT_S = 1e-9
 # How long MessageQueue.spin_until_readable() sleeps on a remote reader's socket.
 REMOTE_POLL_WAIT_MS = 1
 
@@ -287,6 +289,10 @@ class SpinCondition:
     def in_grace(self, now: float) -> bool:
         """Whether a reader is still within its busy-loop window at `now`."""
         return now <= self.last_read + self.busy_loop_s
+
+    def remaining_grace_s(self, now: float) -> float:
+        """Busy-loop window left at `now`, clamped to zero."""
+        return max(0.0, self.last_read + self.busy_loop_s - now)
 
     def poll_notify(self, timeout_ms: int | None = None) -> None:
         """Park until a write notification, a cancel, or `timeout_ms`.
@@ -899,7 +905,12 @@ class MessageQueue:
                     return not (written_flag and read_count != self.buffer.n_reader)
 
                 if SPINLOOP_EXT_ENABLED and not check():
-                    spinloop(metadata_buffer, check, timeout=SPINLOOP_TIMEOUT_SECONDS)
+                    spin_s = SPINLOOP_TIMEOUT_SECONDS
+                    if timeout is not None:
+                        # Never spin past the caller's deadline.
+                        spin_s = min(spin_s, timeout - (time.monotonic() - start_time))
+                    if spin_s > _SPINLOOP_MIN_TIMEOUT_S:
+                        spinloop(metadata_buffer, check, timeout=spin_s)
 
                 if not check():
                     # this block is written and not read by all readers
@@ -987,6 +998,17 @@ class MessageQueue:
                 raise TimeoutError
             return min(wait_ms, time_left_ms)
 
+        def remaining_s(self) -> float:
+            """Seconds until the deadline or, when warning, the next warning."""
+            now = time.monotonic()
+            remaining = self.deadline - now
+            if self._should_warn:
+                next_warning = (
+                    self.started + VLLM_RINGBUFFER_WARNING_INTERVAL * self.n_warning
+                )
+                remaining = min(remaining, next_warning - now)
+            return remaining
+
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
             indefinite"""
@@ -1008,11 +1030,17 @@ class MessageQueue:
             return self._is_readable(metadata_buffer)
 
         if SPINLOOP_EXT_ENABLED and not check_readable():
-            spinloop(
-                metadata_buffer[0 : self.local_reader_rank + 1],
-                check_readable,
-                timeout=SPINLOOP_TIMEOUT_SECONDS,
+            # Spin natively only where the Python loop would spin: within the
+            # busy-loop window, and never past the deadline or the next
+            # long-wait warning. An idle reader parks without spinning.
+            spin_s = min(
+                SPINLOOP_TIMEOUT_SECONDS,
+                self._spin_condition.remaining_grace_s(time.monotonic()),
+                read_timeout.remaining_s(),
             )
+            if spin_s > _SPINLOOP_MIN_TIMEOUT_S:
+                with self._watched_flags(metadata_buffer) as watched:
+                    spinloop(watched, check_readable, timeout=spin_s)
 
         if check_readable():
             return True
@@ -1106,6 +1134,12 @@ class MessageQueue:
         with self.buffer.get_park_flags() as flags:
             return any(flags[: self.buffer.n_reader])
 
+    def _watched_flags(self, metadata_buffer: memoryview) -> memoryview:
+        """The metadata bytes `_is_readable` reads: the written flag through
+        this reader's read flag. A hardware wait armed on them ends on any
+        store that can change the result."""
+        return metadata_buffer[0 : self.local_reader_rank + 2]
+
     def _is_readable(self, metadata_buffer) -> bool:
         """Whether the current block is written and not yet read by this reader."""
         memory_fence()
@@ -1131,6 +1165,10 @@ class MessageQueue:
 
         Iterations are kept minimal, since each holds the GIL until it yields. A
         remote reader instead sleeps briefly on its socket, without the GIL.
+        With the spinloop extension, a local reader waits in hardware on the
+        flags it reads: a store to them wakes it, and it re-checks `pending`
+        after each bounded hardware wait (about a millisecond at most), as a
+        remote reader does after its socket poll.
         """
         if self._is_remote_reader:
             self.remote_socket.poll(timeout=REMOTE_POLL_WAIT_MS)
@@ -1138,6 +1176,24 @@ class MessageQueue:
         read_flag_idx = self.local_reader_rank + 1
         monotonic = time.monotonic
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+            if SPINLOOP_EXT_ENABLED:
+
+                def stop() -> bool:
+                    return bool(pending) or self._is_readable(metadata_buffer)
+
+                # Released on every exit, so the outer view can close.
+                with self._watched_flags(metadata_buffer) as watched:
+                    while (
+                        not stop()
+                        and (remaining := deadline - monotonic())
+                        > _SPINLOOP_MIN_TIMEOUT_S
+                    ):
+                        spinloop(
+                            watched,
+                            stop,
+                            timeout=min(remaining, SPINLOOP_TIMEOUT_SECONDS),
+                        )
+                return
             while not pending and monotonic() < deadline:
                 memory_fence()
                 if metadata_buffer[0] and not metadata_buffer[read_flag_idx]:

@@ -65,6 +65,39 @@ inproc PAIR socket. Every reader wait polls that socket: the ring park, the
 overflow-payload wait on `local_socket`, and a remote reader's wait on
 `remote_socket`. The reader then raises `RuntimeError("cancelled")`.
 
+### Hardware waits
+
+With `VLLM_USE_SPINLOOP_EXT=1`, the spinning part of a wait runs in the
+`vllm.spinloop` extension. It calls a Python predicate, and while the
+predicate is false it waits in hardware on the metadata bytes the predicate
+reads, so a store to them ends the wait:
+
+| CPU | Armed wait | Condition | Otherwise |
+| --- | --- | --- | --- |
+| AMD with `MONITORX` | `MONITORX` / `MWAITX` | watched bytes in one monitor line | `MWAITX` with a 150 000-cycle timer, armed on the first line |
+| x86-64 with `WAITPKG` and a usable invariant-TSC leaf | `UMONITOR` / `UMWAIT` in C0.1, at most 1 ms | watched bytes in one monitor line | `TPAUSE` in C0.1, at most 50 µs |
+| AArch64 with `FEAT_WFxT` | exclusive load (`LDXR`) then `WFET`, at most 1 ms | watched bytes in one aligned 64-bit word | `WFET`, at most 50 µs |
+| other | - | - | `pause` / `yield` |
+
+Each armed wait closes the race between the predicate and the arm. On x86 the
+predicate runs again after `MONITORX` or `UMONITOR` arms the line. On AArch64
+the extension snapshots the watched word before the predicate and compares it
+with the exclusive load: a store before the load changes the word and skips
+the wait, a store after it clears the exclusive monitor and ends the `WFET`.
+Nothing between the exclusive load and the `WFET` stores to memory.
+
+An arm watches one monitor line or one aligned word, not an arbitrary byte
+range. When the watched bytes do not fit in one, the extension uses a short
+timed wait, because a store to the uncovered bytes would not end an armed
+wait. The watched bytes are the written flag through the waiting reader's own
+read flag: every byte the readability check reads. A writer's metadata row is
+`1 + n_reader` bytes and can straddle a line, so it often takes the timed
+wait.
+
+`MessageQueue.spin_until_readable`, the executor's wait for a worker reply,
+uses the same hardware wait in bounded steps, re-checking for new engine
+inputs between steps.
+
 ### Wake-up invariant
 
 A reader re-reads the flags after every wake-up and before every park, so the

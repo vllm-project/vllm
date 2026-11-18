@@ -276,9 +276,13 @@ def worker_fn_test_idle_to_busy():
 
     message1 = "hello world"
     message2 = np.random.randint(1, 100, 100)
+    # Count parks on the notify socket: an idle reader parks once per wait,
+    # a busy reader never parks, whether it spins in Python or natively.
     with mock.patch.object(
-        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
-    ) as wrapped_wait:
+        message_queue._spin_condition,
+        "poll_notify",
+        wraps=message_queue._spin_condition.poll_notify,
+    ) as parks:
         if not message_queue._is_writer:
             # Put into idle mode
             message_queue._spin_condition.last_read = 0
@@ -286,22 +290,22 @@ def worker_fn_test_idle_to_busy():
             # no messages, so expect a TimeoutError
             with pytest.raises(TimeoutError):
                 message_queue.dequeue(timeout=0.01)
-            # wait should only be called once while idle
-            assert wrapped_wait.call_count == 1
+            # an idle reader parks once
+            assert parks.call_count == 1
 
             # sync with the writer and wait for message1
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=5)
             assert recv_message == message1
-            # second call to wait, with a message read, this puts in a busy spin
-            assert wrapped_wait.call_count == 2
+            # still idle: it parked once more, until the write woke it
+            assert parks.call_count == 2
 
             # sync with the writer and wait for message2
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert np.array_equal(recv_message, message2)
-            # in busy mode, we expect wait to have been called multiple times
-            assert wrapped_wait.call_count > 3
+            # the read made it busy, so it waited without parking
+            assert parks.call_count == 2
         else:
             # writer writes two messages in sync with the reader
             dist.barrier()
@@ -332,9 +336,13 @@ def worker_fn_test_busy_to_idle():
 
     message1 = 12345
     message2 = list(range(3))
+    # Count parks on the notify socket: a busy reader never parks, whether it
+    # spins in Python or natively; an idle reader parks once per wait.
     with mock.patch.object(
-        message_queue._spin_condition, "wait", wraps=message_queue._spin_condition.wait
-    ) as wrapped_wait:
+        message_queue._spin_condition,
+        "poll_notify",
+        wraps=message_queue._spin_condition.poll_notify,
+    ) as parks:
         if not message_queue._is_writer:
             # Put into busy mode
             message_queue._spin_condition.busy_loop_s = 9999
@@ -343,23 +351,24 @@ def worker_fn_test_busy_to_idle():
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert recv_message == message1
-            # in busy mode, we expect wait to have been called many times
-            assert wrapped_wait.call_count > 1
+            # in busy mode, the reader waited without parking
+            assert parks.call_count == 0
 
             # simulate busy loop ending
             message_queue._spin_condition.busy_loop_s = 0
-            # ensure we enter idle mode, then record call count
+            # ensure we enter idle mode, then record the park count
             with pytest.raises(TimeoutError):
                 message_queue.dequeue(timeout=0.01)
-            call_count = wrapped_wait.call_count
+            assert parks.call_count == 1
+            call_count = parks.call_count
 
             # sync with the writer and wait for message2
             dist.barrier()
             recv_message = message_queue.dequeue(timeout=1)
             assert recv_message == message2
 
-            # call to wait after idle should only happen once
-            assert wrapped_wait.call_count == call_count + 1
+            # after idling, it parks once more, until the write wakes it
+            assert parks.call_count == call_count + 1
         else:
             # writer writes two messages in sync with the reader
             dist.barrier()
@@ -1115,6 +1124,120 @@ def test_remote_reader_in_reference_cycle_is_collected_without_blocking():
     assert not collector.is_alive()
     assert reader_ref() is None
     writer.shutdown()
+
+
+def _spinloop_ext():
+    return pytest.importorskip("vllm.spinloop", reason="needs the spinloop extension")
+
+
+def test_spinloop_returns_at_its_timeout():
+    """A predicate that never turns true returns False after the timeout."""
+    spinloop = _spinloop_ext()
+    flag = bytearray(8)
+    start = time.monotonic()
+    assert spinloop.spinloop(flag, lambda: False, timeout=0.05) is False
+    # The extension times on CLOCK_MONOTONIC_RAW, time.monotonic on
+    # CLOCK_MONOTONIC, so the two can disagree by a little.
+    assert 0.045 <= time.monotonic() - start < 1.0
+
+
+def test_spinloop_wakes_on_a_store_to_the_watched_bytes():
+    """A store from another thread ends the wait well before its timeout."""
+    spinloop = _spinloop_ext()
+    flag = bytearray(8)
+    timer = threading.Timer(0.02, flag.__setitem__, args=(0, 1))
+    timer.start()
+    start = time.monotonic()
+    try:
+        assert spinloop.spinloop(flag, lambda: flag[0] == 1, timeout=5) is True
+    finally:
+        timer.cancel()
+    assert time.monotonic() - start < 1.0
+
+
+def test_spinloop_propagates_callback_errors():
+    spinloop = _spinloop_ext()
+
+    def broken():
+        raise ValueError("callback failed")
+
+    with pytest.raises(ValueError, match="callback failed"):
+        spinloop.spinloop(bytearray(8), broken, timeout=1)
+
+
+def test_reader_watches_its_own_read_flag():
+    """The bytes a hardware wait is armed on must include every byte
+    `_is_readable` reads, or a store to the uncovered read flag never ends
+    the wait."""
+    writer = MessageQueue(n_reader=3, n_local_reader=3, max_chunk_bytes=1024)
+    readers = [
+        MessageQueue.create_from_handle(writer.export_handle(), rank=r)
+        for r in range(3)
+    ]
+    try:
+        for reader in readers:
+            with (
+                reader.buffer.get_metadata(0) as metadata_buffer,
+                reader._watched_flags(metadata_buffer) as watched,
+            ):
+                assert len(watched) == reader.local_reader_rank + 2
+                metadata_buffer[0] = 1
+                metadata_buffer[reader.local_reader_rank + 1] = 0
+                assert reader._is_readable(metadata_buffer)
+                # The reader's own read flag is the last watched byte.
+                watched[-1] = 1
+                assert not reader._is_readable(metadata_buffer)
+                metadata_buffer[0] = 0
+                watched[-1] = 0
+    finally:
+        writer.shutdown()
+        for reader in readers:
+            reader.shutdown()
+
+
+def test_spin_until_readable_waits_in_the_extension(monkeypatch):
+    """With the extension on, the executor's reply wait is a bounded hardware
+    wait on the reader's flags rather than a sched_yield loop, and still
+    returns on each condition."""
+    spinloop = _spinloop_ext()
+    calls = []
+
+    def recording_spinloop(buffer, callback, timeout):
+        calls.append((len(buffer), timeout))
+        return spinloop.spinloop(buffer, callback, timeout=timeout)
+
+    monkeypatch.setattr(shm_broadcast, "SPINLOOP_EXT_ENABLED", True)
+    monkeypatch.setattr(shm_broadcast, "spinloop", recording_spinloop, raising=False)
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024 * 1024, max_chunks=2
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        # Spin for the whole wait, whatever the grace policy.
+        reader._spin_condition.busy_loop_s = 9999
+        far_future = time.monotonic() + 60
+
+        reader.spin_until_readable(["input"], far_future)
+        reader.spin_until_readable([], time.monotonic())
+        assert calls == []
+
+        start = time.monotonic()
+        reader.spin_until_readable([], start + 0.05)
+        assert 0.05 <= time.monotonic() - start < 1.0
+        assert calls and all(
+            n == 2 and timeout <= shm_broadcast.SPINLOOP_TIMEOUT_SECONDS
+            for n, timeout in calls
+        )
+
+        threading.Timer(0.05, writer.enqueue, args=("message",)).start()
+        reader.spin_until_readable([], far_future)
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "message"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
 
 
 def test_acquire_read_releases_slot_when_reader_raises():
