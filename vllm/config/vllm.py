@@ -463,7 +463,7 @@ class VllmConfig:
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     num_hash_lookahead_tokens: int = Field(default=0, init=False)
-    """Tokens after each block covered by its hash; zero keeps legacy hashes."""
+    """Tokens after each block that its hash covers; 0 unless draft KV reads ahead."""
     watermark_config: WatermarkConfig | None = None
     """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
@@ -688,10 +688,11 @@ class VllmConfig:
         Mid-prefill the drafter consumes tokens the target model has not been
         scheduled for yet, so every component that has to keep them available
         must apply this margin: the scheduler, which never ends a chunk within
-        it and shifts encoder scheduling by it, and the KV cache manager, which
-        treats the trailing `this - 1` tokens as re-prefillable rather than
-        finalized. Consumers must read this property rather than re-deriving
-        their own per-method lookahead, so those components cannot drift apart.
+        it and shifts encoder scheduling by it, and the HiSparse write-back and
+        sliding-window retention, which keep the trailing `this - 1` tokens
+        re-prefillable. Consumers must read this property rather than
+        re-deriving their own per-method lookahead, so those components cannot
+        drift apart.
         """
         speculative_config = self.speculative_config
         if speculative_config is None:
