@@ -52,8 +52,8 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .configs import FlintConfig
-from .gguf_nvfp4 import find_gguf_file, gguf_nvfp4_weights_iterator
+from ..common.gguf_nvfp4 import find_gguf_file, gguf_nvfp4_weights_iterator
+from ..configs import FlintConfig
 from .ops import linear as flint_linear
 from .ops.moe import (
     BF16_DECODE_MAX_TOKENS,

@@ -240,6 +240,36 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class FlintForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        compilation_config = vllm_config.compilation_config
+        selected_backends = {attention_config.backend}
+        selected_backends |= set(attention_config.backend_per_kind.values())
+        selected_backends.discard(None)
+        if (
+            not rocm_aiter_ops.is_enabled()
+            or not selected_backends <= {AttentionBackendEnum.ROCM_AITER_FA}
+            or "-rotary_embedding" in compilation_config.custom_ops
+        ):
+            return
+
+        # Keep QK norm, RoPE and the KV write in one Inductor graph so the
+        # QK-norm + RoPE + KV-cache fusion can match them.
+        compilation_config.use_inductor_graph_partition = True
+        if "+rotary_embedding" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+rotary_embedding")
+
+
 class MuseGlimmerAttentionConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -1878,6 +1908,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
+    "FlintForCausalLM": FlintForCausalLMConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,

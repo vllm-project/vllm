@@ -7,8 +7,8 @@ and route exactly like sigmoid top-k."""
 import pytest
 import torch
 
-from vllm.models.flint.gguf_nvfp4 import dequantize_nvfp4
-from vllm.models.flint.ops import moe
+from vllm.models.flint.common.gguf_nvfp4 import dequantize_nvfp4
+from vllm.models.flint.nvidia.ops import moe
 from vllm.platforms import current_platform
 
 E, H, INTER, TOPK = 256, 2048, 512, 6
@@ -382,7 +382,7 @@ def _ll_weights(weights, flint_weights, sh):
 def test_ll_moe_block(weights, flint_weights, num_tokens):
     """The fused decode MoE block equals Flint's fused_add_rms_norm followed by
     the shared expert and the regular Flint decode MoE path."""
-    from vllm.models.flint.ops import norm
+    from vllm.models.flint.nvidia.ops import norm
 
     gen = torch.Generator(device="cuda").manual_seed(5)
     bf = torch.bfloat16
