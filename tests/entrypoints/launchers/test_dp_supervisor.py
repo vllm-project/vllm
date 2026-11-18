@@ -87,7 +87,6 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "shutdown_timeout": 5.0,
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
-        "log_config_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -125,7 +124,6 @@ def _make_args(**overrides) -> argparse.Namespace:
         shutdown_timeout=0.0,
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
-        log_config_file=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
