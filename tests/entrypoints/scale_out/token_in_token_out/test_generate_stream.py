@@ -15,6 +15,7 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    mm_hashes_from_engine_input,
     placeholder_ranges_from_engine_input,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -227,6 +228,21 @@ def test_placeholder_ranges_from_engine_input():
 
     text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
     assert placeholder_ranges_from_engine_input(text_only) is None
+
+
+def test_mm_hashes_from_engine_input():
+    engine_input: Any = {
+        "type": "multimodal",
+        "mm_hashes": {"image": ["img-0", "img-1"], "audio": ["aud-0"]},
+    }
+
+    assert mm_hashes_from_engine_input(engine_input) == {
+        "image": ["img-0", "img-1"],
+        "audio": ["aud-0"],
+    }
+
+    text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    assert mm_hashes_from_engine_input(text_only) is None
 
 
 @pytest.mark.asyncio
