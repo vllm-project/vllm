@@ -11,7 +11,6 @@ same weights, byte for byte, at the same address.
 """
 
 import dataclasses
-import gc
 import weakref
 from types import SimpleNamespace
 
@@ -19,6 +18,7 @@ import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_engine as engine_mod
+from tests.distributed.sharded_rdt_utils import Server, make_server, patch_for_cpu
 from tests.model_executor.model_loader.test_load_plan import (
     _EXPERT_SHAPES,
     _LINEAR_SHAPES,
@@ -46,7 +46,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     _Bucket,
     _PullHooks,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_trainer import _RDTProducerServer
 from vllm.model_executor.model_loader.reload import lifecycle
 
 BF16 = torch.bfloat16
@@ -57,20 +56,10 @@ def _direct_mode(monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setattr(lifecycle, "_weight_update_active", False)
     monkeypatch.setattr(engine_mod, "check_ray_rdt_version", lambda: None)
-    monkeypatch.setattr(
-        torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False
-    )
-    monkeypatch.setattr(gc, "freeze", lambda: None)
+    patch_for_cpu(monkeypatch)
 
 
 # ------------------------------------------------------------ loopback
-
-
-class _Server(_RDTProducerServer):
-    """A real producer whose frees come from the loopback, not Ray's store."""
-
-    def _track_free(self, flat, *key):
-        self.tracked = key
 
 
 class _Handle:
@@ -110,13 +99,13 @@ class _Loopback:
         (sent,) = server.bucket(self.consumer_id, bucket.seq, sync_idx)
         if target is None:
             self.untargeted.append(bucket)
-            return _Handle(server, sent, None, server.tracked)
+            return _Handle(server, sent, None, server.outstanding.pop())
         assert any(
             target.untyped_storage().data_ptr() == t.untyped_storage().data_ptr()
             for t in self.pinned
         ), "the target is not in the pinned arena"
         assert sent.dtype == target.dtype and sent.shape == target.shape
-        return _Handle(server, sent, target, server.tracked)
+        return _Handle(server, sent, target, server.outstanding.pop())
 
     def get(self, handles):
         """Ray's get: into the target while it lives, else into a buffer of
@@ -174,7 +163,7 @@ class _Fleet:
         units = dict(zip(shapes, gather_units(nbytes, buffer_bytes)))
         self.shapes, self.units = shapes, units
         self.servers = [
-            _Server(
+            make_server(
                 served={
                     n: (str(dt).removeprefix("torch."), tuple(s))
                     for i, (n, (s, dt)) in enumerate(shapes.items())
@@ -231,7 +220,7 @@ class _Fleet:
         self.engine.update_weights({"sync_idx": sync_idx})
         for server in self.servers:
             server.end_sync()
-            assert not server._cache, "a unit outlived the sync"
+            assert not server._resident, "a unit outlived the sync"
             assert not server._blocks
         self.engine.finish_weight_update()
 
@@ -439,7 +428,7 @@ def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
     """A unit stays gathered until every live worker has freed its pulls."""
     make = _experts_model(0, 1, 0, 1)
     fleets: list[_Fleet] = []
-    servers: list[_Server] = []
+    servers: list[Server] = []
     for consumer in (0, 1):
         model = _cold_start(make, _checkpoint(_EXPERT_SHAPES, seed=0))
         fleet = _Fleet(
@@ -462,7 +451,7 @@ def test_two_consumers_release_a_unit_only_when_both_are_done(monkeypatch):
     weights = _checkpoint(_EXPERT_SHAPES, seed=1)
     server._publish(0, dict(weights))
     fleets[0].engine.update_weights({"sync_idx": 0})
-    assert server._unit_names, "released before consumer 1 pulled"
+    assert server._resident, "released before consumer 1 pulled"
     fleets[1].engine.update_weights({"sync_idx": 0})
     assert server.end_sync() == [0]
     for fleet in fleets:

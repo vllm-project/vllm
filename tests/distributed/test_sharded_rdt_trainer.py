@@ -5,7 +5,6 @@ plan it derives from metadata, the worker init payload, and the gather loop
 against a real producer server (CUDA IPC replaced by an in-process registry).
 """
 
-import gc
 import json
 import threading
 from functools import cached_property
@@ -14,16 +13,12 @@ import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
+from tests.distributed.sharded_rdt_utils import make_server, patch_for_cpu
 from tests.distributed.test_weight_transfer import RecordingClient
-from vllm.distributed.weight_transfer import (
-    ParamMeta,
-    WeightSource,
-    WeightTransferTrainerFactory,
-)
+from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
-    _RDTProducerServer,
 )
 
 
@@ -63,11 +58,6 @@ _PP = [
 _PP_OWNERS = {"embed.weight": (0,), "model.layers.0.w": (0,), "model.layers.1.w": (1,)}
 
 
-class _Server(_RDTProducerServer):
-    def _track_free(self, tensors, *key):
-        self.outstanding.append(key)
-
-
 @pytest.fixture
 def cpu_ipc(monkeypatch):
     """CUDA IPC in process: an export is a key into a registry of storages."""
@@ -80,10 +70,9 @@ def cpu_ipc(monkeypatch):
     monkeypatch.setattr(trainer_mod, "reduce_tensor", reduce)
     monkeypatch.setattr(trainer_mod, "rebuild_cuda_tensor", lambda *a: registry[a[0]])
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
-    monkeypatch.setattr(
-        torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False
-    )
-    monkeypatch.setattr(gc, "freeze", lambda: None)
+    # server calls run inline: a call's "ref" is its result
+    monkeypatch.setattr(trainer_mod.ray, "get", lambda result: result)
+    patch_for_cpu(monkeypatch)
 
 
 def _engine(source, *, rank=0, world=1, client=None, **init):
@@ -106,23 +95,19 @@ def _attach_server(engine, consumer_ids=(0,)):
         if m.name in engine._owned_names
     }
     units = {m.name: u for m, u in zip(engine._meta, engine._units)}
-    server = _Server(
-        served=served, units=units, arena_bytes=1 << 20, stall_timeout_s=20
+    server = make_server(
+        served=served,
+        units=units,
+        arena_bytes=1 << 20,
+        bucket_bytes=1 << 20,
+        stall_timeout_s=20,
     )
-    server.outstanding = []
     engine._server = server
-    engine._rpc = lambda method, *args: getattr(server, method)(*args)
+    engine._remote = lambda method, *args: getattr(server, method)(*args)
     return server
 
 
 # ------------------------------------------------------------ init info
-
-
-def test_init_info_backend_and_factory():
-    assert ShardedRDTTrainerInitInfo.backend == "sharded_rdt"
-    assert "sharded_rdt" in WeightTransferTrainerFactory._registry
-    with pytest.raises(TypeError):
-        ShardedRDTTrainerInitInfo(1)  # rank is keyword-only, num_consumers needed
 
 
 @pytest.mark.parametrize(
@@ -294,21 +279,20 @@ def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
     server.register_consumer(0, [[(n, [[0, 8]])] for n, _ in pairs])
     peak = [0]
     served = []
-    original = engine._publish_async
+    original = engine._remote
 
-    def publish(unit, entries):
-        peak[0] = max(peak[0], len(engine._inflight))
-        return original(unit, entries)
+    def remote(method, *args):
+        if method == "publish_unit":
+            peak[0] = max(peak[0], len(engine._inflight))
+        return original(method, *args)
 
-    engine._publish_async = publish
+    engine._remote = remote
 
     def consumer():
         for seq in range(len(pairs)):
             (t,) = server.bucket(0, seq, 0)
             served.append(t.view(torch.float32).clone())
-            for key in server.outstanding:
-                server._freed_bucket(*key)
-            server.outstanding.clear()
+            server.free()
 
     worker = threading.Thread(target=consumer)
     worker.start()

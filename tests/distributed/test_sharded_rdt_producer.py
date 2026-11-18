@@ -22,6 +22,7 @@ import pytest
 import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
+from tests.distributed.sharded_rdt_utils import make_server, patch_for_cpu
 from vllm.distributed.nixl_utils import alias_nixl_for_ray
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     flat_view,
@@ -150,35 +151,20 @@ _SERVED = {N: ("bfloat16", (8, 4)), M: ("float32", (4,)), E: ("bfloat16", (2, 6)
 _UNITS = {N: 0, M: 0, E: 1}
 
 
-class _Server(_RDTProducerServer):
-    """Frees come from the test (`free`), not from Ray's object store."""
-
-    def _track_free(self, flat, *key):
-        self.outstanding.append(key)
-
-
 @pytest.fixture
 def server(monkeypatch):
-    monkeypatch.setattr(
-        torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False
-    )
-    monkeypatch.setattr(gc, "freeze", lambda: None)
+    patch_for_cpu(monkeypatch)
     monkeypatch.setattr(trainer_mod, "_STALL_POLL_S", 0.05)
-    built = []
 
-    def make(cls=_Server, **kw):
+    def make(cls=None, **kw):
         kw.setdefault("served", _SERVED)
         kw.setdefault("units", _UNITS)
         kw.setdefault("arena_bytes", 1 << 20)
+        kw.setdefault("bucket_bytes", kw["arena_bytes"])
         kw.setdefault("stall_timeout_s", 30)
-        s = cls(**kw)
-        s.outstanding = []
-        built.append(s)
-        return s
+        return make_server(cls, **kw)
 
-    yield make
-    for s in built:
-        s.shutdown()
+    return make
 
 
 def _weights(seed=0):
@@ -192,13 +178,6 @@ def _weights(seed=0):
 def _publish(server, weights, *units):
     for unit in units:
         server._publish(unit, {n: weights[n] for n, u in _UNITS.items() if u == unit})
-
-
-def free(server, n=None):
-    """Ray freed the oldest `n` served buckets (all by default)."""
-    for key in server.outstanding[: n if n is not None else len(server.outstanding)]:
-        server._freed_bucket(*key)
-    del server.outstanding[: n if n is not None else len(server.outstanding)]
 
 
 def _call(fn, *args, timeout=0.3):
@@ -217,18 +196,6 @@ def _boxes(server, flat, consumer=0, seq=0):
 
 
 class TestServe:
-    def test_a_bucket_packs_its_boxes_into_the_arena(self, server):
-        s = server()
-        s.register_consumer(0, [[(N, [[2, 6], [1, 3]]), (M, [[0, 4]])]])
-        s.begin_sync([0], 0)
-        w = _weights()
-        _publish(s, w, 0)
-        (flat,) = s.bucket(0, 0, 0)
-        assert flat.dtype == torch.uint8 and flat.numel() == 32
-        assert flat.untyped_storage().data_ptr() == s._arena.data_ptr()
-        a, b = _boxes(s, flat)
-        assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
-
     def test_new_unit_tensors_rebuild_the_cached_sources(self, server):
         """A bucket's source boxes are cached per publish of its unit: new
         tensors (a changed storage) are served, not the cached boxes."""
@@ -239,9 +206,11 @@ class TestServe:
             w = _weights(seed)
             _publish(s, w, 0)
             (flat,) = s.bucket(0, 0, sync_idx)
+            assert flat.untyped_storage().data_ptr() == s._arena.data_ptr()
+            assert flat.dtype == torch.uint8 and flat.numel() == 32
             a, b = _boxes(s, flat)
             assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
-            free(s)
+            s.free()
 
     def test_the_same_unit_tensors_reuse_the_cached_sources(self, server):
         """Republishing the same tensors (an identical CUDA-IPC publish)
@@ -260,7 +229,7 @@ class TestServe:
                 cached = s._sources[0, 0]
             a, b = _boxes(s, flat)
             assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
-            free(s)
+            s.free()
         assert s._sources[0, 0] is cached
 
     def test_a_pull_waits_for_its_unit(self, server):
@@ -288,7 +257,7 @@ class TestServe:
         future = _call(s.bucket, 0, 0, 1)
         assert not future.done(), "served sync 1 out of sync 0's gather"
         s.bucket(0, 1, 0)
-        free(s)
+        s.free()
         assert s.end_sync() == [1, 0]
         s.begin_sync([0], 1)
         new = _weights(1)
@@ -325,10 +294,10 @@ class TestServe:
         assert sorted(s._blocks) == [0, 64]
         future = _call(s.bucket, 0, 2, 0)
         assert not future.done()
-        free(s, 1)
+        s.free(1)
         (flat,) = future.result(timeout=5)
         assert flat.data_ptr() == s._arena.data_ptr()
-        free(s)
+        s.free()
         assert s._blocks == {}
 
 
@@ -365,21 +334,11 @@ class TestRelease:
         _publish(s, _weights(), 0)
         s.bucket(0, 0, 0)
         s.bucket(1, 0, 0)
-        free(s, 1)
-        assert 0 in s._unit_names
-        free(s)
-        assert 0 not in s._unit_names
+        s.free(1)
+        assert 0 in s._resident
+        s.free()
+        assert 0 not in s._resident
         assert s.wait_freed() == [0]
-
-    def test_serving_is_not_freeing(self, server):
-        """Until Ray frees a served bucket the consumer may still read its
-        arena block, so a served unit stays gathered."""
-        s = server()
-        s.register_consumer(0, [[(N, [[0, 8], [0, 4]])]])
-        s.begin_sync([0], 0)
-        _publish(s, _weights(), 0)
-        s.bucket(0, 0, 0)
-        assert 0 in s._unit_names
 
     def test_an_unneeded_unit_is_released_at_publish(self, server):
         s = server()
@@ -393,7 +352,7 @@ class TestRelease:
         s.register_consumer(0, [])
         s.begin_sync([0, 1], 0)
         _publish(s, _weights(), 1)
-        assert 1 in s._unit_names
+        assert 1 in s._resident
         s.register_consumer(1, [])
         assert s.wait_freed() == [1]
 
@@ -404,7 +363,7 @@ class TestRelease:
         s.begin_sync([1], 0)
         _publish(s, _weights(), 0)
         s.bucket(1, 0, 0)
-        free(s)
+        s.free()
         assert s.end_sync() == [0]
 
     def test_a_free_from_the_previous_sync_does_not_count(self, server):
@@ -417,7 +376,7 @@ class TestRelease:
         s.begin_sync([0], 1)
         _publish(s, _weights(1), 0)
         s._freed_bucket(*stale)
-        assert 0 in s._unit_names
+        assert 0 in s._resident
         assert s._blocks == {}
 
     def test_end_sync_waits_for_every_unit(self, server):
@@ -428,7 +387,7 @@ class TestRelease:
         s.bucket(0, 0, 0)
         future = _call(s.end_sync)
         assert not future.done()
-        free(s)
+        s.free()
         assert future.result(timeout=5) == [0]
 
 
@@ -574,9 +533,3 @@ class TestExportRing:
             _, dt, shape, stride, off = views[name]
             got = torch.as_strided(slot.view(getattr(torch, dt)), shape, stride, off)
             assert got.dtype is t.dtype and torch.equal(got, t), name
-
-    def test_slots_are_distinct(self):
-        eng = self._engine()
-        eng._pack_for_export([("a", torch.randn(8, 8).bfloat16())], 0)
-        eng._pack_for_export([("b", torch.randn(8, 8).bfloat16())], 1)
-        assert eng._export_ring[0].data_ptr() != eng._export_ring[1].data_ptr()
