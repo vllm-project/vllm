@@ -819,8 +819,8 @@ def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
 def test_deepseek_v4_small_regex_matches_vllm_names():
     """Checkpoint regex from the 2-layer DeepSeek-V4 small model.
 
-    The saved target uses the checkpoint name ``w2``. vLLM's module is
-    ``model.layers.*.ffn.shared_experts.down_proj``. Leaving the ``re:``
+    The saved target uses the checkpoint name `w2`. vLLM's module is
+    `model.layers.*.ffn.shared_experts.down_proj`. Leaving the `re:`
     target unchanged misses that module.
     """
     saved = r"re:^layers\.(?:0|1)\.ffn\.shared_experts\.w2\Z"

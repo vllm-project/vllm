@@ -89,7 +89,7 @@ def _literal_in_regex_source(literal: str) -> str:
     """Match `literal` as it is written inside a regex pattern string.
 
     Metacharacters may appear raw or backslash-escaped, so both
-    ``.*mlp.fc1.*`` and ``^model\\.mlp\\.fc1\\Z`` contain ``.mlp.fc1.``.
+    `.*mlp.fc1.*` and `^model\\.mlp\\.fc1\\Z` contain `.mlp.fc1.`.
     """
     parts: list[str] = []
     for char in literal:
@@ -185,12 +185,12 @@ def _apply_regex_suffix(
 
 
 def _map_regex_target(pattern: str, mapper: "WeightsMapper") -> str | None:
-    """Rename literals inside a compressed-tensors ``re:`` body.
+    """Rename literals inside a compressed-tensors `re:` body.
 
     Uses the same prefix, substring, and suffix rules as
-    ``WeightsMapper._map_name``. Stacked maps stay unused: fused q/k/v and
-    gate/up modules are matched through ``packed_modules_mapping``, and MoE
-    looks up ``{module}.0.{proj}``. Mapper regexes are not applied to these
+    `WeightsMapper._map_name`. Stacked maps stay unused: fused q/k/v and
+    gate/up modules are matched through `packed_modules_mapping`, and MoE
+    looks up `{module}.0.{proj}`. Mapper regexes are not applied to these
     patterns either.
     """
     for substr, repl in mapper.orig_to_new_substr.items():
@@ -223,7 +223,7 @@ def _ignore_sort_key(parts: tuple[str, ...]) -> tuple:
 def _is_index_rectangle(paths: set[tuple[str, ...]], columns: list[int]) -> bool:
     """True when every combination of the numeric columns is present.
 
-    ``{(0, 0), (0, 1), (1, 0), (1, 1)}`` is a rectangle. ``{(0, 0), (1, 1)}``
+    `{(0, 0), (0, 1), (1, 0), (1, 1)}` is a rectangle. `{(0, 0), (1, 1)}`
     is a diagonal: compressing that per column would also match the other
     two corners.
     """
@@ -272,12 +272,12 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
 
     The result is stored on the loaded config only. Quantization still saves
     a list of concrete checkpoint names. Older vLLM rewrites those names and
-    leaves ``re:`` entries unchanged, so a regex saved at quantization time
+    leaves `re:` entries unchanged, so a regex saved at quantization time
     would miss the renamed module when those versions load the checkpoint.
 
-    ``apply_vllm_mapper`` rewrites checkpoint names first. This function then
-    runs on those vLLM names. Folding first would turn a name into a ``re:``
-    pattern, and ``hf_to_vllm_mapper`` would leave that pattern unchanged, so
+    `apply_vllm_mapper` rewrites checkpoint names first. This function then
+    runs on those vLLM names. Folding first would turn a name into a `re:`
+    pattern, and `hf_to_vllm_mapper` would leave that pattern unchanged, so
     a renamed module would miss its ignore hole.
 
     Names are grouped by path shape. A numeric component is a wildcard in
@@ -288,10 +288,10 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
 
     What a group becomes:
 
-    * One name stays a literal: ``model.layers.0.mlp.down_proj``.
+    * One name stays a literal: `model.layers.0.mlp.down_proj`.
     * A rectangle of indexes becomes one anchored regex. Each numeric
       position lists only the indexes that were ignored. After a substring
-      rename of ``.mlp.fc1.`` to ``.fc1.`` the group above becomes::
+      rename of `.mlp.fc1.` to `.fc1.` the group above becomes::
 
         re:^model\\.layers\\.(?:0|1)\\.fc1\\.gate\\Z
 
@@ -300,8 +300,8 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
         layers.{0,1}.experts.{0,1}.gate
         -> re:^layers\\.(?:0|1)\\.experts\\.(?:0|1)\\.gate\\Z
 
-      ``\\d+`` is not used. An index missing from the ignore list may belong
-      to a module that is quantized, and ``\\d+`` would ignore that module.
+      `\\d+` is not used. An index missing from the ignore list may belong
+      to a module that is quantized, and `\\d+` would ignore that module.
     * A set that is not a rectangle stays an alternation of the full paths,
       so a diagonal does not also match the other corners::
 
@@ -309,13 +309,13 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
         layers.1.experts.1.gate
         -> re:^(?:layers\\.0\\.experts\\.0\\.gate|layers\\.1\\.experts\\.1\\.gate)\\Z
 
-    An entry that is already ``re:`` is copied through. Its literals were
+    An entry that is already `re:` is copied through. Its literals were
     rewritten before this function ran. A group is emitted where its first
     concrete name appeared, so the rest of the list stays in order.
 
-    Matchers use ``re.match``, which does not require the pattern to consume
-    the whole name, so every generated pattern is anchored with ``^`` and
-    ``\\Z``.
+    Matchers use `re.match`, which does not require the pattern to consume
+    the whole name, so every generated pattern is anchored with `^` and
+    `\\Z`.
     """
     groups: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
     # A regex stays where it is. A shape is emitted where its first concrete
@@ -346,13 +346,13 @@ def _consolidate_ignore_names(ignore: list[str]) -> list[str]:
 def _consolidate_scheme_map(mapped: dict[str, Any]) -> dict[str, Any]:
     """Fold concrete targets that share a path shape and a scheme.
 
-    ``re:`` entries and class names stay as written. Concrete names are
+    `re:` entries and class names stay as written. Concrete names are
     grouped only with other names that carry the same scheme, so two
     layers quantized differently are not merged. A single name stays a
     literal. The checkpoint is unchanged; this map is the loaded one.
     """
     groups: list[dict[str, Any]] = []
-    order: list[tuple[str, str | int]] = []
+    order: list[tuple[Literal["keep"], str] | tuple[Literal["group"], int]] = []
     for name, scheme in mapped.items():
         if name.startswith("re:") or "." not in name:
             order.append(("keep", name))
@@ -371,11 +371,11 @@ def _consolidate_scheme_map(mapped: dict[str, Any]) -> dict[str, Any]:
         groups[found]["parts"].append(parts)
 
     consolidated: dict[str, Any] = {}
-    for kind, value in order:
-        if kind == "keep":
-            consolidated[value] = mapped[value]
+    for item in order:
+        if item[0] == "keep":
+            consolidated[item[1]] = mapped[item[1]]
             continue
-        group = groups[value]
+        group = groups[item[1]]
         pattern = _pattern_for_ignore_group(set(group["parts"]))
         consolidated[pattern] = group["scheme"]
     return consolidated
