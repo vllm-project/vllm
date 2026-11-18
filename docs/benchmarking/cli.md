@@ -60,6 +60,33 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+Sparse MLA benchmarks use the metadata builder's prefill route by default.
+The `mha_vs_mqa` comparison mode forces the selected `dense_mha`, `masked_mha`,
+and `mqa` variants. When calling the benchmark runner from Python, set
+`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.DENSE_MHA`,
+`MASKED_MHA`, or `SPARSE_MQA` to force a route, or leave it as `None` to use the
+builder's decision. Import `SparseMLAPrefillRoute` from
+`vllm.v1.attention.backends.mla.sparse_utils`. This replaces
+the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+The runner's FP8 options `output_scale` and `fuse_quant_op` are keyword-only;
+old positional route overrides raise `TypeError` instead of being interpreted
+as quantization options. Move route overrides into `BenchmarkConfig`.
+`BenchmarkResult.actual_sparse_mla_route` records the executed prefill route
+(or `SPARSE_MQA` for decode-only sparse batches). The result table shows this
+route below each timing; JSON and CSV include its enum name in
+`actual_sparse_mla_route`. Decodes in mixed batches always use MQA.
+If automatic routing chooses MQA despite an explicit `prefill_backend`, the
+runner warns that the requested prefill backend was not executed. Set the route
+enum explicitly when measuring an MHA kernel.
+
+The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
+it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,
+and masked MHA otherwise. Masked MHA requires `fa4`.
+Unsupported prefill backends report an error instead
+of falling back to sparse MQA and labeling its timing as the requested backend.
+FP8 output comparisons also require an MHA prefill route; an automatic sparse
+MQA route reports an error instead of silently omitting output quantization.
+
 ## Dataset Overview
 
 <style>
