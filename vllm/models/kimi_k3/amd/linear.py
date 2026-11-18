@@ -86,6 +86,10 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -316,7 +320,8 @@ class KimiMoE(nn.Module):
         min_moe_intermediate_per_partition = getattr(
             config, "min_moe_intermediate_per_partition", 256
         )
-        if self.tp_size > 1:
+        enable_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
+        if self.tp_size > 1 and not enable_ep:
             moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
             if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
                 self.padded_moe_intermediate_size = (
@@ -428,6 +433,7 @@ class KimiMoE(nn.Module):
             top_k=num_experts_per_token,
             hidden_size=self.moe_hidden_size,
             intermediate_size=self.padded_moe_intermediate_size,
+            intermediate_size_unpadded=moe_intermediate_size,
             activation=config.hidden_act,
             activation_situ_beta=activation_situ_beta,
             activation_situ_linear_beta=activation_situ_linear_beta,
@@ -456,17 +462,11 @@ class KimiMoE(nn.Module):
             # The sharded path adds an all_gather, so all ranks must take it or none.
             self.routed_expert_down_proj.enable_token_sharding()
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
-            if w13_weight is None:
-                w13_weight = self.experts.w13_weight_packed
-            w2_weight = getattr(self.experts, "w2_weight", None)
-            if w2_weight is None:
-                w2_weight = self.experts.w2_weight_packed
-            w13_weight.data.zero_()
-            w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
+            # Zero what a direct reload zero-fills at begin (weights and scales,
+            # whatever their names), so a cold start matches a reload.
+            for param in self.experts.routed_experts.parameters(recurse=False):
+                if getattr(param, "fill_on_reload", False):
+                    param.data.zero_()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -958,6 +958,23 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+
+    def _new_block_residual(
+        self, hidden_states: torch.Tensor, num_blocks: int
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        if not is_workspace_manager_initialized():
+            return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
+        bank = current_workspace_manager().get_persistent(
+            "kimi_k3_attn_res_block_residual",
+            (self.max_num_batched_tokens, num_blocks, hidden_size),
+            hidden_states.dtype,
+        )
+        assert num_tokens <= bank.shape[0]
+        return bank[:num_tokens]
 
     def make_empty_intermediate_tensors(
         self,
@@ -1050,9 +1067,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
-        block_residual = hidden_states.new_empty(
-            hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
-        )
+        block_residual = self._new_block_residual(hidden_states, attn_res_block_num)
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual

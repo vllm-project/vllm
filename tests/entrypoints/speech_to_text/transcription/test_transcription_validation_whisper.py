@@ -68,8 +68,7 @@ def server(request):
     if request.param is not None:
         args += ["--attention-backend", request.param]
         if "AITER" in request.param:
-            # TODO: re-enable once AITER reenables fp16 unified attention.
-            pytest.skip("ROCM_AITER_UNIFIED_ATTN does not support fp16")
+            env_dict = _AITER_ENV
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 

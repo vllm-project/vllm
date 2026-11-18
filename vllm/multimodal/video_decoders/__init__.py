@@ -7,8 +7,12 @@ from typing import Any, Literal
 from .base import (
     PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
+    SampledFramesCharge,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_frame_copies,
+    charge_sampled_frames,
+    charging_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -25,6 +29,7 @@ _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
         "hw_decoders": PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
         "max_width": None,
         "max_height": None,
+        "keyframe_sampling": None,
     },
     "deepstream": {
         "pool_size": None,
@@ -112,9 +117,13 @@ def decode_video(
 __all__ = [
     "PYNVVIDEOCODEC_DEFAULT_HW_DECODERS",
     "PYNVVIDEOCODEC_VIDEO_BACKEND",
+    "SampledFramesCharge",
     "VideoDecoderBackend",
     "VideoSourceMetadata",
     "VideoTargetMetadata",
+    "charge_frame_copies",
+    "charge_sampled_frames",
+    "charging_sampled_frames",
     "check_frame_pixel_limit",
     "decode_video",
     "incompatible_backend_options",

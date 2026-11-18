@@ -30,7 +30,11 @@ from vllm.entrypoints.generate.beam_search.utils import (
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    MAX_LOGPROB_TOKEN_IDS,
+    BeamSearchParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
@@ -745,7 +749,8 @@ def test_beam_allowlist_rejects_unsupported_requests(case):
             get_vocab_size=lambda: 256,
         ),
     )
-    ids = {"empty": [], "size": list(range(129)), "id": [256]}.get(case, [13])
+    oversized = [13] * (MAX_LOGPROB_TOKEN_IDS + 1)
+    ids = {"empty": [], "size": oversized, "id": [256]}.get(case, [13])
     params = BeamSearchParams(2, 1, allowed_token_ids=ids)
     if case == "grammar":
         params.structured_outputs = StructuredOutputsParams(regex="a")
