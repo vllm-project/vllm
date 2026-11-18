@@ -470,6 +470,26 @@ class Worker(WorkerBase):
         finally:
             torch._C._accelerator_setAllocatorSettings(original_settings)
 
+    @contextmanager
+    def _scoped_cuda_stack_limit(self):
+        """Restore the CUDA thread stack size on exit. A kernel that raised it
+        keeps limit x threads x SMs of device memory until it goes down."""
+        if not current_platform.is_cuda():
+            yield
+            return
+
+        from vllm.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaLimitStackSize,
+        )
+
+        cudart = CudaRTLibrary()
+        limit = cudart.cudaDeviceGetLimit(cudaLimitStackSize)
+        try:
+            yield
+        finally:
+            cudart.cudaDeviceSetLimit(cudaLimitStackSize, limit)
+
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
@@ -731,7 +751,10 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            with set_current_vllm_config(self.vllm_config):
+            with (
+                self._scoped_cuda_stack_limit(),
+                set_current_vllm_config(self.vllm_config),
+            ):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
@@ -770,6 +793,8 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
+            # Exits before memory_profiling measures.
+            self._scoped_cuda_stack_limit(),
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
