@@ -57,8 +57,7 @@ _VALUE_READS = frozenset(
 
 
 def _is_basic_index(index: object) -> bool:
-    """Whether `index` holds only ints, int slices, None and Ellipsis: an
-    index that selects a view, and that reads no tensor."""
+    """Whether `index` holds only ints, int slices, None and Ellipsis."""
     parts = index if isinstance(index, tuple) else (index,)
     for x in parts:
         if isinstance(x, slice):
@@ -123,10 +122,8 @@ class TraceTensor(torch.Tensor):
             if isinstance(src, cls) and not isinstance(args[0], cls):
                 return src._sink.accept_copy(args[0], src)
         if func is torch.Tensor.__setitem__ and len(args) == 3:
-            # ``dst[index] = src`` is ``dst[index].copy_(src)`` when the
-            # index is basic (ints, slices, None, ...), which selects a view
-            # of ``dst``. Any other index (a list, a tensor, one computed
-            # from a traced tensor) goes to dispatch without being evaluated.
+            # `dst[index] = src` is `dst[index].copy_(src)` for a basic index;
+            # any other index goes to dispatch unevaluated.
             dst, index, src = args
             if (
                 isinstance(src, cls)

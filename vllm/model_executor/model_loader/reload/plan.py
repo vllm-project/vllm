@@ -157,48 +157,29 @@ def load_planned(
     pass fallbacks to `model.load_weights`. Call between `start_reload`
     and `finish_reload`.
 
-    Copies run in batches, so every tensor `weights` yields must stay valid
-    and unchanged until this call returns: do not reuse one buffer for
-    several items."""
+    Copies are batched, so each tensor `weights` yields must stay unchanged
+    until this call returns: do not reuse one buffer across items."""
     fallbacks = []
-    names: list[str] = []
-    dsts: list[torch.Tensor] = []
-    srcs: list[torch.Tensor] = []
-    pending: set[tuple] = set()
+    # (name, k) -> (dst, src); a name sent again replaces its copies.
+    batch: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
     held = 0
-
-    def flush() -> None:
-        nonlocal held
-        _copy_all(names, dsts, srcs)
-        names.clear()
-        dsts.clear()
-        srcs.clear()
-        pending.clear()
-        held = 0
-
     for name, full in weights:
         dest = plan.get_dest(name)
         if dest is None:
             fallbacks.append((name, full))
             continue
-        keys = [_dest_key(tensor) for _, tensor in dest]
-        # A destination already in the batch (a name sent twice): copy the
-        # batch first so the later write lands last, as one copy_ each would.
-        if not pending.isdisjoint(keys):
-            flush()
-        for (box, tensor), key in zip(dest, keys):
+        for k, (box, tensor) in enumerate(dest):
             part = full[tuple(slice(start, stop) for start, stop in box)]
-            names.append(name)
-            dsts.append(tensor)
-            srcs.append(part.reshape(tensor.shape))
-            pending.add(key)
-        held += full.nbytes if dest else 0
-        # Batch copies into one dispatch per ~2 GiB instead of one per tensor;
-        # flushing bounds how many source tensors a streaming caller keeps alive.
+            batch[name, k] = (tensor, part.reshape(tensor.shape))
+        if dest:
+            held += full.nbytes
+        # Bounds how many source tensors a streaming caller keeps alive.
         if held > _FLUSH_BYTES:
-            flush()
-    if dsts:
-        flush()
+            _copy_all(batch)
+            batch.clear()
+            held = 0
+    if batch:
+        _copy_all(batch)
     if fallbacks:
         model.load_weights(fallbacks)
 
@@ -206,21 +187,14 @@ def load_planned(
 _FLUSH_BYTES = 2 << 30
 
 
-def _dest_key(tensor: torch.Tensor) -> tuple:
-    return tensor.data_ptr(), tuple(tensor.shape), tensor.stride()
-
-
-def _copy_all(
-    names: list[str], dsts: list[torch.Tensor], srcs: list[torch.Tensor]
-) -> None:
-    """One `_foreach_copy_` over the batch; if it fails, copy pair by pair,
-    which either completes the batch or names the checkpoint tensor that
-    failed."""
+def _copy_all(batch: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]]) -> None:
+    """One `_foreach_copy_` over the batch; on failure, copy pair by pair to
+    finish it or name the checkpoint tensor that failed."""
     try:
-        torch._foreach_copy_(dsts, srcs)
+        torch._foreach_copy_(*map(list, zip(*batch.values())))
     except Exception as batched:
         logger.debug("load_planned: _foreach_copy_ failed (%s); copying each", batched)
-        for name, dst, src in zip(names, dsts, srcs):
+        for (name, _), (dst, src) in batch.items():
             try:
                 dst.copy_(src)
             except Exception as e:
@@ -322,8 +296,7 @@ def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
 def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     """Names whose writes share a byte with another write: direct writes land
     in any order, so these go through `load_weights` in arrival order."""
-    # Sweep each storage by the byte span each copy covers; only copies whose
-    # spans intersect can share a byte, and only those are expanded into runs.
+    # Sweep byte spans; expand into runs only copies whose spans intersect.
     spans: dict[int, list[tuple[int, int, int, str, Copy]]] = defaultdict(list)
     for name, copies in traced.copies.items():
         for c in copies:
@@ -341,7 +314,9 @@ def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
             while active and active[0][0] <= start:
                 runs.pop(heapq.heappop(active)[1], None)
             for _, j, other, oc in active:
-                if _runs_intersect(_sorted_runs(runs, i, c), _sorted_runs(runs, j, oc)):
+                if (name not in reasons or other not in reasons) and _runs_intersect(
+                    _sorted_runs(runs, i, c), _sorted_runs(runs, j, oc)
+                ):
                     reasons.setdefault(name, f"writes overlap with {other!r}")
                     reasons.setdefault(other, f"writes overlap with {name!r}")
             heapq.heappush(active, (stop, i, name, c))
