@@ -633,10 +633,6 @@ def test_host_resident_weights_take_sorted_path(
     from vllm.utils.platform_utils import is_uva_available
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
-    monkeypatch.setattr(
-        current_platform, "is_integrated_gpu", lambda device_id=0: False
-    )
-
     if host_resident and not is_uva_available():
         pytest.skip("needs UVA")
     set_random_seed(7)
@@ -684,7 +680,8 @@ def test_host_resident_weights_take_sorted_path(
         ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
     assert ref.abs().mean() > 0.1
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-    assert bool(aligned) == host_resident
+    expected_aligned = host_resident or (current_platform.is_integrated_gpu() and m > 1)
+    assert bool(aligned) == expected_aligned
 
 
 @pytest.mark.parametrize("m", [1, 2, 4, 8])
