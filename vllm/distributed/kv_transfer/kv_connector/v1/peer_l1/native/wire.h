@@ -19,11 +19,13 @@ enum Operation : uint64_t {
   AcquireLeased,
   Subscribe = 10,
   AcquireDeferred = 11,
-  AcquireDeferredLeased
+  AcquireDeferredLeased,
+  Members
 };
 struct Request {
-  uint64_t magic = 0x4c314f574e455231ULL;
+  uint64_t magic = 0x4c314f574e455232ULL;
   uint64_t op, epoch, reader, seq, n;
+  Key credential{};
 };
 struct Reply {
   uint64_t epoch, n;

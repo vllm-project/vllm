@@ -204,14 +204,16 @@ class Replica {
   }
 
  public:
-  Replica(const char* const* endpoints, const uint64_t* epochs, size_t n)
+  Replica(const char* const* endpoints, const uint64_t* epochs, size_t n,
+          const Key* credential)
       : generations_(new std::atomic<uint64_t>[n] {}),
         windows_(new std::atomic<uint64_t>[n] {}) {
     for (size_t i = 0; i < n; ++i) {
       Peer peer;
-      peer.endpoint = std::string(endpoints[i]) + ".sub";
+      peer.endpoint = subscription_endpoint(endpoints[i]);
       peer.epoch = epochs[i];
       peer.request.op = Subscribe;
+      if (credential) peer.request.credential = *credential;
       peer.request.epoch = epochs[i];
       peer.request.reader = peer.request.seq = peer.request.n = 0;
       peers_.push_back(std::move(peer));

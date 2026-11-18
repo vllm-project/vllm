@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 
-from .native import CleanupQueue, Operation, key_array, library
+from .native import CleanupQueue, Operation, credential_array, key_array, library
 
 
 def peer_key(identity: bytes) -> bytes:
@@ -103,6 +103,7 @@ class NativeOwnerChannel:
         self.lease_s = lease_s
         self._sequence = 0
         self._lib = library()
+        self._credential = credential_array(cleanup.credential)
 
     def _rpc(
         self, op: Operation, seq: int, keys: list[bytes]
@@ -119,6 +120,7 @@ class NativeOwnerChannel:
             out.ctypes.data,
             len(keys),
             self.timeout_ms,
+            self._credential.ctypes.data,
         )
         return result, out
 

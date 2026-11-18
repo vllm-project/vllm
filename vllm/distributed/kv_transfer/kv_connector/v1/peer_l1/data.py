@@ -26,6 +26,13 @@ class PeerMemory:
     segments: tuple[tuple[tuple[int, int, int], ...], ...]
     # Exported once per receiver. Descriptors never enter the scheduler metadata.
     handles: dict[int, tuple[Any, ...]] = field(repr=False)
+    instance_id: str = ""
+    kv_compatibility_id: str = ""
+    hash_settings: str = ""
+    restart_group: str = ""
+    session_kinds: tuple[str, ...] = ("ipc",)
+    rdma: bytes = field(default=b"", repr=False)
+    lease_s: float = 1.0
 
 
 @dataclass
@@ -35,11 +42,12 @@ class PeerHandshake(KVConnectorHandshakeMetadata):
 
 @dataclass(frozen=True)
 class CopyJob:
-    peer: int
+    peer: int | str
     grant: Grant
     # (cache group, source row, destination row).
     blocks: tuple[tuple[int, int, int], ...]
     request_id: str = ""
+    memory: PeerMemory | None = None
 
 
 @dataclass
@@ -53,6 +61,7 @@ class PeerWorkerMetadata(KVConnectorWorkerMetadata):
     completed_step: int
     quarantined: dict[str, tuple[int, ...]] = field(default_factory=dict)
     drained: set[str] = field(default_factory=set)
+    failed_peers: set[str] = field(default_factory=set)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> "PeerWorkerMetadata":
         if not isinstance(other, PeerWorkerMetadata):
@@ -61,4 +70,5 @@ class PeerWorkerMetadata(KVConnectorWorkerMetadata):
             min(self.completed_step, other.completed_step),
             {**self.quarantined, **other.quarantined},
             self.drained | other.drained,
+            self.failed_peers | other.failed_peers,
         )

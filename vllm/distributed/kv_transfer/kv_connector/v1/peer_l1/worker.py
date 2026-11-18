@@ -20,15 +20,105 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.simple_kv_offload.cuda_mem_ops import _resolve_max_batch_descriptors
 
 from .data import PeerHandshake, PeerMemory, PeerMetadata, PeerWorkerMetadata
 from .native import CleanupQueue
+from .registry import Domain
 from .session import AccessMode, Grant, Mover, PeerSession, Transfer
 from .stats import PeerL1Stats
 
 logger = init_logger(__name__)
+
+
+def memory_description(
+    config: VllmConfig, cache: KVCacheConfig, domain: Domain, device: int
+) -> PeerMemory:
+    """Describe rank-local memory without opening or importing device handles."""
+    transfer = config.kv_transfer_config
+    assert transfer is not None and transfer.engine_id is not None
+    rank = config.parallel_config.data_parallel_rank
+    instance = hashlib.sha256(transfer.engine_id.encode()).hexdigest()[:24]
+    signature = repr(
+        (
+            domain.compatibility_id or config.model_config.model,
+            config.model_config.revision,
+            config.model_config.dtype,
+            cache.kv_cache_layout,
+            [(g.manager_config, g.kv_cache_specs) for g in cache.kv_cache_groups],
+        )
+    )
+    return PeerMemory(
+        rank,
+        domain.endpoint(rank)
+        if domain.instance_id
+        else f"vllm-peer-l1/{instance}/{rank}",
+        secrets.randbits(63) + 1,
+        socket.gethostname(),
+        device,
+        hashlib.sha256(signature.encode()).hexdigest(),
+        cache.num_blocks,
+        cache_segments(cache),
+        {},
+        instance_id=domain.instance_id or instance,
+        kv_compatibility_id=domain.compatibility_id,
+        hash_settings=hashlib.sha256(
+            repr(
+                (
+                    config.cache_config.prefix_caching_hash_algo,
+                    os.environ.get("PYTHONHASHSEED", "fixed"),
+                    resolve_kv_cache_block_sizes(cache, config),
+                    cache.cache_hit_alignment_tokens,
+                    config.num_hash_lookahead_tokens,
+                    config.num_reprefillable_tokens,
+                )
+            ).encode()
+        ).hexdigest(),
+        restart_group=domain.instance_id or instance,
+        lease_s=domain.lease_ms / 1000 if domain.instance_id else 1.0,
+    )
+
+
+def validated_members(
+    gathered: list[PeerMemory | None], *, rank: int, implicit: bool
+) -> list[PeerMemory]:
+    """Validate the descriptions exchanged by one DP group."""
+    members = []
+    for member in gathered:
+        if not isinstance(member, PeerMemory):
+            raise RuntimeError("Peer L1 received an invalid member description")
+        members.append(member)
+    if {m.rank for m in members} != set(range(len(members))) or not 0 <= rank < len(
+        members
+    ):
+        raise ValueError("Peer L1 requires a complete DP membership")
+    if implicit:
+        if any(m.kv_compatibility_id for m in members):
+            raise ValueError(
+                "Peer implicit and explicit instance modes differ across ranks"
+            )
+        # The gather defines this instance; engine IDs intentionally differ by DP rank.
+        instance = next(m.instance_id for m in members if m.rank == 0)
+        members = [
+            replace(m, instance_id=instance, restart_group=instance) for m in members
+        ]
+    local = next(m for m in members if m.rank == rank)
+    for member in members:
+        if member.compatibility != local.compatibility:
+            raise ValueError(
+                "Peer L1 KV geometry or model compatibility differs across ranks"
+            )
+        if (
+            member.instance_id != local.instance_id
+            or member.hash_settings != local.hash_settings
+            or member.restart_group != local.restart_group
+        ):
+            raise ValueError(
+                "Peer instance identity or prefix hash settings differ across ranks"
+            )
+    return members
 
 
 class CompletionWatermark:
@@ -252,11 +342,20 @@ class IPCSession:
 class PeerWorker:
     def __init__(self, config: VllmConfig, cache: KVCacheConfig):
         self.config, self.cache = config, cache
+        transfer = config.kv_transfer_config
+        assert transfer is not None
+        self.domain = Domain.from_options(transfer.kv_connector_extra_config)
+        if (
+            self.domain.instance_id
+            and config.cache_config.prefix_caching_hash_algo.startswith("xxhash")
+            and not os.environ.get("PYTHONHASHSEED")
+        ):
+            raise ValueError("Cross-instance xxhash requires a shared PYTHONHASHSEED")
         self.rank = config.parallel_config.data_parallel_rank
-        self.cleanup = CleanupQueue()
+        self.cleanup = CleanupQueue(credential=self.domain.credential)
         self._stats = PeerL1Stats()
-        self._sessions: dict[int, PeerSession] = {}
-        self._members: dict[int, PeerMemory] = {}
+        self._sessions: dict[int | str, PeerSession] = {}
+        self._members: dict[int | str, PeerMemory] = {}
         self._watermark = CompletionWatermark()
         self._handshake: PeerHandshake | None = None
         self._stream: torch.cuda.Stream | None = None
@@ -278,59 +377,27 @@ class PeerWorker:
         device = torch.accelerator.current_device_index()
         parallel = self.config.parallel_config
         world = parallel.data_parallel_size
-        transfer = self.config.kv_transfer_config
-        assert transfer is not None
-        assert transfer.engine_id is not None
-        instance = hashlib.sha256(transfer.engine_id.encode()).hexdigest()[:24]
-        endpoint = f"vllm-peer-l1/{instance}/{self.rank}"
-        signature = repr(
-            (
-                self.config.model_config.model,
-                self.config.model_config.revision,
-                self.config.model_config.dtype,
-                self.cache.kv_cache_layout,
-                [
-                    (g.manager_config, g.kv_cache_specs)
-                    for g in self.cache.kv_cache_groups
-                ],
-            )
-        )
-        compatibility = hashlib.sha256(signature.encode()).hexdigest()
+        local = memory_description(self.config, self.cache, self.domain, device)
         handles = {
             rank: self._storage._share_cuda_()
             for rank in range(world)
             if rank != self.rank
         }
-        local = PeerMemory(
-            self.rank,
-            endpoint,
-            secrets.randbits(63) + 1,
-            socket.gethostname(),
-            device,
-            compatibility,
-            self.cache.num_blocks,
-            cache_segments(self.cache),
-            handles,
-        )
+        local = replace(local, handles=handles)
         gathered: list[PeerMemory | None] = [None] * world
         if world > 1:
             dist.all_gather_object(gathered, local, group=get_dp_group().cpu_group)
         else:
             gathered = [local]
-        members = []
-        for member in gathered:
-            if not isinstance(member, PeerMemory):
-                raise RuntimeError("Peer L1 received an invalid member description")
-            members.append(member)
+        members = validated_members(
+            gathered, rank=self.rank, implicit=not bool(self.domain.instance_id)
+        )
+        local = next(m for m in members if m.rank == self.rank)
         self._stream = torch.cuda.Stream(device=device, priority=-1)
         self._mover = LoadStoreMover(self.cleanup, self._stream, stats=self._stats)
         for member in members:
             if member.host != local.host:
                 raise ValueError("Peer L1 requires all DP workers on the same OS")
-            if member.compatibility != compatibility:
-                raise ValueError(
-                    "Peer L1 KV geometry or model compatibility differs across ranks"
-                )
             self._members[member.rank] = member
             if member.rank == self.rank:
                 continue

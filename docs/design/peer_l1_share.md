@@ -66,3 +66,5 @@ scheduler takes an extra reference on each target row before recomputation,
 abort or normal finish can free the request's references. Quarantine belongs to
 the transfer identity, independently of the request, until drain or process exit.
 An elapsed lease or failed status alone is not drain proof.
+
+Discovery validates epoch, geometry and hash settings before selecting an owner.

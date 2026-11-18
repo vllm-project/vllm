@@ -12,6 +12,7 @@ from functools import wraps
 from time import monotonic, perf_counter_ns
 from typing import Concatenate, ParamSpec, TypeVar
 
+import msgspec
 import numpy as np
 
 from vllm.config import VllmConfig
@@ -32,8 +33,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, get_reusable_prefix_length
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .data import CopyJob, PeerHandshake, PeerMetadata, PeerWorkerMetadata
+from .data import CopyJob, PeerHandshake, PeerMemory, PeerMetadata, PeerWorkerMetadata
 from .native import CleanupQueue, NativeOwner, PlacementReplica
+from .registry import CandidateReplicas, Domain, Manifest, Resolver
 from .session import Grant, NativeOwnerChannel, OwnerBusy, OwnerDeferred, peer_key
 from .stats import COUNTERS, PeerL1Stats
 
@@ -113,6 +115,7 @@ class PeerScheduler:
         transfer = config.kv_transfer_config
         assert transfer is not None
         self.options = transfer.kv_connector_extra_config
+        self.domain = Domain.from_options(self.options)
         self.rank = config.parallel_config.data_parallel_rank
         self.window = int(self.options.get("pin_window", 16384))
         self.pin_cap = int(self.options.get("pin_cap", 65536))
@@ -136,10 +139,15 @@ class PeerScheduler:
         self._pool: BlockPool | None = None
         self._manager: KVCacheManager | None = None
         self._owner: NativeOwner | None = None
-        self._replica: PlacementReplica | None = None
-        self._cleanup = CleanupQueue(self.timeout)
+        self._replica: PlacementReplica | CandidateReplicas | None = None
+        self._local_replica: PlacementReplica | None = None
+        self._local_count = 0
+        self._resolver: Resolver | None = None
+        self._remote_version = 0
+        self._peer_memory: dict[int | str, PeerMemory] = {}
+        self._cleanup = CleanupQueue(self.timeout, credential=self.domain.credential)
         self._channels: list[NativeOwnerChannel] = []
-        self._ranks: list[int] = []
+        self._ranks: list[int | str] = []
         self._wake_stop = threading.Event()
         self._wake_thread: threading.Thread | None = None
         block_size, self.hash_size = resolve_kv_cache_block_sizes(cache, config)
@@ -185,18 +193,76 @@ class PeerScheduler:
             window=self.window,
             pin_cap=self.pin_cap,
             initial_window=self._reserve,
-            lease_ms=int(self.options.get("lease_ms", 1000)),
+            lease_ms=int(
+                self.options.get("lease_ms", 30000 if self.domain.instance_id else 1000)
+            ),
+            credential=self.domain.credential,
         )
         self._published = self._owner.published_rows
         peers = [member for member in metadata.members if member.rank != self.rank]
         self._ranks = [member.rank for member in peers]
-        self._replica = PlacementReplica([(m.endpoint, m.epoch) for m in peers])
+        self._local_count = len(peers)
+        self._local_replica = PlacementReplica(
+            [(m.endpoint, m.epoch) for m in peers], credential=self.domain.credential
+        )
+        self._replica = self._local_replica
+        self._peer_memory = {m.rank: m for m in peers}
         self._channels = [
             NativeOwnerChannel(
                 m.endpoint, m.epoch, local.epoch, self._cleanup, self.timeout
             )
             for m in peers
         ]
+        self._owner.describe(
+            msgspec.json.encode(local),
+            msgspec.json.encode(
+                Manifest(
+                    1, local.instance_id, tuple(metadata.members), len(metadata.members)
+                )
+            ),
+        )
+        if self.domain.instance_id and self.domain.seeds:
+            self._resolver = Resolver(self.domain, local, self.timeout)
+            self._resolver.start()
+
+    def _adopt_remotes(self) -> None:
+        if self._resolver is None or self._reads:
+            return
+        snapshot = self._resolver.snapshot()
+        if snapshot is None or snapshot.version == self._remote_version:
+            return
+        for waiting in self._busy.values():
+            if waiting.queued is not None and waiting.queued.peer >= self._local_count:
+                self._finish_wait(waiting, "cancel")
+                self._cancel_queued(waiting)
+            waiting.generations = {
+                p: g for p, g in waiting.generations.items() if p < self._local_count
+            }
+        self._channels = self._channels[: self._local_count]
+        self._ranks = self._ranks[: self._local_count]
+        self._peer_memory = {
+            k: v for k, v in self._peer_memory.items() if isinstance(k, int)
+        }
+        assert self._owner is not None and self._local_replica is not None
+        for member in snapshot.members:
+            identity = f"{member.instance_id}/{member.rank}/{member.epoch}"
+            self._ranks.append(identity)
+            self._peer_memory[identity] = member
+            self._channels.append(
+                NativeOwnerChannel(
+                    member.endpoint,
+                    member.epoch,
+                    self._owner.epoch,
+                    self._cleanup,
+                    self.timeout,
+                    lease_s=member.lease_s,
+                )
+            )
+        self._replica = CandidateReplicas(
+            self._local_replica, snapshot.replica, self._local_count
+        )
+        self._remote_version = snapshot.version
+        self._resolver.acknowledge(snapshot.version)
 
     def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
         assert self._owner is not None
@@ -415,6 +481,7 @@ class PeerScheduler:
 
     @_timed
     def match(self, request: Request, local_tokens: int) -> tuple[int | None, bool]:
+        self._adopt_remotes()
         self._stats.inc("reader_lookups")
         saved = self._reads.get(request.request_id)
         if saved is not None:
@@ -539,6 +606,7 @@ class PeerScheduler:
         order = sorted(
             available,
             key=lambda peer: (
+                int(peer >= self._local_count),
                 -bounds[peer],
                 (peer - self._round_robin) % len(self._channels),
             ),
@@ -617,6 +685,11 @@ class PeerScheduler:
                     reason,
                 )
             if length <= best:
+                continue
+            if (
+                peer >= self._local_count
+                and length - best < self.domain.min_gain_pages * self.alignment
+            ):
                 continue
             keys = []
             for group, index in positions:
@@ -702,7 +775,14 @@ class PeerScheduler:
         )
         if len(plan) != len(read.positions):
             raise RuntimeError("Peer L1 required a null destination block")
-        read.job = CopyJob(self._ranks[read.peer], read.grant, plan, request.request_id)
+        identity = self._ranks[read.peer]
+        read.job = CopyJob(
+            identity,
+            read.grant,
+            plan,
+            request.request_id,
+            self._peer_memory.get(identity) if read.grant.lease_s is not None else None,
+        )
 
     @_timed
     def build(self) -> PeerMetadata:
@@ -713,6 +793,7 @@ class PeerScheduler:
             else:
                 jobs.append(read.job)
         self._reads.clear()
+        self._adopt_remotes()
         if self._owner is not None:
             assert self._pool is not None
             touch, free, withheld = self._owner.absorb(
@@ -753,6 +834,9 @@ class PeerScheduler:
         meta = output.kv_connector_worker_meta
         if not isinstance(meta, PeerWorkerMetadata):
             return
+        if self._resolver is not None:
+            for endpoint in meta.failed_peers:
+                self._resolver.invalidate(endpoint)
         assert self._pool is not None
         for transfer, quarantined_rows in meta.quarantined.items():
             if transfer not in self._quarantined:
@@ -797,8 +881,10 @@ class PeerScheduler:
             self._wake_thread.join()
         for request_id in self._reads.keys() | self._busy.keys():
             self.finished(request_id)
-        if self._replica is not None:
-            self._replica.close()
+        if self._resolver is not None:
+            self._resolver.close()
+        if self._local_replica is not None:
+            self._local_replica.close()
         self._cleanup.close()
         if self._owner is not None:
             self._owner.close()

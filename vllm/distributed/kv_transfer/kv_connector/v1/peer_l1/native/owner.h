@@ -61,6 +61,8 @@ class Owner {
   int lease_ms_, wake_, sub_fd_ = -1;
   size_t log_capacity_;
   std::vector<int64_t> description_;
+  std::vector<int64_t> members_;
+  Key credential_{};
   std::unique_ptr<TcpServer> server_;
   std::atomic<bool> stop_{false};
   std::thread subscription_thread_;
@@ -119,9 +121,12 @@ class Owner {
   std::vector<int64_t> dispatch(const Request& request,
                                 const std::vector<Key>& keys) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (request.credential != credential_) return {};
     if (request.op == Hello)
       return description_.size() <= request.n ? description_
                                               : std::vector<int64_t>{};
+    if (request.op == Members)
+      return members_.size() <= request.n ? members_ : std::vector<int64_t>{};
     Identity id{request.reader, request.seq};
     if (request.op == Cleanups) {
       for (auto& key : keys) finish({key[0], key[1]});
@@ -220,6 +225,7 @@ class Owner {
     frame.snapshot = !client.subscribed;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (client.request.credential != credential_) return false;
       if (!client.subscribed) {
         for (auto [key, count] : short_keys_)
           batch.push_back({sequence_, key, 1});
@@ -336,7 +342,7 @@ class Owner {
  public:
   Owner(const char* endpoint, uint64_t epoch, size_t rows, uint64_t cap,
         uint64_t window, int lease_ms, size_t log_capacity,
-        uint64_t initial_window, uint8_t* published,
+        uint64_t initial_window, uint8_t* published, const Key* credential,
         int64_t (*clock_ns)() = nullptr)
       : clock_ns_(clock_ns),
         rows_(rows),
@@ -348,7 +354,8 @@ class Owner {
         lease_ms_(lease_ms),
         wake_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)),
         log_capacity_(log_capacity),
-        sub_endpoint_(std::string(endpoint) + ".sub") {
+        sub_endpoint_(subscription_endpoint(endpoint)) {
+    if (credential) credential_ = *credential;
     if (wake_ < 0) throw std::runtime_error("peer L1 eventfd failed");
     try {
       dirty_.reserve(rows);
@@ -356,8 +363,11 @@ class Owner {
       auto addr = address(sub_endpoint_.c_str());
       sub_fd_ = socket(addr.storage.ss_family,
                        SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-      if (sub_fd_ < 0 || bind(sub_fd_, addr.data(), addr.length) ||
-          listen(sub_fd_, 128))
+      int one = 1;
+      if (sub_fd_ < 0 ||
+          (addr.storage.ss_family != AF_UNIX &&
+           setsockopt(sub_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one))) ||
+          bind(sub_fd_, addr.data(), addr.length) || listen(sub_fd_, 128))
         throw std::system_error(errno, std::generic_category(),
                                 "peer L1 subscription bind failed");
       server_ = std::make_unique<TcpServer>(
@@ -382,6 +392,12 @@ class Owner {
     close(wake_);
   }
   int wake_fd() const { return wake_; }
+  void describe(const int64_t* hello, size_t n_hello, const int64_t* members,
+                size_t n_members) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    description_.assign(hello, hello + n_hello);
+    members_.assign(members, members + n_members);
+  }
   void publish(const Key* keys, const int64_t* rows, size_t n) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (size_t i = 0; i < n; ++i) {

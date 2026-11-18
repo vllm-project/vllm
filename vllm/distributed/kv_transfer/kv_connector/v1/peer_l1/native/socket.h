@@ -72,6 +72,18 @@ inline bool no_delay(int fd, int family) {
          setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) == 0;
 }
 
+inline std::string subscription_endpoint(const std::string& endpoint) {
+  if (endpoint.rfind("tcp://", 0) != 0) return endpoint + ".sub";
+  auto addr = address(endpoint.c_str());
+  unsigned port =
+      addr.storage.ss_family == AF_INET6
+          ? ntohs(reinterpret_cast<sockaddr_in6*>(&addr.storage)->sin6_port)
+          : ntohs(reinterpret_cast<sockaddr_in*>(&addr.storage)->sin_port);
+  if (!port || port == 65535)
+    throw std::invalid_argument("peer L1 TCP control needs a port in 1..65534");
+  return endpoint.substr(0, endpoint.rfind(':') + 1) + std::to_string(port + 1);
+}
+
 inline std::string bound_endpoint(int fd, const char* endpoint,
                                   SocketAddress addr) {
   if (addr.storage.ss_family == AF_UNIX) return endpoint;

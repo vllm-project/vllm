@@ -21,16 +21,24 @@ extern "C" {
 int64_t l1_owner_start(const char* endpoint, uint64_t epoch, uint64_t rows,
                        uint64_t cap, uint64_t window, int lease_ms,
                        uint64_t log_capacity, uint64_t initial_window,
-                       uint8_t* published, int64_t (*clock_ns)()) {
+                       uint8_t* published, const Key* credential,
+                       int64_t (*clock_ns)()) {
   return checked([&] {
     return reinterpret_cast<int64_t>(
         new Owner(endpoint, epoch, rows, cap, window, lease_ms, log_capacity,
-                  initial_window, published, clock_ns));
+                  initial_window, published, credential, clock_ns));
   });
 }
 int64_t l1_owner_stop(void* owner) {
   delete static_cast<Owner*>(owner);
   return 0;
+}
+int64_t l1_owner_describe(void* owner, const int64_t* hello, size_t n_hello,
+                          const int64_t* members, size_t n_members) {
+  return checked([&] {
+    static_cast<Owner*>(owner)->describe(hello, n_hello, members, n_members);
+    return 0;
+  });
 }
 int64_t l1_owner_publish(void* owner, const Key* keys, const int64_t* rows,
                          size_t n) {
@@ -80,9 +88,10 @@ int64_t l1_owner_thaw(void* owner, int clear) {
   return 0;
 }
 int64_t l1_replica_start(const char* const* endpoints, const uint64_t* epochs,
-                         size_t n) {
+                         size_t n, const Key* credential) {
   return checked([&] {
-    return reinterpret_cast<int64_t>(new Replica(endpoints, epochs, n));
+    return reinterpret_cast<int64_t>(
+        new Replica(endpoints, epochs, n, credential));
   });
 }
 int64_t l1_replica_stop(void* replica) {
@@ -106,13 +115,14 @@ int64_t l1_replica_query(void* replica, const uint64_t* keys, size_t n,
 int64_t l1_owner_rpc(const char* endpoint, uint64_t op, uint64_t epoch,
                      uint64_t reader, uint64_t seq,
                      const vllm::peer_l1::Key* keys, int64_t* out, size_t n,
-                     int timeout_ms) {
+                     int timeout_ms, const Key* credential) {
   vllm::peer_l1::Request request;
   request.op = op;
   request.epoch = epoch;
   request.reader = reader;
   request.seq = seq;
   request.n = n;
+  if (credential) request.credential = *credential;
   return vllm::peer_l1::rpc(endpoint, request, keys, out, timeout_ms);
 }
 int64_t l1_cleanup_start(int timeout_ms) {
@@ -130,7 +140,8 @@ int64_t l1_cleanup_pending(void* queue) {
 }
 int64_t l1_cleanup_create(void* queue, const char* endpoint, uint64_t op,
                           uint64_t epoch, uint64_t reader, uint64_t seq,
-                          uint64_t lease_ms, void* next) {
+                          uint64_t lease_ms, void* next,
+                          const Key* credential) {
   return checked([&] {
     vllm::peer_l1::Request request;
     request.op = op;
@@ -138,6 +149,7 @@ int64_t l1_cleanup_create(void* queue, const char* endpoint, uint64_t op,
     request.reader = reader;
     request.seq = seq;
     request.n = 0;
+    if (credential) request.credential = *credential;
     auto* item = new vllm::peer_l1::Cleanup{
         static_cast<vllm::peer_l1::CleanupQueue*>(queue), endpoint, request};
     item->batch_next = static_cast<vllm::peer_l1::Cleanup*>(next);

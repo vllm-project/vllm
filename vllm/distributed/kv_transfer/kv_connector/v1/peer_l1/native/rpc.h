@@ -56,10 +56,13 @@ inline int64_t rpc(const char* endpoint, Request request, const Key* keys,
     Reply reply{};
     if (transfer_bytes(fd, &request, sizeof(request), true, deadline) &&
         transfer_bytes(fd, const_cast<Key*>(keys),
-                       (request.op == Hello ? 0 : request.n * sizeof(Key)),
+                       (request.op == Hello || request.op == Members
+                            ? 0
+                            : request.n * sizeof(Key)),
                        true, deadline) &&
         transfer_bytes(fd, &reply, sizeof(reply), false, deadline)) {
-      if (reply.epoch != request.epoch)
+      if (reply.epoch != request.epoch &&
+          !(request.op == Members && !request.epoch))
         result = -2;
       else if (reply.n <=
                    std::max<uint64_t>(

@@ -1413,3 +1413,317 @@ def test_scheduler_quarantine_reference_survives_request_free(scheduler_resource
         )
     )
     assert all(manager.block_pool.blocks[row].ref_cnt == 0 for row in rows)
+
+
+@pytest.fixture
+def tcp_members(unused_tcp_port_factory, clock):
+    import hashlib
+    from dataclasses import replace
+
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.data import PeerMemory
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.registry import Manifest
+
+    auth = hashlib.sha256(b"deployment secret").digest()
+    with ExitStack() as stack:
+        cleanup = CleanupQueue(credential=auth)
+        stack.callback(cleanup.close)
+
+        def create(rank=0, epoch=19, endpoint=None, window=10, lease_ms=1000):
+            for _ in range(100):
+                selected = endpoint or f"tcp://127.0.0.1:{unused_tcp_port_factory()}"
+                if selected.endswith(":65535"):
+                    continue
+                try:
+                    owner = NativeOwner(
+                        selected,
+                        epoch,
+                        128,
+                        window=window,
+                        credential=auth,
+                        lease_ms=lease_ms,
+                        clock=clock,
+                    )
+                    break
+                except RuntimeError as error:
+                    if endpoint is not None or "Address already in use" not in str(
+                        error
+                    ):
+                        raise
+            else:
+                pytest.fail("Could not bind a control/subscription port pair")
+            endpoint = selected
+            stack.callback(owner.close)
+            member = PeerMemory(
+                rank,
+                endpoint,
+                epoch,
+                "owner",
+                0,
+                "geometry",
+                128,
+                (((0, 1, 1),),),
+                {},
+                instance_id="source",
+                kv_compatibility_id="weights",
+                hash_settings="sha256-seed-fixed",
+                restart_group="source",
+                session_kinds=("rdma",),
+                rdma=b"registered memory",
+                lease_s=1.0,
+            )
+            publish([(owner, member)])
+            return owner, member
+
+        def publish(entries):
+            manifest = Manifest(
+                1, "source", tuple(member for _, member in entries), len(entries)
+            )
+            for owner, member in entries:
+                owner.describe(
+                    msgspec.json.encode(member), msgspec.json.encode(manifest)
+                )
+
+        yield create, publish, cleanup, auth, replace
+
+
+def test_members_snapshot_hello_authentication_and_tcp_subscription(tcp_members):
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.native import description
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.registry import (
+        Domain,
+        Resolver,
+    )
+
+    create, publish, cleanup, auth, replace = tcp_members
+    first, a = create()
+    second, b = create(rank=1, epoch=20)
+    publish([(first, a), (second, b)])
+    key = peer_key(b"remote prefix")
+    first.publish([key], [1])
+    local = replace(a, instance_id="reader")
+    resolver = Resolver(
+        Domain(instance_id="reader", seeds=(a.endpoint,), credential=auth), local
+    )
+    try:
+        resolver.refresh()
+        snapshot = resolver.snapshot()
+        assert snapshot.members == (a, b)
+        wait_until(lambda: snapshot.replica.query([key])[0, 0])
+        assert not snapshot.replica.query([key])[0, 1]
+        assert (
+            msgspec.json.decode(description(a.endpoint, a.epoch, credential=auth))[
+                "epoch"
+            ]
+            == a.epoch
+        )
+        with pytest.raises(ConnectionError):
+            description(a.endpoint, 0, members=True)
+        unauthorized = NativeOwnerChannel(a.endpoint, a.epoch, 999, CleanupQueue())
+        try:
+            assert unauthorized.acquire_exact([key]) is None
+        finally:
+            unauthorized.cleanup.close()
+        grant = NativeOwnerChannel(
+            a.endpoint, a.epoch, 7, cleanup, lease_s=1.0
+        ).acquire_exact([key])
+        assert grant.rows == (1,) and first.refs == 1
+        cleanup.enqueue(
+            cleanup.create(a.endpoint, a.epoch, grant.reader, grant.sequence)
+        )
+        wait_until(lambda: first.refs == 0)
+    finally:
+        resolver.close()
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ["kv_compatibility_id", "hash_settings", "compatibility", "schema", "hello"],
+)
+def test_resolver_rejects_incompatible_or_inconsistent_members(tcp_members, difference):
+    import msgspec
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.registry import (
+        Domain,
+        Manifest,
+        Resolver,
+    )
+
+    create, _, _, auth, replace = tcp_members
+    owner, member = create()
+    local = replace(member, instance_id="reader")
+    if difference in ("schema", "hello"):
+        owner.describe(
+            msgspec.json.encode(member),
+            msgspec.json.encode(
+                Manifest(
+                    2 if difference == "schema" else 1,
+                    "source",
+                    (replace(member, epoch=77) if difference == "hello" else member,),
+                    1,
+                )
+            ),
+        )
+    else:
+        local = replace(local, **{difference: "incompatible"})
+    resolver = Resolver(
+        Domain(instance_id="reader", seeds=(member.endpoint,), credential=auth), local
+    )
+    try:
+        resolver.refresh()
+        assert resolver.snapshot() is None
+        assert owner.refs == 0
+    finally:
+        resolver.close()
+
+
+def test_resolver_replaces_epoch_without_releasing_the_new_owner_grant(
+    tcp_members, monkeypatch
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import registry
+
+    create, _, cleanup, auth, replace = tcp_members
+    old, member = create()
+    now = [0.0]
+    monkeypatch.setattr(registry, "monotonic", lambda: now[0])
+    resolver = registry.Resolver(
+        registry.Domain(
+            instance_id="reader", seeds=(member.endpoint,), credential=auth
+        ),
+        replace(member, instance_id="reader"),
+    )
+    try:
+        resolver.refresh()
+        assert resolver.snapshot().members == (member,)
+        key = peer_key(b"restart-outstanding")
+        old.publish([key], [1])
+        old_channel = NativeOwnerChannel(
+            member.endpoint, member.epoch, 9, cleanup, lease_s=1.0
+        )
+        outstanding = old_channel.acquire_exact([key])
+        old.close()
+        new, replacement = create(epoch=member.epoch + 1, endpoint=member.endpoint)
+        new.publish([key], [2])
+        now[0] = 2.0
+        resolver.refresh()
+        # The first MEMBERS call consumes the old cached TCP connection's
+        # failure. A refresh inside backoff must retain the last snapshot.
+        assert resolver.snapshot().members == (member,)
+        now[0] = 2.01
+        resolver.refresh()
+        assert resolver.snapshot().members == (member,)
+        now[0] = 2.1
+        resolver.refresh()
+        assert resolver.snapshot().members == (replacement,)
+        current = NativeOwnerChannel(
+            replacement.endpoint, replacement.epoch, 9, cleanup, lease_s=1.0
+        )
+        grant = current.acquire_exact([key])
+        old_channel.release(outstanding)
+        wait_until(lambda: not cleanup.pending)
+        assert new.refs == 1
+        current.cancel_unsubmitted(grant.sequence)
+        assert new.refs == 0
+    finally:
+        resolver.close()
+
+
+@pytest.mark.parametrize(
+    "scheduler_resources", [{"mtp": True}, {"flash": True}], indirect=True
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_dp_identity_agrees_with_rank_suffixed_engine_ids(
+    scheduler_resources, explicit, monkeypatch
+):
+    from copy import deepcopy
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1 import worker
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.registry import Domain
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.worker import (
+        memory_description,
+        validated_members,
+    )
+    from vllm.v1.engine.utils import _apply_dp_identity_suffix
+
+    base, _, _ = scheduler_resources
+    epochs = iter((100, 101))
+    monkeypatch.setattr(worker.secrets, "randbits", lambda bits: next(epochs))
+    members = []
+    for rank in range(2):
+        config = deepcopy(base.config)
+        config.parallel_config.data_parallel_size = 2
+        config.parallel_config.data_parallel_rank = rank
+        config.kv_transfer_config.engine_id = "engine_dp7"
+        _apply_dp_identity_suffix(config, rank)
+        assert config.kv_transfer_config.engine_id == f"engine_dp7_dp{rank}"
+        options = (
+            {}
+            if not explicit
+            else dict(
+                instance_id="deployment_dp7",
+                kv_compatibility_id="weights",
+                control_host="127.0.0.1",
+                control_port=28500,
+            )
+        )
+        members.append(
+            memory_description(config, base.cache, Domain.from_options(options), rank)
+        )
+    assert members[0].endpoint != members[1].endpoint
+    assert members[0].epoch != members[1].epoch
+    assert members[0].compatibility == members[1].compatibility
+    assert members[0].hash_settings == members[1].hash_settings
+    for rank in range(2):
+        agreed = validated_members(members, rank=rank, implicit=not explicit)
+        assert {m.instance_id for m in agreed} == {
+            "deployment_dp7" if explicit else members[0].instance_id
+        }
+        assert {m.restart_group for m in agreed} == {agreed[0].instance_id}
+        assert [m.endpoint for m in agreed] == [m.endpoint for m in members]
+
+
+@pytest.mark.parametrize(
+    ("field", "implicit"),
+    [
+        ("hash_settings", True),
+        ("compatibility", True),
+        ("instance_id", False),
+        ("restart_group", False),
+        ("kv_compatibility_id", True),
+    ],
+)
+def test_dp_identity_agreement_keeps_compatibility_checks(
+    scheduler_resources, field, implicit
+):
+    from copy import deepcopy
+    from dataclasses import replace
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.registry import Domain
+    from vllm.distributed.kv_transfer.kv_connector.v1.peer_l1.worker import (
+        memory_description,
+        validated_members,
+    )
+
+    base, _, _ = scheduler_resources
+    members = []
+    for rank in range(2):
+        config = deepcopy(base.config)
+        config.parallel_config.data_parallel_rank = rank
+        config.kv_transfer_config.engine_id = f"engine_dp{rank}"
+        domain = (
+            Domain()
+            if implicit
+            else Domain(
+                instance_id="explicit",
+                compatibility_id="weights",
+                host="127.0.0.1",
+                port=28500,
+            )
+        )
+        members.append(memory_description(config, base.cache, domain, rank))
+    members[1] = replace(members[1], **{field: "different"})
+    for rank in range(2):
+        with pytest.raises(ValueError):
+            validated_members(members, rank=rank, implicit=implicit)

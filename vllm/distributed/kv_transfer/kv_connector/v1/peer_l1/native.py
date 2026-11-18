@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import os
 import shutil
+import struct
 import subprocess
 from collections.abc import Callable
 from enum import IntEnum
@@ -28,6 +29,7 @@ class Operation(IntEnum):
     SUBSCRIBE = 10
     ACQUIRE_DEFERRED = 11
     ACQUIRE_DEFERRED_LEASED = 12
+    MEMBERS = 13
 
 
 @lru_cache(maxsize=1)
@@ -75,8 +77,9 @@ def library():
     ptr, u64, size = ctypes.c_void_p, ctypes.c_uint64, ctypes.c_size_t
     string, integer = ctypes.c_char_p, ctypes.c_int
     signatures = {
-        "owner_start": [string, u64, u64, u64, u64, integer, u64, u64, ptr, ptr],
+        "owner_start": [string, u64, u64, u64, u64, integer, u64, u64, ptr, ptr, ptr],
         "owner_stop": [ptr],
+        "owner_describe": [ptr, ptr, size, ptr, size],
         "owner_publish": [ptr, ptr, ptr, size],
         "owner_retire": [ptr, ctypes.c_int64, integer],
         "owner_absorb": [ptr, ptr, size, ptr, u64, ptr, size, u64],
@@ -93,8 +96,8 @@ def library():
             )
         },
         "owner_thaw": [ptr, integer],
-        "owner_rpc": [string, u64, u64, u64, u64, ptr, ptr, size, integer],
-        "replica_start": [ptr, ptr, size],
+        "owner_rpc": [string, u64, u64, u64, u64, ptr, ptr, size, integer, ptr],
+        "replica_start": [ptr, ptr, size, ptr],
         "replica_stop": [ptr],
         "replica_generation": [ptr, size],
         "replica_window": [ptr, size],
@@ -102,7 +105,7 @@ def library():
         "cleanup_start": [integer],
         "cleanup_stop": [ptr],
         "cleanup_pending": [ptr],
-        "cleanup_create": [ptr, string, u64, u64, u64, u64, u64, ptr],
+        "cleanup_create": [ptr, string, u64, u64, u64, u64, u64, ptr, ptr],
     }
     lib.l1_owner_error.restype = ctypes.c_char_p
 
@@ -124,6 +127,47 @@ def library():
 
 def key_array(keys: list[bytes]) -> np.ndarray:
     return np.frombuffer(b"".join(keys), dtype=np.uint64).reshape(-1, 4)
+
+
+def credential_array(credential: bytes) -> np.ndarray:
+    if credential and len(credential) != 32:
+        raise ValueError("Peer credential must be a SHA-256 digest")
+    return np.frombuffer(credential or bytes(32), dtype=np.uint64)
+
+
+def description(
+    endpoint: str,
+    epoch: int,
+    *,
+    members: bool = False,
+    credential: bytes = b"",
+    timeout_ms: int = 50,
+) -> bytes:
+    out = np.empty(65536, dtype=np.int64)
+    auth = credential_array(credential)
+    n = library().l1_owner_rpc(
+        endpoint.encode(),
+        Operation.MEMBERS if members else Operation.HELLO,
+        epoch,
+        0,
+        0,
+        0,
+        out.ctypes.data,
+        len(out),
+        timeout_ms,
+        auth.ctypes.data,
+    )
+    if n <= 0 or not 0 <= out[0] <= (n - 1) * 8:
+        raise ConnectionError("Peer description unavailable or unauthorized")
+    return out[1:n].tobytes()[: int(out[0])]
+
+
+def _blob_words(data: bytes) -> np.ndarray:
+    if len(data) > 524280:
+        raise ValueError("Peer description exceeds 512 KiB")
+    return np.frombuffer(
+        struct.pack("<Q", len(data)) + data + bytes(-len(data) % 8), dtype=np.int64
+    )
 
 
 class NativeOwner:
@@ -158,6 +202,7 @@ class NativeOwner:
         lease_ms: int = 1000,
         log_capacity: int = 4096,
         initial_window: int | None = None,
+        credential: bytes = b"",
         clock: Callable[[], float] | None = None,
     ):
         if min(rows, pin_cap, window, lease_ms, log_capacity) <= 0:
@@ -171,6 +216,7 @@ class NativeOwner:
             self._published
         )
         self.published_rows = memoryview(self._published)[:rows].toreadonly()
+        auth = credential_array(credential)
         self._clock = (
             ctypes.CFUNCTYPE(ctypes.c_int64)(lambda: int(clock() * 1_000_000_000))
             if clock is not None
@@ -186,6 +232,7 @@ class NativeOwner:
             log_capacity,
             window if initial_window is None else initial_window,
             ctypes.addressof(self._published_buffer),
+            auth.ctypes.data,
             self._clock,
         )
         self._absorbed = np.empty(rows * 2, dtype=np.int64)
@@ -195,6 +242,12 @@ class NativeOwner:
     @property
     def wake_fd(self) -> int:
         return self._lib.l1_owner_wake_fd(self._handle)
+
+    def describe(self, hello: bytes, members: bytes) -> None:
+        h, m = _blob_words(hello), _blob_words(members)
+        self._lib.l1_owner_describe(
+            self._handle, h.ctypes.data, len(h), m.ctypes.data, len(m)
+        )
 
     @property
     def refs(self) -> int:
@@ -285,15 +338,16 @@ class NativeOwner:
 
 
 class PlacementReplica:
-    def __init__(self, peers: list[tuple[str, int]]):
+    def __init__(self, peers: list[tuple[str, int]], *, credential: bytes = b""):
         self._lib = library()
         self._peers = peers
         endpoints = (ctypes.c_char_p * len(peers))(
             *(endpoint.encode() for endpoint, _ in peers)
         )
         epochs = np.asarray([epoch for _, epoch in peers], dtype=np.uint64)
+        auth = credential_array(credential)
         self._handle = self._lib.l1_replica_start(
-            endpoints, epochs.ctypes.data, len(peers)
+            endpoints, epochs.ctypes.data, len(peers), auth.ctypes.data
         )
 
     def generation(self, peer: int) -> int:
@@ -318,7 +372,9 @@ class PlacementReplica:
 
 
 class CleanupQueue:
-    def __init__(self, timeout_ms: int = 50):
+    def __init__(self, timeout_ms: int = 50, *, credential: bytes = b""):
+        self.credential = credential
+        self._credential = credential_array(credential)
         self._lib = library()
         self._handle = self._lib.l1_cleanup_start(timeout_ms)
 
@@ -333,10 +389,25 @@ class CleanupQueue:
         return self._lib.l1_cleanup_pending(self._handle)
 
     def create(
-        self, endpoint: str, epoch: int, reader: int, seq: int, *, next_node: int = 0
+        self,
+        endpoint: str,
+        epoch: int,
+        reader: int,
+        seq: int,
+        *,
+        next_node: int = 0,
+        lease_ms: int = 0,
     ) -> int:
         return self._lib.l1_cleanup_create(
-            self._handle, endpoint.encode(), 3, epoch, reader, seq, 0, next_node
+            self._handle,
+            endpoint.encode(),
+            3,
+            epoch,
+            reader,
+            seq,
+            lease_ms,
+            next_node,
+            self._credential.ctypes.data,
         )
 
     def enqueue(self, node: int) -> None:

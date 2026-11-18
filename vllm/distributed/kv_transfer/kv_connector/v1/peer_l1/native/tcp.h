@@ -80,15 +80,17 @@ class TcpServer {
     if (r.magic != Request{}.magic || r.n > (1 << 20) ||
         (r.op != Release && r.op != Cancel && r.op != Cleanups &&
          r.op != AcquireExact && r.op != Hello && r.op != AcquireLeased &&
-         r.op != AcquireDeferred && r.op != AcquireDeferredLeased))
+         r.op != AcquireDeferred && r.op != AcquireDeferredLeased &&
+         r.op != Members))
       return false;
-    size_t body_keys = r.op == Hello ? 0 : r.n;
+    size_t body_keys = r.op == Hello || r.op == Members ? 0 : r.n;
     c.keys.resize(body_keys);
     if (!read_part(fd, c.keys.data(), body_keys * sizeof(Key), c.body, budget))
       return false;
     if (c.body < body_keys * sizeof(Key)) return true;
-    auto rows =
-        r.epoch == epoch_ ? handler_(r, c.keys) : std::vector<int64_t>{};
+    auto rows = (r.epoch == epoch_ || (r.op == Members && !r.epoch))
+                    ? handler_(r, c.keys)
+                    : std::vector<int64_t>{};
     Reply reply{epoch_, rows.size()};
     c.response.resize(sizeof(reply) + rows.size() * sizeof(int64_t));
     memcpy(c.response.data(), &reply, sizeof(reply));
