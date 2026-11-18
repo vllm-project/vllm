@@ -6,7 +6,11 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    RoutedScaleMode,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -104,7 +108,7 @@ class BeamSparseMoeBlock(nn.Module):
                 if config.routed_scaling_factor is not None
                 else 1.0
             ),
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,

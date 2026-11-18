@@ -71,8 +71,6 @@ hardware_overrides:
       - "ROCM_AITER_UNIFIED_ATTN"
       - "-cc.pass_config.fuse_rope_kvcache=True"
       - "-cc.use_inductor_graph_partition=True"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--block-size=64"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
@@ -194,7 +192,6 @@ guide: |
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
     -cc.pass_config.fuse_rope_kvcache=True \
     -cc.use_inductor_graph_partition=True \
-    --gpu-memory-utilization 0.95 \
     --block-size 64
   ```
 
