@@ -163,10 +163,35 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
-            // A media host that timed out or failed, and a decoder that failed
-            // on this side, stay server errors, as in Python.
-            Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
+            Self::Media(error) => match error {
+                llm_multimodal::MediaConnectorError::Http(error) => {
+                    // The connector also sends non-HTTP schemes to reqwest.
+                    error.is_builder()
+                        && error.url().is_some_and(|url| !matches!(url.scheme(), "http" | "https"))
+                }
+                // The connector's fault categories also charge unreachable
+                // hosts and unreadable local files to the client. Python
+                // leaves these as server errors and classifies HTTP separately.
+                llm_multimodal::MediaConnectorError::UnresolvableHost { .. }
+                | llm_multimodal::MediaConnectorError::Io(_) => false,
+                _ => error.fault() == llm_multimodal::MediaFault::Client,
+            },
 
+            _ => false,
+        }
+    }
+
+    /// Whether media fetching failed permanently, as opposed to a transient
+    /// host failure or a request rejected before fetching.
+    pub fn is_unprocessable_entity_error(&self) -> bool {
+        match self {
+            Self::Media(llm_multimodal::MediaConnectorError::Http(error)) => {
+                !self.is_request_validation_error()
+                    && (error.status().is_some_and(|status| {
+                        status.is_client_error() && !matches!(status.as_u16(), 408 | 429)
+                    }) || error.is_builder())
+            }
+            Self::MediaAfterPreprocessed { source, .. } => source.is_unprocessable_entity_error(),
             _ => false,
         }
     }
@@ -176,6 +201,8 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::Text(error) => error.param(),
+            Self::MediaAfterPreprocessed { source, .. } => source.param(),
+            _ if self.is_unprocessable_entity_error() => Some("image_url"),
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
             _ => None,
         }

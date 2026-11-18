@@ -63,6 +63,7 @@ bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 prost.workspace = true
+reqwest-0-13.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
