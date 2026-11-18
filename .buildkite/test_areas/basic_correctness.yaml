@@ -29,10 +29,15 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
-  source_file_dependencies: *basic-correctness-deps
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/basic_correctness/
+  - tests/device_allocator/test_weight_snapshot.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/cumem
+  - pytest -v -s device_allocator/test_weight_snapshot.py
   mirror:
     amd:
       automatic_shard: true
