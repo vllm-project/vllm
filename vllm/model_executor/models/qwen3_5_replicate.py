@@ -15,13 +15,26 @@ def setup_replicated_ffn(config: Any, parallel_config: Any) -> None:
         raise NotImplementedError(
             "VLLM_QWEN3_5_REPLICATE_FFN applies to dense Qwen3.5 models only."
         )
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        or parallel_config.prefill_context_parallel_size > 1
-    ):
-        # Context parallelism turns the TP-synced autotune off.
+    # The layouts where tp_synced_autotune.configure() turns syncing off: ranks
+    # would tune the replicated MLP each on their own.
+    unsynced = [
+        name
+        for name, active in (
+            ("expert parallelism", parallel_config.enable_expert_parallel),
+            ("sequence-parallel MoE", parallel_config.use_sequence_parallel_moe),
+            (
+                "context parallelism",
+                parallel_config.decode_context_parallel_size > 1
+                or parallel_config.prefill_context_parallel_size > 1,
+            ),
+        )
+        if active
+    ]
+    if unsynced:
         raise NotImplementedError(
-            "VLLM_QWEN3_5_REPLICATE_FFN is not supported with context parallelism."
+            "VLLM_QWEN3_5_REPLICATE_FFN is not supported with "
+            + ", ".join(unsynced)
+            + "."
         )
     # Nothing re-syncs ranks after a replicated MLP: autotune must agree.
     from vllm.triton_utils.tp_synced_autotune import install
