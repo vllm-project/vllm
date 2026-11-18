@@ -7,6 +7,8 @@ Routes based on the activation shape:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_M:  dense GEMM on a cached dequantized copy, when
       `KernelConfig.rdna_hybrid_w4a16_prefill_dequant` is "enable"
+  M >= GFX12_DEQUANT_GEMM_MIN_M on gfx12: dequantize into a temporary dense
+      [N, K] weight, then the same dense GEMM
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
@@ -102,6 +104,15 @@ MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
 # The dense copy reads 4x the weight bytes of int4, so it only pays off once
 # the GEMM is compute bound.
 MIN_DENSE_M = 256
+# On gfx12 the Triton GEMM runs prefill well below the dense GEMM rate. From
+# this many rows up, dequantize into a temporary dense [N, K] weight and run the
+# dense GEMM on it, as the cached copy above does without keeping the copy.
+# Swept on gfx1201 (group_size=128; Qwen3-30B-A3B, Qwen3-14B and gemma-3-12b
+# bf16, Llama-3.1-8B fp16, all linear layers, M = 512..8192): faster than the
+# Triton GEMM for every shape from M=1792 (10-30%). Below that some shapes lose:
+# by up to 28% (Qwen3-14B qkv/o, M <= 1536) and up to 41% (Qwen3-14B down_proj,
+# M=512).
+GFX12_DEQUANT_GEMM_MIN_M = 1792
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +731,120 @@ def pack_scale_zp_carrier(scales: torch.Tensor, zp: torch.Tensor) -> torch.Tenso
     return ((hi << 16) | lo).contiguous()
 
 
+@triton.jit
+def _dequant_skinny_kernel(
+    b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
+    scales_ptr,  # [N, K//G]  fp16/bf16 scales
+    zp_ptr,  # [N//8, K//G]  int32 zero-points (when HAS_ZP=True)
+    out_ptr,  # [N, K]  fp16/bf16 dense weight
+    N,
+    K,
+    stride_bn,
+    stride_sn,
+    ZP_BIAS: tl.constexpr,
+    HAS_ZP: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    K_TILES: tl.constexpr,
+):
+    """Dequantize BLOCK_N rows of the skinny-format weight over K_TILES
+    consecutive BLOCK_K tiles into a dense [N, K] weight. BLOCK_K spans
+    BLOCK_K // GROUP_SIZE whole groups, so each row is read and written in long
+    runs. Bitwise equal to dequantize_w4a16 and, for AutoAWQ checkpoints, to
+    the transpose of awq_dequantize_triton."""
+    GROUPS_PER_TILE: tl.constexpr = BLOCK_K // GROUP_SIZE
+    pid_n = tl.program_id(0)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_n = offs_n < N
+    # ExLlama unshuffle shifts: [0, 16, 4, 20, 8, 24, 12, 28] per int32.
+    exllama_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16
+    shifts_1d = tl.reshape(
+        tl.broadcast_to(exllama_shifts_row[None, :], (BLOCK_K // 8, 8)),
+        (BLOCK_K,),
+    )
+    for t in range(K_TILES):
+        k_tile = tl.program_id(1) * K_TILES + t
+        offs_k8 = k_tile * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
+        b_packed = tl.load(
+            b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :],
+            mask=mask_n[:, None],
+            other=0,
+        )
+        b = tl.interleave(b_packed, b_packed)
+        b = tl.interleave(b, b)
+        b = tl.interleave(b, b)
+        b = (b >> shifts_1d[None, :]) & 0xF
+
+        group_idx = k_tile * GROUPS_PER_TILE + tl.arange(0, GROUPS_PER_TILE)
+        scales = tl.load(
+            scales_ptr + offs_n[:, None] * stride_sn + group_idx[None, :],
+            mask=mask_n[:, None],
+        )
+        q = tl.reshape(b, (BLOCK_N, GROUPS_PER_TILE, GROUP_SIZE))
+        if HAS_ZP:
+            zp_word = tl.load(
+                zp_ptr + (offs_n // 8)[:, None] * stride_sn + group_idx[None, :],
+                mask=mask_n[:, None],
+                other=0,
+            )
+            q = q - ((zp_word >> (4 * (offs_n % 8))[:, None]) & 0xF)[:, :, None]
+        else:
+            q = q - ZP_BIAS
+        # A 5-bit integer times an fp16/bf16 scale is exact in fp32, so this
+        # rounds once, to nearest even, like torch and awq_dequantize_triton.
+        # The bf16 product in Triton rounds differently.
+        w = (q.to(tl.float32) * scales.to(tl.float32)[:, :, None]).to(scales.dtype)
+
+        offs_k = k_tile * BLOCK_K + tl.arange(0, BLOCK_K)
+        tl.store(
+            out_ptr + offs_n[:, None] * K + offs_k[None, :],
+            tl.reshape(w, (BLOCK_N, BLOCK_K)),
+            mask=mask_n[:, None],
+        )
+
+
+def dequantize_skinny_w4a16(
+    w_q: torch.Tensor,  # [N, K//2] int8 view of the skinny weight
+    w_s: torch.Tensor,  # [N, K//G] fp16/bf16
+    w_zp: torch.Tensor | None,  # [N//8, K//G] int32
+    group_size: int,
+    zp_bias: int = 8,
+) -> torch.Tensor:
+    """Dequantize the skinny-format weight into a new dense [N, K] tensor."""
+    b_q = w_q.view(torch.int32)
+    N, K8 = b_q.shape
+    K = K8 * 8
+    out = torch.empty((N, K), dtype=w_s.dtype, device=w_q.device)
+    # 32 rows x 2 x 512 K per program, swept on gfx1201 over Qwen3-30B-A3B and
+    # Llama-3.1-8B AWQ shapes: 0.9-1.4x the time of awq_dequantize_triton.
+    # K is a multiple of group_size, so the last candidate always fits.
+    block_k = next(
+        bk for bk in (512, 256, 128, group_size) if bk % group_size == 0 and K % bk == 0
+    )
+    k_tiles = K // block_k
+    tiles_per_program = 2 if k_tiles % 2 == 0 else 1
+    grid = (triton.cdiv(N, 32), k_tiles // tiles_per_program)
+    _dequant_skinny_kernel[grid](
+        b_q,
+        w_s,
+        w_zp if w_zp is not None else w_s,  # dummy pointer when no zp (unused)
+        out,
+        N,
+        K,
+        b_q.stride(0),
+        w_s.stride(0),
+        ZP_BIAS=zp_bias,
+        HAS_ZP=w_zp is not None,
+        GROUP_SIZE=group_size,
+        BLOCK_N=32,
+        BLOCK_K=block_k,
+        K_TILES=tiles_per_program,
+        num_warps=4,
+    )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
@@ -784,6 +909,11 @@ def _rdna_hybrid_w4a16_apply_impl(
     if w_dequant is not None and M >= MIN_DENSE_M:
         with _profile_scope(f"hybrid_dequant_w4a16 {M}x{N}x{K}"):
             return rocm_unquantized_gemm_impl(x_2d, w_dequant, bias)
+
+    if M >= GFX12_DEQUANT_GEMM_MIN_M and _on_gfx12x():
+        with _profile_scope(f"hybrid_dequant_gemm_w4a16 {M}x{N}x{K}"):
+            w_dense = dequantize_skinny_w4a16(w_q, w_s, w_zp, group_size)
+            return rocm_unquantized_gemm_impl(x_2d, w_dense, bias)
 
     with _profile_scope(f"hybrid_triton_w4a16 {M}x{N}x{K}"):
         output = triton_w4a16_skinny_fmt_gemm(

@@ -35,6 +35,8 @@ MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
 MIN_DENSE_M = hybrid_module.MIN_DENSE_M
+GFX12_DEQUANT_GEMM_MIN_M = hybrid_module.GFX12_DEQUANT_GEMM_MIN_M
+dequantize_skinny_w4a16 = hybrid_module.dequantize_skinny_w4a16
 triton_w4a16_skinny_fmt_gemm = hybrid_module.triton_w4a16_skinny_fmt_gemm
 _select_skinny_gfx1151_config = hybrid_module._select_skinny_gfx1151_config
 
@@ -105,7 +107,16 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 8, 9, 64, MIN_DENSE_M],
+    [
+        1,
+        MAX_SKINNY_BATCH_SIZE,
+        MAX_SKINNY_BATCH_SIZE + 1,
+        8,
+        9,
+        64,
+        MIN_DENSE_M,
+        GFX12_DEQUANT_GEMM_MIN_M,
+    ],
     ids=[
         "M=1_decode",
         "M=5_decode",
@@ -114,6 +125,7 @@ def _rdna_hybrid_w4a16_reference(
         "M=9_prefill",
         "M=64_prefill",
         "M=256_dense",
+        f"M={GFX12_DEQUANT_GEMM_MIN_M}_dequant_gemm",
     ],
 )
 @pytest.mark.parametrize("use_dequant", [False, True])
@@ -267,6 +279,112 @@ def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypat
     )
 
     assert called == [expected_path]
+
+
+@pytest.mark.parametrize(
+    "M,gfx12,has_dense,expected_path",
+    [
+        (GFX12_DEQUANT_GEMM_MIN_M - 1, True, False, "triton"),
+        (GFX12_DEQUANT_GEMM_MIN_M, True, False, "dequant+dense"),
+        (GFX12_DEQUANT_GEMM_MIN_M, False, False, "triton"),
+        (GFX12_DEQUANT_GEMM_MIN_M, True, True, "dense"),
+    ],
+    ids=["below_threshold", "at_threshold", "not_gfx12", "cached_copy_first"],
+)
+def test_rdna_hybrid_w4a16_dequant_gemm_dispatch(
+    M, gfx12, has_dense, expected_path, monkeypatch
+):
+    """Prefill-sized batches on gfx12 dequantize into a temporary dense weight
+    for the dense GEMM; a cached dense copy, when enabled, takes precedence."""
+    N, K, G = 16, 1024, 128
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    w_dequant = torch.empty((N, K), dtype=torch.float16) if has_dense else None
+    called = []
+
+    def fake(path, out_shape):
+        def record(*args, **kwargs):
+            called.append(path)
+            return torch.empty(out_shape, dtype=x_mk.dtype)
+
+        return record
+
+    monkeypatch.setattr(
+        hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake("triton", (M, N))
+    )
+    monkeypatch.setattr(
+        hybrid_module, "rocm_unquantized_gemm_impl", fake("dense", (M, N))
+    )
+    monkeypatch.setattr(
+        hybrid_module, "dequantize_skinny_w4a16", fake("dequant", (N, K))
+    )
+    monkeypatch.setattr(hybrid_module, "_on_gfx12x", lambda: gfx12)
+
+    hybrid_module._rdna_hybrid_w4a16_apply_impl(
+        x_mk, w_q, scales, None, None, 40, G, w_dequant
+    )
+
+    assert "+".join(called) == expected_path
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("has_zp", [False, True])
+# K=768 takes 256-wide K tiles, K=1024 512-wide, K=1152 128-wide and one tile
+# per program; N=520 leaves a partial row tile.
+@pytest.mark.parametrize("N,K", [(520, 768), (256, 1024), (64, 1152)])
+def test_dequantize_skinny_w4a16_is_bitwise_dequantize_w4a16(
+    dtype, group_size, has_zp, N, K
+):
+    """The on-the-fly dequant kernel writes exactly the weight that
+    dequantize_w4a16 builds."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    set_random_seed(0)
+    _, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
+        1, K, N, group_size, dtype, has_zp
+    )
+    out = dequantize_skinny_w4a16(b_q.view(torch.int8), scales, zp_packed, group_size)
+    ref = dequantize_w4a16(w_int4, scales, zp_raw, group_size, 8, dtype)
+    assert out.shape == (N, K) and out.is_contiguous()
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_dequantize_skinny_w4a16_is_bitwise_legacy_awq_dequant(dtype):
+    """For an AutoAWQ checkpoint the dense weight equals the (transposed)
+    output of the legacy awq_dequantize_triton bit for bit."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    from vllm.model_executor.layers.quantization.awq_triton import (
+        awq_dequantize_triton,
+    )
+
+    set_random_seed(0)
+    K, N, G = 1024, 512, 128
+    q_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    z_kn = torch.randint(0, 16, (K // G, N), device=device, dtype=torch.int32)
+    scales_kn = (0.05 * torch.rand((K // G, N), device=device)).to(dtype)
+
+    def awq_pack(v):  # AutoAWQ packs column 8c + order[j] into nibble j
+        order = [0, 2, 4, 6, 1, 3, 5, 7]
+        v = v.view(v.shape[0], -1, 8)
+        packed = torch.zeros(v.shape[:2], device=device, dtype=torch.int32)
+        for j in range(8):
+            packed |= v[:, :, order[j]] << (4 * j)
+        return packed
+
+    legacy = awq_dequantize_triton(awq_pack(q_kn), scales_kn, awq_pack(z_kn))
+    out = dequantize_skinny_w4a16(
+        pack_int4_exllama_shuffle(q_kn.t().contiguous()).view(torch.int8),
+        scales_kn.t().contiguous(),
+        _pack_zp_rows_for_kernel(z_kn.t().contiguous()),
+        G,
+    )
+    torch.testing.assert_close(out, legacy.t(), rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------
