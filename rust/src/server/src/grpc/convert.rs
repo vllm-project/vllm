@@ -162,17 +162,12 @@ fn build_sampling_params(
     stopping: Option<&pb::StoppingCriteria>,
     response: Option<&pb::ResponseOptions>,
 ) -> Result<SamplingParams, Status> {
-    // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
-    // the gRPC API when the caller does not specify a value. This differs from
-    // the HTTP/OpenAI API (which defaults to 1.0) and matches the convention of
-    // programmatic generation APIs.
-    let temperature = temperature.or(Some(0.0));
+    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     let mut params = SamplingParams {
         temperature,
         ..SamplingParams::default()
     };
 
-    // Preserve explicit values; omitted fields inherit model defaults during lowering.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -905,13 +900,6 @@ mod tests {
             hints.actions[0].payload.get("source"),
             Some(&serde_json::json!("g2"))
         );
-    }
-
-    #[test]
-    fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &served()).expect("convert ok");
-        // The gRPC API defaults to greedy (0.0) when temperature is not specified.
-        assert_eq!(text.sampling_params.temperature, Some(0.0));
     }
 
     #[test]
