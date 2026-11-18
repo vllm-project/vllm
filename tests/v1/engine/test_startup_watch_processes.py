@@ -4,7 +4,7 @@
 import os
 from contextlib import nullcontext
 from multiprocessing import connection
-from threading import Event, Lock
+from threading import Event
 from types import SimpleNamespace
 
 import msgspec
@@ -183,7 +183,6 @@ def test_engine_core_process_shutdown_timeout(
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
-    manager._reap_lock = Lock()
     manager.processes = [object()]
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))

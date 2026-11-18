@@ -239,12 +239,20 @@ def _configure_uniproc_startup_threads(
         yield
 
 
-def _stop_and_shutdown(
-    procs: list[BaseProcess], stopped: threading.Event, reap_lock: threading.Lock
-) -> None:
-    with reap_lock:
-        stopped.set()
-    shutdown(procs)
+def _exited_cleanly(proc: BaseProcess) -> bool:
+    """Whether `proc` exited with status 0, without reaping it.
+
+    Reading `proc.exitcode` would reap the child, racing `shutdown()`'s join;
+    `WNOWAIT` leaves `shutdown()` as the only reaper. The engine is a direct
+    child under both start methods `get_mp_context()` uses (fork and spawn).
+    """
+    if not hasattr(os, "waitid"):  # macOS before Python 3.13
+        return proc.exitcode == 0
+    try:
+        info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+    except ChildProcessError:  # already reaped by shutdown()
+        return True
+    return info is not None and info.si_code == os.CLD_EXITED and info.si_status == 0
 
 
 class CoreEngineProcManager:
@@ -300,17 +308,8 @@ class CoreEngineProcManager:
                 )
             )
 
+        self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
-        # Held while the liveness monitor reaps a process and while shutdown
-        # stops it, so a process is never reaped by both.
-        self._reap_lock = threading.Lock()
-        self._finalizer = weakref.finalize(
-            self,
-            _stop_and_shutdown,
-            self.processes,
-            self.manager_stopped,
-            self._reap_lock,
-        )
         self.failed_proc_name: str | None = None
         self._coord_store: object | None = None
 
@@ -357,8 +356,7 @@ class CoreEngineProcManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
-        with self._reap_lock:
-            self.manager_stopped.set()
+        self.manager_stopped.set()
         if self._finalizer.detach() is not None:
             process_timeout = get_engine_process_shutdown_timeout(
                 self._request_shutdown_timeout, timeout
@@ -379,13 +377,10 @@ class CoreEngineProcManager:
         while sentinels and not self.manager_stopped.is_set():
             died_sentinels = connection.wait(sentinels, timeout=1)
 
-            with self._reap_lock:
-                if self.manager_stopped.is_set():
-                    break
-                for sentinel in died_sentinels:
-                    proc = sentinel_to_proc.pop(cast(int, sentinel))
-                    if proc.exitcode != 0:
-                        self.failed_proc_name = proc.name
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                if not self.manager_stopped.is_set() and not _exited_cleanly(proc):
+                    self.failed_proc_name = proc.name
             if died_sentinels:
                 break
 
