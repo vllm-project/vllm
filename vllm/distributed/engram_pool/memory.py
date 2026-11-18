@@ -23,18 +23,15 @@ _MPOL_PREFERRED = 1
 
 
 def gpu_numa_node(device: int | None = None) -> int:
-    """The NUMA node of a GPU's PCI device (current by default), or -1."""
+    """The host NUMA node nearest a GPU (current by default), or -1."""
+    from cuda.bindings import driver as cu
+
     if device is None:
         device = torch.accelerator.current_device_index()
-    props = torch.cuda.get_device_properties(device)
-    bdf = (
-        f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
+    error, node = cu.cuDeviceGetAttribute(
+        cu.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device
     )
-    try:
-        with open(f"/sys/bus/pci/devices/{bdf}/numa_node") as f:
-            return int(f.read())
-    except OSError:
-        return -1
+    return node if error == cu.CUresult.CUDA_SUCCESS else -1
 
 
 def _prefer_numa_node(address: int, num_bytes: int, node: int) -> None:
