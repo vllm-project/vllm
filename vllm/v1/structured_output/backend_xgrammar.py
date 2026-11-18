@@ -53,7 +53,6 @@ class XgrammarBackend(StructuredOutputBackend):
 
             # not self.tokenizer.vocab_size as self.tokenizer.vocab
             # collapses all decoded errors into a single token.
-            self.vocab_size = len(self.tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
                 encoded_vocab=self.tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43
@@ -194,9 +193,6 @@ class XgrammarBackend(StructuredOutputBackend):
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
-
-    def allocate_token_bitmask(self, max_num_seqs: int):
-        return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
 
     def destroy(self):
         del self.compiler
