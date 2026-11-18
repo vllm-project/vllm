@@ -99,12 +99,7 @@ class PoolingIOProcessor:
             )
 
             mm_config = self.model_config.multimodal_config
-            tok_params = request.build_tok_params(
-                self.model_config,
-                # chat: `None` -> `False`, mirroring the online chat default
-                # and the offline chat path.
-                default_add_special_tokens=False,
-            )
+            tok_params = request.build_tok_params(self.model_config)
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
@@ -201,7 +196,6 @@ class PoolingIOProcessor:
             for prompt in prompts_seq
         ]
         tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
-
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
             pooling_params = PoolingParams()

@@ -157,13 +157,37 @@ class OfflineInputsContext:
     late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
     # Tri-state: `None` means "not specified" and falls back to the per-path default
+    add_generation_prompt: bool | None = None
+    continue_final_message: bool | None = None
     add_special_tokens: bool | None = None
+
+    chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+
+    mm_processor_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.continue_final_message and self.add_generation_prompt:
+            raise VLLMValidationError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True.",
+            )
+
+    def build_prompt_extras(self) -> dict[str, Any] | None:
+        """Pack the renderer-side `prompt_extras` payload."""
+        extras: dict[str, Any] = {}
+        if self.mm_processor_kwargs is not None:
+            extras["mm_processor_kwargs"] = self.mm_processor_kwargs
+        if self.cache_salt is not None:
+            extras["cache_salt"] = self.cache_salt
+        return extras or None
 
     def build_tok_params(
         self,
         default_tok_params: TokenizeParams,
     ) -> TokenizeParams:
-        """Build tokenize params for offline encode inputs."""
         # User-provided `tokenization_kwargs` still wins over the default.
         tok_kwargs: dict[str, Any] = {}
         if self.add_special_tokens is not None:
@@ -172,6 +196,27 @@ class OfflineInputsContext:
         if not tok_kwargs:
             return default_tok_params
         return default_tok_params.with_kwargs(**tok_kwargs)
+
+    def to_encode_context(
+        self,
+        *,
+        prompts: Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None,
+    ) -> "OfflineEncodeInputsContext":
+        return OfflineEncodeInputsContext(
+            prompts=prompts,
+            pooling_params=pooling_params,
+            pooling_task=self.pooling_task,
+            tokenization_kwargs=self.tokenization_kwargs,
+            lora_request=self.lora_request,
+            priorities=self.priorities,
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            add_special_tokens=self.add_special_tokens,
+            chat_template=self.chat_template,
+            chat_template_kwargs=self.chat_template_kwargs,
+            chat_template_content_format=self.chat_template_content_format,
+        )
 
 
 @dataclass(slots=True)
@@ -183,9 +228,21 @@ class OfflineEncodeInputsContext(OfflineInputsContext):
 @dataclass(slots=True)
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
-    chat_template: str | None
     pooling_params: PoolingParams
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+
+    def to_encode_context(
+        self,
+        *,
+        prompts: Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+    ) -> "OfflineEncodeInputsContext":
+        return OfflineInputsContext.to_encode_context(
+            self,
+            prompts=prompts,
+            pooling_params=(
+                self.pooling_params if pooling_params is None else pooling_params
+            ),
+        )
 
 
 @dataclass(slots=True)
@@ -235,6 +292,7 @@ class ScoringRenderParams(RenderParams):
     data_2: ScoreData
     chat_template: str | None
     chat_template_content_format: ChatTemplateContentFormatOption
+    chat_template_kwargs: NotRequired[dict[str, Any] | None]
     max_tokens_per_query: int
     max_tokens_per_doc: int
 
