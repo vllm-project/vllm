@@ -376,7 +376,7 @@ def _remap_compact_topk(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class _Layer:
     """One indexer layer's inputs and outputs for this step."""
 

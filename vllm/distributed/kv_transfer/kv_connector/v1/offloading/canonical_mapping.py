@@ -43,7 +43,7 @@ def canonical_format_id(kv_cache_layout: str) -> str:
     return f"v{CANONICAL_FORMAT_VERSION}-{family}"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _RankContext:
     """Sharding parameters of one worker rank within the offload group."""
 
@@ -68,7 +68,7 @@ class _RankContext:
         return pcp_rank * self.dcp_size + self.tp_rank % self.dcp_size
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ByteRegion:
     """A byte region within a page that repeats once per token."""
 

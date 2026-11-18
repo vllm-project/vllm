@@ -775,6 +775,81 @@ async fn generate_propagates_unexpected_close_errors() {
     llm.shutdown().await.unwrap();
 }
 
+/// When the engine reports that it does not compute prompt logprobs (under
+/// `--kv-sharing-fast-prefill`), requests asking for them fail before
+/// submission, including `prompt_logprobs=0`; other requests still reach the
+/// engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_logprobs_rejected_when_engine_lacks_them() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-fast-prefill".to_vec(),
+        EngineCoreReadyResponse {
+            supports_prompt_logprobs: false,
+            ..default_ready_response()
+        },
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.external_req_id.as_deref(), Some("req-plain"));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![1],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+
+    let mut prompt_logprobs = sample_generate_request("req-prompt-logprobs", 1);
+    prompt_logprobs.sampling_params.prompt_logprobs = Some(0);
+    let mut prompt_logprob_token_ids = sample_generate_request("req-prompt-token-ids", 1);
+    prompt_logprob_token_ids.sampling_params.prompt_logprob_token_ids =
+        Some(WireNdArray::from_i32(vec![1, 1], vec![7]).unwrap());
+    for (request, expected) in [
+        (prompt_logprobs, "prompt_logprobs"),
+        (prompt_logprob_token_ids, "prompt_logprob_token_ids"),
+    ] {
+        let error = llm.generate(request).await.map(|_| ()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::PromptLogprobsUnsupported { parameter } if parameter == expected
+            ),
+            "{error:?}"
+        );
+    }
+
+    let output = llm
+        .generate(sample_generate_request("req-plain", 1))
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_a_live_generate_stream_triggers_abort() {
     let ipc = IpcNamespace::new().unwrap();

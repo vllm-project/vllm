@@ -86,7 +86,7 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
 

@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-05
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -202,6 +202,8 @@ compatible_strategies:
 kv_offload_support:
   offloading_cpu: verified
   offloading_fs: verified
+  # MI355X, attention DP2: the mi355x_agentx_dp2_umbp preset.
+  umbp: verified
 
 strategy_hardware:
   # Single GPU; only TP1 is measured.
@@ -404,7 +406,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP4 for concurrency 4 to 24 with capped decode batches (max-num-active-seqs), prefill admitted on an interval, FlashInfer sparse MLA (FlashMLA at 16) and THP-backed Engram host tables."
     source: { label: "InferenceX #4786", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4786", key: "dsv41flash-fp4-b200-vllm-agentic-dspark", revision: becc63b53 }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:d2a073f6b4da63907c8374313f66407798035649cc4b574287df6d20050753c6"
@@ -514,7 +515,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "DEP4 at concurrency 66 and DEP8 at 224 to 576: DeepGEMM MegaMoE, FlashMLA MegaAttention, GPU-resident Engram tables shared across DP ranks, and per-point prefill budgets and KV pools, behind a consistent-hash vLLM Router."
     source: { label: "InferenceX #4786", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4786", key: "dsv41flash-fp4-b200-vllm-agentic-dspark", revision: becc63b53 }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:d2a073f6b4da63907c8374313f66407798035649cc4b574287df6d20050753c6"
@@ -660,7 +660,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP4 for concurrency 4 to 16 with capped decode batches (max-num-active-seqs), prefill admitted on an interval, FlashInfer sparse MLA and THP-backed Engram host tables."
     source: { label: "InferenceX #4783", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4783", key: "dsv41flash-fp4-gb200-vllm-agentic-dspark", revision: 2610b3f }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:ab9450628edc1909b5f242be837822e09a2eb9bdd25fea169f69871a59fa6424"
@@ -747,7 +746,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "DEP4 (TP1 x DP4 + EP4) for concurrency 64 to 256: DeepGEMM MegaMoE, FlashMLA MegaAttention, deep_select indexer top-k, Engram host tables shared across DP ranks, and per-point prefill budgets and KV pools, behind a consistent-hash vLLM Router."
     source: { label: "InferenceX #4783", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4783", key: "dsv41flash-fp4-gb200-vllm-agentic-dspark", revision: 2610b3f }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:ab9450628edc1909b5f242be837822e09a2eb9bdd25fea169f69871a59fa6424"
@@ -1280,6 +1278,133 @@ presets:
       admission and may queue additional sessions. No independent accuracy
       evaluation was performed at every concurrency or on the 1017 checkpoint.
 
+  mi300x_agentx:
+    label: "AgentX TP8 / TP4"
+    hardware: mi300x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 with resident Engram tables and TP4 with host Engram; six concurrency points per topology."
+    source: { label: "InferenceX #5058", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5058", key: "dsv41flash-fp4-mi300x-vllm-agentic-dspark", revision: 3df6aeb375cc662c8613f77b9b4e22dadc5b4032 }
+    image: "vllm/vllm-openai-rocm:nightly-rocm100-f5d93296c8ec82b7e7dabdb308d24d43cb1907bf@sha256:1b1b0c7c62d8ba3503d4f2e448795ed00e261bc73ad681f6811c3690613c7084"
+    select:
+      frontend: rust
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, encoder_parallel: false }
+      dcp: 1
+      kv_offload: off
+    args:
+      - "--served-model-name"
+      - "deepseek-ai/DeepSeek-V4.1-Flash"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-cudagraph-capture-size"
+      - "1024"
+      - "--disable-uvicorn-access-log"
+    env:
+      OMP_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    json_args:
+      "--speculative-config":
+        num_speculative_tokens: 5
+        draft_sample_method: probabilistic
+        rejection_sample_method: block
+        enable_adaptive_verification: false
+      "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
+    points:
+      tp8_c1:
+        label: "1 (TP8)"
+        concurrency: 1
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c2:
+        label: "2 (TP8)"
+        concurrency: 2
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c4:
+        label: "4 (TP8)"
+        concurrency: 4
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c8:
+        label: "8 (TP8)"
+        concurrency: 8
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c16:
+        label: "16 (TP8)"
+        concurrency: 16
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c32:
+        label: "32 (TP8)"
+        concurrency: 32
+        tp: 8
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp4_c1:
+        label: "1 (TP4)"
+        concurrency: 1
+        tp: 4
+      tp4_c2:
+        label: "2 (TP4)"
+        concurrency: 2
+        tp: 4
+      tp4_c4:
+        label: "4 (TP4)"
+        concurrency: 4
+        default: true
+        tp: 4
+      tp4_c8:
+        label: "8 (TP4)"
+        concurrency: 8
+        tp: 4
+      tp4_c16:
+        label: "16 (TP4)"
+        concurrency: 16
+        tp: 4
+      tp4_c32:
+        label: "32 (TP4)"
+        concurrency: 32
+        tp: 4
+    runbook: |
+      These points serve the 0909 launch checkpoint with five-token DSpark and
+      real block verification. TP8 keeps Engram in HBM; TP4 offloads it to host
+      memory. Decode uses full graphs and prefill runs eagerly. There is no TP2
+      lane, and no monokernel point: its weight copies leave about 2.7 GiB a
+      rank on this 192 GB part.
+
+      Decoder SWA bounded replay keeps vLLM's enabled default. The pinned image
+      carries [vLLM #65249](https://github.com/vllm-project/vllm/pull/65249),
+      which turns on prefix-cache SWA replay on CDNA3, so the sliding-window
+      cache no longer takes part in prefix caching. The lane's earlier v0.33.0
+      image predates #65249 and ran with `--no-swa-bounded-replay`; keep that
+      flag if you serve these points on such an image. There decoder replay
+      trims the sliding-window layers while their cache still takes part in
+      prefix caching, so a later prefix hit can read window KV that was never
+      written. Adaptive verification stays disabled, as in the measured lane.
+
+      [Run 43350013915](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43350013915)
+      passed all 12 performance points and the TP8 c32 GSM8K evaluation at
+      `3df6aeb375cc`, with 97.65% strict exact match over 1,319 samples.
+
+      InferenceX throughput measurement separately substitutes synthetic
+      acceptance length 3.51 from its committed DSpark thinking-on curve.
+      This control is excluded from the preset's serving and accuracy commands;
+      the generic Bench action is not an AgentX trace replay. Concurrency labels
+      identify the measured workload, while the generated sequence cap controls
+      admission and may queue additional sessions. No independent accuracy
+      evaluation was performed at every concurrency or on the 1017 checkpoint.
+
   mi355x_agentx:
     label: "AgentX TP2"
     hardware: mi355x
@@ -1409,7 +1534,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "The lane's engine settings in a 1P1D layout: one tray of DEP4 prefill (the lane runs several DEP2 prefill engines behind Dynamo) and four trays of DEP16 decode, with MegaMoE, MegaAttention and Engram offload; KV moves over the NVLink fabric."
     source: { label: "InferenceX #3941", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3941", key: "dsv41flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg", revision: f516173 }
     args:
@@ -1503,6 +1627,87 @@ presets:
       scored 0.972 exact match (strict) over 1319 questions. Throughput runs use
       DSpark's synthetic golden acceptance length (3.51); the preset keeps real block
       rejection for ordinary serving and accuracy evaluation.
+
+  mi355x_agentx_dp2_umbp:
+    label: "AgentX DP2"
+    hardware: mi355x
+    strategy: single_node_dep
+    # Same checkpoint note as mi355x_agentx: the lane served the 0909 launch
+    # checkpoint, and 1017 shares its format and memory layout.
+    variants: [fp8, default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Two GPUs per server with attention DP2 and the MoE tensor-parallel across both ranks (no expert parallelism), behind a consistent-hash vLLM Router, at concurrency 128 to 384. At 256 and 384 UMBP offloads KV cache to a node-local host-DRAM pool shared by both ranks; 128 runs without offloading. Per-tensor fp8 KV cache, prefill cadence 11 and Engram tables in host memory."
+    source: { label: "InferenceX #5036", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5036", key: "dsv41flash-fp4-mi355x-vllm-agentic-dspark-umbp", revision: 3a4e0673e96ab2e37ab246963c9ff55b8ce32f41 }
+    # Carries vllm-project/vllm#64715 (UMBP standalone for DeepSeek-V4.1-Flash)
+    # and #66036 (per-tensor fp8_e4m3 KV for the ROCm sparse MLA).
+    image: "vllm/vllm-openai-rocm:nightly-be47189f37f6162991366ff6b91539f6e9d1f432@sha256:a6263de19d7e68fc12d7ee37da0cc0d2817b8eb9a83c4f22911783befd133ebc"
+    select:
+      frontend: rust
+      features: { spec_decoding: true, text_only: true, encoder_parallel: false }
+      kv_offload: umbp
+    # The MI355X kernels the TP rows get from strategy_overrides.single_node_tp
+    # (MXFP4 indexer, block size 128, AITER sparse MLA) are restated here: DEP
+    # does not inherit them. --monokernel stays off, since mono decode rejects DP.
+    args:
+      - "--data-parallel-size"
+      - "2"
+      - "--engram-config"
+      - '{"cpu_offload":true}'
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+      - "--block-size"
+      - "128"
+      - "--kv-cache-dtype"
+      - "fp8_e4m3"
+      - "--prefill-schedule-interval"
+      - "11"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-cudagraph-capture-size"
+      - "1024"
+    # Attention DP with the experts tensor-parallel across the two ranks.
+    remove_args:
+      - "--enable-expert-parallel"
+    env:
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
+      OMP_NUM_THREADS: "1"
+    points:
+      # The GPU KV cache holds the working set at 128, where UMBP did not help.
+      dp2_c128:
+        label: "128 (no offload)"
+        concurrency: 128
+        select:
+          kv_offload: off
+      dp2_c256:
+        label: "256"
+        concurrency: 256
+        default: true
+      dp2_c384:
+        label: "384"
+        concurrency: 384
+    runbook: |
+      Each server takes two GPUs, so an 8-GPU node holds four. The UMBP Server
+      on the KV Offload row runs once per node and every server on the node
+      attaches to it; its pool is shared, with no per-engine quota. InferenceX
+      sizes the pool at 449 GB for one two-GPU server (0.60 of that server's
+      share of host DRAM), on 4 KiB pages.
+
+      UMBP pays off once the working set outgrows GPU KV. In local agentx-fast
+      replays (1200 s, single runs) of this configuration on the default
+      `fp8_ds_mla` KV cache and an earlier nightly, against the same
+      configuration without offloading, total throughput per GPU rose 10.1% at
+      concurrency 256 and doubled at 384, where the server without offloading
+      was overloaded (73% GPU prefix hits, 265 s TTFT p90) and UMBP restored
+      21.5% of prompt tokens. At 128 the GPU KV cache held the working set and
+      UMBP did not help (−4.7%), so the 128 point runs without it. Throughput levels
+      off past 384: at 544, UMBP held throughput level with 384 at much higher
+      latency.
+
+      The `fp8_e4m3` KV cache and the pinned nightly are qualified by the
+      InferenceX sweep of the source PR, not by those local runs. Throughput
+      runs use DSpark's synthetic golden acceptance length (3.51); the preset
+      keeps real block rejection for ordinary serving and accuracy evaluation.
 
 hardware_notes:
   dgx_station_gb300:

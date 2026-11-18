@@ -28,6 +28,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphConfig,
+    EncoderCudaGraphPaddingLogic,
     EncoderItemSpec,
 )
 
@@ -43,8 +44,11 @@ _LINEAR_GRID_END = 2560
 # Warn when capture axes multiply the captured graph count past this point.
 _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 
+# Padding repeats the last offset so padded sequences are empty.
+_CUMULATIVE_BUFFER_KEYS = frozenset({"cu_seqlens", "cu_window_seqlens"})
 
-@dataclass
+
+@dataclass(slots=True)
 class BudgetGraphMetadata:
     """Metadata for a single budget graph.
 
@@ -60,8 +64,9 @@ class BudgetGraphMetadata:
     graph: torch.cuda.CUDAGraph
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
     # Before replay the manager updates these in-place. By default buffers are
-    # zeroed before slice-copying the actual values; model-specific padding
-    # behavior is provided by EncoderCudaGraphConfig.padding_logics.
+    # zeroed before slice-copying the actual values, and cumulative buffers
+    # repeat their last value; model-specific padding behavior is provided by
+    # EncoderCudaGraphConfig.padding_logics.
     input_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
@@ -554,6 +559,27 @@ class EncoderCudaGraphManager:
                 return True
         return False
 
+    @staticmethod
+    def _copy_cumulative_buffer(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+    ) -> None:
+        n = src.shape[0]
+        dst[:n].copy_(src)
+        dst[n:] = src[-1]
+
+    @classmethod
+    def _get_padding_logic(
+        cls,
+        config: EncoderCudaGraphConfig,
+        key: str,
+    ) -> EncoderCudaGraphPaddingLogic:
+        if key in config.padding_logics:
+            return config.padding_logics[key]
+        if key in _CUMULATIVE_BUFFER_KEYS:
+            return cls._copy_cumulative_buffer
+        return cls._copy_padded_buffer
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -612,10 +638,7 @@ class EncoderCudaGraphManager:
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                padding_logic = self.config.padding_logics.get(
-                    key, self._copy_padded_buffer
-                )
-                padding_logic(buf, src)
+                self._get_padding_logic(self.config, key)(buf, src)
 
         graph_meta.graph.replay()
 
