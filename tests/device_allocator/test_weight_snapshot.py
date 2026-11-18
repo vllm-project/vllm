@@ -66,12 +66,15 @@ def test_roundtrip_restores_tensors_scalars_and_aliases(tmp_path):
 
 
 @cuda
-def test_pinned_host_state_is_not_saved(tmp_path):
+def test_pinned_host_state_roundtrips(tmp_path):
     path = tmp_path / "snap.bin"
-    model = _Toy()
-    model.table_host = torch.rand(3, 5).pin_memory()
-    ws.save(_roots(model), path)
-    assert not path.exists()
+    src = _Toy()
+    src.table_host = torch.rand(3, 5).pin_memory()
+    ws.save(_roots(src), path)
+    dst = _Toy()
+    dst.table_host = torch.zeros(3, 5).pin_memory()
+    ws.restore(_roots(dst), path)
+    assert torch.equal(dst.table_host, src.table_host)
 
 
 @cuda
