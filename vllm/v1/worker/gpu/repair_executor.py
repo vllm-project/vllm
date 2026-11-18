@@ -81,17 +81,22 @@ def execute_repair_only(
         # Repair steps are exclusive: no ordinary request rides the batch.
         # The works and the scheduling counts are broadcast data (identical
         # on every rank); only batch_req_ids is worker-local. A step-level
-        # violation on ONE rank must not strand the TP peers inside the
-        # first verdict collective: the failure is contained here and every
-        # work still gets its (failed) verdict and its collective.
+        # violation on ONE rank converges to failed verdicts on every rank,
+        # but NOT promptly: the failing rank skips ahead to its verdict
+        # collective while peers already inside a layer collective block
+        # there until the backend timeout (the process-group timeout, the
+        # NCCL watchdog, or the executor RPC bound), and only then do the
+        # failed verdicts and their collectives proceed.
         assert set(works) == set(scheduler_output.num_scheduled_tokens), (
             "hole repair: a repair step must not carry ordinary work "
             f"({len(works)} repair works vs "
             f"{len(scheduler_output.num_scheduled_tokens)} scheduled requests)"
         )
-        assert set(batch_req_ids) == set(scheduler_output.num_scheduled_tokens), (
+        assert len(batch_req_ids) == len(scheduler_output.num_scheduled_tokens) and set(
+            batch_req_ids
+        ) == set(scheduler_output.num_scheduled_tokens), (
             "hole repair: batch_req_ids must name exactly the repair step's "
-            f"requests ({batch_req_ids!r} vs "
+            f"requests, each once ({batch_req_ids!r} vs "
             f"{sorted(scheduler_output.num_scheduled_tokens)})"
         )
     except Exception as exc:
@@ -157,10 +162,14 @@ def execute_repair_only(
         # Failure envelope: a rank-local recoverable exception anywhere
         # between the work lookup and the verdict construction (positions
         # fetch, metadata access, the host-side fence, embedding, the layer
-        # stream, the re-zero, or the collective itself) must not escape and
-        # strand the TP peers inside _ranks_repair_agree -- it is captured
-        # here, preserved as error_detail, and converged into a consistent
-        # failed verdict that still participates in consensus.
+        # stream, the re-zero, or the verdict collective itself) must not
+        # ESCAPE this function: it is captured here, preserved as
+        # error_detail, and converged into a consistent failed verdict that
+        # still participates in consensus. The VERDICT collective is
+        # never skipped; peers already blocked inside an inner LAYER
+        # collective at the moment of the exception still wait for that
+        # collective's backend timeout -- containment is fail-closed, not
+        # latency-free.
         work: RepairWork | None = None
         span_start, span_end = -1, -1
         lo = row_starts.get(req_id, 0)
@@ -181,6 +190,14 @@ def execute_repair_only(
         try:
             work = works[req_id]
             span_start, span_end = work.repair_span
+            # A zero-width window is malformed (and positions[hi - 1]
+            # with hi == 0 would read the whole batch's LAST row via
+            # negative indexing).
+            assert hi > lo, (
+                f"hole repair: zero-width repair window for {req_id} "
+                f"(num_scheduled_tokens="
+                f"{scheduler_output.num_scheduled_tokens.get(req_id, 0)})"
+            )
             pos_first = _int_timed(positions[lo], f"positions[{lo}].int")
             pos_last = _int_timed(positions[hi - 1], f"positions[{hi - 1}].int")
             assert pos_first == span_start and pos_last == span_end - 1, (
@@ -343,6 +360,9 @@ def execute_repair_only(
             # diverge, and consensus fails everywhere (fail-closed). The
             # scheduler's identity check rejects the placeholder echo as
             # stale, and its missing-verdict synthesis aborts the plan.
+            # The collective here is REQUIRED: this rank's per-work loop
+            # iteration count matches the peers', so skipping it would
+            # leave every peer's next collective unpaired.
             if error_detail is None:
                 error_detail = "RepairWork lookup failed on this rank"
             logger.error(
@@ -351,6 +371,23 @@ def execute_repair_only(
                 req_id,
                 error_detail,
             )
+            try:
+                _ranks_repair_agree(
+                    True,
+                    0,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    0,
+                    False,
+                    plan_id=-1,
+                    epoch=-1,
+                    span=(-1, -1),
+                )
+            except Exception:
+                logger.exception("Repair TP consensus failed req=%s -> abort", req_id)
             results.append(
                 RepairResultReport(
                     request_id=req_id,

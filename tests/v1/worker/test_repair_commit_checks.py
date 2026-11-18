@@ -613,6 +613,44 @@ def test_single_work_positions_failure_returns_failed_verdict():
     assert ra.commit_check["authorized_distinct"] is False
 
 
+def test_zero_width_window_refused():
+    """A zero-width repair window (an all-zero num_scheduled_tokens
+    entry) must be refused as malformed: indexing positions[hi - 1] with
+    hi == 0 reads the LAST row of the whole batch (Python negative
+    indexing), which can spuriously satisfy the span check against an
+    unrelated request's position."""
+    works = {
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=(10, 20),
+            layer_end=1,
+            restored_extent=64,
+            plan_id=1,
+            epoch=7,
+            expected_write_block_ids=(2,),
+        )
+    }
+    tokens = {"req-a": 0}
+    # The batch ends at position 19: positions[-1] == 19 == span_end - 1,
+    # so the unguarded span check would pass spuriously.
+    positions = torch.arange(10, 20)
+    sub = _sub_output(works, tokens)
+    model = _FakeModel(n_layers=4)
+
+    with set_forward_context(
+        {"model.layers.0": _meta(_span_slots(2))},
+        create_vllm_config(model="facebook/opt-125m"),
+    ):
+        results = execute_repair_only(
+            model, sub, positions, positions.clone(), ["req-a"]
+        )
+
+    ra = results[0]
+    assert ra.aborted
+    assert not ra.structural_check
+    assert "zero-width" in (ra.error_detail or "")
+
+
 def test_single_work_ambiguous_cache_contained():
     """A cache geometry the block-size derivation cannot interpret (the
     ambiguous 3-D form) in a step whose FIRST work fails must be
