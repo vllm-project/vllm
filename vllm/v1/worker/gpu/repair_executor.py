@@ -172,6 +172,7 @@ def execute_repair_only(
         auth_present = False
         auth_slots_ok = False
         auth_table_ok = False
+        auth_distinct_ok = False
         pre_write_ownership = False
         pre_write_coverage = False
         error_detail: str | None = None

@@ -561,6 +561,87 @@ def test_ambiguous_three_dim_cache_refused():
     assert len(views) == 2
 
 
+# ---- Envelope containment for a step whose FIRST work fails early ----
+
+
+def _single_work(layer_end: int = 1):
+    works = {
+        "req-a": RepairWork(
+            request_id="req-a",
+            repair_span=(0, BS),
+            layer_end=layer_end,
+            restored_extent=512,
+            plan_id=1,
+            epoch=7,
+            expected_write_block_ids=(2,),
+        )
+    }
+    return works, {"req-a": BS}, torch.arange(BS)
+
+
+def test_single_work_positions_failure_returns_failed_verdict():
+    """An early per-work failure in a step whose FIRST (and only) work
+    fails must converge to that work's failed verdict instead of
+    escaping the envelope -- an escape raises out of execute_repair_only,
+    the step's works get no verdict and no consensus collective, and
+    the TP peers block inside theirs."""
+    works, tokens, positions = _single_work()
+    mismatched = positions + 7  # span says [0, 128)
+    sub = _sub_output(works, tokens)
+    model = _FakeModel(n_layers=4)
+
+    with set_forward_context(
+        {"model.layers.0": _meta(_span_slots(2))},
+        create_vllm_config(model="facebook/opt-125m"),
+    ):
+        results = execute_repair_only(
+            model, sub, mismatched, mismatched.clone(), ["req-a"]
+        )
+
+    assert len(results) == 1
+    ra = results[0]
+    assert ra.aborted
+    assert not ra.structural_check
+    assert "positions" in (ra.error_detail or "")
+    assert ra.commit_check["authorized_distinct"] is False
+
+
+def test_single_work_ambiguous_cache_contained():
+    """A cache geometry the block-size derivation cannot interpret (the
+    ambiguous 3-D form) in a step whose FIRST work fails must be
+    contained as that work's failed verdict, not escape the envelope."""
+    inner = SimpleNamespace(
+        layers=[
+            SimpleNamespace(
+                self_attn=SimpleNamespace(
+                    attn=SimpleNamespace(
+                        kv_cache=torch.zeros(2, BS, BS),
+                        layer_name="model.layers.0",
+                    )
+                )
+            )
+        ],
+        embed_input_ids=lambda ids: torch.zeros(ids.shape[0], 8),
+    )
+    works, tokens, positions = _single_work()
+    sub = _sub_output(works, tokens)
+
+    with set_forward_context(
+        {"model.layers.0": _meta(_span_slots(2))},
+        create_vllm_config(model="facebook/opt-125m"),
+    ):
+        results = execute_repair_only(
+            SimpleNamespace(model=inner), sub, positions, positions.clone(), ["req-a"]
+        )
+
+    assert len(results) == 1
+    ra = results[0]
+    assert ra.aborted
+    assert not ra.structural_check
+    assert "ambiguous" in (ra.error_detail or "")
+    assert ra.commit_check["authorized_distinct"] is False
+
+
 # ---- Port-discriminating battery: the 0003 port onto the #68140 stack ----
 
 
