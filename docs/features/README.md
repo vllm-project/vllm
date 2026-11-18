@@ -4,6 +4,10 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## ROCm attention
+
+- [Experimental AITER FA attention paths](rocm_aiter_fa.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
