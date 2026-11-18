@@ -330,7 +330,6 @@ DSV2_EP_CASE = ModelCase(
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.85,
         enforce_eager=True,
         max_model_len=1024,
     ),

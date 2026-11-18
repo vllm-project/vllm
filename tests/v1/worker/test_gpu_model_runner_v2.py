@@ -489,7 +489,7 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     )
     total, cached = 16 << 30, [0]
 
-    def _dummy_run(num_tokens):
+    def _dummy_run(num_tokens, **kwargs):
         cached[0] = 2 << 30
 
     monkeypatch.setattr(runner, "_dummy_run", _dummy_run)

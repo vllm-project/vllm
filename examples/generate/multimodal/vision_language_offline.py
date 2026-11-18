@@ -2100,7 +2100,6 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=8,
         limit_mm_per_prompt={modality: 1},
         reasoning_parser="step3",

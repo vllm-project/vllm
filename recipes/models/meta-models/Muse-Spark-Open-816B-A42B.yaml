@@ -139,8 +139,6 @@ variants:
           - "32"
           - "--max-num-batched-tokens"
           - "4096"
-          - "--gpu-memory-utilization"
-          - "0.95"
   mxfp4:
     model_id: "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4"
     precision: mxfp4
@@ -159,8 +157,6 @@ variants:
           - "128"
           - "--max-num-batched-tokens"
           - "8192"
-          - "--gpu-memory-utilization"
-          - "0.90"
   default:
     model_id: "meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
     precision: nvfp4

@@ -71,8 +71,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
   rl:
     # The original 2026-09-22 RL checkpoint. No `model_id` override: it serves
     # the recipe's own repo, like DeepSeek-V4-Pro's "FP8 (Preview)" variant.
@@ -85,8 +83,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
 
 compatible_strategies:
   - single_node_tp
@@ -100,8 +96,6 @@ hardware_overrides:
     # allreduce, which is a real cost at this TP. Verified 2026-09-23 on an
     # 8x MI355X node, vllm/vllm-openai-rocm:nightly @ 0961bbae2.
     extra_args:
-      - "--gpu-memory-utilization"
-      - "0.93"
       - "--kv-cache-dtype"
       - "fp8"
     extra_env:
@@ -180,7 +174,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -196,7 +189,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.93 \
     --kv-cache-dtype fp8 \
     --max-model-len auto \
     --reasoning-parser mimo \
@@ -239,7 +231,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Pro-MOPD \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DFLASH_DIR\",\"num_speculative_tokens\":7}" \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \

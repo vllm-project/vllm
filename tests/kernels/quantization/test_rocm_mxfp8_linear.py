@@ -706,3 +706,108 @@ def test_rocm_mxfp8_fused_quant_cuda_graph_capture(warm_counters):
         graph.replay()
         torch.accelerator.synchronize()
         assert torch.equal(out, expected), "replay differs from stock"
+
+
+@pytest.fixture
+def aiter_flydsl_mxfp8_kernel(monkeypatch):
+    """`AiterFlyDSLMxfp8LinearKernel` with AITER linear on and every shape treated
+    as tuned (an untuned one runs AITER's heuristic kernel)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
+    )
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    yield AiterFlyDSLMxfp8LinearKernel
+    torch.set_default_dtype(prev_dtype)
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize("name,n,k", M31_TP4_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 128, 1024])
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_linear_matches_dequant_reference(
+    aiter_flydsl_mxfp8_kernel, name, n, k, num_tokens
+):
+    """Output matches an exact MXFP8 GEMM of the same inputs, and a
+    pre-quantized activation gives the same bits as quantizing in the kernel."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    torch.manual_seed(num_tokens)
+    layer = _make_layer(n, k, "cuda")
+    w_q, w_scale = layer.weight.data.clone(), layer.weight_scale.data.clone()
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+    assert out.shape == (num_tokens, n) and out.dtype == torch.bfloat16
+    assert torch.isfinite(out).all(), f"{name}: non-finite output"
+
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(w_q, w_scale).float().T
+    )
+    rel = (out.float() - expected).norm() / expected.norm()
+    assert rel < 5e-3, f"{name}: relative error {rel:.4f}"
+
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    assert torch.equal(kernel.apply_weights(layer, qa), out)
+
+
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_linear_cuda_graph_replay(aiter_flydsl_mxfp8_kernel):
+    n, k, m = 2560, 6144, 16
+    layer = _make_layer(n, k, "cuda")
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    eager = kernel.apply_weights(layer, x)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = kernel.apply_weights(layer, x)
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    assert torch.equal(captured, kernel.apply_weights(layer, x))
+    assert not torch.equal(captured, eager)
+
+
+@torch.inference_mode()
+def test_aiter_flydsl_mxfp8_row_major_weight(aiter_flydsl_mxfp8_kernel):
+    """`row_major_weight` undoes the kernel's (16, 16) preshuffle, and returns
+    the weight as is for a layer the Triton kernel runs."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        row_major_weight,
+    )
+
+    n, k = 2560, 6144
+    layer = _make_layer(n, k, "cuda")
+    w = layer.weight.data.clone()
+    kernel = aiter_flydsl_mxfp8_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    layer.quant_method = SimpleNamespace(kernel=kernel)
+    kernel.process_weights_after_loading(layer)
+    assert not torch.equal(layer.weight.view(torch.uint8), w.view(torch.uint8))
+    assert torch.equal(row_major_weight(layer).view(torch.uint8), w.view(torch.uint8))
+
+    triton_layer = _make_layer(n, k, "cuda")
+    triton = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    triton_layer.quant_method = SimpleNamespace(kernel=triton)
+    triton.process_weights_after_loading(triton_layer)
+    assert row_major_weight(triton_layer).data_ptr() == triton_layer.weight.data_ptr()
