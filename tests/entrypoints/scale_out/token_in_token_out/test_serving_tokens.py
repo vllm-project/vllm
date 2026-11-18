@@ -141,6 +141,24 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--override-generation-config", '{"max_new_tokens": 8}']],
+    indirect=True,
+)
+async def test_generate_rejects_min_tokens_above_server_cap(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"min_tokens": 10},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
