@@ -37,23 +37,23 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import TorchNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearLayerConfig,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
-    FlashInferFP8ScaledMMLinearKernel,
+    FlashInferFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    PerTensorTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+    PerTensorTorchFp8LinearKernel,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -69,14 +69,14 @@ from vllm.platforms import current_platform
 
 # The only backends that consume a pre-quantized activation.
 SUPPORTING = {
-    CutlassFP8ScaledMMLinearKernel,
-    FlashInferFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    FlashInferFp8LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     RocmDotScaledMxfp8LinearKernel,
@@ -111,12 +111,12 @@ def _probe(cls: type):
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
-    elif issubclass(cls, Int8ScaledMMLinearKernel):
-        obj.config = Int8ScaledMMLinearLayerConfig(
+    elif issubclass(cls, Int8LinearKernel):
+        obj.config = Int8LinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
         )
     else:
-        obj.config = FP8ScaledMMLinearLayerConfig(
+        obj.config = Fp8LinearLayerConfig(
             weight_quant_key=kFp8StaticTensorSym,
             activation_quant_key=kFp8StaticTensorSym,
             weight_shape=(16, 16),

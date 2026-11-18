@@ -17,11 +17,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
-from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
+from .base import Fp8LinearKernel, Fp8LinearLayerConfig
+from .block_base import Fp8BlockLinearKernel
 
 
-class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
+class XPUW8A8FP8LinearKernel(Fp8LinearKernel):
     _SUPPORTED_ACT_QUANT_KEYS = {
         kFp8DynamicTensorSym,
         kFp8DynamicTokenSym,
@@ -42,7 +42,7 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if c.weight_quant_key not in cls._SUPPORTED_WEIGHT_QUANT_KEYS:
             return (
                 False,
@@ -66,7 +66,7 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c, layer_param_names)
 
@@ -89,7 +89,7 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
 
         if w.shape not in {(K, N), (N, K)}:
             raise ValueError(
-                f"XPUFP8ScaledMM expects weight shape ({K},{N}) or ({N},{K}), "
+                f"XPUFp8LinearKernel expects weight shape ({K},{N}) or ({N},{K}), "
                 f"but got {tuple(w.shape)}"
             )
 
@@ -122,7 +122,7 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         return output.view(*output_shape)
 
 
-class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
+class XPUW8A16FP8LinearKernel(Fp8LinearKernel):
     @classmethod
     def executed_activation_key(
         cls, activation_quant_key: QuantKey | None
@@ -138,7 +138,7 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
             return (
                 False,
@@ -152,7 +152,7 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
@@ -200,13 +200,13 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
         pass
 
 
-class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class XPUFp8BlockLinearKernel(Fp8BlockLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
-            return False, "XPUFp8BlockScaledMM only support on XPU"
+            return False, "XPUFp8BlockLinearKernel only support on XPU"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module):

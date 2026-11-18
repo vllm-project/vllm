@@ -12,7 +12,7 @@ two independent fused `rms_norm + group_fp8_quant` ops:
 * `DoubleAiterRMSFp8GroupQuantViewPattern` (this PR) is the view-tolerant
   sibling that additionally matches the
   `rms_norm -> view -> group_fp8_quant` shape that DSv3.2's MLA indexer
-  q_c norm exposes through `Fp8BlockScaledMMLinearKernel.apply_weights`'s
+  q_c norm exposes through `Fp8BlockLinearKernel.apply_weights`'s
   2D-flatten boilerplate.
 """
 
@@ -58,7 +58,7 @@ class _NoViewDoubleQuantModel(torch.nn.Module):
 class _ViewDoubleQuantModel(torch.nn.Module):
     """`rms_norm -> view -> 2x group_fp8_quant` fan-out (DSv3.2 shape).
 
-    Reproduces the FX-graph shape produced by `Fp8BlockScaledMMLinearKernel`'s
+    Reproduces the FX-graph shape produced by `Fp8BlockLinearKernel`'s
     2D-flatten before the FP8 group quant op.
     """
 

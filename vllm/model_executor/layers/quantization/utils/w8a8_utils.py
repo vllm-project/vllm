@@ -12,8 +12,8 @@ from vllm.platforms import current_platform
 from .layer_utils import replace_parameter
 
 if TYPE_CHECKING:
-    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-        Int8ScaledMMLinearLayerConfig,
+    from vllm.model_executor.kernels.linear.scaled_mm.base import (
+        Int8LinearLayerConfig,
     )
 
 
@@ -83,7 +83,7 @@ def convert_to_channelwise(
 
 def prepare_int8_scaled_mm_weights(
     layer: torch.nn.Module,
-    config: "Int8ScaledMMLinearLayerConfig",
+    config: "Int8LinearLayerConfig",
     param_names: Sequence[str],
 ) -> None:
     """Convert int8 W8A8 weights on `layer` to the `cutlass_scaled_mm` layout.

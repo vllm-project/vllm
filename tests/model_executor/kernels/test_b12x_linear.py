@@ -17,13 +17,13 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_MXFP4_KERNELS,
     _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
-    B12xFp8BlockScaledMMKernel,
+    B12xFp8BlockLinearKernel,
     B12xMxFp4LinearKernel,
     B12xMxfp8LinearKernel,
     B12xNvFp4LinearKernel,
     B12xNvFp4W4A16LinearKernel,
-    B12xTensorFP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+    B12xTensorFp8LinearKernel,
+    Fp8LinearLayerConfig,
     Mxfp8LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp4_linear_kernel,
@@ -74,10 +74,10 @@ from vllm.platforms.interface import DeviceCapability
             {"weight_shape": (2048, 2048)},
         ),
         (
-            B12xTensorFP8ScaledMMLinearKernel,
+            B12xTensorFp8LinearKernel,
             _POSSIBLE_FP8_KERNELS[PlatformEnum.CUDA],
-            "CutlassFP8ScaledMMLinearKernel",
-            "PerTensorTorchFP8ScaledMMLinearKernel",
+            "CutlassFp8LinearKernel",
+            "PerTensorTorchFp8LinearKernel",
             init_fp8_linear_kernel,
             {
                 "activation_quant_key": kFp8StaticTensorSym,
@@ -88,10 +88,10 @@ from vllm.platforms.interface import DeviceCapability
             },
         ),
         (
-            B12xFp8BlockScaledMMKernel,
+            B12xFp8BlockLinearKernel,
             _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.CUDA],
-            "CutlassFp8BlockScaledMMKernel",
-            "MarlinFP8ScaledMMLinearKernel",
+            "CutlassFp8BlockLinearKernel",
+            "MarlinFp8LinearKernel",
             init_fp8_linear_kernel,
             {
                 "activation_quant_key": kFp8Dynamic128Sym,
@@ -159,7 +159,7 @@ def test_b12x_module_lookup_is_dynamo_safe(monkeypatch) -> None:
 
 
 def test_b12x_tensor_fp8_can_implement_supported_config() -> None:
-    config = FP8ScaledMMLinearLayerConfig(
+    config = Fp8LinearLayerConfig(
         activation_quant_key=kFp8StaticTensorSym,
         weight_quant_key=kFp8StaticTensorSym,
         weight_shape=(64, 128),
@@ -167,7 +167,7 @@ def test_b12x_tensor_fp8_can_implement_supported_config() -> None:
         out_dtype=torch.bfloat16,
     )
 
-    can_implement, reason = B12xTensorFP8ScaledMMLinearKernel.can_implement(config)
+    can_implement, reason = B12xTensorFp8LinearKernel.can_implement(config)
 
     assert can_implement
     assert reason is None
@@ -188,7 +188,7 @@ def test_b12x_block_fp8_checks_runtime_support(monkeypatch) -> None:
         lambda: types.SimpleNamespace(is_supported=lambda: False),
     )
 
-    supported, reason = B12xFp8BlockScaledMMKernel.is_supported()
+    supported, reason = B12xFp8BlockLinearKernel.is_supported()
 
     assert not supported
     assert reason == "B12X regular block-FP8 GEMM is not supported"
@@ -196,7 +196,7 @@ def test_b12x_block_fp8_checks_runtime_support(monkeypatch) -> None:
 
 def test_b12x_block_fp8_requires_matching_supported_dtypes() -> None:
     def config(input_dtype: torch.dtype, out_dtype: torch.dtype):
-        return FP8ScaledMMLinearLayerConfig(
+        return Fp8LinearLayerConfig(
             activation_quant_key=kFp8Dynamic128Sym,
             weight_quant_key=kFp8Static128BlockSym,
             weight_shape=(256, 128),
@@ -204,19 +204,19 @@ def test_b12x_block_fp8_requires_matching_supported_dtypes() -> None:
             out_dtype=out_dtype,
         )
 
-    can_implement, reason = B12xFp8BlockScaledMMKernel.can_implement(
+    can_implement, reason = B12xFp8BlockLinearKernel.can_implement(
         config(torch.float32, torch.float32)
     )
     assert not can_implement
     assert reason == "Supports only bf16/fp16 input dtype"
 
-    can_implement, reason = B12xFp8BlockScaledMMKernel.can_implement(
+    can_implement, reason = B12xFp8BlockLinearKernel.can_implement(
         config(torch.bfloat16, torch.float16)
     )
     assert not can_implement
     assert reason == "Input and output dtype must match"
 
-    can_implement, reason = B12xFp8BlockScaledMMKernel.can_implement(
+    can_implement, reason = B12xFp8BlockLinearKernel.can_implement(
         config(torch.float16, torch.float16)
     )
     assert can_implement
@@ -225,14 +225,14 @@ def test_b12x_block_fp8_requires_matching_supported_dtypes() -> None:
 
 def test_b12x_block_fp8_requires_aligned_features() -> None:
     def can_implement(weight_shape: tuple[int, int]):
-        config = FP8ScaledMMLinearLayerConfig(
+        config = Fp8LinearLayerConfig(
             activation_quant_key=kFp8Dynamic128Sym,
             weight_quant_key=kFp8Static128BlockSym,
             weight_shape=weight_shape,
             input_dtype=torch.bfloat16,
             out_dtype=torch.bfloat16,
         )
-        return B12xFp8BlockScaledMMKernel.can_implement(config)
+        return B12xFp8BlockLinearKernel.can_implement(config)
 
     assert can_implement((256, 192)) == (
         False,
@@ -273,7 +273,7 @@ def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
     scale_loader = object()
     layer.weight.weight_loader = weight_loader
     layer.weight_scale.weight_loader = scale_loader
-    kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
+    kernel = object.__new__(B12xTensorFp8LinearKernel)
     kernel.config = types.SimpleNamespace(weight_shape=(64, 128))
     kernel.layer_param_names = (
         "weight",
@@ -345,7 +345,7 @@ def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
     x = torch.empty((2, 3, 128), dtype=torch.bfloat16)
     x_q = torch.empty((6, 128), dtype=torch.float8_e4m3fn)
     bias = torch.empty((48,), dtype=torch.bfloat16)
-    kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
+    kernel = object.__new__(B12xTensorFp8LinearKernel)
     kernel.config = types.SimpleNamespace(out_dtype=torch.bfloat16)
     kernel.layer_param_names = (
         "weight",
@@ -559,7 +559,7 @@ def test_b12x_block_fp8_process_weights_keeps_native_block_layout() -> None:
     scale_loader = object()
     layer.weight.weight_loader = weight_loader
     layer.weight_scale_inv.weight_loader = scale_loader
-    kernel = object.__new__(B12xFp8BlockScaledMMKernel)
+    kernel = object.__new__(B12xFp8BlockLinearKernel)
 
     kernel.process_weights_after_loading(layer)
 
@@ -586,7 +586,7 @@ def test_b12x_block_fp8_upcasts_e8m0_weight_scales(scale_dtype) -> None:
         requires_grad=False,
     )
     layer.weight_block_size = [128, 128]
-    kernel = object.__new__(B12xFp8BlockScaledMMKernel)
+    kernel = object.__new__(B12xFp8BlockLinearKernel)
 
     kernel.process_weights_after_loading(layer)
 
@@ -662,7 +662,7 @@ def test_b12x_block_fp8_apply_uses_b12x_recipe_api(monkeypatch) -> None:
     weight = torch.empty((256, 128), dtype=torch.float8_e4m3fn)
     a_scale = torch.empty((6, 1), dtype=torch.float32)
     weight_scale = torch.empty((2, 1), dtype=torch.float32)
-    kernel = object.__new__(B12xFp8BlockScaledMMKernel)
+    kernel = object.__new__(B12xFp8BlockLinearKernel)
     kernel.config = types.SimpleNamespace(out_dtype=torch.bfloat16)
 
     output = kernel.apply_block_scaled_mm(a, weight, a_scale, weight_scale)

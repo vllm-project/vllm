@@ -12,10 +12,10 @@ import torch
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -55,8 +55,8 @@ def _make_config(
     weight_quant_key=kFp8StaticChannelSym,
     out_dtype: torch.dtype = torch.bfloat16,
     weight_shape: tuple[int, int] = (512, 4096),
-) -> FP8ScaledMMLinearLayerConfig:
-    return FP8ScaledMMLinearLayerConfig(
+) -> Fp8LinearLayerConfig:
+    return Fp8LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=kFp8DynamicTokenSym,
         weight_shape=weight_shape,
@@ -128,7 +128,7 @@ def test_hipb_mm_kernel_requires_hipbmm_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", raising=False)
     rocm_aiter_ops.refresh_env_variables()
 
-    is_supported, reason = AiterHipbMMPerTokenFp8ScaledMMLinearKernel.is_supported()
+    is_supported, reason = AiterHipbMMPerTokenFp8LinearKernel.is_supported()
 
     assert not is_supported
     assert reason == (
@@ -166,7 +166,7 @@ def test_hipb_mm_flag_enables_hip_online_tuning(
 
 
 def test_hipb_mm_kernel_can_implement_success(enable_hipb_mm_kernel):
-    can_implement, reason = AiterHipbMMPerTokenFp8ScaledMMLinearKernel.can_implement(
+    can_implement, reason = AiterHipbMMPerTokenFp8LinearKernel.can_implement(
         _make_config()
     )
 
@@ -196,12 +196,10 @@ def test_hipb_mm_kernel_can_implement_success(enable_hipb_mm_kernel):
 )
 def test_hipb_mm_kernel_can_implement_rejects_unsupported_configs(
     enable_hipb_mm_kernel,
-    config: FP8ScaledMMLinearLayerConfig,
+    config: Fp8LinearLayerConfig,
     expected_reason: str,
 ):
-    can_implement, reason = AiterHipbMMPerTokenFp8ScaledMMLinearKernel.can_implement(
-        config
-    )
+    can_implement, reason = AiterHipbMMPerTokenFp8LinearKernel.can_implement(config)
 
     assert not can_implement
     assert reason == expected_reason
@@ -211,7 +209,7 @@ def test_hipb_mm_kernel_process_weights_after_loading_shuffles_weights(
     enable_hipb_mm_kernel,
 ):
     weight_shape = (512, 4096)
-    kernel = AiterHipbMMPerTokenFp8ScaledMMLinearKernel(
+    kernel = AiterHipbMMPerTokenFp8LinearKernel(
         _make_config(weight_shape=weight_shape),
         layer_param_names=("weight", "weight_scale", "input_scale", "input_scale_ub"),
     )
@@ -259,7 +257,7 @@ def test_hipb_mm_kernel_forward_matches_raw_aiter_hipb_mm(enable_hipb_mm_kernel)
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
         device=torch.device("cuda"),
-        force_kernel=AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+        force_kernel=AiterHipbMMPerTokenFp8LinearKernel,
     )
 
     # hipb_mm uses a transposed-result GEMM internally, so the flattened token
@@ -299,7 +297,7 @@ def test_hipb_mm_kernel_forward_matches_raw_aiter_hipb_mm(enable_hipb_mm_kernel)
         _skip_if_no_hipb_mm_solution(exc)
         raise
 
-    assert isinstance(layer.kernel, AiterHipbMMPerTokenFp8ScaledMMLinearKernel)
+    assert isinstance(layer.kernel, AiterHipbMMPerTokenFp8LinearKernel)
     assert out.shape == (2, 16, weight_shape[0])
     torch.testing.assert_close(out, expected)
 
@@ -332,7 +330,7 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     layer.input_scale = None
     layer.input_scale_ub = None
 
-    kernel = AiterHipbMMPerTokenFp8ScaledMMLinearKernel(
+    kernel = AiterHipbMMPerTokenFp8LinearKernel(
         _make_config(weight_shape=weight_shape),
         layer_param_names=("weight", "weight_scale", "input_scale", "input_scale_ub"),
     )
@@ -383,7 +381,7 @@ def test_hipb_mm_kernel_online_tuning_writes_csv(
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
         device=torch.device("cuda"),
-        force_kernel=AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+        force_kernel=AiterHipbMMPerTokenFp8LinearKernel,
     )
 
     # The effective heuristic N dimension is the flattened token count.

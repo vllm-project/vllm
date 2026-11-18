@@ -21,8 +21,8 @@ from ..base import LinearKernel, MMLinearLayerConfig
 
 
 @dataclass(slots=True)
-class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
+class Int8LinearLayerConfig(MMLinearLayerConfig):
+    # TODO: Change to QuantKey like Fp8LinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
@@ -33,7 +33,7 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
 
 
 @dataclass(slots=True)
-class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
+class Fp8LinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     weight_shape: tuple[int, int]
@@ -56,9 +56,9 @@ _Int8ParamsT = tuple[
 ]
 
 
-class FP8ScaledMMLinearKernel(LinearKernel[FP8ScaledMMLinearLayerConfig], ABC):
+class Fp8LinearKernel(LinearKernel[Fp8LinearLayerConfig], ABC):
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         act_scale_descriptor = c.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
@@ -137,9 +137,9 @@ class FP8ScaledMMLinearKernel(LinearKernel[FP8ScaledMMLinearLayerConfig], ABC):
         return None
 
 
-class Int8ScaledMMLinearKernel(LinearKernel[Int8ScaledMMLinearLayerConfig], ABC):
+class Int8LinearKernel(LinearKernel[Int8LinearLayerConfig], ABC):
     def __init__(
-        self, c: Int8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Int8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c)
         self.layer_param_names = layer_param_names

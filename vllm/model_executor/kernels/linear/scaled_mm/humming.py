@@ -15,17 +15,17 @@ from vllm.platforms import current_platform
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
 
 logger = init_logger(__name__)
 
 
-class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class HummingFp8LinearKernel(Fp8LinearKernel):
     """Humming GEMM Kernel for FP8."""
 
     @classmethod
@@ -50,9 +50,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -117,12 +115,10 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "HummingFP8ScaledMMLinearKernel uses apply_weights directly"
-        )
+        raise NotImplementedError("HummingFp8LinearKernel uses apply_weights directly")
 
 
-class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class HummingInt8LinearKernel(Int8LinearKernel):
     """Humming GEMM Kernel for INT8."""
 
     @classmethod
@@ -147,9 +143,7 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(
-        cls, config: Int8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

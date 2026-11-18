@@ -377,7 +377,7 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
 
     This shape arises in DeepSeek-V3.2's MLA indexer q_c norm, where the
     FP8 linear path's 2D-flatten boilerplate
-    (`Fp8BlockScaledMMLinearKernel.apply_weights`) inserts a view between
+    (`Fp8BlockLinearKernel.apply_weights`) inserts a view between
     the rms_norm output and each FP8 group quant op. The non-view sibling
     pattern silently no-ops on this graph because the pattern matcher
     requires the in-graph and in-pattern node shapes to align.

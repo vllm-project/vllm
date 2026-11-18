@@ -14,18 +14,18 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .block_base import (
+    Fp8BlockLinearKernel,
 )
 
 
-class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class TritonInt8LinearKernel(Int8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -35,7 +35,7 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return False, "requires ROCm, CUDA or XPU."
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -77,7 +77,7 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return out
 
 
-class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class TritonFp8LinearKernel(Fp8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -87,7 +87,7 @@ class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         act_group = c.activation_quant_key.scale.group_shape
         weight_group = c.weight_quant_key.scale.group_shape
         if not (act_group.is_per_tensor() or act_group.is_per_token()):
@@ -117,7 +117,7 @@ class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return out.view(*output_shape)
 
 
-class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class TritonFp8BlockLinearKernel(Fp8BlockLinearKernel):
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):

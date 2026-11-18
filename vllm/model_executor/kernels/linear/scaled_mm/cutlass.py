@@ -22,16 +22,16 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
+from .block_base import Fp8BlockLinearKernel
 
 
-class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class CutlassInt8LinearKernel(Int8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -41,7 +41,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -82,9 +82,9 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
 
-class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CutlassFp8LinearKernel(Fp8LinearKernel):
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
@@ -98,7 +98,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
@@ -194,8 +194,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return output.view(*output_shape[:-1], output_size)
 
 
-class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+class CutlassFp8BlockLinearKernel(Fp8BlockLinearKernel):
+    def __init__(self, config: Fp8LinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
@@ -219,7 +219,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+    def can_implement(cls, config: Fp8LinearLayerConfig):
         can_implement_base, reason = super().can_implement(config)
         if not can_implement_base:
             return can_implement_base, reason

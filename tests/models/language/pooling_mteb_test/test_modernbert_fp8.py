@@ -65,7 +65,7 @@ def _assert_modernbert_online_fp8(model) -> None:
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(
     _fp8_scaled_mm_unsupported(),
-    reason="No FP8 ScaledMM kernel is available on this GPU type.",
+    reason="No FP8 linear kernel is available on this GPU type.",
 )
 def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

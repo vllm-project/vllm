@@ -246,7 +246,7 @@ def apply_pre_quantized_block_scaled_mm(
     the wq_b-style column/replicated linears: their output is the local
     TP shard, so no all-reduce is needed.
     """
-    from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
+    from vllm.model_executor.kernels.linear.scaled_mm.block_base import (
         FP8BlockParams,
     )
 
@@ -1407,7 +1407,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         """
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.kernels.linear.scaled_mm import (
-            Fp8BlockScaledMMLinearKernel,
+            Fp8BlockLinearKernel,
         )
 
         if not rocm_aiter_ops.is_linear_fp8_enabled():
@@ -1418,7 +1418,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             linears.append(self.indexer.wq_b)
         for linear in linears:
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
-            if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
+            if not isinstance(kernel, Fp8BlockLinearKernel):
                 return False
         return True
 

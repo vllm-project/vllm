@@ -41,7 +41,7 @@ MNK_FACTORS = [
 ]
 
 # Shapes with N or K not divisible by 16.  These exercise the padding path
-# inside CutlassFP8ScaledMMLinearKernel.apply_scaled_mm (e.g. Qwen2.5-VL
+# inside CutlassFp8LinearKernel.apply_scaled_mm (e.g. Qwen2.5-VL
 # vision MLP dims).
 UNALIGNED_MNK_FACTORS = [
     (32, 3420, 1280),
@@ -182,12 +182,12 @@ def test_cutlass_fp8_gemm_padded(
 ):
     """Test CUTLASS FP8 GEMM with padding for non-16-aligned N/K dims.
 
-    Exercises CutlassFP8ScaledMMLinearKernel.apply_scaled_mm which pads
+    Exercises CutlassFp8LinearKernel.apply_scaled_mm which pads
     inputs to satisfy CUTLASS alignment requirements — the path taken by
     models like Qwen2.5-VL whose vision MLP has non-16-aligned dims.
     """
     from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-        CutlassFP8ScaledMMLinearKernel,
+        CutlassFp8LinearKernel,
     )
 
     a = to_fp8(torch.randn((m, k), device="cuda"))
@@ -215,7 +215,7 @@ def test_cutlass_fp8_gemm_padded(
         if pad_n > 0 and scale_b.numel() > 1:
             scale_b = torch.nn.functional.pad(scale_b, (0, pad_n), value=1.0)
 
-    kernel = object.__new__(CutlassFP8ScaledMMLinearKernel)
+    kernel = object.__new__(CutlassFp8LinearKernel)
     kernel.logical_output_size = n
     out = kernel.apply_scaled_mm(
         A=a,

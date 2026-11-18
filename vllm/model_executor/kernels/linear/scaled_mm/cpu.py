@@ -17,21 +17,21 @@ from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .block_base import (
+    Fp8BlockLinearKernel,
+    Fp8LinearLayerConfig,
 )
 
 # BLOCK_K in csrc/cpu/sgl-kernels/gemm.h — the AMX kernel's fixed K-block size.
 _BLOCK_SIZE_K = 128
 
 
-class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class CPUInt8LinearKernel(Int8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -41,7 +41,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -231,7 +231,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return out
 
 
-class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class CPUFp8BlockLinearKernel(Fp8BlockLinearKernel):
     """FP8 W8A16 block-quantized GEMM via AMX BRGEMM on CPU."""
 
     # Input stays BF16 — no FP8 activation quantization.
@@ -256,9 +256,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         # Validate weight block shape
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col <= 0 or weight_gs.col != 128:
@@ -348,16 +346,16 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8BlockScaledMMKernel overrides apply_weights directly."
+            "CPUFp8BlockLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CPUFp8PerTensorLinearKernel(Fp8LinearKernel):
     """FP8 W8A16 per-tensor-scaled GEMM via AMX BRGEMM on CPU.
 
     Reuses the block-scaled AMX kernel (fp8_scaled_mm_cpu) with a single
     synthetic block spanning the whole weight, so activations stay BF16/FP32
-    — no FP8 activation quantization, unlike PerTensorTorchFP8ScaledMMLinearKernel.
+    — no FP8 activation quantization, unlike PerTensorTorchFp8LinearKernel.
     """
 
     @classmethod
@@ -379,7 +377,7 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if not c.weight_quant_key.scale.group_shape.is_per_tensor():
             return False, "requires a per-tensor weight scale."
         if not c.activation_quant_key.scale.group_shape.is_per_tensor():
@@ -450,11 +448,11 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8PerTensorScaledMMLinearKernel overrides apply_weights directly."
+            "CPUFp8PerTensorLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel):
+class CPUFp8ChannelWiseLinearKernel(CPUFp8PerTensorLinearKernel):
     """FP8 W8A16 per-channel-scaled GEMM via AMX BRGEMM on CPU.
 
     fp8_scaled_mm_cpu only supports block scales whose N extent is a multiple
@@ -464,7 +462,7 @@ class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel)
     """
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if not c.weight_quant_key.scale.group_shape.is_per_channel():
             return False, "requires a per-channel weight scale."
         if c.out_dtype != torch.bfloat16:
@@ -515,7 +513,7 @@ class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel)
         return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
 
-class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class CPUFp8W8A8BlockLinearKernel(Fp8BlockLinearKernel):
     """FP8 W8A8 block-quantized GEMM with dynamic per-token activation quant on CPU."""
 
     # Activation quant is done inside fp8_scaled_mm_with_quant;
@@ -533,14 +531,12 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not ops.cpu_has_amx_fp8():
             return False, (
                 "requires native AMX-FP8 hardware; falls back "
-                "to CPUFp8BlockScaledMMKernel (W8A16) otherwise."
+                "to CPUFp8BlockLinearKernel (W8A16) otherwise."
             )
         return True, None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         # Same block-shape requirements as the W8A16 sibling kernel.
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col <= 0 or weight_gs.col != 128:
@@ -672,11 +668,11 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8W8A8BlockScaledMMKernel overrides apply_weights directly."
+            "CPUFp8W8A8BlockLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CPUFp8W8A8LinearKernel(Fp8LinearKernel):
     """FP8 W8A8 GEMM with dynamic per-token activation quantization on CPU."""
 
     @classmethod
@@ -695,12 +691,10 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if config.out_dtype not in (torch.bfloat16, torch.float16, torch.float32):
             return False, "Only bfloat16/float16/float32 output dtype supported."
-        # Reject block-quantized weights — those go to CPUFp8BlockScaledMMKernel
+        # Reject block-quantized weights — those go to CPUFp8BlockLinearKernel
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col > 0 and weight_gs.row > 0:
             return False, "Block-quantized weights not handled by FP8 W8A8 kernel."
@@ -801,6 +795,4 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
     def apply_scaled_mm(self, A, B, out_dtype, As, Bs, bias=None, **kwargs):
-        raise NotImplementedError(
-            "CPUFP8W8A8ScaledMMLinearKernel uses apply_weights directly."
-        )
+        raise NotImplementedError("CPUFp8W8A8LinearKernel uses apply_weights directly.")

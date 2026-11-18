@@ -13,7 +13,7 @@ from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    MarlinFP8ScaledMMLinearKernel,
+    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -357,7 +357,7 @@ class Fp8LinearMethod(LinearMethodBase):
             module_name=self.__class__.__name__,
         )
 
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFp8LinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():

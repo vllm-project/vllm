@@ -22,10 +22,10 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
-    Fp8BlockScaledMMLinearKernel,
+    Fp8BlockLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    MarlinFP8ScaledMMLinearKernel,
+    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
@@ -535,11 +535,11 @@ def test_compressed_tensors_fp8_block_enabled(
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
     assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
     if linear_backend == "marlin":
-        assert isinstance(qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        assert isinstance(qkv_proj.scheme.fp8_linear, MarlinFp8LinearKernel)
         assert qkv_proj.weight.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
     else:
-        assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
+        assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockLinearKernel)
         assert qkv_proj.weight.dtype is fp8_dtype
         assert qkv_proj.weight_scale.dtype is torch.float32
     assert len(qkv_proj.weight.shape) == 2

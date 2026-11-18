@@ -21,8 +21,8 @@ from tests.utils import TestFP8Layer, requires_fp8
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear import fp8_scaled_mm_is_batch_invariant
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
-    TritonFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    TritonFp8LinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -102,12 +102,12 @@ def setup_cuda():
     "kernel",
     [
         pytest.param(
-            CutlassFP8ScaledMMLinearKernel,
+            CutlassFp8LinearKernel,
             marks=pytest.mark.skipif(
                 not current_platform.is_cuda(), reason="CUTLASS requires CUDA."
             ),
         ),
-        TritonFP8ScaledMMLinearKernel,
+        TritonFp8LinearKernel,
     ],
 )
 @pytest.mark.parametrize(

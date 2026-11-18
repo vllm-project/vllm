@@ -13,12 +13,12 @@ import pytest
 import torch
 
 from vllm import _cpu_ops as ops
-from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
-    CPUFp8ChannelWiseScaledMMLinearKernel,
-    CPUFp8PerTensorScaledMMLinearKernel,
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearLayerConfig,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
+from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+    CPUFp8ChannelWiseLinearKernel,
+    CPUFp8PerTensorLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
@@ -303,7 +303,7 @@ NK_SIZES_PER_TENSOR = [
 def test_cpu_fp8_per_tensor_scaled_mm_kernel(
     M: int, N: int, K: int, use_bias: bool, default_vllm_config
 ):
-    """CPUFp8PerTensorScaledMMLinearKernel correctness against float reference.
+    """CPUFp8PerTensorLinearKernel correctness against float reference.
 
     Exercises the full kernel class (not just the raw op), including the
     weight-orientation fixup: Fp8LinearMethod stores `layer.weight` as
@@ -321,14 +321,14 @@ def test_cpu_fp8_per_tensor_scaled_mm_kernel(
 
     ref_out = ref_fp8_per_tensor_scaled_mm(x, fp8_weight, scale, bias, out_dtype)
 
-    config = FP8ScaledMMLinearLayerConfig(
+    config = Fp8LinearLayerConfig(
         weight_quant_key=kFp8StaticTensorSym,
         activation_quant_key=kFp8StaticTensorSym,
         weight_shape=(N, K),
         input_dtype=out_dtype,
         out_dtype=out_dtype,
     )
-    kernel = CPUFp8PerTensorScaledMMLinearKernel(
+    kernel = CPUFp8PerTensorLinearKernel(
         config,
         layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
@@ -356,14 +356,14 @@ def test_cpu_fp8_per_tensor_kernel_rejects_non_multiple_of_32_n(n: int):
     remainder tile smaller than that, so can_implement must reject any N
     that isn't a multiple of 32 rather than let it crash the process.
     """
-    config = FP8ScaledMMLinearLayerConfig(
+    config = Fp8LinearLayerConfig(
         weight_quant_key=kFp8StaticTensorSym,
         activation_quant_key=kFp8StaticTensorSym,
         weight_shape=(n, 64),
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
     )
-    supported, _ = CPUFp8PerTensorScaledMMLinearKernel.can_implement(config)
+    supported, _ = CPUFp8PerTensorLinearKernel.can_implement(config)
     assert not supported
 
 
@@ -373,7 +373,7 @@ def test_cpu_fp8_per_tensor_kernel_rejects_non_multiple_of_32_n(n: int):
 def test_cpu_fp8_channelwise_scaled_mm_kernel(
     M: int, N: int, K: int, use_bias: bool, default_vllm_config
 ):
-    """CPUFp8ChannelWiseScaledMMLinearKernel against a dequantized reference."""
+    """CPUFp8ChannelWiseLinearKernel against a dequantized reference."""
     torch.manual_seed(0)
     out_dtype = torch.bfloat16
     x = torch.randn(M, K, dtype=out_dtype) / (K**0.5)
@@ -386,14 +386,14 @@ def test_cpu_fp8_channelwise_scaled_mm_kernel(
         x.float(), fp8_weight.float() * scale, None if bias is None else bias.float()
     ).to(out_dtype)
 
-    config = FP8ScaledMMLinearLayerConfig(
+    config = Fp8LinearLayerConfig(
         weight_quant_key=kFp8StaticChannelSym,
         activation_quant_key=kFp8DynamicTokenSym,
         weight_shape=(N, K),
         input_dtype=out_dtype,
         out_dtype=out_dtype,
     )
-    kernel = CPUFp8ChannelWiseScaledMMLinearKernel(
+    kernel = CPUFp8ChannelWiseLinearKernel(
         config,
         layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
@@ -450,7 +450,7 @@ W8A8_NK_SIZES = [(128, 256), (256, 512), (64, 128)]
 def test_cpu_fp8_w8a8_per_tensor(
     M: int, N: int, K: int, use_bias: bool, static_activation: bool
 ):
-    """CPUFP8W8A8ScaledMMLinearKernel with per-tensor weight scale."""
+    """CPUFp8W8A8LinearKernel with per-tensor weight scale."""
     torch.manual_seed(42)
     out_dtype = torch.bfloat16
 
@@ -489,7 +489,7 @@ def test_cpu_fp8_w8a8_per_tensor(
 def test_cpu_fp8_w8a8_per_channel(
     M: int, N: int, K: int, use_bias: bool, static_activation: bool
 ):
-    """CPUFP8W8A8ScaledMMLinearKernel with per-channel weight scale."""
+    """CPUFp8W8A8LinearKernel with per-channel weight scale."""
     torch.manual_seed(42)
     out_dtype = torch.bfloat16
 
@@ -525,7 +525,7 @@ def test_cpu_fp8_w8a8_per_channel(
 @pytest.mark.parametrize("N,K", W8A8_NK_SIZES)
 @pytest.mark.parametrize("use_bias", [False, True])
 def test_cpu_fp8_w8a8_per_group(M: int, N: int, K: int, use_bias: bool):
-    """CPUFp8W8A8BlockScaledMMKernel: per-group (128-block) weight scale +
+    """CPUFp8W8A8BlockLinearKernel: per-group (128-block) weight scale +
     dynamic per-token activation scale."""
     torch.manual_seed(42)
     out_dtype = torch.bfloat16

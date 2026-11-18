@@ -16,7 +16,7 @@ from tests.kernels.utils import fp8_ulp_distance
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
-    B12xFp8BlockScaledMMKernel,
+    B12xFp8BlockLinearKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
@@ -215,11 +215,11 @@ def test_w8a8_block_fp8_cutlass_matmul(M):
     reason="torch._scaled_mm DeepSeek-style block scaling only supports SM90.",
 )
 def test_w8a8_block_fp8_torch_scaled_mm_matmul():
-    # BlockWiseTorchFP8ScaledMMLinearKernel: 1x128 activation + 128x128 weight
+    # BlockWiseTorchFp8LinearKernel: 1x128 activation + 128x128 weight
     # block scaling routed through torch._scaled_mm. M=83 is not a multiple of
     # 4 so this also exercises the M-padding path.
     from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-        BlockWiseTorchFP8ScaledMMLinearKernel,
+        BlockWiseTorchFp8LinearKernel,
     )
 
     M = 83
@@ -254,9 +254,7 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
         A_fp32, block_size[1], column_major_scales=True
     )
 
-    stub = BlockWiseTorchFP8ScaledMMLinearKernel.__new__(
-        BlockWiseTorchFP8ScaledMMLinearKernel
-    )
+    stub = BlockWiseTorchFp8LinearKernel.__new__(BlockWiseTorchFp8LinearKernel)
     stub.config = types.SimpleNamespace(out_dtype=out_dtype)
     out = stub.apply_block_scaled_mm(
         A_fp8_cuda.cuda(), B_fp8.cuda(), As_cuda.cuda(), Bs.cuda()
@@ -427,7 +425,7 @@ def test_w8a8_block_fp8_aiter_matmul(
 )
 @torch.inference_mode()
 def test_w8a8_block_fp8_b12x_matmul(M, N, K):
-    supported, reason = B12xFp8BlockScaledMMKernel.is_supported()
+    supported, reason = B12xFp8BlockLinearKernel.is_supported()
     if not supported:
         pytest.skip(reason)
 

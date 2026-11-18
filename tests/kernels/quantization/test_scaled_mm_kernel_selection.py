@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ScaledMM kernel selection logic (CPU-only).
+"""Tests for FP8 and INT8 linear kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
@@ -16,15 +16,15 @@ from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
-    AiterInt8ScaledMMLinearKernel,
-    CPUInt8ScaledMMLinearKernel,
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    HummingFP8ScaledMMLinearKernel,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-    TritonInt8ScaledMMLinearKernel,
+    AiterInt8LinearKernel,
+    CPUInt8LinearKernel,
+    Fp8BlockLinearKernel,
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+    HummingFp8LinearKernel,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
+    TritonInt8LinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
@@ -82,7 +82,7 @@ def test_linear_backend_override_is_quantization_specific():
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@patch.object(HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch.object(HummingFp8LinearKernel, "is_supported", return_value=(True, None))
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
     """Humming FP8 linear is weight-only, so it runs W8A8 layers as W8A16
@@ -110,49 +110,45 @@ def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
             with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
                 init_kernel()
         else:
-            assert type(init_kernel()) is HummingFP8ScaledMMLinearKernel
+            assert type(init_kernel()) is HummingFp8LinearKernel
 
 
 def test_is_supported_is_abstract():
     """Test that is_supported() is properly defined as abstract."""
-    for kernel_cls in (FP8ScaledMMLinearKernel, Int8ScaledMMLinearKernel):
+    for kernel_cls in (Fp8LinearKernel, Int8LinearKernel):
         assert issubclass(kernel_cls, ABC)
         assert "is_supported" in kernel_cls.__abstractmethods__
 
 
 def test_cpu_kernel_implements_is_supported():
-    """Test that CPUInt8ScaledMMLinearKernel implements is_supported() method."""
-    assert hasattr(CPUInt8ScaledMMLinearKernel, "is_supported"), (
-        "CPUInt8ScaledMMLinearKernel missing is_supported() method"
+    """Test that CPUInt8LinearKernel implements is_supported() method."""
+    assert hasattr(CPUInt8LinearKernel, "is_supported"), (
+        "CPUInt8LinearKernel missing is_supported() method"
     )
     # Verify it's a classmethod by checking if it can be called with the class
     # and by checking the method type
-    assert inspect.ismethod(
-        CPUInt8ScaledMMLinearKernel.is_supported
-    ) or inspect.isfunction(CPUInt8ScaledMMLinearKernel.is_supported), (
-        "CPUInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
-    )
+    assert inspect.ismethod(CPUInt8LinearKernel.is_supported) or inspect.isfunction(
+        CPUInt8LinearKernel.is_supported
+    ), "CPUInt8LinearKernel.is_supported() should be a classmethod"
     # Verify it can be called as a classmethod
-    result, reason = CPUInt8ScaledMMLinearKernel.is_supported()
+    result, reason = CPUInt8LinearKernel.is_supported()
     assert isinstance(result, bool), "is_supported() should return a bool"
     assert reason is None or isinstance(reason, str), "reason should be str or None"
 
 
 def test_aiter_kernel_implements_is_supported():
-    """Test that AiterInt8ScaledMMLinearKernel implements is_supported() method."""
-    assert hasattr(AiterInt8ScaledMMLinearKernel, "is_supported"), (
-        "AiterInt8ScaledMMLinearKernel missing is_supported() method"
+    """Test that AiterInt8LinearKernel implements is_supported() method."""
+    assert hasattr(AiterInt8LinearKernel, "is_supported"), (
+        "AiterInt8LinearKernel missing is_supported() method"
     )
     # Verify it's a classmethod by checking if it can be called with the class
     # and by checking the method type
-    assert inspect.ismethod(
-        AiterInt8ScaledMMLinearKernel.is_supported
-    ) or inspect.isfunction(AiterInt8ScaledMMLinearKernel.is_supported), (
-        "AiterInt8ScaledMMLinearKernel.is_supported() should be a classmethod"
-    )
+    assert inspect.ismethod(AiterInt8LinearKernel.is_supported) or inspect.isfunction(
+        AiterInt8LinearKernel.is_supported
+    ), "AiterInt8LinearKernel.is_supported() should be a classmethod"
     # Verify it can be called as a classmethod
     # (will return False on CPU, which is expected)
-    result, reason = AiterInt8ScaledMMLinearKernel.is_supported()
+    result, reason = AiterInt8LinearKernel.is_supported()
     assert isinstance(result, bool), "is_supported() should return a bool"
     assert reason is None or isinstance(reason, str), "reason should be str or None"
     # On CPU, it should return False with a reason about requiring ROCm
@@ -179,13 +175,13 @@ def test_aiter_kernel_implements_is_supported():
 def test_aiter_int8_kernel_can_implement_scale_layouts(
     is_static_input_scheme, is_channelwise, is_fused_module, expected
 ):
-    config = Int8ScaledMMLinearLayerConfig(
+    config = Int8LinearLayerConfig(
         is_static_input_scheme=is_static_input_scheme,
         is_channelwise=is_channelwise,
         input_symmetric=True,
         is_fused_module=is_fused_module,
     )
-    can_impl, _ = AiterInt8ScaledMMLinearKernel.can_implement(config)
+    can_impl, _ = AiterInt8LinearKernel.can_implement(config)
     assert can_impl is expected
 
 
@@ -224,8 +220,8 @@ def _make_quark_per_tensor_int8_scheme():
     ids=["compressed_tensors", "quark"],
 )
 @pytest.mark.parametrize("output_partition_sizes", [[16, 32], [48]], ids=str)
-@patch.object(TritonInt8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
-@patch.object(AiterInt8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch.object(TritonInt8LinearKernel, "is_supported", return_value=(True, None))
+@patch.object(AiterInt8LinearKernel, "is_supported", return_value=(True, None))
 @patch(
     "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1
 )
@@ -256,9 +252,7 @@ def test_aiter_int8_per_tensor_weight_selection_and_loading(
     )
 
     is_fused = len(output_partition_sizes) > 1
-    expected_kernel = (
-        AiterInt8ScaledMMLinearKernel if is_fused else TritonInt8ScaledMMLinearKernel
-    )
+    expected_kernel = AiterInt8LinearKernel if is_fused else TritonInt8LinearKernel
     assert type(scheme.kernel) is expected_kernel
     if not is_fused:
         return
@@ -269,7 +263,7 @@ def test_aiter_int8_per_tensor_weight_selection_and_loading(
     layer.weight_scale.data.copy_(shard_scales)
     scheme.process_weights_after_loading(layer)
 
-    # AiterInt8ScaledMMLinearKernel.apply_weights expects [K, N] weights and
+    # AiterInt8LinearKernel.apply_weights expects [K, N] weights and
     # one scale per output channel.
     assert layer.weight.shape == (32, n)
     assert layer.weight_scale.numel() == layer.weight.shape[1]
@@ -280,14 +274,14 @@ def test_aiter_int8_per_tensor_weight_selection_and_loading(
 
 
 def test_cpu_kernel_accepts_all_configs():
-    """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
+    """Test that CPUInt8LinearKernel accepts all config combinations."""
     configs = [
-        Int8ScaledMMLinearLayerConfig(
+        Int8LinearLayerConfig(
             is_channelwise=False,
             is_static_input_scheme=True,
             input_symmetric=True,
         ),
-        Int8ScaledMMLinearLayerConfig(
+        Int8LinearLayerConfig(
             is_channelwise=True,
             is_static_input_scheme=False,
             input_symmetric=False,
@@ -295,10 +289,8 @@ def test_cpu_kernel_accepts_all_configs():
     ]
 
     for config in configs:
-        can_impl, reason = CPUInt8ScaledMMLinearKernel.can_implement(config)
-        assert can_impl, (
-            f"CPUInt8ScaledMMLinearKernel should accept config {config}: {reason}"
-        )
+        can_impl, reason = CPUInt8LinearKernel.can_implement(config)
+        assert can_impl, f"CPUInt8LinearKernel should accept config {config}: {reason}"
 
 
 @pytest.mark.skipif(
@@ -318,12 +310,12 @@ def test_cpu_sgl_int8_linear_accepts_3d_input():
     layer.bias = torch.nn.Parameter(
         torch.randn(N, dtype=torch.bfloat16), requires_grad=False
     )
-    config = Int8ScaledMMLinearLayerConfig(
+    config = Int8LinearLayerConfig(
         is_channelwise=True,
         is_static_input_scheme=False,
         input_symmetric=True,
     )
-    kernel = CPUInt8ScaledMMLinearKernel(
+    kernel = CPUInt8LinearKernel(
         config,
         ("weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"),
     )
@@ -338,7 +330,7 @@ def test_cpu_sgl_int8_linear_accepts_3d_input():
     torch.testing.assert_close(out, ref.reshape(2, 3, N), rtol=0, atol=0)
 
 
-class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class OOTInt8LinearKernel(Int8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -346,7 +338,7 @@ class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -365,16 +357,16 @@ class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 def test_register_oot_linear_kernel(platform_mock):
     """Test that the linear kernel registration works correctly."""
     platform_mock._enum = PlatformEnum.OOT
-    register_linear_kernel(OOTInt8ScaledMMLinearKernel, PlatformEnum.OOT, "int8")
+    register_linear_kernel(OOTInt8LinearKernel, PlatformEnum.OOT, "int8")
 
     kernel = init_int8_linear_kernel(True, True, True, "module")
 
-    assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
+    assert isinstance(kernel, OOTInt8LinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
 
 
-class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+class OOTFp8BlockLinearKernel(Fp8BlockLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -382,7 +374,7 @@ class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def apply_block_scaled_mm(
@@ -399,9 +391,7 @@ class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
 def test_register_oot_fp8_block_linear_kernel(platform_mock, default_vllm_config):
     """Test that block-scaled FP8 kernel registration works correctly."""
     platform_mock._enum = PlatformEnum.OOT
-    register_linear_kernel(
-        OOTFp8BlockScaledMMLinearKernel, PlatformEnum.OOT, "fp8_block"
-    )
+    register_linear_kernel(OOTFp8BlockLinearKernel, PlatformEnum.OOT, "fp8_block")
 
     kernel = init_fp8_linear_kernel(
         activation_quant_key=kFp8Dynamic128Sym,
@@ -411,7 +401,7 @@ def test_register_oot_fp8_block_linear_kernel(platform_mock, default_vllm_config
         weight_shape=(128, 128),
     )
 
-    assert isinstance(kernel, OOTFp8BlockScaledMMLinearKernel), (
+    assert isinstance(kernel, OOTFp8BlockLinearKernel), (
         "init_fp8_linear_kernel should return an instance of the registered kernel"
     )
 

@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
-    DeepGemmFp8BlockScaledMMKernel,
+    DeepGemmFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
@@ -21,7 +21,7 @@ def _block_fp8_layer(n: int, k: int, scale_name: str = "weight_scale"):
     layer = SimpleNamespace(
         weight=torch.empty((n, k), dtype=torch.float8_e4m3fn),
         weight_block_size=[128, 128],
-        deep_gemm_warmup_provider=object.__new__(DeepGemmFp8BlockScaledMMKernel),
+        deep_gemm_warmup_provider=object.__new__(DeepGemmFp8BlockLinearKernel),
     )
     setattr(layer, scale_name, torch.empty((n // 128, k // 128), dtype=torch.float32))
     return layer
@@ -77,7 +77,7 @@ def test_unstamped_and_mismatched_block_layers_are_skipped(monkeypatch) -> None:
 @pytest.mark.parametrize("is_bmm", [False, True])
 def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
     """Bmm layers bypass the kernel at runtime, so they must not be warmed."""
-    kernel = object.__new__(DeepGemmFp8BlockScaledMMKernel)
+    kernel = object.__new__(DeepGemmFp8BlockLinearKernel)
     kernel.is_deep_gemm_supported = False
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(

@@ -2,73 +2,73 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterInt8ScaledMMLinearKernel,
+    AiterInt8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.block_base import (
+    Fp8BlockLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
-    CPUFp8BlockScaledMMKernel,
-    CPUFp8PerTensorScaledMMLinearKernel,
-    CPUFP8W8A8ScaledMMLinearKernel,
-    CPUInt8ScaledMMLinearKernel,
+    CPUFp8BlockLinearKernel,
+    CPUFp8PerTensorLinearKernel,
+    CPUFp8W8A8LinearKernel,
+    CPUInt8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
-    CutlassInt8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    CutlassInt8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
-    FlashInferFP8ScaledMMLinearKernel,
+    FlashInferFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
-    MarlinFP8ScaledMMLinearKernel,
+    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
+    ChannelWiseTorchFp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    RowWiseTorchFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+    ROCmFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-    TritonFP8ScaledMMLinearKernel,
-    TritonInt8ScaledMMLinearKernel,
+    TritonFp8LinearKernel,
+    TritonInt8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-    XPUFp8BlockScaledMMKernel,
+    XPUFp8BlockLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
-    ZentorchInt8ScaledMMLinearKernel,
+    ZentorchInt8LinearKernel,
 )
 
 __all__ = [
-    "FP8ScaledMMLinearKernel",
-    "FP8ScaledMMLinearLayerConfig",
-    "Int8ScaledMMLinearKernel",
-    "Int8ScaledMMLinearLayerConfig",
-    "AiterInt8ScaledMMLinearKernel",
-    "CPUInt8ScaledMMLinearKernel",
-    "CutlassFP8ScaledMMLinearKernel",
-    "CutlassInt8ScaledMMLinearKernel",
-    "FlashInferFP8ScaledMMLinearKernel",
-    "MarlinFP8ScaledMMLinearKernel",
-    "ChannelWiseTorchFP8ScaledMMLinearKernel",
-    "PerTensorTorchFP8ScaledMMLinearKernel",
-    "RowWiseTorchFP8ScaledMMLinearKernel",
-    "ROCmFP8ScaledMMLinearKernel",
-    "TritonFP8ScaledMMLinearKernel",
-    "TritonInt8ScaledMMLinearKernel",
-    "ZentorchInt8ScaledMMLinearKernel",
-    "Fp8BlockScaledMMLinearKernel",
-    "CPUFp8BlockScaledMMKernel",
-    "CPUFp8PerTensorScaledMMLinearKernel",
-    "CPUFP8W8A8ScaledMMLinearKernel",
-    "XPUFp8BlockScaledMMKernel",
+    "Fp8LinearKernel",
+    "Fp8LinearLayerConfig",
+    "Int8LinearKernel",
+    "Int8LinearLayerConfig",
+    "AiterInt8LinearKernel",
+    "CPUInt8LinearKernel",
+    "CutlassFp8LinearKernel",
+    "CutlassInt8LinearKernel",
+    "FlashInferFp8LinearKernel",
+    "MarlinFp8LinearKernel",
+    "ChannelWiseTorchFp8LinearKernel",
+    "PerTensorTorchFp8LinearKernel",
+    "RowWiseTorchFp8LinearKernel",
+    "ROCmFp8LinearKernel",
+    "TritonFp8LinearKernel",
+    "TritonInt8LinearKernel",
+    "ZentorchInt8LinearKernel",
+    "Fp8BlockLinearKernel",
+    "CPUFp8BlockLinearKernel",
+    "CPUFp8PerTensorLinearKernel",
+    "CPUFp8W8A8LinearKernel",
+    "XPUFp8BlockLinearKernel",
 ]

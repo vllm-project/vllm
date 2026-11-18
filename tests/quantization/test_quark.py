@@ -27,12 +27,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearLayerConfig,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -137,9 +137,9 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 AITER_AVAILABLE = is_aiter_found_and_supported()
 
 AITER_PTPC_KERNELS = (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -1585,7 +1585,7 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
     # Llama-3.1-70B qkv_proj at TP1 (aiter-tuned N, K on gfx950).
     N, K = 10240, 8192
     dtype = torch.bfloat16
-    kernel_config = FP8ScaledMMLinearLayerConfig(
+    kernel_config = Fp8LinearLayerConfig(
         weight_quant_key=kFp8StaticChannelSym,
         activation_quant_key=kFp8DynamicTokenSym,
         weight_shape=(N, K),

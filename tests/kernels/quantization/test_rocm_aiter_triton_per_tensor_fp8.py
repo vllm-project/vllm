@@ -9,13 +9,13 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterTritonPerTensorFp8ScaledMMLinearKernel,
+    AiterTritonPerTensorFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.base import (
+    Fp8LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
+    ROCmFp8LinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
@@ -61,8 +61,8 @@ def _make_config(
     weight_quant_key=kFp8StaticTensorSym,
     out_dtype: torch.dtype = torch.bfloat16,
     weight_shape: tuple[int, int] = (4096, 4096),
-) -> FP8ScaledMMLinearLayerConfig:
-    return FP8ScaledMMLinearLayerConfig(
+) -> Fp8LinearLayerConfig:
+    return Fp8LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         weight_shape=weight_shape,
@@ -111,18 +111,16 @@ def _make_layer(weight_shape: tuple[int, int]) -> torch.nn.Module:
 )
 def test_can_implement_rejects_unsupported_configs(
     enable_kernel,
-    config: FP8ScaledMMLinearLayerConfig,
+    config: Fp8LinearLayerConfig,
     expected_reason: str,
 ):
-    can_implement, reason = AiterTritonPerTensorFp8ScaledMMLinearKernel.can_implement(
-        config
-    )
+    can_implement, reason = AiterTritonPerTensorFp8LinearKernel.can_implement(config)
     assert not can_implement
     assert reason == expected_reason
 
 
 def test_can_implement_rejects_untuned_shape(enable_kernel):
-    can_implement, reason = AiterTritonPerTensorFp8ScaledMMLinearKernel.can_implement(
+    can_implement, reason = AiterTritonPerTensorFp8LinearKernel.can_implement(
         _make_config(weight_shape=(1232, 4096))
     )
     assert not can_implement
@@ -133,8 +131,8 @@ def test_can_implement_rejects_untuned_shape(enable_kernel):
 @pytest.mark.parametrize(
     ("weight_shape", "expected_kernel"),
     [
-        ((4096, 4096), AiterTritonPerTensorFp8ScaledMMLinearKernel),
-        ((1232, 4096), ROCmFP8ScaledMMLinearKernel),
+        ((4096, 4096), AiterTritonPerTensorFp8LinearKernel),
+        ((1232, 4096), ROCmFp8LinearKernel),
     ],
 )
 def test_default_selection(
@@ -171,7 +169,7 @@ def test_forward_matches_scaled_mm(
 
     monkeypatch.setattr(aiter_gemm_a8w8, "gemm_a8w8", counting_gemm_a8w8)
 
-    kernel = AiterTritonPerTensorFp8ScaledMMLinearKernel(
+    kernel = AiterTritonPerTensorFp8LinearKernel(
         _make_config(weight_shape=weight_shape), layer_param_names=PARAM_NAMES
     )
     layer = _make_layer(weight_shape)
@@ -191,14 +189,14 @@ def test_forward_matches_scaled_mm(
 
     assert out.shape == (num_tokens, weight_shape[0])
     torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
-    expect_triton = 5 <= num_tokens <= AiterTritonPerTensorFp8ScaledMMLinearKernel.MAX_M
+    expect_triton = 5 <= num_tokens <= AiterTritonPerTensorFp8LinearKernel.MAX_M
     assert triton_calls == ([num_tokens] if expect_triton else [])
 
 
 @pytest.mark.parametrize("num_tokens", [8, 300])
 def test_rocm_aiter_triton_per_tensor_fp8_gemm_fake_implementation(num_tokens: int):
     n, k = 4096, 4096
-    max_m = AiterTritonPerTensorFp8ScaledMMLinearKernel.MAX_M
+    max_m = AiterTritonPerTensorFp8LinearKernel.MAX_M
     layer = _make_layer((n, k))
     x_q = torch.randn(num_tokens, k, device="cuda").to(current_platform.fp8_dtype())
     x_scale_vec = layer.input_scale.reshape(1).expand(max_m).contiguous()

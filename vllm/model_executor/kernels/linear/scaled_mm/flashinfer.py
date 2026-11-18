@@ -25,18 +25,18 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
 
-from .BlockScaledMMLinearKernel import (
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+)
+from .block_base import (
+    Fp8BlockLinearKernel,
     Fp8BlockScaledDynamicMMLinearKernel,
-    Fp8BlockScaledMMLinearKernel,
 )
-from .deep_gemm import DeepGemmFp8BlockScaledMMKernel, fp8_gemm_nt
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
+from .deep_gemm import DeepGemmFp8BlockLinearKernel, fp8_gemm_nt
 
 
-class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class FlashInferFp8LinearKernel(Fp8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -53,7 +53,7 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -85,15 +85,15 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
 
 
-class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class FlashInferFp8BlockLinearKernel(Fp8BlockLinearKernel):
     # FlashInfer accepts BF16 input and handles FP8 conversion internally.
     apply_input_quant: ClassVar[bool] = False
 
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+    def __init__(self, config: Fp8LinearLayerConfig) -> None:
         super().__init__(config)
 
     @classmethod
-    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+    def can_implement(cls, config: Fp8LinearLayerConfig):
         can_implement_base, reason = super().can_implement(config)
         if not can_implement_base:
             return can_implement_base, reason
@@ -164,18 +164,18 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     BF16 tensor operand list passed by torch.cond.
     """
 
-    base_type: ClassVar[type[FlashInferFp8BlockScaledMMKernel]] = (
-        FlashInferFp8BlockScaledMMKernel
+    base_type: ClassVar[type[FlashInferFp8BlockLinearKernel]] = (
+        FlashInferFp8BlockLinearKernel
     )
-    fallback_type: ClassVar[type[DeepGemmFp8BlockScaledMMKernel]] = (
-        DeepGemmFp8BlockScaledMMKernel
+    fallback_type: ClassVar[type[DeepGemmFp8BlockLinearKernel]] = (
+        DeepGemmFp8BlockLinearKernel
     )
     apply_input_quant: ClassVar[bool] = False
 
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+    def __init__(self, config: Fp8LinearLayerConfig):
         super().__init__(config)
-        self.base: FlashInferFp8BlockScaledMMKernel
-        self.fallback: DeepGemmFp8BlockScaledMMKernel
+        self.base: FlashInferFp8BlockLinearKernel
+        self.fallback: DeepGemmFp8BlockLinearKernel
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # DeepGEMM need post-processing; both kernels share the same

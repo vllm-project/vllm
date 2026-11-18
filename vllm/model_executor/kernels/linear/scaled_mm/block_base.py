@@ -17,7 +17,7 @@ from ..base import (
     FP8Params,
     MMLinearKernel,
 )
-from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
+from .base import Fp8LinearLayerConfig
 
 
 @dataclass(slots=True)
@@ -54,14 +54,12 @@ class FP8BlockParams(FP8Params):
         return scale
 
 
-class Fp8BlockScaledMMLinearKernel(
-    MMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8BlockParams], ABC
-):
+class Fp8BlockLinearKernel(MMLinearKernel[Fp8LinearLayerConfig, FP8BlockParams], ABC):
     # Set to False in subclasses that accept BF16 input directly (e.g. FlashInfer)
     # and therefore do not need the input quantization step in apply_weights.
     apply_input_quant: ClassVar[bool] = True
 
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+    def __init__(self, config: Fp8LinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.weight_group_shape = config.weight_quant_key.scale.group_shape
@@ -74,7 +72,7 @@ class Fp8BlockScaledMMLinearKernel(
         self.use_triton = False
 
     @classmethod
-    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+    def can_implement(cls, config: Fp8LinearLayerConfig):
         act_quant_key = config.activation_quant_key
         if act_quant_key.scale.static:
             return (
@@ -150,10 +148,10 @@ class Fp8BlockScaledMMLinearKernel(
         raise NotImplementedError
 
 
-class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
+class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockLinearKernel, ABC):
     """Dynamic FP8 block-scaled kernel that dispatches at runtime.
 
-    Extends Fp8BlockScaledMMLinearKernel to inherit apply_weights and overrides
+    Extends Fp8BlockLinearKernel to inherit apply_weights and overrides
     apply_block_scaled_mm to dispatch between two sub-kernels using torch.cond.
 
     Subclasses must define:
@@ -161,10 +159,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         fallback_type: The fallback kernel class.
     """
 
-    base_type: ClassVar[type[Fp8BlockScaledMMLinearKernel]]
-    fallback_type: ClassVar[type[Fp8BlockScaledMMLinearKernel]]
+    base_type: ClassVar[type[Fp8BlockLinearKernel]]
+    fallback_type: ClassVar[type[Fp8BlockLinearKernel]]
 
-    def __init__(self, config: "FP8ScaledMMLinearLayerConfig") -> None:
+    def __init__(self, config: "Fp8LinearLayerConfig") -> None:
         super().__init__(config)
         self.base = self.base_type(config)
         self.fallback = self.fallback_type(config)
@@ -192,9 +190,7 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         return False, f"fallback is not supported due to {reason_2}"
 
     @classmethod
-    def can_implement(
-        cls, config: "FP8ScaledMMLinearLayerConfig"
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: "Fp8LinearLayerConfig") -> tuple[bool, str | None]:
         can_implement_base, reason_1 = cls.base_type.can_implement(config)
         can_implement_fallback, reason_2 = cls.fallback_type.can_implement(config)
         if can_implement_base and can_implement_fallback:

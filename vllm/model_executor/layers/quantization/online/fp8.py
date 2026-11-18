@@ -21,14 +21,14 @@ from vllm.model_executor.kernels.linear import (
     init_wfp8_a16_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
-    MarlinFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFp8BlockScaledMMKernel,
+    CutlassFp8BlockLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
-    HummingFP8ScaledMMLinearKernel,
+    HummingFp8LinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -220,7 +220,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         return self.requantization_source is None and isinstance(
-            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+            getattr(self, "fp8_linear", None), CutlassFp8LinearKernel
         )
 
     def create_weights(
@@ -253,7 +253,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFp8LinearKernel)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if is_weights_pre_processed():
@@ -335,7 +335,7 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         return self.requantization_source is None and isinstance(
-            getattr(self, "fp8_linear", None), CutlassFp8BlockScaledMMKernel
+            getattr(self, "fp8_linear", None), CutlassFp8BlockLinearKernel
         )
 
     def create_weights(
@@ -456,7 +456,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         return self.requantization_source is None and isinstance(
-            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+            getattr(self, "fp8_linear", None), CutlassFp8LinearKernel
         )
 
     def create_weights(
@@ -492,7 +492,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             # are W8A16 and would silently produce a weight-only fp8 model.
             if isinstance(
                 self.fp8_linear,
-                (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
+                (MarlinFp8LinearKernel, HummingFp8LinearKernel),
             ):
                 raise ValueError(
                     "FP8 PTPC online quant requires a kernel that honors "

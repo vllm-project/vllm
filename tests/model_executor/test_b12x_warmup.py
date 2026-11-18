@@ -8,11 +8,11 @@ import pytest
 import torch
 
 from vllm.model_executor.kernels.linear import (
-    B12xFp8BlockScaledMMKernel,
+    B12xFp8BlockLinearKernel,
     B12xMxFp4LinearKernel,
     B12xMxfp8LinearKernel,
     B12xNvFp4LinearKernel,
-    B12xTensorFP8ScaledMMLinearKernel,
+    B12xTensorFp8LinearKernel,
 )
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.utils.b12x import B12xWarmupUnit, b12x_warmup_token_counts
@@ -105,7 +105,7 @@ def test_b12x_block_quant_warmup_covers_each_layers_plans(monkeypatch, is_embedd
             "NVFP4",
         ),
         (
-            B12xFp8BlockScaledMMKernel,
+            B12xFp8BlockLinearKernel,
             "vllm.model_executor.kernels.linear.scaled_mm.b12x",
             "_run_b12x_fp8_block_scaled_mm",
             SimpleNamespace(
@@ -195,7 +195,7 @@ def test_b12x_tensor_fp8_warmup_unit(monkeypatch) -> None:
         values=torch.empty(1),
     )
     layer = SimpleNamespace(b12x_tensor_fp8_packed_weight=packed_weight)
-    kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
+    kernel = object.__new__(B12xTensorFp8LinearKernel)
 
     unit = kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16)
     unit.compile()

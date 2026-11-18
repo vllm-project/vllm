@@ -18,7 +18,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
-    DeepGemmFp8BlockScaledMMKernel,
+    DeepGemmFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
@@ -131,7 +131,7 @@ def _deep_gemm_linear_data(
     `deep_gemm_warmup_provider` in `process_weights_after_loading`, else None.
     """
     provider = getattr(module, "deep_gemm_warmup_provider", None)
-    if not isinstance(provider, DeepGemmFp8BlockScaledMMKernel):
+    if not isinstance(provider, DeepGemmFp8BlockLinearKernel):
         return None
     if module.weight_block_size != get_mk_alignment_for_contiguous_layout():
         return None

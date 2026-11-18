@@ -3,7 +3,7 @@
 """Zentorch dynamic-symmetric W8A8 int8 linear kernel for AMD Zen CPUs.
 
 Selected by `choose_scaled_mm_linear_kernel` ahead of the generic
-oneDNN-backed `CPUInt8ScaledMMLinearKernel`. When `is_supported` or
+oneDNN-backed `CPUInt8LinearKernel`. When `is_supported` or
 `can_implement` rejects a layer, the selector falls through to the next
 kernel in `_POSSIBLE_INT8_KERNELS[PlatformEnum.CPU]`.
 """
@@ -15,15 +15,15 @@ from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .base import (
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
 )
 
 logger = init_logger(__name__)
 
 
-class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class ZentorchInt8LinearKernel(Int8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -40,7 +40,7 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8LinearLayerConfig) -> tuple[bool, str | None]:
         if c.is_static_input_scheme:
             return False, "requires dynamic activation quantization."
         if not c.input_symmetric:

@@ -19,11 +19,11 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.kernels.linear import (
-    CutlassFP8ScaledMMLinearKernel,
-    FlashInferFP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    ROCmFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    FlashInferFp8LinearKernel,
+    Fp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    ROCmFp8LinearKernel,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
@@ -64,11 +64,11 @@ class MockLinearForFusion(torch.nn.Module):
             self.input_global_scale_inv = input_global_scale_inv
 
 
-ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
+ROCM_KERNELS = [ROCmFp8LinearKernel, PerTensorTorchFp8LinearKernel]
 CUDA_KERNELS = [
-    FlashInferFP8ScaledMMLinearKernel,
-    CutlassFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
+    FlashInferFp8LinearKernel,
+    CutlassFp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
@@ -84,7 +84,7 @@ def test_manual_fusion_fp8_static_with_linear(
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    force_kernel: type[FP8ScaledMMLinearKernel],
+    force_kernel: type[Fp8LinearKernel],
 ):
     """Test manual fusion with real FP8 linear layer (kFp8StaticTensorSym).
 

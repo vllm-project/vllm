@@ -51,7 +51,7 @@ from vllm.model_executor.kernels.linear.requantization_source import (
     FakeMxFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    MarlinFP8ScaledMMLinearKernel,
+    MarlinFp8LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
@@ -2384,14 +2384,10 @@ def test_online_quantization(
     elif current_platform.is_cuda() or current_platform.is_xpu():
         if current_platform.supports_fp8() and not force_marlin:
             assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert not isinstance(
-                o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
-            )
+            assert not isinstance(o_proj.quant_method.fp8_linear, MarlinFp8LinearKernel)
         else:
             assert o_proj.weight.dtype == torch.int32
-            assert isinstance(
-                o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
-            )
+            assert isinstance(o_proj.quant_method.fp8_linear, MarlinFp8LinearKernel)
     elif current_platform.is_rocm():
         assert o_proj.weight.dtype == current_platform.fp8_dtype()
     else:

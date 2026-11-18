@@ -21,10 +21,10 @@ from vllm.model_executor.kernels.linear import (
     init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFp8BlockScaledMMKernel,
+    CutlassFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
@@ -3081,12 +3081,12 @@ class ModelOptLinearMethod(LinearMethodBase):
             w.dtype == FP4_DTYPE
             or (
                 w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
-                and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
+                and isinstance(self.kernel, CutlassFp8LinearKernel)
                 and type(self.fmt) is FormatScheme
             )
             or (
                 w == kFp8Static128BlockSym
-                and isinstance(self.kernel, CutlassFp8BlockScaledMMKernel)
+                and isinstance(self.kernel, CutlassFp8BlockLinearKernel)
                 and type(self.fmt) is _Fp8PbWoPartialBlock
             )
             or (
