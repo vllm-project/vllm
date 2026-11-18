@@ -8700,11 +8700,23 @@ async fn completions_happy_path_returns_sse_stream() {
         payloads.iter().any(|payload| payload.contains("\"text\":\"h\"")),
         "{text}"
     );
-    assert!(
-        payloads.iter().any(|payload| payload.contains("\"finish_reason\":\"stop\"")),
-        "{text}"
-    );
     assert!(usage_index < done_index, "{text}");
+
+    let chunks = sse_json_payloads(&text);
+    let choice_chunks: Vec<_> =
+        chunks.iter().filter(|chunk| chunk["choices"] != json!([])).collect();
+    let (final_chunk, non_final_chunks) =
+        choice_chunks.split_last().expect("stream must contain choice chunks");
+    assert!(!non_final_chunks.is_empty(), "{text}");
+    for chunk in non_final_chunks {
+        let choice = &chunk["choices"][0];
+        assert_eq!(
+            choice.get("finish_reason"),
+            Some(&serde_json::Value::Null),
+            "non-final choice must include finish_reason: null: {choice}",
+        );
+    }
+    assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
 
     let usage_chunk: serde_json::Value =
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
