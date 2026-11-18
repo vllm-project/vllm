@@ -564,8 +564,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         ):
             fused_qkv_a_g_proj = self.fused_qkv_a_g_proj
             assert fused_qkv_a_g_proj is not None
-            qkv_a_weight = fused_qkv_a_g_proj.weight[:qkv_a_rows]
-            gate_weight = fused_qkv_a_g_proj.weight[qkv_a_rows:]
+            weight = fused_qkv_a_g_proj.weight
+            qkv_a_weight = weight[: fused_qkv_a_g_proj.latent_rows]
+            gate_weight = weight[fused_qkv_a_g_proj.gate_row_offset :]
 
             start_event, end_event = self._gate_events
             return maybe_execute_in_parallel(
