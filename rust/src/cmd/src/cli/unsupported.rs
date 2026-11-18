@@ -308,8 +308,11 @@ pub struct EngineUnsupportedArgs {
 
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    pub aggregate_engine_logging: Option<Unsupported>,
+    ///
+    /// Accepted as a no-op: the Rust frontend's periodic stats line always
+    /// aggregates across engines.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1, hide = true)]
+    pub aggregate_engine_logging: Option<Noop>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but

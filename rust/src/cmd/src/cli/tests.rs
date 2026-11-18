@@ -3044,8 +3044,9 @@ fn noop_args_are_accepted() {
         "Qwen/Qwen3-0.6B",
         "--disable-fastapi-docs",
         "--enable-offline-docs",
+        "--aggregate-engine-logging",
     ])
-    .expect("--disable-fastapi-docs and --enable-offline-docs are accepted");
+    .expect("no-op flags are accepted");
 
     Cli::try_parse_from([
         "vllm-rs",
@@ -3057,9 +3058,9 @@ fn noop_args_are_accepted() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true}"#,
     ])
-    .expect("disable_fastapi_docs and enable_offline_docs are accepted");
+    .expect("no-op fields are accepted");
 }
 
 /// `--custom-histogram-buckets` reaches the frontend config on both the
