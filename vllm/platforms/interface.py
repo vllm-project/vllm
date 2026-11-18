@@ -433,10 +433,10 @@ class Platform:
                 f"Backend {backend} is not supported for vit attention"
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
@@ -713,7 +713,13 @@ class Platform:
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends keep that preference only when they all ask
+        for the same size and all accept it. Differing preferences keep the
+        default. If any backend rejects the default, the LCM search is
+        unchanged.
 
         `supports_block_size` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -731,6 +737,18 @@ class Platform:
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Take a preference only when every backend asks for that same
+                # size. The max of disagreeing preferences would move
+                # DeepSeek-V4.1 from 64 to the SWA preference of 256.
+                preferences = [
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                ]
+                chosen = preferences[0]
+                if all(p == chosen for p in preferences) and all(
+                    b.supports_block_size(chosen) for b in backend_classes
+                ):
+                    return chosen
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
