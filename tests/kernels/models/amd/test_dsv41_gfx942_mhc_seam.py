@@ -112,6 +112,7 @@ def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
         engram=None,
         use_sequence_parallel=False,
         fuse_seam_norm=False,
+        attn_seam_mxfp8=False,
         mhc_seam=partial(amd_mhc.mhc_pre_delayed_seam, MHCPreDelayedOp()),
         mhc_pre_delayed=None,
         hc_attn_fn=fn,
