@@ -2166,6 +2166,7 @@ def initialize_model_parallel(
     assert torch.distributed.is_initialized()
 
     from vllm.config import get_current_vllm_config
+    from vllm.platforms import current_platform
 
     config = get_current_vllm_config()
     data_parallel_size = config.parallel_config.data_parallel_size
@@ -2264,13 +2265,25 @@ def initialize_model_parallel(
         and config.model_config is not None
         and (
             config.model_config.architecture == "DeepseekV41ForCausalLM"
-            # Qwen4Exp only shares its PLE table over this group. embedding_across_dp
-            # spreads the table's vocab over the DP ranks, so they hold different rows.
             or (
                 config.model_config.architecture
                 in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
-                and engram_config.dp_shared_memory
-                and not engram_config.embedding_across_dp
+                and (
+                    # Qwen4Exp shares a host PLE table over this group, unless
+                    # embedding_across_dp spreads the table's vocab over the DP
+                    # ranks so they hold different rows.
+                    (
+                        engram_config.dp_shared_memory
+                        and not engram_config.embedding_across_dp
+                    )
+                    # Or splits a GPU table's rows over it (on NVIDIA, TP=1).
+                    or (
+                        not engram_config.cpu_offload
+                        and not engram_config.disk_offload
+                        and tensor_model_parallel_size == 1
+                        and current_platform.is_cuda()
+                    )
+                )
             )
         )
         and not enable_elastic_ep

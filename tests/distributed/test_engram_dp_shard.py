@@ -149,6 +149,23 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
         ),
         ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
+        # Qwen4Exp GPU tables split their rows over the group, which needs TP=1.
+        ("Qwen4ExpForCausalLM", {"cpu_offload": False}, 1, [0, 1], [0]),
+        (
+            "Qwen4ExpForCausalLM",
+            {"cpu_offload": False, "embedding_across_dp": True},
+            1,
+            [0, 1, 2, 3],
+            [0, 1, 2, 3],
+        ),
+        ("Qwen4ExpForCausalLM", {"cpu_offload": False}, 2, None, [0, 1]),
+        (
+            "Qwen4ExpForCausalLM",
+            {"cpu_offload": False, "disk_offload": True},
+            1,
+            None,
+            [0],
+        ),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
@@ -179,6 +196,7 @@ def test_engram_group_creation_honors_model_and_options(
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     # Two ranks per node.
     monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
 
@@ -289,6 +307,9 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
                 )
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
+        # Qwen4Exp splits its PLE tables over DP ranks on NVIDIA only.
+        if tp_size == 1 and p2p and current_platform.is_cuda():
+            _check_ple_peer_table(get_engram_dp_group())
     finally:
         cleanup_dist_env_and_memory()
 
@@ -317,6 +338,65 @@ def _check_peer_group_table(store_path: str):
     del table
     group.barrier()
     assert torch.accelerator.get_memory_info()[0] > free
+
+
+def _check_ple_peer_table(group):
+    """Each DP rank holds a row slice of a Qwen4Exp PLE table, loaded from
+    checkpoint shards that cross the slices, and looks up every row as one whole
+    table does."""
+    rows, dim = 50, 160
+    torch.manual_seed(0)
+    formats = {
+        ple_ops.Qwen4ExpPLEUnquantizedEmbeddingMethod: {
+            "weight": torch.randn(rows, dim, dtype=torch.bfloat16)
+        },
+        ple_ops.Qwen4ExpPLEFp8EmbeddingMethod: {
+            "weight": torch.randn(rows, dim).to(torch.float8_e4m3fn),
+            "weight_scale": torch.tensor(0.5),
+        },
+        ple_ops.Qwen4ExpPLENvFp4EmbeddingMethod: {
+            "weight": torch.randint(0, 256, (rows, dim // 2), dtype=torch.uint8),
+            "weight_scale": (torch.rand(rows, dim // 16) + 0.5).to(torch.float8_e4m3fn),
+            "weight_scale_2": torch.tensor(0.37),
+        },
+    }
+    # Every row, from every slice, in an order that crosses slices.
+    ids = torch.arange(rows, device="cuda").flip(0).view(-1, 2)
+    for method, checkpoint in formats.items():
+        tables = []
+        for cls, extra in (
+            (ple_ops.Qwen4ExpPLEPeerEmbedding, {"peer_group": group}),
+            (ple_ops.Qwen4ExpPLEDeviceEmbedding, {}),
+        ):
+            with torch.device("cuda"):
+                table = cls(
+                    rows,
+                    dim,
+                    params_dtype=torch.bfloat16,
+                    padding_size=1,
+                    prefix="test.ple_embedding",
+                    embedding_method=method(),
+                    **extra,
+                )
+            for name, tensor in checkpoint.items():
+                param = getattr(table, name)
+                if tensor.ndim == 0:
+                    table.weight_loader(param, tensor)
+                    continue
+                for start in range(0, rows, 20):
+                    table.weight_loader(
+                        param, tensor[start : start + 20], checkpoint_start=start
+                    )
+            table.embedding_method.process_weights_after_loading(table)
+            tables.append(table)
+        peer, whole = tables
+        assert peer.weight.shape[0] == (13 if group.rank_in_group < 3 else 11)
+        torch.testing.assert_close(
+            peer(ids).view(torch.uint8), whole(ids).view(torch.uint8), atol=0, rtol=0
+        )
+        # No GPU frees its slice while others may still read it.
+        torch.accelerator.synchronize()
+        group.barrier()
 
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):

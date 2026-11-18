@@ -5,6 +5,7 @@
 import mmap
 import os
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
+from vllm.models.deepseek_v41.common.engram import engram_dp_peer_group
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
@@ -28,6 +30,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
+    Qwen4ExpPLEPeerEmbedding,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLESharedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -155,7 +158,7 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         self._shards[name][shard_index] = loaded_weight.view(torch.uint8)
         self._shard_size = shard_size
 
-    def bind_file_shards(self) -> None:
+    def finish_loading(self) -> None:
         """Record each shard's file and offset and release the loader's views."""
         if self._bound or self._dummy:
             self._bound = True
@@ -432,9 +435,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
+        peer_group = (
+            engram_dp_peer_group(engram_config.cpu_offload)
+            if engram_config is not None and not engram_config.disk_offload
+            else None
+        )
         embedding_cls = (
             Qwen4ExpPLEDiskOffloadEmbedding
             if engram_config is not None and engram_config.disk_offload
+            else Qwen4ExpPLEPeerEmbedding
+            if peer_group is not None
             else Qwen4ExpPLESharedHostEmbedding
             if engram_config is not None
             and engram_config.dp_shared_memory
@@ -443,12 +453,17 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
+        peer_kwargs: dict[str, Any] = (
+            {} if peer_group is None else {"peer_group": peer_group}
+        )
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
-        # Disk-offload ranks hold full rows, so they only shard tokens.
+        # Disk-offload and peer lookups return full rows, so they only shard
+        # tokens.
         self.use_reduce_scatter = (
             self.use_sequence_parallel
             and get_etp_group().world_size == get_tp_group().world_size
-            and embedding_cls is not Qwen4ExpPLEDiskOffloadEmbedding
+            and embedding_cls
+            not in (Qwen4ExpPLEDiskOffloadEmbedding, Qwen4ExpPLEPeerEmbedding)
         )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
@@ -461,6 +476,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
             reduce_results=not self.use_reduce_scatter,
+            **peer_kwargs,
         )
         if self.ngram_embedding.supports_prefetch:
             # The side-stream lookup outlives eager-break args, whose

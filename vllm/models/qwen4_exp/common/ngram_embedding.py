@@ -22,6 +22,7 @@ from vllm.distributed import (
     get_etp_group,
     get_tp_group,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -54,7 +55,12 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v41.common.engram import DPSharedEngramStorage
+from vllm.models.deepseek_v41.common.engram import (
+    DPSharedEngramStorage,
+    engram_peer_row,
+    engram_peer_rows,
+    share_dp_peer_slice,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -82,6 +88,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         max_total_tokens: int = 0,
         data_parallel_rank: int = 0,
         reduce_results: bool = True,
+        parallel_group: GroupCoordinator | None = None,
     ) -> None:
         del num_ngram_heads, max_total_tokens
         super().__init__(
@@ -91,7 +98,7 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             padding_size=padding_size,
             prefix=prefix,
             quant_method=embedding_method,
-            parallel_group=get_etp_group(),
+            parallel_group=parallel_group or get_etp_group(),
             reduce_results=reduce_results,
         )
         self.embedding_method = embedding_method
@@ -165,8 +172,8 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
             return embeddings
         return embeddings.narrow(0, slot_offset, local_num_tokens)
 
-    def bind_file_shards(self) -> None:
-        """Bind the checkpoint files of a disk-offloaded table after loading."""
+    def finish_loading(self) -> None:
+        """Prepare the table for lookups once every checkpoint shard is loaded."""
         return None
 
     @abstractmethod
@@ -282,8 +289,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
     ) -> None:
         """Copy the ETP-owned rows for `ids` from pinned host memory."""
         row_bytes = layer.embedding_dim * layer.weight.element_size()
-        _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
-            layer._uva_weight,
+        _lookup_ple_rows_kernel[(ids.numel(),)](
+            layer._uva_weight.view(torch.uint8),
             ids,
             output,
             row_bytes,
@@ -292,10 +299,29 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             BLOCK_D=triton.next_power_of_2(row_bytes),
         )
 
+    def lookup_from_peers(
+        self,
+        layer: "Qwen4ExpPLEPeerEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Copy the rows for `ids` from the GPUs that hold them."""
+        row_bytes = layer.embedding_dim * layer.weight.element_size()
+        _lookup_ple_rows_kernel[(ids.numel(),)](
+            layer.slice_ptrs(layer.weight),
+            ids,
+            output,
+            row_bytes,
+            0,
+            layer.org_vocab_size,
+            BLOCK_D=triton.next_power_of_2(row_bytes),
+            PEER_ROWS=layer.peer_rows,
+        )
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        """Bind disk-offloaded tables once every checkpoint shard is loaded."""
+        """Finish the table once every checkpoint shard is loaded."""
         if isinstance(layer, Qwen4ExpPLEEmbedding):
-            layer.bind_file_shards()
+            layer.finish_loading()
 
     @abstractmethod
     def dequantize(
@@ -512,12 +538,17 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         output: torch.Tensor,
         vocab_start: int,
         vocab_end: int,
+        peer_rows: int = 0,
     ) -> None:
-        """Decode the rows of `ids` in `[vocab_start, vocab_end)` into `output`."""
+        """Decode the rows of `ids` in `[vocab_start, vocab_end)` into `output`.
+
+        With `peer_rows`, `weight` and `weight_scale` hold the address of every
+        peer slice of their table.
+        """
         if ids.numel():
             _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
                 weight,
-                weight_scale.view(torch.uint8),
+                weight_scale if peer_rows else weight_scale.view(torch.uint8),
                 weight_scale_2,
                 ids,
                 output,
@@ -525,6 +556,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
                 vocab_start,
                 vocab_end,
                 BLOCK_D=triton.next_power_of_2(output.shape[-1]),
+                PEER_ROWS=peer_rows,
             )
 
     def lookup_from_pinned(
@@ -541,6 +573,23 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             output,
             layer.shard_indices.org_vocab_start_index,
             layer.shard_indices.org_vocab_end_index,
+        )
+
+    def lookup_from_peers(
+        self,
+        layer: "Qwen4ExpPLEPeerEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        self.decode_rows(
+            layer.slice_ptrs(layer.weight),
+            layer.slice_ptrs(layer.weight_scale),
+            layer.weight_scale_2,
+            ids,
+            output,
+            0,
+            layer.org_vocab_size,
+            peer_rows=layer.peer_rows,
         )
 
     def dequantize(
@@ -565,17 +614,29 @@ def _lookup_nvfp4_ple_embedding_kernel(
     vocab_start,
     vocab_end,
     BLOCK_D: tl.constexpr,
+    PEER_ROWS: tl.constexpr = 0,
 ):
-    """Decode owned NVFP4 PLE rows; write zeros for rows another rank owns."""
+    """Decode owned NVFP4 PLE rows; write zeros for rows another rank owns.
+
+    With PEER_ROWS, `weight_ptr` and `scale_ptr` hold every peer slice's address.
+    """
     row = tl.program_id(0).to(tl.int64)
     idx = tl.load(ids_ptr + row).to(tl.int64)
     owned = (idx >= vocab_start) & (idx < vocab_end)
     local_idx = tl.where(owned, idx - vocab_start, 0)
+    if PEER_ROWS:
+        weights, slice_row = engram_peer_row(weight_ptr, local_idx, PEER_ROWS, owned)
+        block_scales, _ = engram_peer_row(scale_ptr, local_idx, PEER_ROWS, owned)
+        weights = weights.to(tl.pointer_type(tl.uint8))
+        block_scales = block_scales.to(tl.pointer_type(tl.uint8))
+        local_idx = slice_row
+    else:
+        weights, block_scales = weight_ptr, scale_ptr
     offsets = tl.arange(0, BLOCK_D)
     in_row = offsets < embedding_dim
     mask = owned & in_row
     packed = tl.load(
-        weight_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
+        weights + local_idx * (embedding_dim // 2) + offsets // 2,
         mask=mask,
         other=0,
     )
@@ -583,7 +644,7 @@ def _lookup_nvfp4_ple_embedding_kernel(
     codes = (packed >> ((offsets % 2) * 4)) & 0xF
     scales = _e4m3_inline(
         tl.load(
-            scale_ptr + local_idx * (embedding_dim // 16) + offsets // 16,
+            block_scales + local_idx * (embedding_dim // 16) + offsets // 16,
             mask=mask,
             other=0,
         )
@@ -625,30 +686,137 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
         )
 
 
+class Qwen4ExpPLEPeerEmbedding(Qwen4ExpPLEEmbedding):
+    """PLE table whose rows are split over the HBM of NVLink-connected DP ranks.
+
+    Each rank holds one row slice of every table parameter and reads its own
+    tokens' rows from the ranks that hold them, so lookups need no collective,
+    as with DeepSeek V4.1's Engram peer tables.
+    """
+
+    def __init__(
+        self,
+        *args,
+        peer_group: GroupCoordinator,
+        **kwargs,
+    ) -> None:
+        if get_tp_group().world_size != 1:
+            raise ValueError("Peer-split PLE tables require TP=1")
+        self.peer_group = peer_group
+        # Each table parameter's slice addresses and the handle keeping them
+        # mapped, keyed by the address of this rank's slice.
+        self._slices: dict[int, tuple[torch.Tensor, object]] = {}
+        # Every rank looks up the whole vocabulary, so it is not ETP-sharded.
+        super().__init__(*args, parallel_group=get_tp_group(), **kwargs)
+        logger.info(
+            "PLE table %s split over %d GPUs: %d rows, %.2f GiB on this GPU",
+            kwargs["prefix"],
+            peer_group.world_size,
+            self.local_rows,
+            sum(p.nbytes for p in self.parameters() if p.data_ptr() in self._slices)
+            / 2**30,
+        )
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Allocate this rank's row slice of a table parameter and map the others'."""
+        self.peer_rows, self.row_start, self.local_rows = engram_peer_rows(
+            num_embeddings, self.peer_group
+        )
+        row_bytes = embedding_dim * dtype.itemsize
+        buffer, handle = share_dp_peer_slice(
+            self.peer_rows * row_bytes, self.peer_group
+        )
+        rows = buffer[: self.local_rows * row_bytes].view(dtype)
+        rows = rows.view(self.local_rows, embedding_dim)
+        slice_ptrs = torch.tensor(
+            handle.buffer_ptrs, dtype=torch.int64, device=buffer.device
+        )
+        self._slices[rows.data_ptr()] = (slice_ptrs, handle)
+        return rows
+
+    def slice_ptrs(self, param: torch.Tensor) -> torch.Tensor:
+        """The address of every rank's slice of a table parameter."""
+        return self._slices[param.data_ptr()][0]
+
+    def _stored_vocab_range(self) -> tuple[int, int]:
+        return self.row_start, self.row_start + self.local_rows
+
+    def weight_loader(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+    ) -> None:
+        if param.data_ptr() not in self._slices:
+            super().weight_loader(param, loaded_weight, checkpoint_start)
+            return
+        # A table saved whole starts at row 0.
+        self._copy_embedding_shard_(
+            param, loaded_weight, checkpoint_start=checkpoint_start or 0
+        )
+
+    def finish_loading(self) -> None:
+        """Peers read this table's rows directly, so serve only once every rank
+        has loaded its own."""
+        torch.accelerator.synchronize()
+        self.peer_group.barrier()
+
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
+        """Peer lookups run in the forward."""
+        return None
+
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        raise RuntimeError("Peer-split PLE embedding does not support prefetch")
+
+    def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
+        """Look up every row of `ngram_ids` from the GPUs that hold it."""
+        output = torch.empty(
+            (*ngram_ids.shape, self.embedding_dim),
+            dtype=self.embedding_method.lookup_dtype(self),
+            device=ngram_ids.device,
+        )
+        if ngram_ids.numel():
+            self.embedding_method.lookup_from_peers(self, ngram_ids.reshape(-1), output)
+        return output
+
+
 @triton.jit
-def _lookup_ple_embedding_from_pinned_kernel(
-    weight_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
+def _lookup_ple_rows_kernel(
+    weight_ptr,
     ids_ptr,
     output_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
     row_bytes,
-    tp_vocab_start,
-    tp_vocab_end,
+    vocab_start,
+    vocab_end,
     BLOCK_D: tl.constexpr,
+    PEER_ROWS: tl.constexpr = 0,
 ):
-    """Copy TP-owned PLE rows as raw bytes from a CUDA view of pinned host memory.
+    """Copy owned PLE rows as raw bytes; write zeros for rows another rank owns.
 
-    Byte pointers keep the storage dtype out of the kernel signature, so
-    dtypes Triton cannot lower on the GPU (FP8 E4M3FN before SM89) still work.
+    `weight_ptr` holds the rows as bytes, e.g. a CUDA view of pinned host
+    memory, or with PEER_ROWS every peer slice's address. Byte rows keep the
+    storage dtype out of the kernel signature, so dtypes Triton cannot lower on
+    the GPU (FP8 E4M3FN before SM89) still work.
     """
     row_id = tl.program_id(0).to(tl.int64)
-    global_idx = tl.load(ids_ptr + row_id)
-    in_range = (global_idx >= tp_vocab_start) & (global_idx < tp_vocab_end)
-    local_idx = tl.where(in_range, global_idx - tp_vocab_start, 0)
+    global_idx = tl.load(ids_ptr + row_id).to(tl.int64)
+    in_range = (global_idx >= vocab_start) & (global_idx < vocab_end)
+    local_idx = tl.where(in_range, global_idx - vocab_start, 0)
+    if PEER_ROWS:
+        rows, local_idx = engram_peer_row(weight_ptr, local_idx, PEER_ROWS, in_range)
+        rows = rows.to(tl.pointer_type(tl.uint8))
+    else:
+        rows = weight_ptr
     offsets = tl.arange(0, BLOCK_D)
     store_mask = offsets < row_bytes
     load_mask = store_mask & in_range
     values = tl.load(
-        weight_ptr + local_idx * row_bytes + offsets,
+        rows + local_idx * row_bytes + offsets,
         mask=load_mask,
         other=0,
     )

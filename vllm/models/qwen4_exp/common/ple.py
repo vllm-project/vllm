@@ -24,6 +24,13 @@ class PLEShardOverlap:
 class PLEVocabParallelEmbedding(VocabParallelEmbedding):
     """Vocab-parallel embedding that accepts checkpoint row shards."""
 
+    def _stored_vocab_range(self) -> tuple[int, int]:
+        """The vocabulary rows this rank stores, from first to one past last."""
+        return (
+            self.shard_indices.org_vocab_start_index,
+            self.shard_indices.org_vocab_end_index,
+        )
+
     def _compute_shard_overlap(
         self,
         *,
@@ -31,8 +38,7 @@ class PLEVocabParallelEmbedding(VocabParallelEmbedding):
         checkpoint_rows: int,
     ) -> PLEShardOverlap | None:
         """Compute the overlap of a checkpoint shard and one TP vocabulary range."""
-        tp_start = self.shard_indices.org_vocab_start_index
-        tp_end = self.shard_indices.org_vocab_end_index
+        tp_start, tp_end = self._stored_vocab_range()
         if checkpoint_start < 0 or checkpoint_rows < 0:
             raise ValueError("checkpoint shard bounds must be non-negative")
         if tp_start < 0 or tp_end < tp_start:
@@ -56,8 +62,7 @@ class PLEVocabParallelEmbedding(VocabParallelEmbedding):
         checkpoint_start: int,
     ) -> int:
         """Copy the overlapping rows of a PLE checkpoint shard into a TP table."""
-        tp_start = self.shard_indices.org_vocab_start_index
-        tp_end = self.shard_indices.org_vocab_end_index
+        tp_start, tp_end = self._stored_vocab_range()
         if destination.ndim == 0 or loaded_weight.ndim != destination.ndim:
             raise ValueError("destination and loaded weight must have matching ranks")
         if destination.shape[1:] != loaded_weight.shape[1:]:

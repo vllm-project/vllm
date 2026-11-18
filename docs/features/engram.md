@@ -161,8 +161,9 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload`,
-`disk_offload` and, on NVIDIA, `dp_shared_memory`.
+Qwen4Exp PLE tables are ETP-sharded instead: `embedding_across_dp` spreads
+their vocabulary rows over the TP × DP ranks, and `use_thp` does not apply to
+them.
 
 ## Sharing host tables across DP replicas
 
@@ -189,6 +190,24 @@ on affected amdgpu drivers (for example 6.16.6) the tables' host memory is not
 freed after the replicas exit, until reboot
 ([ROCm/rocm-systems#13573](https://github.com/ROCm/rocm-systems/issues/13573)).
 Any HIP VMM failure falls back to `/dev/shm` on every replica.
+
+## Splitting GPU tables across DP ranks
+
+With `cpu_offload: false` and TP=1, the GPUs of an engine's DP ranks split each
+table's rows when NVLink connects them. Each rank reads its own tokens' rows
+from the owning GPU's HBM, so lookups need no DP collective. The split covers
+the DP ranks on each node, or every DP rank with `embedding_across_dp: true`,
+which then must share one NVLink domain (e.g. GB200 NVL72):
+
+```bash
+vllm serve <qwen4exp-checkpoint> --data-parallel-size 4 \
+  --enable-expert-parallel --engram-config.cpu_offload false
+```
+
+This applies to DeepSeek V4.1 and, on NVIDIA, to Qwen4Exp. Without NVLink peer
+access, DeepSeek V4.1 shards the hash heads and exchanges rows with DP
+collectives instead, and Qwen4Exp keeps a table per DP rank (or ETP-shards it
+with `embedding_across_dp`).
 
 ## Splitting GPU tables across engines (DeepSeek V4.1)
 
