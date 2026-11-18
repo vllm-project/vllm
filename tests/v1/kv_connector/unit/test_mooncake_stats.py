@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -224,7 +225,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
     worker._kv_lease_duration = None
-    worker._expired_transfer_ids = {}
+    worker._expired_transfer_ids = OrderedDict()
     return worker
 
 
