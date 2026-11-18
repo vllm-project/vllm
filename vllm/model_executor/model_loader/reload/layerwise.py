@@ -322,9 +322,8 @@ def _check_requantization_source_fully_loaded(
             break
     else:
         return
-    if (
-        info.load_numel <= 0 or info.load_numel >= info.load_numel_total  # type: ignore[operator]
-    ):
+    assert info.load_numel_total is not None
+    if info.load_numel <= 0 or info.load_numel >= info.load_numel_total:
         return
     raise ValueError(
         f"{getattr(layer, 'prefix', layer.__class__.__name__)}: the checkpoint is "
