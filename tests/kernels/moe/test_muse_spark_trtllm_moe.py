@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
 )
+from vllm.model_executor.offloader import UVAOffloader, set_offloader
 from vllm.models.muse_spark.common.layers import (
     MuseSparkRMSNorm,
     MuseSparkRMSNormWithInputScale,
@@ -397,25 +398,39 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     assert _rel(out, ref_full) < 1.5e-1
 
 
+@pytest.mark.parametrize("cpu_offload", [False, True])
 @torch.inference_mode()
-def test_muse_spark_online_nvfp4_moe_numeric(dist_init, workspace_init):
+def test_muse_spark_online_nvfp4_moe_numeric(cpu_offload, dist_init, workspace_init):
     """Experts an NVFP4 checkpoint leaves in BF16 take nvfp4_per_token online
     quantization and keep the post-expert norm.
+
+    With CPU offloading the BF16 experts are staged on the CPU.
     """
     quant_config = nvfp4_quant_config(exclude_modules=["moe.experts"])
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
     )
     ckpt = _bf16_checkpoint()
-    router, routed, norm, vllm_config, runner = build_moe(
-        MuseSparkRMSNorm,
-        {name: w.to("cuda") for name, w in ckpt.items()},
-        quant_config,
-    )
+    bf16_bytes = sum(w.nbytes for w in ckpt.values())
+    if cpu_offload:
+        set_offloader(UVAOffloader(cpu_offload_max_bytes=0))
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    try:
+        router, routed, norm, vllm_config, runner = build_moe(
+            MuseSparkRMSNorm,
+            {name: w.to("cpu" if cpu_offload else "cuda") for name, w in ckpt.items()},
+            quant_config,
+        )
+    finally:
+        set_offloader(None)
     method = routed.quant_method
     assert isinstance(method, Nvfp4OnlineMoEMethod)
     assert method.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
     assert routed.w13_weight.is_cuda and routed.w2_weight.is_cuda
+    if cpu_offload:
+        # Staged experts never hold the whole BF16 layer on the device.
+        assert torch.accelerator.max_memory_allocated() - allocated < bf16_bytes
 
     x, logits = _inputs(1)
     out = run_moe(runner, vllm_config, x, logits)
