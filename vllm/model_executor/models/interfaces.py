@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -691,8 +691,8 @@ class SupportsKVCacheGrouping(Protocol):
     def get_kv_cache_groups(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
-    ) -> list["KVCacheGroupSpec"]:
+        layer_configs: dict[str, "KVCacheLayerConfig"],
+    ) -> list["KVCacheGroup"]:
         """Split the model's layers into logical KV cache groups."""
         ...
 
@@ -731,7 +731,7 @@ class SupportsLoRA(Protocol):
     is_non_gated_moe: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
-    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_modules: dict[str, str] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
@@ -1667,7 +1667,11 @@ class EagleModelMixin:
             layer_idx >= self._aux_first_local_layer
             and layer_idx in self.aux_hidden_state_layers
         ):
-            value = hidden_states + residual if residual is not None else hidden_states
+            if residual is None:
+                # The first layer updates its residual (the embeddings) in place
+                value = hidden_states.clone()
+            else:
+                value = hidden_states + residual
             aux_hidden_states.append(value)
         return aux_hidden_states
 
@@ -1721,6 +1725,9 @@ def _get_decoder_holder(model: object) -> object:
         parent_ref = model.get_language_model()
     elif hasattr(model, "language_model"):
         parent_ref = model.language_model
+    # The Transformers modeling backend's `.model` is the HF model, not the decoder
+    if isinstance(parent_ref, EagleModelMixin):
+        return parent_ref
     # A multimodal model that builds its decoder inside `_mark_language_model`
     # has get_language_model() return the decoder itself, with no `.model`.
     return getattr(parent_ref, "model", parent_ref)
@@ -1916,7 +1923,15 @@ class SupportsEncoderCudaGraph(Protocol):
         `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
-        ...
+        # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
+        # 64 tokens).
+        return (
+            64,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            ),
+        )
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -2023,7 +2038,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.

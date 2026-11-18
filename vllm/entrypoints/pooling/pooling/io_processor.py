@@ -8,7 +8,7 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 from ..base.io_processor import PoolingIOProcessor
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeCMPLRenderParams,

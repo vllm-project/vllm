@@ -174,7 +174,6 @@ guide: |
   ```bash
   vllm serve google/gemma-4-E2B-it \
     --max-model-len 16384 \
-    --gpu-memory-utilization 0.90 \
     --enable-auto-tool-choice \
     --reasoning-parser gemma4 \
     --tool-call-parser gemma4 \

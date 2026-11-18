@@ -186,11 +186,12 @@ class ExternalLBServerManager:
 
         env_dict = {
             "VLLM_SERVER_DEV_MODE": "1",
-            current_platform.device_control_env_var: ",".join(
+        }
+        if not current_platform.is_xpu():
+            env_dict[current_platform.device_control_env_var] = ",".join(
                 str(current_platform.device_id_to_physical_device_id(i))
                 for i in range(rank * self.tp_size, (rank + 1) * self.tp_size)
-            ),
-        }
+            )
         if elastic_ep_scale_up_launch:
             env_dict["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "1"
 
