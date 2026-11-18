@@ -67,36 +67,9 @@ the boundary are recomputed.
 QSA does not yet implement decode context parallelism, even without HiSparse.
 The current HiSparse configuration also rejects DCP.
 
-For NIXL pull P/D, keep HiSparse disabled on P and compose `NixlConnector`
-with `HiSparseConnector` on D. Set `VLLM_KV_CACHE_LAYOUT=BLNHC` on both endpoints,
-use matching tensor-parallel degrees and block sizes, and keep PP, PCP and DCP
-at 1. Follow the [NIXL setup guide](../features/nixl_connector_usage.md) for
-the prefiller and proxy; use this KV transfer configuration on D:
-
-```json
-{
-  "kv_connector": "MultiConnector",
-  "kv_role": "kv_both",
-  "kv_buffer_device": "cuda",
-  "kv_load_failure_policy": "fail",
-  "kv_connector_extra_config": {
-    "connectors": [
-      {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
-      {
-        "kv_connector": "HiSparseConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"host_pool_gib": 8}
-      }
-    ]
-  }
-}
-```
-
-NIXL registers main KV in host memory and the indexer, raw-key rings and
-recurrent state in GPU memory. It pairs transferable layers across P and D
-to account for HiSparse's split cache groups. Each local transfer group must
-map to one remote group; ambiguous hybrid mappings are rejected. Resident and
-hot groups do not participate in the P/D transfer.
+QSA P/D with HiSparse requires a separate NIXL integration for mixed host/GPU
+cache registration and transfer-group mapping across P and D. It is not yet
+supported by this implementation.
 
 ## Ownership
 
