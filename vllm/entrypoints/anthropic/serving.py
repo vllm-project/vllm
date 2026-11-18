@@ -55,8 +55,10 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, Usa
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils.types import ConversationMessage
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -1352,16 +1354,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
+        result = await self.render_chat_request(
+            chat_req,
+            enforce_max_tokenize_tokens=True,
+        )
 
-        try:
-            tok_params = apply_max_tokenize_tokens(
-                chat_req.build_tok_params(self.model_config),
-                self.max_tokenize_tokens,
-            )
-        except VLLMValidationError as e:
-            return self.create_error_response(str(e))
-
-        result = await self.online_renderer.render_chat(chat_req, tok_params=tok_params)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -1381,3 +1378,19 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
 
         return response
+
+    async def render_chat_request(
+        self,
+        request: ChatCompletionRequest,
+        tok_params: TokenizeParams | None = None,
+        enforce_max_tokenize_tokens: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+        if enforce_max_tokenize_tokens:
+            try:
+                tok_params = apply_max_tokenize_tokens(
+                    request.build_tok_params(self.model_config),
+                    self.max_tokenize_tokens,
+                )
+            except VLLMValidationError as e:
+                return self.create_error_response(str(e))
+        return await super().render_chat_request(request, tok_params=tok_params)
