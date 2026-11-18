@@ -414,7 +414,7 @@ impl ChatMessage {
     }
 
     /// Return the names of the tools this message references, in order.
-    fn tool_references(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn tool_references(&self) -> impl Iterator<Item = &str> {
         let content = match self {
             Self::System { content }
             | Self::Developer { content, .. }

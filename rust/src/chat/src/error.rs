@@ -122,6 +122,12 @@ pub enum Error {
     ToolReferenceNotFound { name: String },
     #[error("at least one tool must have defer_loading=false; all tools cannot be deferred")]
     AllToolsDeferred,
+    #[error(
+        "This model's chat template does not support tool search results (tool_reference \
+         content). Disable tool search in the client; for Claude Code, set \
+         ENABLE_TOOL_SEARCH=false."
+    )]
+    ToolReferenceNotRendered,
     #[error("failed to build output grammar")]
     OutputGrammar {
         #[source]
@@ -149,6 +155,7 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ToolReferenceNotRendered
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate

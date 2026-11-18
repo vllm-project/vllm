@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::sync::Once;
 
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -255,6 +256,24 @@ impl HfChatRenderer {
     ) -> Result<RenderedPrompt> {
         let lowered = effective_template.developer_role().lower(&request.messages);
         let content_format = effective_template.content_format_for(&lowered);
+        // Like Python: templates such as GLM-5.3's render tool_reference parts
+        // (tool search results) from `tools`; others drop them or fail on them,
+        // so reject the request and let clients such as Claude Code retry
+        // without tool search. The `string` format renders the tool's name.
+        if content_format == ChatTemplateContentFormat::OpenAi
+            && !effective_template.renders_tool_reference()
+            && lowered.iter().any(|message| message.tool_references().next().is_some())
+        {
+            static TOOL_REFERENCE_HINT_ONCE: Once = Once::new();
+            TOOL_REFERENCE_HINT_ONCE.call_once(|| {
+                warn!(
+                    "Rejected a request with tool_reference content (tool search results): the \
+                     chat template does not render it. Pass a chat template that does with \
+                     --chat-template to support tool search."
+                )
+            });
+            return Err(Error::ToolReferenceNotRendered);
+        }
         let mut messages =
             to_template_messages(&lowered, content_format, self.multimodal.as_ref())?;
 
@@ -1280,27 +1299,8 @@ mod tests {
                 ],
                 "call_1",
             ),
-            ChatMessage::tool_response(
-                vec![
-                    ChatContentPart::text("x"),
-                    ChatContentPart::tool_reference("get_weather"),
-                ],
-                "call_1",
-            ),
         ];
-        let weather = ChatTool {
-            name: "get_weather".to_string(),
-            description: None,
-            parameters: serde_json::json!({"type": "object"}),
-            strict: None,
-            defer_loading: Some(true),
-        };
-        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
-        let request = ChatRequest {
-            messages,
-            tool_context,
-            ..sample_request(Vec::new())
-        };
+        let request = sample_request(messages);
         let template = "{% for m in messages %}{{ m.content | tojson }}\n{% endfor %}";
         let rendered: String = [
             ChatTemplateContentFormatOption::String,
@@ -1326,15 +1326,60 @@ mod tests {
             "x\ny"
             "x"
             "x\n<image>"
-            "x\nget_weather"
             OpenAi:
             [{"type": "text", "text": "a"}, {"type": "text", "text": ""}, {"type": "text", "text": "b"}]
             []
             "x\ny"
             "x"
             [{"type": "text", "text": "x"}, {"type": "image"}]
-            [{"type": "text", "text": "x"}, {"type": "tool_reference", "name": "get_weather"}]
         "#]].assert_eq(&rendered);
+    }
+
+    /// Like Python: a tool search result's `tool_reference` part reaches an
+    /// `openai`-format template only if the template renders the part type,
+    /// and the `string` format renders the tool's name.
+    #[test]
+    fn tool_references_need_a_template_that_renders_them() {
+        let messages = vec![ChatMessage::tool_response(
+            vec![
+                ChatContentPart::text("x"),
+                ChatContentPart::tool_reference("get_weather"),
+            ],
+            "call_1",
+        )];
+        let weather = ChatTool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: Some(true),
+        };
+        let tool_context = ResolvedToolContext::new(&messages, vec![weather], None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            ..sample_request(Vec::new())
+        };
+        let renders = "{% for p in messages[0].content %}{% if p.type == 'tool_reference' %}\
+                       REF:{{ p.name }}{% endif %}{% endfor %}";
+        let skips = "{% for m in messages %}{{ m.content | tojson }}{% endfor %}";
+        let prompt = |template, content_format| {
+            render_mm(template, &request, content_format)
+                .map(|rendered| rendered.prompt.into_text().unwrap())
+        };
+
+        assert_eq!(
+            prompt(renders, ChatTemplateContentFormatOption::OpenAi).unwrap(),
+            "REF:get_weather"
+        );
+        assert_eq!(
+            prompt(skips, ChatTemplateContentFormatOption::String).unwrap(),
+            r#""x\nget_weather""#
+        );
+        let error = prompt(skips, ChatTemplateContentFormatOption::OpenAi).unwrap_err();
+        assert!(error.is_request_validation_error());
+        expect!["This model's chat template does not support tool search results (tool_reference content). Disable tool search in the client; for Claude Code, set ENABLE_TOOL_SEARCH=false."]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]

@@ -176,6 +176,7 @@ pub(super) struct CompiledChatTemplate {
     env: Environment<'static>,
     content_format: ContentFormatSelection,
     developer_role: DeveloperRole,
+    renders_tool_reference: bool,
 }
 
 /// How a template's content format is chosen.
@@ -213,15 +214,17 @@ impl CompiledChatTemplate {
                 ContentFormatSelection::Configured(ChatTemplateContentFormat::OpenAi)
             }
         };
-        let developer_role = DeveloperRole::probe(
-            env.get_template("chat")?.source(),
-            &|ctx| render(&env, ctx),
-            probe,
-        );
+        let chat_template = env.get_template("chat")?;
+        let source = chat_template.source();
+        let developer_role = DeveloperRole::probe(source, &|ctx| render(&env, ctx), probe);
+        // Like Python vLLM, a template renders `tool_reference` parts when its
+        // source names the part type.
+        let renders_tool_reference = source.contains("tool_reference");
         Ok(Self {
             env,
             content_format,
             developer_role,
+            renders_tool_reference,
         })
     }
 
@@ -242,6 +245,11 @@ impl CompiledChatTemplate {
     /// How developer messages reach this template.
     pub fn developer_role(&self) -> DeveloperRole {
         self.developer_role
+    }
+
+    /// Whether this template renders `tool_reference` content parts.
+    pub fn renders_tool_reference(&self) -> bool {
+        self.renders_tool_reference
     }
 }
 
