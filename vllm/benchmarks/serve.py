@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    _get_headers,
     async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
@@ -2125,13 +2126,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         base_url = f"http://{host_port}"
 
     # Headers
-    headers = None
+    headers = (
+        _get_headers()
+        if args.backend in OPENAI_COMPATIBLE_BACKENDS
+        or args.backend in POOLING_BACKENDS
+        else {}
+    )
     if args.header:
-        headers = {}
         for item in args.header:
             if "=" in item:
                 kvstring = item.split("=", 1)
-                headers[kvstring[0].strip()] = kvstring[1].strip()
+                name = kvstring[0].strip()
+                if name.lower() == "authorization":
+                    name = "Authorization"
+                headers[name] = kvstring[1].strip()
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 

@@ -24,18 +24,47 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.mark.parametrize(
-    "with_headers,live_model",
-    [(False, False), (True, False), (True, True)],
-    ids=["public_http", "protected_http", "protected_model"],
+    "with_headers,live_model,auth_mode",
+    [
+        (False, False, None),
+        (True, False, None),
+        (True, False, "env"),
+        (True, False, "override"),
+        (True, False, "lowercase"),
+        (True, True, "env"),
+    ],
+    ids=[
+        "public_http",
+        "protected_http",
+        "env_auth",
+        "override_auth",
+        "lowercase_auth",
+        "protected_model",
+    ],
 )
 def test_benchmark_preserves_decode_metrics_with_headers(
-    tmp_path: Path, with_headers: bool, live_model: bool
+    tmp_path: Path,
+    with_headers: bool,
+    live_model: bool,
+    auth_mode: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Protected metrics must be collected using the same headers as inference."""
     dataset = tmp_path / "prompts.jsonl"
     dataset.write_text(json.dumps({"prompt": "hello"}) + "\n", encoding="utf-8")
     alignment_calls: list[str] = []
     expected_headers = {"X-Benchmark-Tenant": "test-tenant"} if with_headers else {}
+
+    cli_headers = expected_headers.copy()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if auth_mode:
+        monkeypatch.setenv("OPENAI_API_KEY", "mock-benchmark-key")
+        authorization = "Bearer mock-benchmark-key"
+        if auth_mode in ("override", "lowercase"):
+            authorization = "Bearer mock-custom-key"
+            key = "authorization" if auth_mode == "lowercase" else "Authorization"
+            cli_headers[key] = authorization
+        expected_headers["Authorization"] = authorization
 
     async def run(upstream_url: str | None):
         completed = 0
@@ -44,6 +73,8 @@ def test_benchmark_preserves_decode_metrics_with_headers(
             nonlocal completed
             if any(request.headers.get(k) != v for k, v in expected_headers.items()):
                 raise web.HTTPUnauthorized()
+            if auth_mode:
+                assert len(request.headers.getall("Authorization")) == 1
             if request.path in ("/tokenize", "/detokenize"):
                 alignment_calls.append(request.path)
             if request.path == "/metrics":
@@ -122,8 +153,8 @@ def test_benchmark_preserves_decode_metrics_with_headers(
                 "1",
                 "--disable-tqdm",
             ]
-            for key, value in expected_headers.items():
-                argv.extend(["--header", f"{key}={value}"])
+            if cli_headers:
+                argv.extend(["--header", *[f"{k}={v}" for k, v in cli_headers.items()]])
             return await main_async(parser.parse_args(argv))
 
     with ExitStack() as stack:
