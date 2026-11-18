@@ -465,13 +465,12 @@ class QkNormRopeKvCachePattern:
             q_scale=q_scale if self.fold_query_quant else None,
         )
         if self.fold_query_quant:
-            # results = (op return, q_out, k_out, q_out_fp8); outputs mirror the
-            # pattern: dummy, fp8 q, k, v[, scale].
+            op_return, _, k_out, q_out_fp8 = results
             # Static quant leaves the scale unchanged; return it in place of
             # the per-tensor quant op's functionalized scale output.
             if self.query_quant_group_shape.is_per_tensor():
-                return results[0], results[3], results[2], v, q_scale
-            return results[0], results[3], results[2], v
+                return op_return, q_out_fp8, k_out, v, q_scale
+            return op_return, q_out_fp8, k_out, v
 
         # Re-apply the same quant form on the kernel's bf16 q_out; the fused
         # operation does not quantize Q with per-head scales.
