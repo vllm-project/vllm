@@ -274,11 +274,7 @@ class HYV4Model(nn.Module):
         speculative_config = vllm_config.speculative_config
         self.ihc_sequence_parallel = (
             self.enable_ihc
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.data_parallel_size == 1
-            and parallel_config.pipeline_parallel_size == 1
-            and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.use_sequence_parallel_attention
             and parallel_config.all2all_backend != "passthrough"
             and vllm_config.lora_config is None
             and not envs.VLLM_BATCH_INVARIANT
