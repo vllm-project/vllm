@@ -62,6 +62,7 @@ def region_pull_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
+    worker._engine_clock_offset = {}
     worker._handshake_lock = threading.RLock()
     worker._handshake_futures = {}
     worker._bidirectional_kv_xfer_enabled = False
@@ -394,7 +395,6 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker._sync_device_after_direct_recv = MagicMock()
     worker.use_host_buffer = False
     worker._reqs_to_send = {}
-    worker._engine_clock_offset = {}
     result = worker.get_transfer_results()
     expected = torch.full_like(backing, 7)
     expected[2, 1] = 0
@@ -806,6 +806,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
+    worker._engine_clock_offset = {}
     worker._recving_transfers = defaultdict(list)
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
