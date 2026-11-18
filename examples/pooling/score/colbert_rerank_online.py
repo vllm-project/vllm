@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Example of using ColBERT late interaction models for reranking and scoring.
+"""Example of using ColBERT late interaction models for reranking and scoring.
 
 ColBERT (Contextualized Late Interaction over BERT) uses per-token embeddings
 and MaxSim scoring for document reranking, providing better accuracy than

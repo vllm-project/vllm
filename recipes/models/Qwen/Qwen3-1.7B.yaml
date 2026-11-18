@@ -1,0 +1,129 @@
+meta:
+  title: "Qwen3-1.7B"
+  slug: "qwen3-1.7b"
+  provider: "Qwen"
+  description: "Qwen3 1.7B dense model with hybrid thinking/non-thinking modes, validated for BF16 serving on Intel Xeon 6."
+  date_added: 2026-08-14
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-4B"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "Qwen/Qwen3-1.7B"
+  min_vllm_version: "0.8.5"
+  architecture: dense
+  parameter_count: "1.7B"
+  active_parameters: "1.7B"
+  context_length: 40960
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  reasoning:
+    description: "Enable Qwen3 thinking mode with the Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 5
+    description: "Full precision BF16"
+    supported_hardware: [xeon6]
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  cpu:
+    extra_args:
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.8"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-1.7B is a compact dense Qwen3 model with hybrid thinking and non-thinking
+  modes. This recipe includes an Intel Xeon 6 CPU configuration validated with
+  BF16 serving.
+
+  ## Prerequisites
+
+  - Hardware: 1x Xeon 6 CPUs
+  - vLLM >= 0.8.5
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  Choose the tensor parallel size based on the system topology and deployment
+  requirements. Add `--tensor-parallel-size <N>` when needed; the recipe does
+  not prescribe a Xeon 6 TP value or hard-code NUMA node IDs.
+
+  ```bash
+  vllm serve Qwen/Qwen3-1.7B \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 Qwen/Qwen3-1.7B \
+    --tensor-parallel-size 1 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3-1.7B",
+      messages=[{"role": "user", "content": "Explain tensor parallelism briefly."}],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-1.7B)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)

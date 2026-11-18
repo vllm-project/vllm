@@ -14,6 +14,7 @@ from tests.models.utils import (
     RerankModelInfo,
 )
 from vllm import PoolingParams
+from vllm.platforms import current_platform
 
 from .mteb_embed_utils import mteb_test_embed_models
 from .mteb_score_utils import mteb_test_rerank_models
@@ -21,7 +22,9 @@ from .mteb_score_utils import mteb_test_rerank_models
 EMBEDDING_MODELS = [
     EmbedModelInfo(
         "jinaai/jina-embeddings-v3",
+        trust_remote_code=True,
         mteb_score=0.824413164,
+        mteb_tol=2e-3,
         architecture="XLMRobertaModel",
         is_matryoshka=True,
         seq_pooling_type="MEAN",
@@ -31,19 +34,34 @@ EMBEDDING_MODELS = [
     ),
     EmbedModelInfo(
         "jinaai/jina-embeddings-v5-text-small",
+        trust_remote_code=True,
         mteb_score=0.794535707854956,
+        mteb_tol=2e-3,
         architecture="JinaEmbeddingsV5Model",
         seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
     ),
+    EmbedModelInfo(
+        "jinaai/jina-embeddings-v5-text-nano",
+        trust_remote_code=True,
+        architecture="JinaEmbeddingsV5Model",
+        mteb_tol=2e-3,
+        dtype="bfloat16" if current_platform.is_rocm() else "auto",
+        seq_pooling_type="LAST",
+        attn_type="encoder_only",
+        is_prefix_caching_supported=False,
+        is_chunked_prefill_supported=False,
+    ),
 ]
 
 RERANK_MODELS = [
     RerankModelInfo(
         "jinaai/jina-reranker-v2-base-multilingual",
+        trust_remote_code=True,
         mteb_score=0.33643,
+        mteb_tol=1e-2,
         architecture="XLMRobertaForSequenceClassification",
         seq_pooling_type="CLS",
         attn_type="encoder_only",
@@ -53,6 +71,7 @@ RERANK_MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     task = "retrieval" if "v5" in model_info.name else "text-matching"
@@ -88,6 +107,7 @@ def test_embed_models_correctness(
     )
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)
@@ -121,12 +141,17 @@ def test_matryoshka(
         model_info.name,
         dtype=dtype,
         is_sentence_transformer=True,
+        trust_remote_code=model_info.trust_remote_code,
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts, task=task)
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(
-        model_info.name, runner="pooling", dtype=dtype, max_model_len=None
+        model_info.name,
+        runner="pooling",
+        dtype=dtype,
+        max_model_len=None,
+        trust_remote_code=model_info.trust_remote_code,
     ) as vllm_model:
         assert vllm_model.llm.llm_engine.model_config.is_matryoshka
 

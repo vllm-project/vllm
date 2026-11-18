@@ -12,7 +12,7 @@ from vllm.config import PoolerConfig
     "model",
     ["BAAI/bge-m3"],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
 def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype: str):
     with vllm_runner(
@@ -20,13 +20,11 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
         runner="pooling",
         pooler_config=PoolerConfig(task="token_embed"),
         max_model_len=None,
+        dtype=dtype,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(example_prompts)
 
-    with hf_runner(
-        model,
-        auto_cls=AutoModel,
-    ) as hf_model:
+    with hf_runner(model, auto_cls=AutoModel, dtype=dtype) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
         for prompt in example_prompts:
@@ -34,7 +32,6 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
             inputs = hf_model.wrap_device(inputs)
             output = hf_model.model(**inputs)
             embedding = output.last_hidden_state[0].float()
-            # normal
             hf_outputs.append(embedding.cpu())
 
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):

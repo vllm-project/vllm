@@ -1,0 +1,21 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "transcribe"
+        },
+        {
+          "type": "input_audio",
+          "data": ""
+        },
+        {
+          "type": "audio_url",
+          "audio_url": "data:audio/wav;base64,"
+        }
+      ]
+    }
+  ]
+}

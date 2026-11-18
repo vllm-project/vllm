@@ -10,7 +10,7 @@ from tests.utils import RemoteOpenAIServer
 
 # Model name constants used across tests
 MODEL_NAME_SMOLLM = "HuggingFaceTB/SmolLM2-135M-Instruct"
-LORA_ADAPTER_NAME_SMOLLM = "jekunz/smollm-135m-lora-fineweb-faroese"
+LORA_ADAPTER_NAME_SMOLLM = "vllm-project/smollm-135m-lora-fineweb-faroese"
 
 # SageMaker header constants
 HEADER_SAGEMAKER_CLOSED_SESSION_ID = "X-Amzn-SageMaker-Closed-Session-Id"
@@ -21,9 +21,9 @@ HEADER_SAGEMAKER_NEW_SESSION_ID = "X-Amzn-SageMaker-New-Session-Id"
 @pytest.fixture(scope="session")
 def smollm2_lora_files():
     """Download LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id=LORA_ADAPTER_NAME_SMOLLM)
+    return hf_api().snapshot_download(repo_id=LORA_ADAPTER_NAME_SMOLLM)
 
 
 @pytest.fixture(scope="module")

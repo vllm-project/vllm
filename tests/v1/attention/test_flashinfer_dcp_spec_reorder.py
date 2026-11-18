@@ -3,21 +3,24 @@
 """FlashInfer GQA builder: reorder threshold under DCP with spec decode."""
 
 import pytest
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda():
+    pytest.skip("FlashInfer backend requires a CUDA platform.", allow_module_level=True)
+
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.config import SpeculativeConfig, set_current_vllm_config
-from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferDecodeKernel,
     FlashInferMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-if not current_platform.is_cuda():
-    pytest.skip("FlashInfer backend requires a CUDA platform.", allow_module_level=True)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
@@ -50,7 +53,7 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
         },
     )
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
@@ -71,3 +74,7 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(monkeypatch):
         builder.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
     )
     assert builder.reorder_batch_threshold == 1
+    assert (
+        FlashInferMetadataBuilder.get_cudagraph_support(vllm_config, kv_cache_spec)
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )

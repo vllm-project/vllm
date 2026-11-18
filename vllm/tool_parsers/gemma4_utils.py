@@ -10,9 +10,9 @@ dependencies — they work on raw decoded strings from any inference
 backend (vLLM, HuggingFace, TGI, etc.).
 
 For the OpenAI-compatible API server tool parser (streaming +
-non-streaming), see ``vllm.tool_parsers.gemma4_tool_parser``.
+non-streaming), see `vllm.tool_parsers.gemma4_tool_parser`.
 For thinking/reasoning output parsing, see
-``vllm.reasoning.gemma4_utils``.
+`vllm.reasoning.gemma4_utils`.
 
 Usage with vLLM offline inference::
 
@@ -31,34 +31,28 @@ Usage with vLLM offline inference::
     for tc in tool_calls:
         print(f"{tc['name']}({tc['arguments']})")
 
-Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
+Ported from `transformers.models.gemma4.utils_gemma4` so that vLLM users
 do not need a transformers dependency for output parsing.
 """
 
 import regex as re
 
-# Tool call delimiter tokens as they appear in decoded text.
-# Standard format: <|tool_call>call:name{args}<tool_call|>
-_TOOL_CALL_START_TAG = "<|tool_call>"
-_TOOL_CALL_END_TAG = "<tool_call|>"
 _TOOL_RESPONSE_START_TAG = "<|tool_response>"
-
-# Gemma4 escape token as it appears in decoded text.
-_ESCAPE_TOKEN = '<|"|>'
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
     """Parse tool call arguments from the Gemma4 compact format.
 
-    Delegates to the native ``<|"|>``-aware parser from
-    ``vllm.parser.gemma4``, which handles internal quotes, nested
+    Delegates to the native `<|"|>`-aware parser from
+    `vllm.parser.gemma4`, which handles internal quotes, nested
     objects, arrays, and all Gemma4 value types correctly.
 
     Args:
-        args_str: Raw argument string from inside ``call:name{...}``.
+        args_str: Raw argument string from inside `call:name{...}`.
 
     Returns:
         Dictionary of argument name → string value.
+
     """
     if not args_str or not args_str.strip():
         return {}
@@ -77,23 +71,23 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     non-standard tool call formats.
 
     Parsing tiers:
-        1. **Standard**: ``<|tool_call>call:name{args}<tool_call|>``
+        1. **Standard**: `<|tool_call>call:name{args}<tool_call|>`
            (special token IDs 48/49 in decoded text)
-        2. **Fallback** (when ``strict=False``): bare ``call:name{args}``
-           patterns, including ``<call>name{args}`` (fragmented tokens from
+        2. **Fallback** (when `strict=False`): bare `call:name{args}`
+           patterns, including `<call>name{args}` (fragmented tokens from
            multimodal inputs)
 
     Args:
-        text: Decoded model output text (from ``tokenizer.decode(...,
-            skip_special_tokens=False)``).
-        strict: If ``True``, only match the standard ``<|tool_call>`` format.
-            If ``False`` (default), also try fallback patterns for
+        text: Decoded model output text (from `tokenizer.decode(...,
+            skip_special_tokens=False)`).
+        strict: If `True`, only match the standard `<|tool_call>` format.
+            If `False` (default), also try fallback patterns for
             known Gemma4 output variations.
 
     Returns:
         A list of dicts, each with keys:
-            - ``"name"``: The tool function name (e.g. ``"get_weather"``).
-            - ``"arguments"``: A dict of argument name → value.
+            - `"name"`: The tool function name (e.g. `"get_weather"`).
+            - `"arguments"`: A dict of argument name → value.
 
     Example::
 
@@ -102,6 +96,7 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         >>> tool_calls = parse_tool_calls(output)
         >>> for tc in tool_calls:
         ...     print(f"Call: {tc['name']}({tc['arguments']})")
+
     """
     results = []
 
@@ -139,17 +134,17 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
 def has_tool_response_tag(text: str) -> bool:
     """Check if model output properly ends with a tool response tag.
 
-    Some Gemma4 models sometimes emit ``<eos>`` instead of
-    ``<|tool_response>`` after a tool call. This helper detects
+    Some Gemma4 models sometimes emit `<eos>` instead of
+    `<|tool_response>` after a tool call. This helper detects
     whether the model used the proper termination, so callers can
-    decide whether to inject ``<|tool_response>`` into the next prompt.
+    decide whether to inject `<|tool_response>` into the next prompt.
 
     Args:
         text: Decoded model output text.
 
     Returns:
-        ``True`` if the output ends with ``<|tool_response>``
-        (proper behavior), ``False`` otherwise.
+        `True` if the output ends with `<|tool_response>`
+        (proper behavior), `False` otherwise.
 
     Example::
 
@@ -157,6 +152,7 @@ def has_tool_response_tag(text: str) -> bool:
         >>> if not has_tool_response_tag(model_output):
         ...     # Model used <eos> instead — inject <|tool_response> manually
         ...     next_prompt = "<|tool_response>" + tool_result
+
     """
     stripped = text.rstrip()
     return stripped.endswith(_TOOL_RESPONSE_START_TAG)

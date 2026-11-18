@@ -69,12 +69,11 @@ def make_inputs(total_tokens, num_reqs, block_size):
     # Output workspace
     dst = torch.zeros(total_tokens, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
 
-    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
     workspace_starts_t = torch.tensor(
         workspace_starts, dtype=torch.int32, device="cuda"
     )
 
-    return cache, dst, block_table, seq_lens_t, workspace_starts_t
+    return cache, dst, block_table, workspace_starts_t
 
 
 def bench_scenario(label, num_reqs, total_tokens_list, save_path):
@@ -94,7 +93,7 @@ def bench_scenario(label, num_reqs, total_tokens_list, save_path):
         )
     )
     def bench_fn(total_tokens, provider, num_reqs):
-        cache, dst, block_table, seq_lens_t, ws_starts = make_inputs(
+        cache, dst, block_table, ws_starts = make_inputs(
             total_tokens, num_reqs, BLOCK_SIZE
         )
 
@@ -102,7 +101,7 @@ def bench_scenario(label, num_reqs, total_tokens_list, save_path):
 
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: ops.cp_gather_and_upconvert_fp8_kv_cache(
-                cache, dst, block_table, seq_lens_t, ws_starts, num_reqs
+                cache, dst, block_table, ws_starts, num_reqs
             ),
             quantiles=quantiles,
             rep=500,

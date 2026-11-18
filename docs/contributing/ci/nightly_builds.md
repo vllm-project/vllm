@@ -6,9 +6,13 @@ vLLM maintains a per-commit wheel repository (commonly referred to as "nightly")
 
 ### Wheel Building
 
-Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch, with multiple variants:
+Wheels are built in the `Release` pipeline
+(`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch.
+Regular builds produce the CUDA 13.2 wheels for x86_64 and aarch64. Additional
+wheel variants and ROCm builds can be unblocked on demand and run automatically
+when `NIGHTLY=1`:
 
-- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`).
+- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu132`).
 - **Architecture variants**: `x86_64` and `aarch64`.
 
 Each build step:
@@ -51,7 +55,7 @@ s3://vllm-wheels/
 │   │   └── vllm/
 │   │       ├── index.html      # Package index (cu129 variant)
 │   │       └── metadata.json   # Metadata (cu129 variant)
-│   ├── cu130/                  # Variant subdirectory
+│   ├── cu132/                  # Variant subdirectory
 │   ├── cpu/                    # Variant subdirectory
 │   └── .../                    # More variant subdirectories
 ├── nightly/                    # Latest main branch wheels (mirror of latest commit)
@@ -63,7 +67,7 @@ This avoids duplication of wheel files.
 
 For example, you can specify the following URLs to use different indices:
 
-- `https://wheels.vllm.ai/nightly/cu130` for the latest main branch wheels built with CUDA 13.0.
+- `https://wheels.vllm.ai/nightly/cu132` for the latest main branch wheels built with CUDA 13.2.
 - `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
 - `https://wheels.vllm.ai/0.12.0/cpu` for 0.12.0 release wheels built for CPU variant.
 
@@ -117,7 +121,7 @@ Since S3 does not provide proper directory listing, to support PyPI-compatible s
 For example, the following requests would be handled as:
 
 - `/nightly` -> `/nightly/index.html`
-- `/nightly/cu130/` -> `/nightly/cu130/index.html`
+- `/nightly/cu132/` -> `/nightly/cu132/index.html`
 - `/nightly/index.html` or `/nightly/vllm.whl` -> unchanged
 
 !!! note "AWS S3 Filename Escaping"
@@ -130,9 +134,9 @@ When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
 
 1. **Determines wheel location** via `precompiled_wheel_utils.determine_wheel_url()`:
     - Env var `VLLM_PRECOMPILED_WHEEL_LOCATION` (user-specified URL/path) always takes precedence and skips all other steps.
-    - Determines the variant from `VLLM_MAIN_CUDA_VERSION` (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_VARIANT`); the default variant will also be tried as a fallback.
+    - For CUDA, uses `VLLM_PRECOMPILED_WHEEL_VARIANT` when specified. Otherwise, an explicitly set `VLLM_MAIN_CUDA_VERSION` selects the variant; if unset, the CUDA version is detected from PyTorch or nvidia-smi, with the default `VLLM_MAIN_CUDA_VERSION` used if detection fails.
     - Determines the _base commit_ (explained later) of this branch (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_COMMIT`).
-2. **Fetches metadata** from `https://wheels.vllm.ai/{commit}/vllm/metadata.json` (for the default variant) or `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json` (for a specific variant).
+2. **For CUDA, fetches metadata** for the selected variant from `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json`.
 3. **Selects compatible wheel** based on:
     - Package name (`vllm`)
     - Platform tag (architecture match)
@@ -158,3 +162,29 @@ Key files involved in the nightly wheel mechanism:
 - **`.buildkite/scripts/upload-wheels.sh`**: Script that uploads wheels and generates indices
 - **`.buildkite/scripts/generate-nightly-index.py`**: Python script that generates PyPI-compatible indices
 - **`setup.py`**: Contains `precompiled_wheel_utils` class for fetching and using precompiled wheels
+
+## Docker Hub publishing credentials
+
+Docker publishing and nightly cleanup use the Buildkite secret
+`VLLM_DOCKERHUB_TOKEN`, mapped to `RELEASE_DOCKERHUB_TOKEN` on publishing
+steps. Use Docker Hub organization username `vllm` with an organization access
+token granting Image Push, Image Delete, and Tag Admin on `vllm/vllm-openai`,
+`vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, and `vllm/vllm-openai-xpu`.
+Tag Admin and Image Delete are needed for nightly tag cleanup. Do not grant
+organization administration or access to unrelated repositories.
+
+Store the secret in the dedicated vLLM Release cluster and restrict its access
+policy to the immutable Release v2 pipeline ID, the `main` and `releases/*`
+branches, and the small CPU publishing queue ID. Build workers do not need it.
+Step-level secrets require Buildkite agent 3.106.0 or newer. Protect release
+branches and pipeline settings in addition to configuring the secret policy.
+
+The cleanup script exchanges the organization token through `/v2/auth/token`
+and uses the namespace-scoped tag API. It keeps credentials out of shell
+traces and command arguments. For manual cleanup, supply
+`RELEASE_DOCKERHUB_TOKEN` and `DOCKERHUB_USERNAME=vllm` through a secure
+local environment, never command-line arguments or committed files.
+
+Validate publishing, multi-architecture manifests, and cleanup before removing
+legacy S3 credentials. Revoke a shared token only after all its consumers have
+migrated; deleting one stored copy does not invalidate the token.

@@ -6,9 +6,9 @@ Exercises DelegatingParser in engine-adapter mode to verify that delegated
 routing produces correct output across chunk sizes.
 See test_replay.py for tests that target engine parsers directly.
 
-Parser discovery is automatic: any engine parser in ``registered_adapters``
+Parser discovery is automatic: any engine parser in `registered_adapters`
 that has both tool and reasoning adapters and a builder in
-``trace_builder._BUILDERS`` is picked up with zero manual wiring.
+`trace_builder._BUILDERS` is picked up with zero manual wiring.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from vllm.parser.engine.adapters import (
     ParserEngineReasoningAdapter,
     ParserEngineToolAdapter,
 )
+from vllm.parser.mistral import MistralParser
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
 
@@ -84,9 +85,27 @@ def _discover_pairings() -> list[_PairingInfo]:
     for engine_cls, adapters in engines.items():
         if "tool" not in adapters or "reasoning" not in adapters:
             continue
+        if engine_cls is MistralParser:
+            # Mistral uses brace-balanced JSON tool args with no TOOL_END
+            # token, so it does not fit this TOOL_END-based replay harness.
+            # It is covered by tests/parser/mistral/ instead.
+            continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
+        if cfg.name == "llama_json":
+            # Llama JSON has no TOOL_END terminal; dedicated coverage lives
+            # in test_llama_json.py.
+            continue
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{engine_cls.__name__} (config.name={cfg.name!r})")
+            continue
+        if cfg.name == "inkling":
+            # Inkling uses typed structural blocks and opts out of token-id
+            # terminal matching; combined-parser replay coverage lives in
+            # test_inkling.py.
+            continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal;
+            # its replay coverage lives in test_granite.py.
             continue
 
         parser_cls = type(
@@ -186,7 +205,7 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
     cfg = parser._tool_parser._parser_engine.parser_engine_config
     terminals = sorted(
         v
-        for v in set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        for v in cfg.terminal_literals | set(cfg.token_id_terminals.values())
         if len(v) > 1
     )
     assert_no_terminal_leakage(

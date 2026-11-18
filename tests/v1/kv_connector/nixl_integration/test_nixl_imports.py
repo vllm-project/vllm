@@ -61,9 +61,19 @@ def test_nixl_and_nixl_ep_imports() -> None:
     importlib.import_module("nixl._bindings")
 
     # Exercise the NIXL EP extension used by fused MoE expert parallelism.
-    nixl_ep = importlib.import_module("nixl_ep")
+    try:
+        nixl_ep = importlib.import_module("nixl_ep")
+    except ImportError as e:
+        if "materialize_cow_storage" in str(e) or "undefined symbol" in str(e):
+            pytest.xfail(
+                "nixl_ep prebuilt extension is ABI-incompatible with this torch "
+                "(undefined symbol c10::impl::cow::materialize_cow_storage); "
+                "needs a nixl rebuild against torch 2.13. "
+                "See pytorch/pytorch#187727 and ai-dynamo/nixl#1798."
+            )
+        raise
     print(f"nixl_ep: {nixl_ep.__file__}")
     assert nixl_ep.__file__ is not None
 
     # Check that the NIXL EP extension is loaded.
-    assert nixl_ep.Config is not None
+    assert nixl_ep.Buffer is not None

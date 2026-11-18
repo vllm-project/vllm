@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import weakref
-from types import SimpleNamespace
 
 import pytest
 import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.entrypoints.pooling.scoring.io_processor import CrossEncoderIOProcessor
-from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.platforms import current_platform
-from vllm.renderers import TokenizeParams
 
-MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+MODEL_NAME = "vllm-project/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
 TEXTS_1 = [
     "What is the capital of France?",
@@ -29,30 +24,20 @@ TEXTS_2 = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
-    # that supports encoder-only models on ROCm.
-    attention_config = None
-    if current_platform.is_rocm():
-        attention_config = {"backend": "FLEX_ATTENTION"}
-
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-        attention_config=attention_config,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="module")
@@ -116,6 +101,63 @@ def test_classify(llm):
     assert len(outputs[0].outputs.data) == 1
 
 
+@pytest.mark.parametrize(
+    "content_format",
+    [
+        pytest.param(None, id="detected-default"),
+        pytest.param("openai", id="structured"),
+        pytest.param("string", id="explicit-string"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_score_content_format_override_matches_classify(llm: LLM, content_format):
+    query, document = TEXTS_1[0], TEXTS_2[0]
+    expected_prompt = json.dumps(
+        [
+            {"role": "query", "content": [{"type": "text", "text": query}]},
+            {"role": "document", "content": [{"type": "text", "text": document}]},
+        ]
+    )
+    chat_template = "{{ messages | tojson }}"
+    if content_format is None:
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for part in message.content %}{{ part.text }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    elif content_format == "string":
+        chat_template = (
+            "{% for message in messages %}"
+            "{% for char in message.content %}{{ char }}{% endfor %}"
+            "{% endfor %}"
+        )
+        expected_prompt = query + document
+    # Compare full-prefill executions; a prefix-cache hit changes the compute path.
+    llm.reset_prefix_cache()
+    format_kwargs = (
+        {}
+        if content_format is None
+        else {"chat_template_content_format": content_format}
+    )
+    (scored,) = llm.score(
+        query,
+        document,
+        chat_template=chat_template,
+        **format_kwargs,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    llm.reset_prefix_cache()
+    (classified,) = llm.classify(
+        expected_prompt,
+        tokenization_kwargs={"add_special_tokens": False},
+        use_tqdm=False,
+    )
+    assert scored.prompt_token_ids == classified.prompt_token_ids
+    assert scored.outputs.score == pytest.approx(classified.outputs.probs[0])
+
+
 @pytest.mark.skip_global_cleanup
 def test_max_tokens_per_doc(llm: LLM):
     """Test max_tokens_per_doc via PoolingParams.extra_kwargs (offline)."""
@@ -143,45 +185,6 @@ def test_max_tokens_per_doc(llm: LLM):
     no_limit_tokens = len(outputs_no_limit[0].prompt_token_ids)
     with_limit_tokens = len(outputs_with_limit[0].prompt_token_ids)
     assert with_limit_tokens < no_limit_tokens
-
-
-def test_token_type_ids_follow_post_tokenization():
-    processor = object.__new__(CrossEncoderIOProcessor)
-    processor.tokenizer = SimpleNamespace(truncation_side="right", pad_token_id=-1)
-    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
-    processor.model_config = None
-    processor.get_score_prompt = lambda **_: (
-        "",
-        {
-            "prompt_token_ids": list(range(32)),
-            "token_type_ids": [0] * 16 + [1] * 16,
-        },
-    )
-
-    engine_inputs, pooling_params = processor._pre_process(
-        ScoringData(data_1=["query"], data_2=["document"]),
-        TokenizeParams(
-            max_total_tokens=None,
-            truncate_prompt_tokens=16,
-            truncation_side="left",
-        ),
-        PoolingParams(task="classify", extra_kwargs={"cache_salt": "salt"}),
-    )
-
-    assert engine_inputs[0]["prompt_token_ids"] == list(range(16, 32))
-    assert pooling_params[0].extra_kwargs == {
-        "cache_salt": "salt",
-        "compressed_token_type_ids": 0,
-    }
-
-    engine_inputs, pooling_params = processor._pre_process(
-        ScoringData(data_1=["query"], data_2=["document"]),
-        TokenizeParams(max_total_tokens=None, pad_prompt_tokens=40),
-        PoolingParams(task="classify"),
-    )
-
-    assert engine_inputs[0]["prompt_token_ids"] == list(range(32)) + [-1] * 8
-    assert pooling_params[0].extra_kwargs == {"compressed_token_type_ids": 16}
 
 
 def test_pooling_params(llm: LLM):

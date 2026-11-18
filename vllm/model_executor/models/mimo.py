@@ -38,10 +38,10 @@ from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM, Qwen2Model
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .qwen3 import Qwen3ForCausalLM, Qwen3Model, use_qwen2_attention
+from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -54,7 +54,9 @@ logger = init_logger(__name__)
         "inputs_embeds": 0,
     }
 )
-class MiMoModel(Qwen2Model):
+class MiMoModel(Qwen3Model):
+    supports_aux_hidden_states_over_pp = False
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -86,10 +88,14 @@ class MiMoModel(Qwen2Model):
         return hidden_states
 
 
-class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
+class MiMoForCausalLM(Qwen3ForCausalLM, nn.Module):
+    # MTP layers are loaded by the draft model, not the main model.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp_layers.": None})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
+        use_qwen2_attention(config)
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -101,15 +107,14 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -120,11 +125,8 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
-        # MTP layers are loaded by the draft model, not the main model.
-        skip_prefixes.append("model.mtp_layers.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def compute_logits(
         self,
@@ -133,3 +135,6 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         hidden_states = self.model.norm(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().compute_logits_local(self.model.norm(hidden_states))

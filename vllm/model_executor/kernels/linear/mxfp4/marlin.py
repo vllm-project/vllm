@@ -3,6 +3,11 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Dynamic,
+)
+
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
@@ -20,7 +25,15 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
         return False, "Marlin FP4 not available"
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key not in (None, kMxfp4Dynamic):
+            return False, "only supports MXFP4 dynamic or unquantized activations"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -45,7 +58,7 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             weight_global_scale=None,
-            workspace=layer.workspace,
+            workspace=None,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,

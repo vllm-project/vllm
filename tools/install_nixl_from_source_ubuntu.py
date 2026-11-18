@@ -21,7 +21,7 @@ NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 
 # --- Helper Functions ---
 def get_latest_nixl_version():
-    """Helper function to get latest release version of NIXL"""
+    """Helper function to get latest release version of NIXL."""
     try:
         nixl_release_url = "https://api.github.com/repos/ai-dynamo/nixl/releases/latest"
         with urllib.request.urlopen(nixl_release_url) as response:
@@ -104,7 +104,6 @@ def install_system_dependencies():
 
 def build_and_install_prerequisites(args):
     """Builds UCX and NIXL from source, creating a self-contained wheel."""
-
     if not args.force_reinstall and is_pip_package_installed("nixl"):
         print("--> NIXL is already installed. Nothing to do.", flush=True)
         return

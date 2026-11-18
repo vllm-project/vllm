@@ -1,0 +1,24 @@
+{
+  "add_generation_prompt": false,
+  "messages": [
+    {
+      "role": "assistant",
+      "reasoning_content": "think",
+      "content": "answer",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"SF\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "content": "sunny"
+    }
+  ]
+}

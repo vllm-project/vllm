@@ -41,7 +41,7 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def prepend_requests(self, requests: "RequestQueue") -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Prepend all requests from another queue to the front of this
         queue."""
         pass
@@ -93,7 +93,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         """Prepend a request to the front of the queue."""
         self.appendleft(request)
 
-    def prepend_requests(self, requests: RequestQueue) -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Prepend all requests from another queue to the front of this
         queue.
 
@@ -129,8 +129,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
 
 
 class PriorityRequestQueue(RequestQueue):
-    """
-    A priority queue that supports heap operations.
+    """A priority queue that supports heap operations.
 
     Respects the ordering defined in the Request class, where
     requests with a smaller value of `priority` are processed first.
@@ -164,7 +163,7 @@ class PriorityRequestQueue(RequestQueue):
         front. Requests are ordered by (priority, arrival_time)."""
         self.add_request(request)
 
-    def prepend_requests(self, requests: RequestQueue) -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Add all requests from another queue according to priority policy.
 
         Note: In a priority queue, there is no concept of prepending to the

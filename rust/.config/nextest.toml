@@ -1,0 +1,3 @@
+# Kill a hung test (per-test 120s budget) so a broken wait fails instead of stalling.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }

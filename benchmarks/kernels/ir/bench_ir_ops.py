@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generic benchmark harness for vLLM IR ops.
+"""Generic benchmark harness for vLLM IR ops.
 
 Usage:
     python benchmarks/kernels/ir/bench_ir_ops.py
@@ -50,7 +49,7 @@ from vllm.platforms import current_platform  # noqa: E402
 from vllm.triton_utils import triton  # noqa: E402
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BenchConfig:
     use_cuda_graph: bool = True
     warmup: int = 25
