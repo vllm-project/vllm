@@ -3648,12 +3648,18 @@ class MoRIIOConnectorWorker:
         self, remote_tp_size: int | None, layer_name: str | None = None
     ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
+        # An MLA-style cache in a non-MLA model (e.g. MiniMax-M3's indexer
+        # keys) has no KV heads: it is identical on every TP rank, so it is
+        # copied whole like an MLA latent rather than sliced by head.
+        is_mla = self.use_mla or (
+            layer_name is not None and self._is_mla_cache_layer(layer_name)
+        )
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
-            self.use_mla,
+            1 if is_mla else self._layer_total_num_kv_heads(layer_name),
+            is_mla,
             self._has_mamba,
         )
 

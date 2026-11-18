@@ -122,6 +122,12 @@ MODELS = {
             ),
         ],
     ),
+    # MiniMax-M3: GQA attention next to a lightning-indexer key cache, which
+    # is MLA-like (one vector per token) and identical on every TP rank.
+    "gqa_indexer": (
+        4,
+        [Layer("attn0", "full", "full"), Layer("indexer0", "mla", "full")],
+    ),
     # MiniMax-M3 on ROCm with --kv-cache-dtype nvfp4.
     "nvfp4": (4, [Layer("attn0", "nvfp4", "full")]),
     # The same page laid out by KV head, as MiniMax-M3's MSA backend does.
@@ -470,7 +476,7 @@ SCENARIOS = [
 ] + [
     # More ranks than some layers have heads: those layers replicate.
     (model, producer_tp, consumer_tp, hma)
-    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero")
+    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero", "gqa_indexer")
     for producer_tp, consumer_tp in [(4, 8), (8, 4)]
     for hma in (True, False)
 ]
@@ -511,6 +517,29 @@ def test_nvfp4_page_laid_out_by_kv_head_is_not_sliced(monkeypatch):
     layouts = (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC)
     with pytest.raises(ValueError, match="cannot slice KV heads"):
         _check_write(monkeypatch, "nvfp4_by_head", 2, 1, False, layouts)
+
+
+@pytest.mark.parametrize(("producer_tp", "consumer_tp"), [(4, 2), (8, 4), (2, 4)])
+def test_replicated_indexer_cache_is_copied_whole(producer_tp, consumer_tp):
+    """An MLA-like cache in a GQA model (MiniMax-M3's indexer keys) is the
+    same on every rank: one producer per decode rank copies the whole block
+    (fan-in), or every decode rank gets the whole block (fan-out)."""
+    heads, layers = MODELS["gqa_indexer"]
+    state = _global_state(layers, heads)
+    ratio = max(producer_tp // consumer_tp, 1)
+    for p in range(producer_tp):
+        worker = _build_rank(
+            "gqa_indexer", p, producer_tp, KVCacheLayout.LBHNC, True, state, True
+        ).worker
+        mapping = worker._write_tp_mapping(consumer_tp, "indexer0")
+        writing = [t for t in mapping.targets if t.num_heads]
+        if p % ratio:
+            assert not writing
+            continue
+        assert writing and all(mapping.copies_whole_block(t) for t in writing)
+        assert {t.tp_rank for t in writing} == set(
+            worker._write_tp_mapping(consumer_tp).target_tp_ranks
+        )
 
 
 def _check_write(monkeypatch, model, producer_tp, consumer_tp, hma, layouts):
