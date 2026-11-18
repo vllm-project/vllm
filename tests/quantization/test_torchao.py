@@ -91,7 +91,9 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
     reason="requires torchao>=0.18.0 on gfx950",
 )
 def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
-    """Testing online quantization with config dict serialized to json string"""
+    """Testing online quantization and reload_weights, with config dict
+    serialized to json string
+    """
     torch._dynamo.reset()
     model_name = "facebook/opt-125m"
 
@@ -117,7 +119,11 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
         enforce_eager=True,
     ) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-        assert output
+
+        llm.collective_rpc("reload_weights")
+
+        reload_output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        assert output[0][0] == reload_output[0][0]
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
