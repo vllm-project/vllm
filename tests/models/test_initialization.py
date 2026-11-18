@@ -3,6 +3,7 @@
 
 import gc
 from collections.abc import Generator
+from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
@@ -205,9 +206,24 @@ def can_initialize(
         if not (current_platform.is_cuda() or current_platform.is_rocm()):
             pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    from vllm.platforms import current_platform
+
+    # Flash is CUDA-only; unsupported platforms must reject initialization.
+    initialization_result = (
+        pytest.raises(NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA")
+        if model_arch
+        in (
+            "HYV4FlashForCausalLM",
+            "HYV4FlashVLForConditionalGeneration",
+            "HYV4DFlyModel",
+        )
+        and not current_platform.is_cuda()
+        else nullcontext()
+    )
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
+        initialization_result,
     ):
         if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not

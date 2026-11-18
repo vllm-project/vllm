@@ -1777,6 +1777,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "tencent/Hy4-flash",
         speculative_model="tencent/Hy4-flash",
         speculative_method="dfly",
+        max_model_len=4096,
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",
