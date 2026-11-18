@@ -289,6 +289,13 @@ three times, limited in turn to web search, GitHub, and a local checkout (before
 merge: the docs preview and the PR branch). If it cannot find and quote the
 docs, fix the docs.
 
+Some reference tables are generated from source at docs build time, e.g.
+attention backends (`docs/mkdocs/gen_files/generate_attention_backends.py`) and
+quantization methods, schemes, and linear kernels
+(`docs/mkdocs/gen_files/generate_quantization_tables.py`). Do not copy their
+contents into prose; write around the `--8<-- "gen:..."` marker in the tracked
+page instead.
+
 ### Adding or Changing Kernels
 
 When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
