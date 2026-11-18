@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HB_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -62,6 +63,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     get_dcp_replicated_group_ids,
     get_representative_spec_type,
+    kv_lease_extension,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -126,6 +128,11 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
     storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
     return len(block_strides) == len(storage_ptrs) == 1
+
+
+# Max slack (s) kept before a remote lease deadline when heartbeating or reading:
+# absorbs clock-offset estimation error and notification/read latency.
+_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
 @dataclass(slots=True)
@@ -707,7 +714,12 @@ class NixlBaseConnectorWorker:
             "kv_lease_duration", 30
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
-        self._lease_extension = kv_lease_duration * 2 // 3
+        self._lease_extension = kv_lease_extension(kv_lease_duration)
+        # At most the heartbeat interval so heartbeats can keep a short lease
+        # alive (assumes both sides share kv_lease_duration, like the interval).
+        self._lease_safety_margin = min(
+            _KV_BLOCKS_EXPIRY_SAFETY_MARGIN, kv_lease_duration / 6
+        )
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -872,6 +884,8 @@ class NixlBaseConnectorWorker:
         self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
+        # (remote engine, remote req id) -> lease deadline renewed by our heartbeats.
+        self._remote_leases: dict[tuple[EngineId, str], float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -1547,6 +1561,10 @@ class NixlBaseConnectorWorker:
                         remote_agents, clock_offset = f.result()
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
+                        # Exported lease deadlines are rebased with this offset.
+                        logger.info(
+                            "NIXL clock offset to engine %s: %.3fs", eid, clock_offset
+                        )
                         self._engine_last_active[eid] = time.perf_counter()
                         self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
@@ -3424,6 +3442,10 @@ class NixlBaseConnectorWorker:
                     self._recv_failures.remove(req_id)
                     failed_recv_reqs.add(req_id)
             done_recving.update(failed_recv_reqs)
+        # KV read while the remote may have released the blocks must not be used.
+        failed_recv_reqs |= self._get_lease_lapsed_recvs(
+            done_recving - failed_recv_reqs
+        )
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -3549,6 +3571,10 @@ class NixlBaseConnectorWorker:
         Subclasses must implement this to handle mode-specific notifications.
         """
         raise NotImplementedError
+
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed receives whose remote lease may have lapsed mid-read."""
+        return set()
 
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into `done_sending`.
@@ -3726,6 +3752,7 @@ class NixlBaseConnectorWorker:
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
+        now = time.perf_counter()
         for engine_id, hb_info in metadata.heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
@@ -3746,17 +3773,46 @@ class NixlBaseConnectorWorker:
             # Refresh the TTL: a heartbeat means the router still paired this P-D,
             # so requests are still waiting on this engine
             self._engine_last_active[engine_id] = time.perf_counter()
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            hb_msg = (HB_NOTIF_PREFIX + ",".join(hb_info.req_ids)).encode()
+            all_sent = True
             for agent_name in self._remote_agents[engine_id].values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
+                    all_sent = False
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
                         engine_id,
                         exc_info=True,
                     )
+            clock_offset = self._engine_clock_offset.get(engine_id)
+            if all_sent and clock_offset is not None:
+                # Only count rounds that reached every remote rank.
+                for remote_req_id, (expiry, extension) in hb_info.leases.items():
+                    if "," in remote_req_id:
+                        # Heartbeats are comma-separated: P can't match this id.
+                        continue
+                    self._record_heartbeat_sent(
+                        (engine_id, remote_req_id),
+                        now,
+                        expiry - clock_offset,
+                        extension,
+                    )
+        if metadata.heartbeat_by_engine:
+            # Expired leases no longer matter: the read is declined either way.
+            self._remote_leases = {
+                k: d for k, d in self._remote_leases.items() if d > now
+            }
+
+    def _record_heartbeat_sent(
+        self, key: tuple[EngineId, str], now: float, deadline: float, extension: int
+    ) -> None:
+        """Mirror the remote's `_handle_heartbeat` for a heartbeat sent at `now`:
+        a live lease (initial `deadline`, our clock) renews to `now + extension`;
+        a lapsed one stays lapsed, as its deadline no longer moves."""
+        lease = self._remote_leases.setdefault(key, deadline)
+        if now + self._lease_safety_margin <= lease:
+            self._remote_leases[key] = max(lease, now + extension)
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
