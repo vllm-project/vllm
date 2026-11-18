@@ -140,6 +140,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     zp_ptr,  # [N//8, K//G]  int32 zero-points (when HAS_ZP=True)
     scale_zp_carrier_ptr,  # [N, K//G]  int32 fp16 scale/bias carrier
     c_ptr,  # [M, N]  fp16/bf16 output
+    ws_ptr,  # [SPLIT_K, M, N]  fp32 partial sums (when SPLIT_K > 1)
     # Dimensions
     M,
     N,
@@ -155,6 +156,8 @@ def _triton_w4a16_skinny_fmt_kernel(
     HAS_ZP: tl.constexpr,
     PACKED_DEQUANT: tl.constexpr,
     HAS_SCALE_ZP_CARRIER: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    K_ROTATE: tl.constexpr,
     # Block sizes
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -181,6 +184,11 @@ def _triton_w4a16_skinny_fmt_kernel(
     magic-constant unpack), so the subtrahend absorbs the 1024: the arithmetic
     is unchanged and every intermediate stays exact, since fp16 represents every
     integer below 2048.
+
+    With SPLIT_K > 1 grid axis 2 splits the K loop into SPLIT_K contiguous runs
+    of BLOCK_K tiles. Each run stores its fp32 partial sum to ws_ptr, and
+    _splitk_reduce_kernel adds them in a fixed order. The dequantization is
+    unchanged; only the order in which the fp32 partial sums are added differs.
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -200,7 +208,23 @@ def _triton_w4a16_skinny_fmt_kernel(
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for k_start in range(0, tl.cdiv(K, BLOCK_K)):
+    k_tiles = tl.cdiv(K, BLOCK_K)
+    if SPLIT_K == 1:
+        k_begin = 0
+        k_end = k_tiles
+    else:
+        tiles_per_split = tl.cdiv(k_tiles, SPLIT_K)
+        k_begin = tl.program_id(2) * tiles_per_split
+        k_end = tl.minimum(k_begin + tiles_per_split, k_tiles)
+
+    n_iters = k_end - k_begin
+    for k_iter in range(0, n_iters):
+        if K_ROTATE:
+            # Start each N tile at a different K tile so concurrent programs do
+            # not read the same column of rows whose stride is a power of two.
+            k_start = k_begin + (k_iter + pid_n * 5) % n_iters
+        else:
+            k_start = k_begin + k_iter
         offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
 
@@ -290,10 +314,35 @@ def _triton_w4a16_skinny_fmt_kernel(
         b_fp_t = tl.trans(b_fp)
         accumulator += tl.dot(a, b_fp_t, out_dtype=tl.float32)
 
-    c = accumulator.to(c_ptr.type.element_ty)
-    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
     mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, c, mask=mask_c)
+    if SPLIT_K == 1:
+        c = accumulator.to(c_ptr.type.element_ty)
+        c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+        tl.store(c_ptrs, c, mask=mask_c)
+    else:
+        ws_ptrs = (
+            ws_ptr
+            + tl.program_id(2).to(tl.int64) * M * N
+            + offs_m[:, None] * N
+            + offs_n[None, :]
+        )
+        tl.store(ws_ptrs, accumulator, mask=mask_c)
+
+
+@triton.jit
+def _splitk_reduce_kernel(
+    ws_ptr,  # [SPLIT_K, numel]  fp32 partial sums
+    c_ptr,  # [numel]  fp16/bf16 output
+    numel,
+    SPLIT_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    for k in tl.static_range(SPLIT_K):
+        acc += tl.load(ws_ptr + k * numel + offs, mask=mask, other=0.0)
+    tl.store(c_ptr + offs, acc.to(c_ptr.type.element_ty), mask=mask)
 
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
@@ -441,6 +490,44 @@ def _select_skinny_gfx1151_config(
     return block_m, block_n, block_k, num_warps, num_stages, packed_dequant
 
 
+# gfx12 small-M (decode batches past the HIP skinny range, M <= 32) tile
+# choice. Swept on gfx1201 (R9700) with Llama-3.1-8B, Qwen3-4B and Qwen3-14B
+# AWQ shapes at M = 6..32: BLOCK_N=64, BLOCK_K=128, 4 warps, 2 stages won
+# everywhere; what varies per shape is the split-K factor and the K rotation.
+_GFX12_SMALL_M_BLOCK_N = 64
+# Work-group count the split-K factor aims for (R9700 has 32 CUs). Shapes with
+# few N tiles (o_proj, down_proj) otherwise leave most CUs idle.
+_GFX12_SPLIT_K_TARGET_TILES = 160
+_GFX12_SPLIT_K_MAX = 4
+# A split shorter than this many BLOCK_K tiles costs more in the fp32 partial
+# sum round trip than it saves.
+_GFX12_SPLIT_K_MIN_TILES = 8
+
+
+def _select_skinny_gfx12_small_m_config(
+    M: int, N: int, K: int
+) -> tuple[int, int, int, int, int | None, int, bool]:
+    """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, split_k,
+    k_rotate) for gfx12 and M <= 32.
+
+    k_rotate makes each N tile start its K loop at a different K tile. It is
+    only used where the packed weight row stride is a multiple of
+    _WEIGHT_CLIFF_BYTES (K = 4096, 14336, ...): there the 64 rows one tile
+    reads are 2 KiB (or 7 KiB) apart and alias on the same memory channels,
+    and the programs of a launch would all hit that same column together.
+    """
+    block_m = 16 if M <= 16 else 32
+    block_n = _GFX12_SMALL_M_BLOCK_N
+    block_k = 128
+    tiles = triton.cdiv(M, block_m) * triton.cdiv(N, block_n)
+    k_tiles = triton.cdiv(K, block_k)
+    split_k = _GFX12_SPLIT_K_TARGET_TILES // tiles
+    split_k = min(split_k, _GFX12_SPLIT_K_MAX, k_tiles // _GFX12_SPLIT_K_MIN_TILES)
+    split_k = max(split_k, 1)
+    k_rotate = (K // 2) % _WEIGHT_CLIFF_BYTES == 0
+    return block_m, block_n, block_k, 4, 2, split_k, k_rotate
+
+
 def triton_w4a16_skinny_fmt_gemm(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [N, K//8] int32 (ExLlama shuffle packed)
@@ -449,6 +536,7 @@ def triton_w4a16_skinny_fmt_gemm(
     zp_bias: int = 8,
     zp: torch.Tensor | None = None,  # [N//8, K//G] int32 zero-points
     scale_zp_carrier: torch.Tensor | None = None,  # [N, K//G] int32 fp16 carrier
+    config: tuple[int, int, int, int, int | None, int, bool, bool] | None = None,
 ) -> torch.Tensor:
     """Fused W4A16 GEMM reading from skinny weight format [N, K//8].
 
@@ -465,6 +553,9 @@ def triton_w4a16_skinny_fmt_gemm(
                     `pack_scale_zp_carrier` (asymmetric only). Read by the
                     packed fp16 dequant in place of scales and zp, and lets it
                     be selected at a smaller M. Ignored otherwise.
+        config:     (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages,
+                    split_k, packed_dequant, k_rotate) override of the tile
+                    table, for tuning.
 
     Returns:
         Output matrix [M, N], same dtype as a.
@@ -513,11 +604,32 @@ def triton_w4a16_skinny_fmt_gemm(
     # heuristics fall back to Triton's default pipeline depth.
     num_stages: int | None = None
     packed_dequant = False
-    if _on_gfx12x():
-        # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
-        # using Llama-3.1-8B AWQ weight shapes with group_size=128.
+    split_k = 1
+    k_rotate = False
+    if config is not None:
+        (
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_K,
+            num_warps,
+            num_stages,
+            split_k,
+            packed_dequant,
+            k_rotate,
+        ) = config
+    elif _on_gfx12x():
+        # Tiles for gfx1201 (32-wide wavefronts), group_size=128. The M <= 32
+        # row is picked per shape by _select_skinny_gfx12_small_m_config.
         if M <= 32:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 16, 16, 128, 4
+            (
+                BLOCK_M,
+                BLOCK_N,
+                BLOCK_K,
+                num_warps,
+                num_stages,
+                split_k,
+                k_rotate,
+            ) = _select_skinny_gfx12_small_m_config(M, N, K)
         elif M <= 64:
             if K >= 2 * N:  # tall K (e.g. down_proj)
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 128, 8
@@ -566,9 +678,14 @@ def triton_w4a16_skinny_fmt_gemm(
     # a different group would get the wrong scale.
     BLOCK_K = min(BLOCK_K, group_size)
 
-    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), split_k)
 
     extra_kwargs = {} if num_stages is None else {"num_stages": num_stages}
+    ws = (
+        torch.empty((split_k, M, N), dtype=torch.float32, device=a.device)
+        if split_k > 1
+        else c
+    )
     _triton_w4a16_skinny_fmt_kernel[grid](
         a,
         b_q,
@@ -578,6 +695,7 @@ def triton_w4a16_skinny_fmt_gemm(
         if scale_zp_carrier is not None
         else scales,  # dummy when unused
         c,
+        ws,
         M,
         N,
         K,
@@ -591,12 +709,19 @@ def triton_w4a16_skinny_fmt_gemm(
         HAS_ZP=has_zp,
         PACKED_DEQUANT=packed_dequant,
         HAS_SCALE_ZP_CARRIER=packed_dequant and scale_zp_carrier is not None,
+        SPLIT_K=split_k,
+        K_ROTATE=k_rotate,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         num_warps=num_warps,
         **extra_kwargs,
     )
+    if split_k > 1:
+        reduce_block = 1024
+        _splitk_reduce_kernel[(triton.cdiv(M * N, reduce_block),)](
+            ws, c, M * N, SPLIT_K=split_k, BLOCK=reduce_block
+        )
     return c
 
 
