@@ -512,3 +512,34 @@ async def test_omitted_video_url_requires_cached_uuid(
         omitted_video_messages,
         context="reuse cached video without URL",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_omitted_media_cache_miss_names_every_item(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+):
+    """The rejection names every uncached item sent without data, across
+    modalities, so the client can resend them all at once."""
+    video_uuids = ["uncached-video-uuid-0", "uncached-video-uuid-1"]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *(
+                    {"type": "video_url", "video_url": {}, "uuid": video_uuid}
+                    for video_uuid in video_uuids
+                ),
+                {"type": "image_url", "image_url": None, "uuid": "uncached-image"},
+                {"type": "text", "text": "What's in these videos and this image?"},
+            ],
+        }
+    ]
+
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await client.chat.completions.create(model=model_name, messages=messages)
+
+    message = str(exc_info.value)
+    assert "video at index 0, 1" in message
+    assert "image at index 0" in message
