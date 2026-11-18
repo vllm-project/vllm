@@ -1530,7 +1530,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
 
         vllm_config = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
+            model="deepseek-ai/DeepSeek-V2-Lite"
         ).create_engine_config()
         engine_core_proc = EngineCoreProc(
             vllm_config=vllm_config,
