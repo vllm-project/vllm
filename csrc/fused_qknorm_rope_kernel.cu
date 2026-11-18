@@ -293,7 +293,7 @@ __global__ void fusedQKNormRopeKernel(
             elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
           }
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
+        // __shfl_sync does not provide memfence. Need to sync again.
         __syncwarp();
       }
     }
@@ -504,8 +504,12 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
         elements[i] *= rms_rcp * (isQ ? q_w[i] : k_w[i]);
       }
 
-      // On first head: wait for group 1 (cos/sin) before RoPE.
-      if (k == 0) cp_async_wait_group<0>();
+      // On first head: wait for group 1 (cos/sin) before RoPE, then sync the
+      // warp so each lane sees the cos/sin copied by the other lanes.
+      if (k == 0) {
+        cp_async_wait_group<0>();
+        __syncwarp();
+      }
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
       // All lanes take the NeoX branch: its warp collectives use the full mask.
