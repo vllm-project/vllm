@@ -319,6 +319,18 @@ class MooncakeStoreScheduler:
 
         self.load_specs[request.request_id].can_load = True
 
+    def note_transfer_attempt(self, request: Request, transfer_generation: int) -> None:
+        """Capture the core-assigned identity of this request's load
+        attempt so it rides the broadcast ReqMeta to every TP-rank
+        worker connector (the repair-policy evidence contract: reports
+        and attestations echo it; the scheduler rejects evidence whose
+        identity does not match the latest scheduled attempt).
+        """
+        if request.request_id in self.load_specs:
+            self.load_specs[
+                request.request_id
+            ].transfer_generation = transfer_generation
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
