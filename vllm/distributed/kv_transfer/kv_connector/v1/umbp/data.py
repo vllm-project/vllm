@@ -303,6 +303,17 @@ class UMBPNamespace:
         ).encode()
         return cls(hashlib.sha256(payload).hexdigest()[:32])
 
+    @classmethod
+    def for_pipeline(cls, stage_namespaces: Sequence[str]) -> UMBPNamespace:
+        """Combine the namespaces derived by each pipeline stage, in stage order.
+
+        A stage derives its namespace from its own layers, so stages disagree.
+        Keys already carry the PP rank; the engine-wide namespace fingerprints
+        every stage's layers and is identical on all stages.
+        """
+        payload = "pp:" + ",".join(stage_namespaces)
+        return cls(hashlib.sha256(payload.encode()).hexdigest()[:32])
+
 
 @dataclass(frozen=True)
 class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):

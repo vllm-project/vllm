@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.distributed as dist
 
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
@@ -98,6 +99,16 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
         self._num_workers = 1
 
 
+def _gather_pp_stage_namespaces(local: UMBPNamespace) -> list[str]:
+    """All-gather the namespace each pipeline stage derived, in stage order."""
+    from vllm.distributed.parallel_state import get_pp_group
+
+    pp_group = get_pp_group()
+    gathered: list[str | None] = [None] * pp_group.world_size
+    dist.all_gather_object(gathered, local.value, group=pp_group.cpu_group)
+    return [str(value) for value in gathered]
+
+
 class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
 
@@ -127,9 +138,13 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         runtime_config = UMBPRuntimeConfig.from_vllm(
             vllm_config
         ).resolve_for_rank_count(topology.rank_count)
-        if topology.pp_size > 1:
+        if topology.pp_size > 1 and runtime_config.mode != "standalone":
+            # Only standalone mode has been validated with PP. Embedded mode
+            # looks up each rank's private pool through a node-local socket,
+            # so a scheduler cannot reach stages placed on other nodes.
             raise NotImplementedError(
-                f"{runtime_config.mode} UMBP does not support pipeline parallelism"
+                f"{runtime_config.mode} UMBP does not support pipeline "
+                "parallelism; use mode='standalone'"
             )
         # A restored prefix skips the draft model's prefill too, so its KV must
         # come from the pool along with the target's.
@@ -169,6 +184,12 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._namespace = UMBPNamespace.from_vllm_config(
                 vllm_config, kv_cache_config
             )
+            if topology.pp_size > 1 and UMBPNamespace.configured(vllm_config) is None:
+                # Every stage must report, and key objects by, the same
+                # namespace; collective across the PP group.
+                self._namespace = UMBPNamespace.for_pipeline(
+                    _gather_pp_stage_namespaces(self._namespace)
+                )
             layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
             if self._dedup_tp_replicated:
                 self._replicated_groups = tp_replicated_group_ids(
@@ -216,6 +237,13 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return UMBPHandshakeMetadata(
             self._namespace.value, tuple(sorted(self._replicated_groups))
         )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        # Every PP stage reports the shared namespace (see for_pipeline), and
+        # only the reported values matter, not the rank they are keyed by.
+        self.set_xfer_handshake_metadata(dict(enumerate(metadata.values())))
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]

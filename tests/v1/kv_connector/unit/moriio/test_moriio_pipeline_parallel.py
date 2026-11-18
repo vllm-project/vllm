@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnector,
     MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
@@ -510,3 +511,11 @@ def test_stage_reports_every_stage_as_a_writer_and_names_itself():
     assert _write_done_fields(pp_rank=2, pp_size=4) == [
         {"num_writers": 4, "sender": [2, 0]}
     ]
+
+
+def test_pp_handshake_metadata_of_other_connectors_is_ignored():
+    """Under MultiConnector with a PP producer, another connector's metadata
+    arrives keyed by every (pp_rank, tp_rank); MoRIIO handshakes on its own
+    side channel and must not reject the pp_rank > 0 entries."""
+    metadata = {(0, 0): object(), (1, 0): object()}
+    MoRIIOConnector.set_xfer_handshake_metadata_pp_aware(SimpleNamespace(), metadata)

@@ -9,6 +9,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.kv_connector.umbp_test_utils import (
     MemoryRuntime,
     _CancellableWorkerHandle,
@@ -33,6 +34,9 @@ from vllm.config import KVTransferConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
+    connector as umbp_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
 )
@@ -580,6 +584,97 @@ def test_scheduler_binds_when_ranks_share_a_report_key(monkeypatch):
         assert scheduler.connector_scheduler.codec == worker.connector_worker.codec
     finally:
         scheduler.shutdown()
+        worker.shutdown()
+
+
+def _pp_stage_kv_cache_config(layer: str) -> KVCacheConfig:
+    """KV cache config of one pipeline stage, which holds only its own layers."""
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=[layer], layer_stride=8192, block_stride=1024
+            )
+        ],
+        kv_cache_groups=[new_kv_cache_group([layer], spec)],
+    )
+
+
+def _pp_vllm_config(extra: dict, rank: int = 0) -> SimpleNamespace:
+    return _vllm_config(extra, rank=rank, pipeline_parallel_size=2, world_size=2)
+
+
+def test_standalone_pp_stages_share_one_namespace(monkeypatch):
+    """Each PP stage derives a namespace from its own layers. Workers combine
+    them across the PP group, so every stage and the scheduler use one
+    namespace, while keys stay separated by the PP rank."""
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    extra = {"mode": "standalone"}
+    stage_configs = [_pp_stage_kv_cache_config(f"layer{i}") for i in range(2)]
+    stage_namespaces = [
+        UMBPNamespace.from_vllm_config(_pp_vllm_config(extra, rank), config).value
+        for rank, config in enumerate(stage_configs)
+    ]
+    assert stage_namespaces[0] != stage_namespaces[1]
+    gathered: list[str] = []
+
+    def gather(local: UMBPNamespace) -> list[str]:
+        gathered.append(local.value)
+        return stage_namespaces
+
+    monkeypatch.setattr(umbp_connector, "_gather_pp_stage_namespaces", gather)
+    workers = [
+        UMBPStoreConnector(_pp_vllm_config(extra, rank), KVConnectorRole.WORKER, config)
+        for rank, config in enumerate(stage_configs)
+    ]
+    scheduler = UMBPStoreConnector(
+        _pp_vllm_config(extra), KVConnectorRole.SCHEDULER, stage_configs[0]
+    )
+    try:
+        assert gathered == stage_namespaces
+        shared = UMBPNamespace.for_pipeline(stage_namespaces)
+        reports = {
+            (pp_rank, 0): worker.get_handshake_metadata()
+            for pp_rank, worker in enumerate(workers)
+        }
+        assert {report.namespace for report in reports.values()} == {shared.value}
+
+        scheduler.set_xfer_handshake_metadata_pp_aware(reports)
+
+        codec = scheduler.connector_scheduler.codec
+        assert codec.namespace == shared
+        for pp_rank, worker in enumerate(workers):
+            key = worker.connector_worker.codec.key(b"a")
+            assert f":pp{pp_rank}:" in key
+            assert key in codec.keys_for_topology(
+                b"a", scheduler.connector_scheduler.topology, [0]
+            )
+    finally:
+        scheduler.shutdown()
+        for worker in workers:
+            worker.shutdown()
+
+
+def test_pp_configured_namespace_skips_gather(monkeypatch):
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+
+    def gather(local: UMBPNamespace) -> list[str]:
+        raise AssertionError("a configured namespace is already engine-wide")
+
+    monkeypatch.setattr(umbp_connector, "_gather_pp_stage_namespaces", gather)
+    worker = UMBPStoreConnector(
+        _pp_vllm_config({"mode": "standalone", "key_namespace": "ns"}, rank=1),
+        KVConnectorRole.WORKER,
+        _pp_stage_kv_cache_config("layer1"),
+    )
+    try:
+        assert worker.get_handshake_metadata().namespace == "ns"
+    finally:
         worker.shutdown()
 
 
