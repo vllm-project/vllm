@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal, get_args
 
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -296,6 +296,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
         if renderer.tokenizer is None:
             merge = True
+        elif online_renderer.use_harmony:
+            # Harmony renders inline system messages in place as developer turns.
+            merge = False
         elif not isinstance(renderer, HfRenderer):
             merge = not cls._renderer_keeps_inline_system(online_renderer)
         else:
@@ -318,57 +321,41 @@ class AnthropicServingMessages(OpenAIServingChat):
                 else ""
             )
             logger.warning_once(
-                "The chat template requires system-first ordering, so inline "
-                "system messages in /v1/messages requests (e.g. Claude Code's "
-                "per-turn reminders) are merged into the leading system prompt. "
+                "The chat template does not keep inline system messages in place, "
+                "so those in /v1/messages requests (e.g. Claude Code's per-turn "
+                "reminders) are merged into the leading system prompt. "
                 "Each new one changes the prompt prefix, so the rest of the "
                 "conversation misses the prefix cache." + hint
             )
         return merge
 
-    @staticmethod
-    def _detect_merge_inline_system(chat_template: str | None) -> bool:
-        """Auto-detect whether the chat template requires system-first ordering.
+    @classmethod
+    def _detect_merge_inline_system(cls, chat_template: str | None) -> bool:
+        """Auto-detect whether the chat template misplaces inline system messages.
 
-        Renders a [system, user, system, user] conversation against the
-        template; if it raises (e.g. Qwen's `loop.first` guard), the
-        model needs inline system messages merged into the leading block.
-        The template is compiled as `apply_chat_template` compiles it, so
-        HF-only syntax such as `{% generation %}` does not count as a failure.
-        That compiler renders in an `ImmutableSandboxedEnvironment`.
+        Templates that reject inline system messages (e.g. Qwen's `loop.first`
+        guard), drop them (e.g. MiniMax-M2), or hoist them to the top (e.g.
+        DeepSeek-V3.1) need them merged into the leading block. The template is
+        compiled as `apply_chat_template` compiles it, in an
+        `ImmutableSandboxedEnvironment`, so HF-only syntax such as
+        `{% generation %}` is supported.
         """
         if not chat_template:
             return True
-        try:
-            hf_chat_utils._compile_jinja_template(chat_template).render(
-                messages=[
-                    {"role": "system", "content": "t"},
-                    {"role": "user", "content": "t"},
-                    {"role": "system", "content": "t"},
-                    {"role": "user", "content": "t"},
-                ],
-                add_generation_prompt=False,
-            )
-            return False
-        except Exception:
-            # Non-TemplateError failures (e.g. TypeError from filters on
-            # undefined variables) must not abort server startup.
-            return True
 
-    @staticmethod
-    def _renderer_keeps_inline_system(online_renderer: OnlineRenderer) -> bool:
+        def render(messages: list[Any]) -> str:
+            template = hf_chat_utils._compile_jinja_template(chat_template)
+            return template.render(messages=messages, add_generation_prompt=True)
+
+        return not cls._keeps_inline_system(render)
+
+    @classmethod
+    def _renderer_keeps_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
         """Probe a non-jinja renderer (e.g. DeepSeek V4.1's encoder).
 
-        Inline system messages must render in order as distinct system turns,
-        and a trailing one must still be followed by the generation prompt.
-        DeepSeek V4 appends their text to the user turn, V3.2 puts it after the
-        generation prompt, and Mistral moves it into the last user turn.
+        DeepSeek V4 appends inline system text to the user turn, V3.2 puts it
+        after the generation prompt, and Mistral moves it into the last user turn.
         """
-        markers = ("SYSA", "USRA", "SYSB", "USRB")
-        messages: list[Any] = [
-            {"role": role, "content": marker}
-            for role, marker in zip(("system", "user") * 2, markers)
-        ]
         renderer = online_renderer.renderer
         params = ChatParams(
             chat_template=online_renderer.chat_template,
@@ -385,13 +372,26 @@ class AnthropicServingMessages(OpenAIServingChat):
                 text = renderer.get_tokenizer().decode(token_ids or [])
             return text
 
+        return cls._keeps_inline_system(render)
+
+    @staticmethod
+    def _keeps_inline_system(render: Callable[[list[Any]], str]) -> bool:
+        """Check that `render`, which adds the generation prompt, keeps inline
+        system messages in order as distinct system turns, and still follows a
+        trailing one with the generation prompt.
+        """
+        markers = ("SYSA", "USRA", "SYSB", "USRB")
+        messages: list[Any] = [
+            {"role": role, "content": marker}
+            for role, marker in zip(("system", "user") * 2, markers)
+        ]
+
         def separator(text: str) -> str:
             return text[text.find(markers[1]) + len(markers[1]) : text.find(markers[2])]
 
         try:
             full = render(messages)
             trailing = render(messages[:3])
-            as_user = render([*messages[:2], {**messages[2], "role": "user"}])
         except Exception:
             logger.debug("Inline system probe failed", exc_info=True)
             return False
@@ -399,10 +399,19 @@ class AnthropicServingMessages(OpenAIServingChat):
         if -1 in positions or positions != sorted(positions):
             return False
         system_separator = separator(full)
-        if not system_separator.strip() or system_separator == separator(as_user):
+        if not system_separator.strip():
+            return False
+        try:
+            as_user = render([*messages[:2], {**messages[2], "role": "user"}])
+        except Exception:
+            # e.g. Gemma rejects consecutive user turns.
+            as_user = None
+        if as_user is not None and system_separator == separator(as_user):
             return False
         generation_prompt = full[positions[-1] + len(markers[-1]) :]
-        return trailing.endswith(markers[2] + generation_prompt)
+        return trailing.endswith(generation_prompt) and 0 <= trailing.rfind(
+            markers[2]
+        ) < len(trailing) - len(generation_prompt)
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
@@ -478,9 +487,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
-        # When the template requires system-first ordering, extract inline
-        # system messages from the messages array and merge them into the
-        # top-level block so the template doesn't reject them.
+        # When the template does not keep inline system messages in place,
+        # merge them into the top-level block so they reach the model.
         if merge_inline_system:
             for msg in anthropic_request.messages:
                 if msg.role != "system":

@@ -1501,7 +1501,7 @@ class TestDetectMergeInlineSystem:
         """Hermes-style `for tool in tools` must not raise in the probe."""
         template = (
             "{% for tool in tools %}{{ tool | tojson }}{% endfor %}"
-            "{% for m in messages %}{{ m.content }}{% endfor %}"
+            "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}"
         )
         assert AnthropicServingMessages._detect_merge_inline_system(template) is False
 
@@ -1513,6 +1513,28 @@ class TestDetectMergeInlineSystem:
             "{% else %}{{ m.role }}: {{ m.content }}{% endif %}{% endfor %}"
         )
         assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            # Drops non-leading system messages (e.g. MiniMax-M2).
+            (
+                "{% for m in messages %}{% if m.role != 'system' or loop.first %}"
+                "{{ m.role }}: {{ m.content }}\n{% endif %}{% endfor %}"
+            ),
+            # Hoists all system messages to the top (e.g. DeepSeek-V3.1).
+            (
+                "{% for m in messages if m.role == 'system' %}{{ m.content }}\n"
+                "{% endfor %}{% for m in messages if m.role != 'system' %}"
+                "{{ m.role }}: {{ m.content }}\n{% endfor %}"
+            ),
+        ],
+        ids=["dropped", "hoisted"],
+    )
+    def test_misplaced_inline_system_merges(self, template):
+        """Templates that render without error but misplace inline system
+        messages must merge them, or Claude Code's reminders are lost."""
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is True
 
     def test_non_template_error_defaults_merge(self):
         """A non-TemplateError render failure must not abort startup."""
@@ -1544,6 +1566,7 @@ class TestDetectMergeInlineSystem:
             renderer=renderer,
             chat_template=None,
             model_config=None,
+            use_harmony=False,
         )
         assert (
             AnthropicServingMessages._should_merge_inline_system(online_renderer)
@@ -1561,6 +1584,9 @@ class TestDetectMergeInlineSystem:
             ("deepseek-ai/DeepSeek-V4-Flash", True),
             # Puts a trailing system message after the generation prompt.
             ("deepseek-ai/DeepSeek-V3.2-Exp", True),
+            # Harmony renders them in place as developer turns, although the
+            # Jinja template drops them.
+            ("openai/gpt-oss-20b", False),
         ],
     )
     def test_probes_non_jinja_renderer(self, model, expected):
@@ -1590,6 +1616,7 @@ class TestDetectMergeInlineSystem:
             renderer=renderer,
             chat_template="custom",
             chat_template_content_format="string",
+            use_harmony=False,
             default_chat_template_kwargs={"thinking": False},
         )
         AnthropicServingMessages._should_merge_inline_system(online_renderer)
@@ -1614,6 +1641,7 @@ class TestDetectMergeInlineSystem:
             chat_template=None,
             chat_template_content_format="auto",
             default_chat_template_kwargs={},
+            use_harmony=False,
         )
         assert AnthropicServingMessages._should_merge_inline_system(online_renderer)
         assert "--chat-template" not in mock_logger.warning_once.call_args.args[0]
