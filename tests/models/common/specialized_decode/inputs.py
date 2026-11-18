@@ -18,11 +18,12 @@ import math
 import torch
 
 from tests.models.common.specialized_decode import reference as R
+from vllm.platforms import current_platform
 
-# torch-hip calls the accelerator "cuda" too, so this is the ROCm device as
-# well. Resolved rather than hardcoded so a CPU-only collection does not fail
-# at import.
-DEV = torch.accelerator.current_accelerator()
+# "cuda" on ROCm too, since torch-hip keeps the name. Asked of the platform
+# rather than hardcoded, the way the rest of tests/ does it, so that importing
+# this file off an accelerator does not fail.
+DEV = current_platform.device_type
 F32, I32 = torch.float32, torch.int32
 
 
@@ -121,6 +122,12 @@ def assert_bit_exact(
     directly there; the generators above run to a million rows, and a bare
     `False` over a million roundings says nothing about which one broke.
     """
+    # Not just a sanity check: `!=` would broadcast a mismatch into a square
+    # of comparisons and the report below would then be about rows that were
+    # never computed.
+    assert actual.shape == expected.shape, (
+        f"{helper}: got shape {tuple(actual.shape)}, want {tuple(expected.shape)}"
+    )
     bad = (actual != expected).view(len(expected), -1).any(1).nonzero().flatten()[:3]
     assert bad.numel() == 0, (
         f"{helper} differs at {sent[bad].tolist()}: "

@@ -34,8 +34,16 @@ import torch
 from tests.models.common.specialized_decode import reference as R
 from vllm.platforms import current_platform
 
+# Every gate this module can be skipped by comes before the imports it would
+# make pointless, cheapest first: the model's device modules are FlyDSL and
+# only ever load on the hardware they are written for.
 if not current_platform.is_rocm():
     pytest.skip("the mono kernels need ROCm", allow_module_level=True)
+
+from vllm.platforms.rocm import on_mi3xx  # noqa: E402
+
+if not on_mi3xx():
+    pytest.skip("the mono kernels are MI300/MI350 only", allow_module_level=True)
 pytest.importorskip("flydsl")
 pytest.importorskip("aiter")
 
@@ -48,10 +56,6 @@ from vllm.models.deepseek_v41.amd.mono.common import gfx942 as gfx  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common import mx, ops  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.stages import moe  # noqa: E402
-from vllm.platforms.rocm import on_mi3xx  # noqa: E402
-
-if not on_mi3xx():
-    pytest.skip("the mono kernels are MI300/MI350 only", allow_module_level=True)
 
 _PKG = "vllm.models.deepseek_v41.amd.mono"
 DEV, F32, I32 = I.DEV, I.F32, I.I32
