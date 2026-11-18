@@ -983,11 +983,11 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 3: For request-level tiers, cascade chunks already in primary
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
         if request_level_tiers:
-            keys_not_in_primary = set(primary_result.keys_to_store)
-            keys_not_in_primary.update(primary_result.keys_to_retry)
-            keys_already_in_primary = tuple(
-                k for k in keys if k not in keys_not_in_primary
-            )
+            # Keys to store cascade once stored, and keys to retry when offered
+            # again.
+            deferred_keys = set(primary_result.keys_to_store)
+            deferred_keys.update(primary_result.keys_to_retry)
+            keys_already_in_primary = tuple(k for k in keys if k not in deferred_keys)
             if keys_already_in_primary:
                 self._cascade_existing_chunks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers

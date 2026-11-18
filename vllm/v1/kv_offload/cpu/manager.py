@@ -349,18 +349,30 @@ class CPUOffloadingManager(OffloadingManager):
             )
             if len(keys_to_store) > num_storable_keys:
                 # Store the lowest positions, so that the groups stay aligned.
-                keys_by_position = sorted(
-                    keys_to_store,
-                    key=lambda key: (
+                order = {
+                    key: (
                         math.inf
                         if (position := req_context.get_offload_key_position(key))
                         is None
-                        else position
-                    ),
-                )
-                storable_keys = set(keys_by_position[:num_storable_keys])
-                keys_to_retry = [k for k in keys_to_store if k not in storable_keys]
-                keys_to_store = [k for k in keys_to_store if k in storable_keys]
+                        else position,
+                        offer_idx,
+                    )
+                    for offer_idx, key in enumerate(keys)
+                }
+                keys_by_position = sorted(keys_to_store, key=order.__getitem__)
+                # Retry each group from its first key that does not fit, resident
+                # keys included, as the connector offers all of them again.
+                group_cuts: dict[int, tuple[float, int]] = {}
+                for key in keys_by_position[num_storable_keys:]:
+                    group_cuts.setdefault(get_offload_group_idx(key), order[key])
+                keys_to_retry = [
+                    key
+                    for key in keys
+                    if (cut := group_cuts.get(get_offload_group_idx(key))) is not None
+                    and order[key] >= cut
+                ]
+                retried_keys = set(keys_to_retry)
+                keys_to_store = [k for k in keys_to_store if k not in retried_keys]
                 if not keys_to_store:
                     return PrepareStoreOutput(
                         keys_to_store=[],

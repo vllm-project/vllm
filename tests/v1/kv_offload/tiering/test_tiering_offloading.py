@@ -1000,24 +1000,37 @@ class TestTieringOffloadingManager:
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
 
-    def test_partial_primary_store_is_passed_through(self, manager_setup, monkeypatch):
-        """Keys the primary tier left unconsumed are not cascaded as existing."""
+    def test_partial_primary_store_cascades_each_resident_key_once(
+        self, manager_setup, monkeypatch
+    ):
+        """Resident keys after the cut are retried, not cascaded, so that the
+        retry, which offers them again, does not cascade them twice."""
         trigger = StoreTrigger.ON_COMPUTE
         self._start_request()
         self.manager.prepare_store(to_keys(range(3)), _CTX, trigger=trigger)
         self.manager.complete_store(to_keys(range(3)), _CTX, trigger=trigger)
         self._simulate_on_schedule_end()
         ctx = self._make_request_level_request(monkeypatch, "req_partial")
+        offer = to_keys([0, 3, 4, 5, 1, 2])
+        for position, key in enumerate(offer, start=1):
+            ctx.set_offload_key_position(key, position * 16)
 
         # 2 free chunks, and the offered resident chunks are not evicted.
-        result = self.manager.prepare_store(
-            to_keys([0, 3, 4, 5, 1, 2]), ctx, trigger=trigger
-        )
+        result = self.manager.prepare_store(offer, ctx, trigger=trigger)
 
         assert result is not None
         assert result.keys_to_store == to_keys([3, 4])
-        assert result.keys_to_retry == to_keys([5])
-        assert self._cascaded_keys_for("req_partial") == [set(to_keys(range(3)))]
+        assert result.keys_to_retry == to_keys([5, 1, 2])
+        assert self._cascaded_keys_for("req_partial") == [set(to_keys([0]))]
+
+        self.manager.complete_store(result.keys_to_store, ctx, trigger=trigger)
+        result = self.manager.prepare_store(to_keys([5, 1, 2]), ctx, trigger=trigger)
+
+        assert result is not None
+        assert result.keys_to_store == to_keys([5])
+        assert not result.keys_to_retry
+        cascaded = [k for keys in self._cascaded_keys_for("req_partial") for k in keys]
+        assert sorted(cascaded) == sorted(to_keys([0, 1, 2, 3, 4]))
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""

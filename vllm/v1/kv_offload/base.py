@@ -205,11 +205,10 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
-    # Offered keys the manager had no room for, which may be offered again.
-    # Disjoint from keys_to_store. Within a group (get_offload_group_idx), every
-    # key to retry has a later token position than every key to store, so the
-    # stored chunks of each group are a prefix of its offered chunks. Cutting
-    # the offer by req_context.get_offload_key_position() meets this.
+    # Offered keys to offer again because the manager had no room. Within a
+    # group (get_offload_group_idx), they are the offered keys from the first
+    # one that did not fit on, by token position, including keys that are
+    # already stored. Disjoint from keys_to_store.
     keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 

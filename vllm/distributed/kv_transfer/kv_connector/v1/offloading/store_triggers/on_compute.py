@@ -165,12 +165,15 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                         start_chunk_idx,
                         min(end_chunk_idx, chunk_idx),
                     )
-                # No key to store may sit at or after its group's cut.
+                retried_keys = set(store_output.keys_to_retry)
                 assert all(
-                    (chunk := key_chunks.get(key)) is not None
-                    and chunk.chunk_idx < group_store_ranges[chunk.config_group_idx][1]
-                    for key in store_output.keys_to_store
-                ), "A key to store follows a key to retry of its group"
+                    (key in retried_keys)
+                    == (chunk_idx >= group_store_ranges[config_group_idx][1])
+                    for key, (config_group_idx, chunk_idx) in key_chunks.items()
+                ), "The keys to retry are not each group's offered keys from its cut"
+                assert retried_keys.isdisjoint(store_output.keys_to_store), (
+                    "A key is both stored and retried"
+                )
                 if req.is_finished():
                     logger.warning("Request %s: cannot store chunks", req_id)
                     sink.record_allocation_failure()
