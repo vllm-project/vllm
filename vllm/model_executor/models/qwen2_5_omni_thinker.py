@@ -183,7 +183,9 @@ def get_omni_modality_masks(
     masks = get_mm_embedding_modality_masks(multimodal_embeddings, is_multimodal)
     if masks is not None:
         return {
-            modality: masks.get(modality, torch.zeros_like(is_multimodal))
+            modality: masks[modality]
+            if modality in masks
+            else torch.zeros_like(is_multimodal)
             for modality in token_ids
         }
     input_ids_cpu = input_ids.cpu()

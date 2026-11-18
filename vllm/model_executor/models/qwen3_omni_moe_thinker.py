@@ -477,7 +477,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         # Chunk bookkeeping stays on the host so no step needs a device read.
         chunk_size = self.n_window * 2
         chunk_num = torch.ceil(feature_lens / chunk_size).long()
-        chunk_lengths = torch.full((int(chunk_num.sum()),), chunk_size)
+        chunk_lengths = torch.full((int(chunk_num.sum()),), chunk_size, device="cpu")
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
         chunk_lengths[tail_chunk_index] = feature_lens % chunk_size
         chunk_lengths[chunk_lengths == 0] = chunk_size
@@ -491,7 +491,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
         max_len_after_cnn = int(feature_lens_after_cnn.max())
         padded_mask_after_cnn = torch.arange(
-            max_len_after_cnn
+            max_len_after_cnn, device="cpu"
         ) < feature_lens_after_cnn.unsqueeze(1)
         valid_token_indices = async_tensor_h2d(
             padded_mask_after_cnn.flatten().nonzero().squeeze(1), device
@@ -552,7 +552,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         max_seqlen = None
         if self.attn_backend in _MAX_SEQLEN_BACKENDS:
             # Kept on the host: the attention wrappers read it with `.item()`.
-            max_seqlen = torch.tensor(max(cu_chunk_lens), dtype=torch.int32)
+            max_seqlen = torch.tensor(
+                max(cu_chunk_lens), dtype=torch.int32, device="cpu"
+            )
 
         # Apply transformer layers
         for encoder_layer in self.layers:
@@ -1023,7 +1025,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         if self.attn_backend in _MAX_SEQLEN_BACKENDS:
             max_seqlen_val = int(np.diff(cu_seqlens_np).max())
         # Kept on the host: the attention wrappers read it with `.item()`.
-        max_seqlen = torch.tensor(max_seqlen_val, dtype=torch.int32)
+        max_seqlen = torch.tensor(max_seqlen_val, dtype=torch.int32, device="cpu")
         sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
             self.attn_backend,
             cu_seqlens_np,
