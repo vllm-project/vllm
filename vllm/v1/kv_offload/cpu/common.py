@@ -30,7 +30,7 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
         return self.block_ids
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CPUOffloadingInfo(ConfigInfo):
     """Static facts about the CPU offload tier."""
 

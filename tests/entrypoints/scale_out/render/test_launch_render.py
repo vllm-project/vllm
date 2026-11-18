@@ -149,17 +149,53 @@ async def test_completion_render_multiple_prompts(client):
 
 
 @pytest.mark.asyncio
-async def test_completion_render_invalid_model(client):
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        pytest.param(
+            "/v1/chat/completions/render",
+            {"messages": [{"role": "user", "content": "Hello"}]},
+            id="chat",
+        ),
+        pytest.param("/v1/completions/render", {"prompt": "Hello"}, id="completion"),
+        pytest.param("/v1/responses/render", {"input": "Hello"}, id="responses"),
+        pytest.param(
+            "/v1/messages/render",
+            {
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            id="messages",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "model_name,display_name",
+    [
+        pytest.param("nonexistent-model", "nonexistent-model", id="short"),
+        pytest.param("x" * 256, "x" * 256, id="boundary"),
+        pytest.param("x" * 257, "x" * 256 + "...", id="truncated"),
+        pytest.param("x" * 16384, "x" * 256 + "...", id="oversized"),
+        pytest.param("\u00e9" * 257, "\u00e9" * 256 + "...", id="unicode"),
+    ],
+)
+async def test_render_invalid_model_error_is_bounded(
+    client, endpoint, payload, model_name, display_name
+):
     response = await client.post(
-        "/v1/completions/render",
-        json={
-            "model": "nonexistent-model",
-            "prompt": "Hello",
-        },
+        endpoint,
+        json={"model": model_name, **payload},
     )
 
     assert response.status_code == 404
-    assert "error" in response.json()
+    assert response.json()["error"] == {
+        "message": (
+            f"The model `{display_name}` does not exist. Valid aliases: {MODEL_NAME}."
+        ),
+        "type": "NotFoundError",
+        "param": "model",
+        "code": 404,
+    }
 
 
 @pytest.mark.asyncio
