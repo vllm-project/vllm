@@ -13,6 +13,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     get_masked_input_and_mask,
@@ -440,6 +443,19 @@ class DSpineQwen3ForCausalLM(DFlashQwen3ForCausalLM):
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
             raise ValueError("DSpine requires the full target vocabulary.")
+        self._coarse_lm_head: ParallelLMHead | None = None
+
+    def prepare_coarse_lm_head(self) -> None:
+        """Build an FP8 retrieval head after the final BF16 head is installed."""
+        if (
+            self.lm_head.tp_size != 1
+            or self.lm_head.weight.dtype != torch.bfloat16
+            or self.logits_processor.head_dtype not in (None, torch.bfloat16)
+        ):
+            raise ValueError(
+                "DSpine FP8 candidate retrieval requires a BF16 head and TP=1."
+            )
+        self._coarse_lm_head = quantized_lm_head_copy(self.lm_head, "fp8")
 
     def process_weights_after_loading(self) -> None:
         super().process_weights_after_loading()
@@ -449,9 +465,26 @@ class DSpineQwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def compute_candidates(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.logits_processor.get_top_k_tokens(
-            self.lm_head, hidden_states, self.model.transition_top_k
+        k = self.model.transition_top_k
+        if self._coarse_lm_head is None:
+            return self.logits_processor.get_top_k_tokens(
+                self.lm_head, hidden_states, k
+            )
+
+        # Retrieve approximately in FP8, then rescore with the original BF16
+        # head before dropping to the model's K transition candidates.
+        shortlist_size = min(max(128, k), self.logits_processor.org_vocab_size)
+        shortlist, _ = self.logits_processor.get_top_k_tokens(
+            self._coarse_lm_head, hidden_states, shortlist_size
         )
+        weights = self.lm_head.weight[shortlist]
+        scores = torch.bmm(weights, hidden_states.unsqueeze(-1)).squeeze(-1)
+        values, ranks = scores.topk(k, dim=-1)
+        values = values.float() * self.logits_processor.scale
+        if self.logits_processor.soft_cap is not None:
+            cap = self.logits_processor.soft_cap
+            values = torch.tanh(values / cap) * cap
+        return shortlist.gather(-1, ranks), values
 
     def compute_transition_scores(
         self,
