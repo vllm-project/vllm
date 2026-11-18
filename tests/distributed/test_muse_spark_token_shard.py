@@ -40,6 +40,14 @@ def token_shard_round_trip(env: dict[str, str], world_size: int, num_tokens: int
     expected = shard.local(full * sum(range(1, world_size + 1)))
     torch.testing.assert_close(summed, expected)
 
+    # Rows of both shards, out of order.
+    rows = sorted({0, shard.rows - 1, num_tokens - 1}, reverse=True)
+    indices = torch.tensor(rows, device="cuda")
+    sparse = shard.gather_rows(local, indices)
+    expected = torch.zeros_like(full)
+    expected[indices] = full[indices]
+    torch.testing.assert_close(sparse, expected, atol=0, rtol=0)
+
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("num_tokens", [1, 5, 16, 1027])
