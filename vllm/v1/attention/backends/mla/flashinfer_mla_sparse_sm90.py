@@ -524,7 +524,17 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
         )
-        self._chunk_states = [self.state]
+        # One planner state per chunk, all sharing the float workspace. Create
+        # the ones a full max_num_batched_tokens batch can need here so their
+        # index buffers are allocated before the KV-cache profiler sizes the
+        # cache, instead of on the first oversized step of a live server.
+        num_chunks = triton.cdiv(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.state.max_tokens,
+        )
+        self._chunk_states = [self.state] + [
+            self.state.clone() for _ in range(max(num_chunks - 1, 0))
+        ]
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
             spec_config is not None and spec_config.enable_adaptive_verification

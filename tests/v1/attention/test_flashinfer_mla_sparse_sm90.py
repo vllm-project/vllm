@@ -402,8 +402,14 @@ def test_builder_kpool_from_model_config(
     class _RecordingState:
         def __init__(self, *args, **kwargs):
             self.kv_dtype = args[2]
+            self.max_tokens = args[3]
             self.index_topk = kwargs["index_topk"]
             self.index_kpool = kwargs["index_kpool"]
+
+        def clone(self):
+            clone = object.__new__(type(self))
+            clone.__dict__.update(self.__dict__)
+            return clone
 
     monkeypatch.setattr(sm90_mod, "_SM90State", _RecordingState)
     impl, _ = make_impl(64)
