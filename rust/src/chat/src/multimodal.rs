@@ -23,7 +23,7 @@ use llm_multimodal::{
     FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
     MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
     PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
-    VideoClip, VisionPreProcessor, VisionPreprocessingContext,
+    TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
@@ -757,7 +757,11 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     let mime_type = match format {
         Some(format) if format.eq_ignore_ascii_case("wav") => "audio/wav",
         Some(format) if format.eq_ignore_ascii_case("mp3") => "audio/mpeg",
-        Some(format) => bail_multimodal!("unsupported input_audio format `{format}`"),
+        Some(format) => {
+            return Err(Error::UnsupportedInputAudioFormat {
+                format: format.to_owned(),
+            });
+        }
         None => "application/octet-stream",
     };
     Ok(format!("data:{mime_type};base64,{data}"))
@@ -843,6 +847,62 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Prepare raw media placed after already-expanded `features` and append
+    /// its features.
+    ///
+    /// Only the prompt tokens after the last range in `features` are expanded,
+    /// so the runs before it are left as they are, like Python's `/generate`
+    /// with both `features` and `content_parts`. `features` must lie within
+    /// `prompt_token_ids`, as [`Self::prepare_preprocessed`] checks.
+    pub(crate) async fn append_multimodal(
+        &self,
+        features: &mut MmFeatures,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+    ) -> Result<()> {
+        let start = features
+            .iter()
+            .map(|feature| feature.mm_position.offset + feature.mm_position.length)
+            .max()
+            .unwrap_or(0);
+        // Item limits count every item of the prompt, not each input kind alone.
+        self.validate_modality_limits(
+            features
+                .iter()
+                .map(|feature| feature.modality)
+                .chain(media_parts.iter().filter_map(media_part_limit_modality)),
+        )?;
+
+        let mut tail = prompt_token_ids.split_off(start);
+        // The expanded prefix takes up context the new media cannot use.
+        let prepared = self
+            .prepare_multimodal(
+                media_parts,
+                &mut tail,
+                model_dtype,
+                max_model_len.map(|limit| limit.saturating_sub(start)),
+            )
+            .await;
+        prompt_token_ids.append(&mut tail);
+        let appended = prepared.map_err(|source| match start {
+            0 => source,
+            offset => Error::MediaAfterPreprocessed {
+                offset,
+                source: Box::new(source),
+            },
+        })?;
+
+        preprocessed::validate_batching(features.iter().chain(&appended))?;
+
+        features.extend(appended.into_iter().map(|mut feature| {
+            feature.mm_position.offset += start;
+            feature
+        }));
+        Ok(())
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
@@ -922,6 +982,13 @@ impl MultimodalModelInfo {
                 );
             }
             for (item, range) in izip!(media.items, media_ranges) {
+                // Like Python, tag the cache key with its source, so a client
+                // `uuid` spelled like another item's content hash cannot hit
+                // that item's entries in the engine's caches.
+                let cache_key = match item.uuid {
+                    Some(uuid) => format!("uuid:{uuid}"),
+                    None => format!("content:{}", item.hash),
+                };
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -929,9 +996,9 @@ impl MultimodalModelInfo {
                         Modality::Video => MmModality::Video,
                         Modality::Audio => MmModality::Audio,
                     },
-                    identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
+                    identifier: cache_key.clone(),
                     mm_position: range,
-                    mm_hash: Some(item.hash),
+                    mm_hash: Some(cache_key),
                 });
             }
         }
@@ -960,8 +1027,8 @@ impl MultimodalModelInfo {
         let video = self.video.as_ref()?;
         let config = &video.config;
         Some((
-            video.spec.raw.video_frame_sampling_with(Some(config)),
-            video.spec.raw.default_video_sample_fps_with(Some(config)),
+            video.spec.raw.video_frame_sampling_with(config),
+            video.spec.raw.default_video_sample_fps_with(config),
         ))
     }
 
@@ -974,13 +1041,26 @@ impl MultimodalModelInfo {
         fields(stage = "media_fetch")
     )]
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
-        if let Some((sampling, default_fps)) = self.video_sampling_policy() {
+        // Python's image loader composites transparent pixels over white
+        // (`rgba_background_color`), except for a processor that handles the
+        // alpha channel itself (Kimi-K3, whose Python renderer keeps it).
+        let transparency = match &self.image {
+            Some(image) if image.processor.keeps_alpha() => TransparencyPolicy::KeepAlpha,
+            _ => TransparencyPolicy::CompositeOverWhite,
+        };
+        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector))
+            .with_image_transparency(transparency);
+        let video_sampling_policy = self.video_sampling_policy();
+        if let Some((sampling, default_fps)) = video_sampling_policy {
             tracker = tracker
                 .with_video_frame_sampling(sampling)
                 .with_default_video_sample_fps(default_fps);
         }
-        for part in media_parts {
+        for mut part in media_parts {
+            apply_video_fps(
+                &mut part,
+                video_sampling_policy.map(|(sampling, _)| sampling),
+            )?;
             tracker.push_part(part)?;
         }
 
@@ -1037,6 +1117,29 @@ impl MultimodalModelInfo {
             audio_uuids,
         })
     }
+}
+
+/// Check a video part's requested sampling rate against the model's frame
+/// sampling, and scope a client uuid by the rate: as in Python, the uuid alone
+/// does not identify frames sampled at a per-request rate.
+fn apply_video_fps(part: &mut MediaContentPart, sampling: Option<FrameSampling>) -> Result<()> {
+    let MediaContentPart::VideoUrl {
+        uuid,
+        fps: Some(fps),
+        ..
+    } = part
+    else {
+        return Ok(());
+    };
+    if let Some(FrameSampling::UpTo { .. }) = sampling {
+        return Err(Error::UnsupportedMultimodalContent(
+            "video fps for a model that samples a fixed number of frames",
+        ));
+    }
+    if let Some(uuid) = uuid {
+        *uuid = format!("{uuid}@fps={fps}");
+    }
+    Ok(())
 }
 
 /// Adapter from the frontend tokenizer trait to `llm-multimodal`.
@@ -1217,10 +1320,62 @@ mod tests {
     }
 
     #[test]
+    fn request_video_fps_scopes_the_uuid_and_needs_a_rate_based_sampling() {
+        let part = |fps| MediaContentPart::VideoUrl {
+            url: "https://example.com/clip.mp4".to_owned(),
+            uuid: Some("clip".to_owned()),
+            fps,
+            max_long_side_pixel: None,
+        };
+        let results = [
+            (part(None), Some(FrameSampling::EvenRounded)),
+            (part(Some(1.0)), Some(FrameSampling::EvenRounded)),
+            (
+                part(Some(1.0)),
+                Some(FrameSampling::UpTo { max_frames: 32 }),
+            ),
+        ]
+        .map(|(mut part, sampling)| {
+            apply_video_fps(&mut part, sampling)
+                .map(|()| part)
+                .map_err(|error| error.to_report_string())
+        });
+        expect_test::expect![[r#"
+            [
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip",
+                        ),
+                        fps: None,
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Ok(
+                    VideoUrl {
+                        url: "https://example.com/clip.mp4",
+                        uuid: Some(
+                            "clip@fps=1",
+                        ),
+                        fps: Some(
+                            1.0,
+                        ),
+                        max_long_side_pixel: None,
+                    },
+                ),
+                Err(
+                    "unsupported multimodal content: video fps for a model that samples a fixed number of frames",
+                ),
+            ]
+        "#]].assert_debug_eq(&results);
+    }
+
+    #[test]
     fn video_sampling_policy_comes_from_the_video_spec() {
         // GLM-5.3-Flash: the GLM-5 family's own loader rule walks the clip
-        // at the configured rate (`RateWalk`), and the processor resamples
-        // at the video config's `fps` (default 2.0).
+        // at its fixed rate (`RateWalk`); the processor config's `fps` does
+        // not change the loader's sampling rate.
         let info = glm53_flash_info(glm53_flash_video_config());
         assert_eq!(
             info.video_sampling_policy(),
@@ -1229,7 +1384,7 @@ mod tests {
                     max_frames: 2048,
                     temporal_patch_size: 2
                 },
-                Some(1.0)
+                Some(2.0)
             ))
         );
         let info = glm53_flash_info(PreProcessorConfig::default());
@@ -1272,6 +1427,73 @@ mod tests {
             info.image.as_ref().unwrap().placeholder.marker_token_ids,
             info.video.as_ref().unwrap().placeholder.marker_token_ids,
         );
+    }
+
+    /// A transparent pixel reaches the encoder as white, the background
+    /// Python's image loader composites it over.
+    #[tokio::test]
+    async fn transparent_pixels_reach_the_encoder_as_white() {
+        let info = qwen3_vl_info();
+        let encoder_input = async |pixel: [u8; 4]| {
+            let mut png = Vec::new();
+            ::image::RgbaImage::from_pixel(32, 32, ::image::Rgba(pixel))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut png),
+                    ::image::ImageFormat::Png,
+                )
+                .unwrap();
+            let media = MediaContentPart::ImageData {
+                data: png,
+                mime_type: Some("image/png".to_string()),
+                uuid: None,
+                detail: None,
+            };
+            let mut tokens = vec![11, QWEN3_IMAGE_PAD_ID, 12];
+            let mut features = info
+                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, None)
+                .await
+                .unwrap();
+            features.remove(0).data
+        };
+
+        let transparent = encoder_input([0, 0, 0, 0]).await;
+        assert_eq!(transparent, encoder_input([255, 255, 255, 255]).await);
+        assert_ne!(transparent, encoder_input([0, 0, 0, 255]).await);
+    }
+
+    /// A processor that handles the alpha channel itself gets the image as
+    /// decoded; every other one gets it composited over white.
+    #[tokio::test]
+    async fn image_transparency_follows_the_processor() {
+        let mut png = Vec::new();
+        ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([0, 0, 0, 0]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+        let kimi_k3_info = test_info(
+            "kimi_k3",
+            serde_json::json!({"model_type": "kimi_k3", "media_placeholder_token_id": 163605}),
+            TestTokenizer::new()
+                .with_regular_token("<|media_begin|>", 163602)
+                .with_regular_token("<|media_content|>", 163603)
+                .with_regular_token("<|media_end|>", 163604)
+                .with_regular_token("<|media_pad|>", 163605),
+        );
+        for (info, expected) in [
+            (qwen3_vl_info(), TransparencyPolicy::CompositeOverWhite),
+            (kimi_k3_info, TransparencyPolicy::KeepAlpha),
+        ] {
+            let media = MediaContentPart::ImageData {
+                data: png.clone(),
+                mime_type: Some("image/png".to_string()),
+                uuid: None,
+                detail: None,
+            };
+            let fetched = info.fetch_media(vec![media]).await.unwrap();
+            assert_eq!(fetched.images[0].transparency(), expected);
+        }
     }
 
     #[test]
@@ -1376,6 +1598,17 @@ mod tests {
         ));
     }
 
+    /// A 640x480 image, which keeps a 30x40 patch grid (300 tokens inside
+    /// `<img>`) on Nemotron-H Omni when the token budget allows.
+    fn png_640x480() -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        }
+    }
+
     #[tokio::test]
     async fn nemotron_image_grid_fits_the_vision_token_budget() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
@@ -1386,16 +1619,15 @@ mod tests {
             info: &MultimodalModelInfo,
             max_model_len: Option<usize>,
         ) -> (usize, usize) {
-            let media = MediaContentPart::ImageUrl {
-                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
-                detail: None,
-                uuid: None,
-                max_long_side_pixel: None,
-            };
             let mut tokens = vec![11; 100];
             tokens.push(1018);
             let features = info
-                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, max_model_len)
+                .prepare_multimodal(
+                    vec![png_640x480()],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    max_model_len,
+                )
                 .await
                 .unwrap();
             let feature = &features[0];
@@ -1419,6 +1651,77 @@ mod tests {
         // Python's tiler does, and the length check refuses the prompt
         // downstream.
         assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
+    }
+
+    /// Prepare a full-size 640x480 image after 100 text tokens, then append
+    /// one more image placeholder: the prompt a later turn sends with the
+    /// first image as preprocessed features.
+    async fn nemotron_prompt_with_preprocessed_image(
+        info: &MultimodalModelInfo,
+    ) -> (Vec<u32>, MmFeatures) {
+        let mut tokens = vec![11; 100];
+        tokens.push(1018);
+        let features = info
+            .prepare_multimodal(vec![png_640x480()], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+        assert_eq!(tokens.len(), 402);
+        tokens.push(1018);
+        (tokens, features)
+    }
+
+    #[tokio::test]
+    async fn append_multimodal_budgets_new_media_after_the_preprocessed_prefix() {
+        let info = nemotron_omni_info();
+        let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
+
+        // 303 tokens left after the 402-token prefix, one short of the full
+        // grid plus the tiler's reserve: the new image shrinks to 30x38.
+        info.append_multimodal(
+            &mut features,
+            vec![png_640x480()],
+            &mut tokens,
+            ModelDtype::Float32,
+            Some(402 + 303),
+        )
+        .await
+        .unwrap();
+
+        let positions: Vec<_> = features
+            .iter()
+            .map(|feature| (feature.mm_position.offset, feature.mm_position.length))
+            .collect();
+        assert_eq!(positions, [(100, 302), (402, 287)]);
+        assert_eq!(tokens.len(), 402 + 287);
+    }
+
+    #[tokio::test]
+    async fn append_multimodal_rejects_media_batched_unlike_the_preprocessed_features() {
+        use vllm_engine_core_client::protocol::multimodal::MmField;
+
+        let info = nemotron_omni_info();
+        let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
+        let data = features[0].data.as_mut().unwrap();
+        match &mut data.get_mut("pixel_values").unwrap().field {
+            MmField::Flat(field) => field.dim = 1,
+            other => panic!("unexpected pixel_values batching: {other:?}"),
+        }
+
+        let error = info
+            .append_multimodal(
+                &mut features,
+                vec![png_640x480()],
+                &mut tokens,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_report_string(),
+            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values""#
+        );
     }
 
     #[test]
@@ -1754,7 +2057,11 @@ mod tests {
             input_audio_data_url("CCCC", None).unwrap(),
             "data:application/octet-stream;base64,CCCC"
         );
-        assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+        assert!(
+            input_audio_data_url("AAAA", Some("flac"))
+                .unwrap_err()
+                .is_request_validation_error()
+        );
     }
 
     #[test]
