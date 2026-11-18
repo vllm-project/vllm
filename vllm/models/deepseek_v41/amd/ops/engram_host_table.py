@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram host tables in HIP VMM host memory, shared across DP ranks by dmabuf FD.
 
-The ROCm counterpart of `nvidia/ops/engram_pool.py`, enabled by
+The ROCm counterpart of `nvidia/ops/engram_fabric_table.py`, enabled by
 VLLM_ROCM_ENGRAM_HIP_VMM. HIP cannot export host allocations as FABRIC handles,
 so rank 0 sends POSIX FDs to its peers over a unix socket. Placing a table this
 way is faster than filling /dev/shm.

@@ -10,13 +10,8 @@ import torch
 
 
 class PeerGroup:
-    """GPUs of several engines that split each table over their memory.
-
-    They meet only at startup, through a file store; lookups then read peers'
-    rows directly, so no engine's step ever waits on another's. Every GPU
-    builds and loads the same tables in the same order, so its n-th exchange
-    is every peer's n-th.
-    """
+    """GPUs of several engines that split each table over their memory. They
+    meet only at startup (a file store), making the same exchanges in order."""
 
     # Engines load their weights at their own pace before the group can serve.
     TIMEOUT = timedelta(minutes=30)

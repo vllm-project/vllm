@@ -374,22 +374,15 @@ def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
         group.barrier()
 
 
-def test_engram_peer_group_table_rejects_reload(tmp_path, monkeypatch):
+def test_engram_pool_table_rejects_reload(monkeypatch):
     """Other engines read a table's rows at any time, so it cannot reload."""
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
-    from vllm.models.deepseek_v41.nvidia.ops.engram_pool import PoolEngramEmbedding
-
-    table = PoolEngramEmbedding.__new__(PoolEngramEmbedding)
-    torch.nn.Module.__init__(table)
-    shard = torch.zeros(4, 16, dtype=torch.uint8)
-    table.table = SimpleNamespace(shard=shard)
-    table.pool = SimpleNamespace(ready=lambda: None)
-    table.row_bytes, table._loaded = 8, False
-    table.weight = torch.nn.Parameter(shard[:, :8], requires_grad=False)
-    table.weight_scale_inv = torch.nn.Parameter(shard[:, 8:], requires_grad=False)
-    table.process_weights_after_loading()
+    pool = EngramPool.__new__(EngramPool)
+    pool.group = SimpleNamespace(barrier=lambda: None)
+    table = SimpleNamespace(_loaded=False)
+    pool.ready(table)
     with pytest.raises(RuntimeError, match="cannot reload weights"):
-        table.process_weights_after_loading()
+        pool.ready(table)
 
 
 def _check_fp8_batch(vllm_config):
@@ -561,7 +554,7 @@ def _engram_host_table():
         from vllm.models.deepseek_v41.amd.ops import engram_host_table
     else:
         from vllm.models.deepseek_v41.nvidia.ops import (
-            engram_pool as engram_host_table,
+            engram_fabric_table as engram_host_table,
         )
     return engram_host_table
 

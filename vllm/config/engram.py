@@ -18,6 +18,8 @@ _NGRAM_LAYER_FIELDS = {
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
+# Fields of models whose tables an Engram pool can split (`peer_group_size`).
+_PEER_GROUP_FIELDS = {"engram_layer_ids"}
 
 
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
@@ -66,7 +68,8 @@ class EngramConfig:
     """Split each table's rows over this many GPUs of several engines (the sum
     of their GPU counts); lookups read rows from the owning GPU. Every engine
     passes the same value, `peer_group_store` and `peer_group_transport`.
-    Requires DeepSeek V4.1, CUDA, TP=1 and PP=1."""
+    Requires a model with Engram pool support (DeepSeek V4.1), CUDA, TP=1 and
+    PP=1."""
 
     peer_group_transport: Literal["nvlink", "rdma"] = "nvlink"
     """How a peer group reads rows: `nvlink` loads them from peers' HBM (CUDA
@@ -139,10 +142,10 @@ class EngramConfig:
 
             if field != "ple_layer_ids" or not current_platform.is_cuda():
                 raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
-        # TODO: split Qwen4Exp's GPU tables over a peer group too; Engram models
-        # on NVL72 should all use one.
-        if self.peer_group_size and field != "engram_layer_ids":
-            raise ValueError("peer_group_size requires a DeepSeek V4.1 model")
+        if self.peer_group_size and field not in _PEER_GROUP_FIELDS:
+            raise ValueError(
+                "peer_group_size requires a model with Engram pool support"
+            )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""

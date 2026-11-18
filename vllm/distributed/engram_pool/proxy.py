@@ -174,10 +174,8 @@ class Owner:
         }
 
     def connect(self, peers, requesters, box_sizes, max_tables):
-        """Connect each peer's QPs (`peers` lists the peer, its owner's address
-        and QPs for this GPU) and each requester's (its address and QP for
-        this GPU); returns this GPU's mailboxes (per requester and table, of
-        `box_sizes[requester]` bytes each) and their rkey and lkey."""
+        """Connect peers' gathering QPs and requesters' request QPs; returns
+        this GPU's mailboxes (per requester and table) and their rkey and lkey."""
         dev = self.device
         for peer, (gid, lid), theirs in peers:
             for qp, remote in zip(self.qps[peer], theirs):
@@ -227,10 +225,8 @@ class Owner:
         return iova, *keys
 
     def run(self) -> None:
-        """Post each request's WRs from its mailbox, a chain per QP in turn and
-        only whole chains that fit their send queue: small requests (decode)
-        first, large ones (prefill) in turn, CHAINS_PER_TURN at a time and one
-        queued chain per QP, so a small fetch never queues behind large ones."""
+        """Post requests' WRs a whole chain at a time: small requests (decode)
+        first, large ones (prefill) in turn and bounded by `fits`."""
         device, recv_wr = self.device, self.recv_wr
         wc = (verbs.ibv_wc * 64)()
         pending: list[_Request] = []
@@ -278,9 +274,8 @@ class Owner:
                 pending.append(request)
 
     def fits(self, request: "_Request") -> bool:
-        """Whether the request's next chain fits its send queue, and for a large
-        request also no other large chain is queued there and fewer than
-        `max_large` in all: their backlog delays small requests on this NIC."""
+        """Whether the next chain fits its send queue; a large one also needs no
+        other large chain on its QP and fewer than `max_large` in flight."""
         qp = request.next_qp
         if self.room[qp] < request.next_wrs:
             return False

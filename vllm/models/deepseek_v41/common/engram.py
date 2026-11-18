@@ -802,9 +802,9 @@ class DPSharedEngramStorage:
 
         views = None
         if current_platform.is_cuda():
-            from vllm.models.deepseek_v41.nvidia.ops import engram_pool
+            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
 
-            views = engram_pool.share_host_table(num_bytes, group)
+            views = engram_fabric_table.share_host_table(num_bytes, group)
         elif current_platform.is_rocm():
             from vllm.models.deepseek_v41.amd.ops import engram_host_table
 

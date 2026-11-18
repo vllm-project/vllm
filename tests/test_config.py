@@ -2225,7 +2225,7 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
         ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
     ],
 )
-def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
     """Qwen4Exp's tables ignore peer groups, so they would not be split."""
     model = cast(
         ModelConfig,
@@ -2235,7 +2235,8 @@ def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supp
         ),
     )
     config = EngramConfig(**_PEER_GROUP)
-    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+    rejects = pytest.raises(ValueError, match="pool support")
+    with nullcontext() if supported else rejects:
         config.verify_model_config(model)
 
 
