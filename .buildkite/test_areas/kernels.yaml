@@ -717,6 +717,7 @@ steps:
   - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/model_executor/layers/linear_attention
   - vllm/triton_utils/allocation.py
   - vllm/triton_utils/tensor_descriptor.py
   - vllm/v1/attention/backends/gdn_attn.py
@@ -893,7 +894,7 @@ steps:
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
-  - vllm/model_executor/layers/mamba/ops/ssd_flashinfer.py
+  - vllm/model_executor/layers/linear_attention/mamba2/prefill/
   - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/v1/attention/backends/mamba2_attn.py
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
