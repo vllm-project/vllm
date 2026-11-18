@@ -705,6 +705,8 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch):
     layer.kda_safe_gate = True
     layer.kda_lower_bound = LOWER_BOUND
     layer._conv_state_dim_first = False
+    layer._triton_checkpoint_spec = None
+    layer._checkpoint_exporter = None
     layer.conv1d = SimpleNamespace(
         weight=0.5 * torch.randn(width, 1, 4, device=device), bias=None
     )
