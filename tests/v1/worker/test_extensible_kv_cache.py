@@ -8,16 +8,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import full_layer, new_kv_cache_group
 from vllm.config import ModelConfig, VllmConfig
 from vllm.platforms.interface import Platform
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
+    AttentionSpec,
+    KVCacheGroup,
     KVCacheTensor,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker import extensible_kv_cache
@@ -45,7 +45,7 @@ NUM_LAYERS = 3
 
 
 def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float16
     )
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
@@ -53,7 +53,7 @@ def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
     layers = [f"layer.{i}" for i in range(NUM_LAYERS)]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(layers, spec)],
+        [new_kv_cache_group(layers, spec)],
         available_memory=NUM_LAYERS * spec.page_size_bytes * num_blocks,
     )
     assert config.num_blocks == num_blocks
@@ -145,6 +145,18 @@ def test_measure_kv_cache_bytes():
         )
         == 5 * gib
     )
+    # So is a larger growth of torch's reservation over the same steps
+    # (fragmentation), without raising the margin, which scales with the
+    # allocated peak alone.
+    assert (
+        measure_kv_cache_bytes(
+            requested_memory=20 * gib,
+            transient_peak_bytes=gib,
+            torch_reserve_growth_bytes=2 * gib,
+            **{**common, "margin_fraction": 1.0},
+        )
+        == 4 * gib
+    )
     # The margin is a share of that peak with a floor, taken off the headroom
     # (floor or fraction, whichever is larger), never off an explicit budget
     # that already leaves it free.
@@ -181,6 +193,32 @@ def test_measure_kv_cache_bytes():
     assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
 
 
+@requires_cuda
+def test_sizing_step_measures_torch_reserve_growth():
+    """A step whose large transient no longer fits the segment freed by the
+    previous one (split by a buffer the step keeps) grows torch's reservation
+    by both, while its allocated transient shows only one."""
+    from vllm.v1.worker.gpu.warmup import _measure_sizing_step
+
+    mib = 1 << 20
+    kv_cache = ExtensibleKVCache.__new__(ExtensibleKVCache)
+    kv_cache.reserved_headroom_bytes = 0
+    kv_cache.torch_reserve_growth_bytes = 0
+    kv_cache.buffer = SimpleNamespace(device=torch.device("cuda"))
+    runner = SimpleNamespace(extensible_kv_cache=kv_cache, device=torch.device("cuda"))
+    kept = []
+    with _measure_sizing_step(runner):  # type: ignore[arg-type]
+        workspace = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
+        del workspace
+        kept.append(torch.empty(100 * mib, dtype=torch.uint8, device="cuda"))
+        workspace = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
+        del workspace
+
+    assert kv_cache.reserved_headroom_bytes == 512 * mib
+    # Two 512 MiB segments, less the 100 MiB the step leaves allocated.
+    assert kv_cache.torch_reserve_growth_bytes == 924 * mib
+
+
 def test_measured_sizing_caps_torch_memory(monkeypatch):
     """Torch's caching allocator may grow into what stays free once the cache
     is extended, less multimodal IPC memory and the non-torch reserve,
@@ -189,6 +227,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     limits: list[int | None] = []
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=gib,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
@@ -254,6 +293,7 @@ def test_measured_sizing_warns_when_utilization_withholds_memory(
     gib = 1 << 30
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=0,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
@@ -300,6 +340,7 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     gib = 1 << 30
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=7 * gib,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
@@ -386,7 +427,7 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     """One group whose layers differ in head size, so their block strides differ."""
     specs = {
-        f"layer.{i}": FullAttentionSpec(
+        f"layer.{i}": AttentionSpec(
             block_size=16,
             num_kv_heads=2,
             head_size=64 * (1 + i % 2),
@@ -394,13 +435,11 @@ def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
         )
         for i in range(NUM_LAYERS)
     }
-    uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert uniform is not None
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(list(specs), uniform)],
+        [KVCacheGroup.from_layers({n: full_layer(s) for n, s in specs.items()})],
         available_memory=sum(s.page_size_bytes for s in specs.values()) * num_blocks,
     )
     assert config.num_blocks == num_blocks
@@ -487,7 +526,7 @@ def test_block_outermost_views_have_mapped_memory_past_their_start(vmm, num_laye
     layers = [f"layer.{i}" for i in range(num_layers)]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(layers, spec)],
+        [new_kv_cache_group(layers, spec)],
         available_memory=num_layers * spec.page_size_bytes * NUM_BLOCKS,
     )
     kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
@@ -834,6 +873,47 @@ def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch)
     # Only the null block stays committed for capture.
     assert committed_at_capture == [1]
     assert outputs[True] == outputs[False]
+
+
+@requires_cuda
+def test_sizing_warmup_gets_the_memory_kernel_warmup_committed(
+    vmm, vllm_runner, monkeypatch
+):
+    """warmup_kernels can commit nearly all the blocks warmup may commit (e.g.
+    hybrid models' speculative Mamba blocks for max_num_seqs requests). They
+    are released before the sizing steps, whose transients would otherwise not
+    fit beside them; the steps commit only the blocks they address."""
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed = {}
+    warmup_kernels = gpu_worker.warmup_kernels
+    run_kv_cache_sizing_warmup = gpu_worker.run_kv_cache_sizing_warmup
+
+    def recording_warmup_kernels(model_runner, *args):
+        warmup_kernels(model_runner, *args)
+        kv_cache = model_runner.extensible_kv_cache
+        committed["kernel warmup"] = kv_cache.num_committed_blocks
+
+    def recording_sizing_warmup(model_runner, *args):
+        kv_cache = model_runner.extensible_kv_cache
+        committed["sizing warmup"] = kv_cache.num_committed_blocks
+        run_kv_cache_sizing_warmup(model_runner, *args)
+
+    monkeypatch.setattr(gpu_worker, "warmup_kernels", recording_warmup_kernels)
+    monkeypatch.setattr(
+        gpu_worker, "run_kv_cache_sizing_warmup", recording_sizing_warmup
+    )
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=256,
+        enable_extensible_kv_cache=True,
+        # Without capture, nothing else releases warmup's blocks.
+        enforce_eager=True,
+    ):
+        pass
+    assert committed["kernel warmup"] > 1
+    assert committed["sizing warmup"] == 1
 
 
 @requires_cuda
