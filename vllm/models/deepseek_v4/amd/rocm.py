@@ -1169,6 +1169,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        # RDNA's known-good AITER blockscale backend uses its own native,
+        # unshuffled weight preparation. Opt in only these two projection
+        # instances; never mutate their weights or change their fallback.
+        from vllm.platforms.rocm import on_gfx1151
+
+        if on_gfx1151() and rocm_aiter_ops.is_rdna_linear_enabled():
+            return
+
         if not rocm_aiter_ops.is_enabled():
             return
         # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.

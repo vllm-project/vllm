@@ -12,7 +12,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import torch
 
@@ -240,6 +240,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.rocm_gfx1151 import (
+    RocmGfx1151SkinnyFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
@@ -804,7 +807,9 @@ def init_fp8_linear_kernel(
     input_dtype: torch.dtype,
     out_dtype: torch.dtype,
     weight_shape: tuple[int, int],
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: (
+        type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel] | None
+    ) = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     # TODO: migrate to oracle base method.
@@ -845,7 +850,8 @@ def init_fp8_linear_kernel(
         # TODO make scaled_mm kernels inherit from MMLinearKernel
         # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
         if issubclass(kernel_type, FP8ScaledMMLinearKernel):
-            return kernel_type(
+            fp8_kernel_type = cast(type[FP8ScaledMMLinearKernel], kernel_type)
+            return fp8_kernel_type(
                 scaled_mm_linear_kernel_config,
                 layer_param_names=[
                     "weight",
@@ -860,8 +866,9 @@ def init_fp8_linear_kernel(
         )
 
     else:
+        fp8_force_kernel = cast(type[FP8ScaledMMLinearKernel] | None, force_kernel)
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
-            force_kernel = _batch_invariant_fp8_kernel(
+            fp8_force_kernel = _batch_invariant_fp8_kernel(
                 TritonFP8ScaledMMLinearKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
@@ -871,7 +878,7 @@ def init_fp8_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
             quantization="fp8_w8a8",
-            force_kernel=force_kernel,
+            force_kernel=fp8_force_kernel,
             activation_quant_key=activation_quant_key,
         )
         if module_name:
@@ -882,7 +889,8 @@ def init_fp8_linear_kernel(
                 scope="global",
             )
 
-        return kernel_type(
+        fp8_kernel_type = cast(type[FP8ScaledMMLinearKernel], kernel_type)
+        return fp8_kernel_type(
             scaled_mm_linear_kernel_config,
             layer_param_names=[
                 "weight",
@@ -1549,6 +1557,7 @@ __all__ = [
     "PerTensorTorchFP8ScaledMMLinearKernel",
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
+    "RocmGfx1151SkinnyFp8BlockScaledMMKernel",
     "TritonInt8ScaledMMLinearKernel",
     "ZentorchInt8ScaledMMLinearKernel",
     "ZentorchWNA16LinearKernel",

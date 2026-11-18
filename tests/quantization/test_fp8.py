@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -22,11 +23,13 @@ from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels.linear import RocmGfx1151SkinnyFp8BlockScaledMMKernel
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
@@ -873,6 +876,108 @@ def test_scaled_fp8_quant(dtype) -> None:
             torch.narrow(y_nc_pad, 0, 0, x_nc.shape[0]), inv_scale_nc, dtype
         ),
     )
+
+
+@pytest.mark.parametrize("backend", ["auto", "aiter"])
+@pytest.mark.parametrize("weight_block_size", ([128, 128], (128, 128)))
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "model.layers.0.self_attn.fused_wqa_wkv",
+        "model.layers.0.self_attn.wo_b",
+    ],
+)
+def test_deepseek_v4_gfx1151_skinny_force_kernel_for_target_projections(
+    default_vllm_config, monkeypatch, backend, weight_block_size, prefix
+):
+    import vllm.platforms.rocm as rocm_platform
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4 import quant_config as quant_module
+
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config = KernelConfig(linear_backend=backend)
+    monkeypatch.setattr(quant_module.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(quant_module.envs, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_linear_enabled", lambda: True)
+
+    config = quant_module.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+    )
+    config.weight_block_size = weight_block_size
+    with set_current_vllm_config(default_vllm_config):
+        method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+
+    assert type(method) is Fp8LinearMethod
+    assert method.force_kernel is RocmGfx1151SkinnyFp8BlockScaledMMKernel
+
+
+@pytest.mark.parametrize(
+    "prefix,backend,batch_invariant",
+    [
+        ("model.layers.0.self_attn.q_proj", "auto", False),
+        ("model.layers.0.self_attn.fused_wqa_wkv", "triton", False),
+        ("model.layers.0.self_attn.wo_b", "auto", True),
+    ],
+)
+def test_deepseek_v4_gfx1151_skinny_force_kernel_respects_guards(
+    default_vllm_config, monkeypatch, prefix, backend, batch_invariant
+):
+    import vllm.platforms.rocm as rocm_platform
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4 import quant_config as quant_module
+
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config = KernelConfig(linear_backend=backend)
+    monkeypatch.setattr(quant_module.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(quant_module.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_linear_enabled", lambda: True)
+
+    config = quant_module.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+    )
+    with set_current_vllm_config(default_vllm_config):
+        method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+
+    assert type(method) is Fp8LinearMethod
+    assert method.force_kernel is None
+
+
+@pytest.mark.parametrize(
+    "prefix", ["model.layers.0.attn.fused_wqa_wkv", "model.layers.0.attn.wo_b"]
+)
+def test_fp8_linear_method_forces_gfx1151_skinny_for_deepseek_v4_prefix(
+    default_vllm_config, monkeypatch, prefix
+):
+    import vllm.platforms.rocm as rocm_platform
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.quantization import fp8 as fp8_module
+
+    default_vllm_config.model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+    )
+    default_vllm_config.kernel_config = KernelConfig(linear_backend="auto")
+    monkeypatch.setattr(fp8_module.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(fp8_module.envs, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(fp8_module, "validate_fp8_block_shape", lambda *args: None)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_linear_enabled", lambda: True)
+
+    layer = torch.nn.Module()
+    layer.prefix = prefix
+    with set_current_vllm_config(default_vllm_config):
+        method = Fp8LinearMethod(
+            Fp8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[128, 128],
+            )
+        )
+        force_kernel = method._get_gfx1151_skinny_force_kernel(layer)
+
+    assert force_kernel is RocmGfx1151SkinnyFp8BlockScaledMMKernel
 
 
 @pytest.mark.parametrize(

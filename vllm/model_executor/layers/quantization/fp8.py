@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.kernels.linear import (
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
 )
@@ -243,8 +245,15 @@ class Fp8LinearMethod(LinearMethodBase):
 
     supports_pre_processed_weights = True
 
-    def __init__(self, quant_config: Fp8Config):
+    def __init__(
+        self,
+        quant_config: Fp8Config,
+        *,
+        force_kernel: type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel]
+        | None = None,
+    ):
         self.quant_config = quant_config
+        self.force_kernel = force_kernel
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
@@ -282,6 +291,46 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.activation_quant_key = kFp8DynamicTensorSym
+
+    def _get_gfx1151_skinny_force_kernel(
+        self,
+        layer: torch.nn.Module,
+    ) -> type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel] | None:
+        prefix = getattr(layer, "prefix", "")
+        if not isinstance(prefix, str):
+            return None
+        if not prefix.endswith((".fused_wqa_wkv", ".wo_b")):
+            return None
+        if tuple(self.weight_block_size or ()) != (128, 128):
+            return None
+        if self.quant_config.activation_scheme != "dynamic":
+            return None
+        if envs.VLLM_BATCH_INVARIANT or not current_platform.is_rocm():
+            return None
+
+        cfg = get_current_vllm_config_or_none()
+        if cfg is None:
+            return None
+        hf_config = getattr(cfg.model_config, "hf_config", None)
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return None
+
+        per_quant_backend = cfg.kernel_config.linear_backend_per_quant or {}
+        backend = (
+            per_quant_backend.get("fp8_block_w8a8") or cfg.kernel_config.linear_backend
+        )
+        if backend not in ("auto", "aiter"):
+            return None
+
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.kernels.linear import (
+            RocmGfx1151SkinnyFp8BlockScaledMMKernel,
+        )
+        from vllm.platforms.rocm import on_gfx1151
+
+        if not on_gfx1151() or not rocm_aiter_ops.is_rdna_linear_enabled():
+            return None
+        return RocmGfx1151SkinnyFp8BlockScaledMMKernel
 
     def create_weights(
         self,
@@ -348,12 +397,14 @@ class Fp8LinearMethod(LinearMethodBase):
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
 
+        force_kernel = self.force_kernel or self._get_gfx1151_skinny_force_kernel(layer)
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
             weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
+            force_kernel=force_kernel,
             module_name=self.__class__.__name__,
         )
 

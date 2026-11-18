@@ -54,6 +54,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
 
   rocm_ops.def(
+      "wvSplitKQBlockScale(Tensor weight, Tensor activation, "
+      "Tensor activation_scale, Tensor weight_scale, Tensor! out, "
+      "int CuCount) -> ()");
+  rocm_ops.impl("wvSplitKQBlockScale", torch::kCUDA, &wvSplitKQBlockScale);
+
+  rocm_ops.def(
       "swmmacGEMM(Tensor in_a, Tensor in_b, "
       "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
   rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);

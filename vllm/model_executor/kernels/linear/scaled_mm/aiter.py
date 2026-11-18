@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 from vllm import _custom_ops as ops
@@ -606,6 +605,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+
         if self.use_bpreshuffle:
             gemm_a8w8_blockscale_op = (
                 rocm_aiter_ops.triton_gemm_a8w8_blockscale_preshuffle

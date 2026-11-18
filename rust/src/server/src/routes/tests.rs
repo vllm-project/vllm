@@ -1237,8 +1237,8 @@ async fn scale_out_abort_requests_validates_body() {
         ));
     }
     expect_test::expect![[r#"
-        None {"request_ids": ["unknown"]} -> 200 OK 
-        Some("text/plain") {"request_ids": "unknown"} -> 200 OK 
+        None {"request_ids": ["unknown"]} -> 200 OK
+        Some("text/plain") {"request_ids": "unknown"} -> 200 OK
         Some("application/json") {} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: missing field `request_ids` at line 1 column 2","type":"Bad Request","param":null,"code":400}}
         Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":null,"code":400}}
         Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":null,"code":400}}
