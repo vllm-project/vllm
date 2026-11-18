@@ -3,10 +3,18 @@
 """Unit tests for the scheduler-driven heartbeat / lease-renewal system."""
 
 import time
+from concurrent.futures import Future
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_ACK_NOTIF_PREFIX,
+    HB_NOTIF_PREFIX,
+    HeartbeatAck,
+    HeartbeatMsg,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_scheduler
@@ -34,6 +42,13 @@ def _worker_stub():
     w.consumer_notification_counts_by_req = {}
     w.expected_consumer_notifications_by_req = {}
     w.xfer_stats = MagicMock()
+    w.engine_id = "p-engine"
+    w._bidirectional_kv_xfer_enabled = False
+    w._acked_lease_deadlines = {}
+    w._remote_agents = {}
+    w._engine_last_active = {}
+    w.nixl_wrapper = MagicMock()
+    w.transfer_topo = MagicMock()
     return w
 
 
@@ -159,7 +174,10 @@ def test_handle_heartbeat():
     w._reqs_to_send = {"req-a": 100.0, "req-b": far_future}
 
     before = time.perf_counter()
-    w._handle_heartbeat("req-a,req-b,req-unknown")
+    assert w._handle_heartbeat(["req-a", "req-b", "req-unknown"]) == [
+        "req-a",
+        "req-b",
+    ]
 
     # req-a: pushed forward to ~now+20.
     assert w._reqs_to_send["req-a"] >= before + 20
@@ -187,7 +205,7 @@ def test_reaper_reclaims_expired_leases_behind_heartbeated_head(monkeypatch):
     monkeypatch.setattr(base_worker.time, "perf_counter", lambda: now["t"])
     for t in (20.0, 40.0, 60.0, 80.0):
         now["t"] = t
-        w._handle_heartbeat("A")
+        w._handle_heartbeat(["A"])
 
     # A was renewed in place: still the dict head, expiry 100.
     assert next(iter(w._reqs_to_send)) == "A"
@@ -251,3 +269,98 @@ def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
     assert done == {"Y"}
     assert list(w._reqs_to_send) == ["X"]
     assert w._reqs_to_process == {"X"}
+
+
+# ===================================================================
+# Worker: heartbeat acknowledgements
+# ===================================================================
+
+
+def _hb_notif(req_ids: list[str], sent_at: float = 100.0) -> bytes:
+    hb = HeartbeatMsg(
+        req_ids=req_ids,
+        sent_at=sent_at,
+        engine_id="d-engine",
+        host="d-host",
+        port=5600,
+        tp_size=1,
+    )
+    return HB_NOTIF_PREFIX.encode() + msgspec.json.encode(hb)
+
+
+def _sent_acks(w) -> list[HeartbeatAck]:
+    acks = []
+    for call in w.nixl_wrapper.send_notif.call_args_list:
+        assert call.args == ("d-agent",)
+        msg = call.kwargs["notif_msg"]
+        assert msg.startswith(HB_ACK_NOTIF_PREFIX.encode())
+        acks.append(
+            msgspec.json.decode(msg[len(HB_ACK_NOTIF_PREFIX) :], type=HeartbeatAck)
+        )
+    return acks
+
+
+def _deliver(w, notif: bytes, agent: str = "d-agent") -> None:
+    w.nixl_wrapper.get_new_notifs.return_value = {agent: [notif]}
+    w._get_new_notifs()
+
+
+def test_heartbeat_is_acknowledged_once_handshaked():
+    """P acknowledges the renewed leases (only) to the heartbeat sender."""
+    w = _worker_stub()
+    w._reqs_to_send = {"req-a": 0.0}
+    w._ensure_handshake = MagicMock(return_value=None)
+    w._remote_agents = {"d-engine": {(0, 0): "d-agent"}}
+
+    _deliver(w, _hb_notif(["req-a", "req-unknown"]))
+
+    w._ensure_handshake.assert_called_once_with(
+        "d-engine", "d-host", 5600, 1, 1, 1, notif_agents_only=True
+    )
+    assert _sent_acks(w) == [
+        HeartbeatAck(
+            engine_id="p-engine", req_ids=["req-a"], sent_at=100.0, lease_remaining=20
+        )
+    ]
+
+    # Nothing renewed: nothing to acknowledge.
+    _deliver(w, _hb_notif(["req-unknown"]))
+    assert len(_sent_acks(w)) == 1
+
+    # A sender this rank did not handshake with is not acknowledged.
+    w._reqs_to_send = {"req-a": 0.0}
+    _deliver(w, _hb_notif(["req-a"]), agent="other-agent")
+    assert len(_sent_acks(w)) == 1
+
+
+def test_heartbeat_ack_waits_for_handshake():
+    """Renewed, but not acknowledged before the handshake completes."""
+    w = _worker_stub()
+    w._reqs_to_send = {"req-a": 0.0}
+    w._ensure_handshake = MagicMock(return_value=Future())
+
+    _deliver(w, _hb_notif(["req-a"]))
+    assert w._reqs_to_send["req-a"] > 0.0
+    w.nixl_wrapper.send_notif.assert_not_called()
+
+
+def test_heartbeat_ack_extends_lease_deadline(monkeypatch):
+    """D keeps the latest acknowledged deadline and drops passed ones."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import pull_worker
+
+    w = _worker_stub()
+    monkeypatch.setattr(pull_worker.time, "perf_counter", lambda: 110.0)
+    w._acked_lease_deadlines = {("p-engine", "stale"): 105.0}
+
+    def ack(sent_at: float) -> bytes:
+        ack = HeartbeatAck(
+            engine_id="p-engine", req_ids=["req-a"], sent_at=sent_at, lease_remaining=20
+        )
+        return HB_ACK_NOTIF_PREFIX.encode() + msgspec.json.encode(ack)
+
+    _deliver(w, ack(sent_at=100.0), agent="p-agent")
+    assert w._acked_lease_deadlines == {("p-engine", "req-a"): 120.0}
+
+    # An earlier deadline, eg from another remote rank, does not shorten it.
+    _deliver(w, ack(sent_at=95.0), agent="p-agent")
+    assert w._acked_lease_deadlines == {("p-engine", "req-a"): 120.0}
