@@ -8,7 +8,7 @@ import requests
 
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
-from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.common.cli_args import BaseFrontendArgs
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeCompletionRequest
 from vllm.renderers.params import resolve_max_tokenize_tokens
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -35,11 +35,11 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
     else:
         monkeypatch.setenv("VLLM_MAX_TOKENIZE_TOKENS", env_value)
 
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser = BaseFrontendArgs.add_cli_args(FlexibleArgumentParser())
     cli_args = [] if cli_value is None else ["--max-tokenize-tokens", cli_value]
-    args = EngineArgs.from_cli_args(parser.parse_args(cli_args))
+    args = parser.parse_args(cli_args)
 
-    # The explicit ModelConfig field is populated from EngineArgs when set;
+    # The explicit ModelConfig field is populated from FrontendArgs when set;
     # otherwise the resolver consults the environment and then the fallback.
     model_config = SimpleNamespace(
         max_tokenize_tokens=args.max_tokenize_tokens,
@@ -60,10 +60,14 @@ def test_max_tokenize_tokens_env_and_cli(monkeypatch, env_value, cli_value, expe
         pytest.param(70000, 140000, id="default-uses-model-length"),
     ],
 )
-def test_max_tokenize_tokens_default_uses_model_length_floor(monkeypatch ,max_model_len, expected):
+def test_max_tokenize_tokens_default_uses_model_length_floor(
+    monkeypatch, max_model_len, expected
+):
     envs.disable_envs_cache()
     monkeypatch.delenv("VLLM_MAX_TOKENIZE_TOKENS", raising=False)
-    model_config = SimpleNamespace(max_tokenize_tokens=None, max_model_len=max_model_len)
+    model_config = SimpleNamespace(
+        max_tokenize_tokens=None, max_model_len=max_model_len
+    )
     assert resolve_max_tokenize_tokens(model_config) == expected
 
 

@@ -31,6 +31,15 @@ async def init_render_app_state(
     preprocessing pipeline (renderer, input_processor)
     directly from the `VllmConfig`.
     """
+    # CLI --max-tokenize-tokens (FrontendArgs) overrides the value resolved
+    # at engine startup (which only reads the env var).
+    if getattr(args, "max_tokenize_tokens", None) is not None:
+        vllm_config.model_config.max_tokenize_tokens = (
+            None
+            if args.max_tokenize_tokens <= 0
+            else args.max_tokenize_tokens
+        )
+
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
         model_config=vllm_config.model_config,

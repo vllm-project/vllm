@@ -234,6 +234,11 @@ class BaseFrontendArgs:
     """
     fingerprint_value: str | None = None
     """Literal fingerprint string used when `--fingerprint-mode=custom`."""
+    max_tokenize_tokens: int | None = None
+    """Maximum number of tokens allowed in `/tokenize`, `/detokenize`, and
+    `/v1/messages/count_tokens` requests. Defaults to `VLLM_MAX_TOKENIZE_TOKENS`
+    if set, otherwise `max(max_model_len * 2, 131072)`. Set to `<= 0` to
+    disable the limit."""
 
     @classmethod
     def _customize_cli_kwargs(
