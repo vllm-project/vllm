@@ -573,9 +573,8 @@ class ShardedRDTWeightTransferEngine(
             landed = [inflight.pop(handle) for handle in ready]
             hooks.get(ready, [bucket.targets[slot] for bucket, slot in landed])
             t1 = time.perf_counter()
-            # The pulls are in our slots: drop their handles, which frees the
-            # producers' arena blocks, then issue the next pulls before
-            # copying out, so `num_buffers` stay in flight meanwhile.
+            # drop the handles (frees the producers' blocks) and issue the next
+            # pulls before copying out
             ready.clear()
             free.extend(slot for _, slot in landed)
             refill()

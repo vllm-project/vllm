@@ -209,7 +209,8 @@ def test_cached_sources_follow_the_published_memory(server, monkeypatch, moved):
         s.begin_sync([0], sync_idx)
         alloc = f"a{sync_idx}" if moved else "a"
         export = (None,) * 6 + (0, alloc, 80, 0, False, sync_idx, 0, sync_idx)
-        s.publish_unit(0, ({1: export}, views, None))
+        keep = () if moved else (1,)  # a moved allocation is a temporary
+        s.publish_unit(0, ({1: export}, views, None, keep))
         base = bases[alloc]
         base.copy_(torch.randn(20).view(torch.uint8))
         (flat,) = s.bucket(0, 0, sync_idx)
@@ -220,6 +221,10 @@ def test_cached_sources_follow_the_published_memory(server, monkeypatch, moved):
         assert torch.equal(_bytes(b), base[64:])
         cached.append(s._sources[0][0])
         s.free()
+        # at release only the kept storages stay imported
+        assert (s._published[0].tensors is None) == (not keep)
+        assert (0 in s._sources[0]) == bool(keep)  # cached views hold it too
+        assert list(s._published[0].bases) == list(keep)
     assert (cached[0] is cached[1]) != moved
 
 

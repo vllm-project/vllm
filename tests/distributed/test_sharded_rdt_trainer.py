@@ -213,8 +213,18 @@ def test_the_sender_drives_the_workers_around_its_gathers(cpu_ipc):
     server = _attach_server(engine)
     for c in (0, 1):
         server.register_consumer(c, [])  # pulls nothing: units release at publish
+    keeps, remote = [], engine._remote
+
+    def recording_remote(method, *args):
+        if method == "publish_unit":
+            keeps.append(bool(args[1][3]))
+        return remote(method, *args)
+
+    engine._remote = recording_remote
     engine.send_weights()
     engine.send_weights(live_consumer_ids=[1])  # degraded: consumer 0 died
+    # storages that outlived the last sync stay imported on the producer
+    assert keeps == [False, True]
     assert client.order == ["start", "update", "finish"] * 2
     assert client.last_update_info == {"sync_idx": 1} and server._live == {1}
     assert not engine._inflight
