@@ -293,6 +293,11 @@ def test_e1_divergent_uncertified_reports_rollback_collapses_to_zero():
         kv_load_failure_policy="repair",
     )
     vllm_config.cache_config.enable_prefix_caching = False
+    # Pin the plain Scheduler: the fixture default resolves
+    # async_scheduling on this platform, which the repair policy
+    # refuses at init; the folding subject below is
+    # scheduling-mode-orthogonal (same pin as make_scheduler).
+    vllm_config.scheduler_config.async_scheduling = False
     scheduler = create_scheduler(vllm_config)
     r1 = create_request(num_tokens=3328)
     scheduler.add_request(r1)
@@ -369,6 +374,11 @@ def test_e2_divergent_incomplete_attestations_rollback_collapses_to_zero():
         kv_load_failure_policy="repair",
     )
     vllm_config.cache_config.enable_prefix_caching = False
+    # Pin the plain Scheduler: the fixture default resolves
+    # async_scheduling on this platform, which the repair policy
+    # refuses at init; the folding subject below is
+    # scheduling-mode-orthogonal (same pin as make_scheduler).
+    vllm_config.scheduler_config.async_scheduling = False
     scheduler = create_scheduler(vllm_config)
     scheduler._evidence_tp_size = 2
     r1 = create_request(num_tokens=3328)
