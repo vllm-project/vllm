@@ -1505,6 +1505,15 @@ class TestDetectMergeInlineSystem:
         )
         assert AnthropicServingMessages._detect_merge_inline_system(template) is False
 
+    def test_generation_tag_template_no_merge(self):
+        """HF's `{% generation %}` tag (e.g. Muse Spark) must not force a merge."""
+        template = (
+            "{% for m in messages %}{% if m.role == 'assistant' %}"
+            "{% generation %}{{ m.content }}{% endgeneration %}"
+            "{% else %}{{ m.role }}: {{ m.content }}{% endif %}{% endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(template) is False
+
     def test_non_template_error_defaults_merge(self):
         """A non-TemplateError render failure must not abort startup."""
         template = "{{ undefined_var | tojson }}"

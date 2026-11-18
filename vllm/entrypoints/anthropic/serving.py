@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any, Literal, get_args
 
-import jinja2
+import transformers.utils.chat_template_utils as hf_chat_utils
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -333,16 +333,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         Renders a [system, user, system, user] conversation against the
         template; if it raises (e.g. Qwen's `loop.first` guard), the
         model needs inline system messages merged into the leading block.
+        The template is compiled as `apply_chat_template` compiles it, so
+        HF-only syntax such as `{% generation %}` does not count as a failure.
         """
         if not chat_template:
             return True
         try:
-            env = jinja2.sandbox.ImmutableSandboxedEnvironment(
-                trim_blocks=True,
-                lstrip_blocks=True,
-                extensions=[jinja2.ext.loopcontrols],
-            )
-            env.from_string(chat_template).render(
+            hf_chat_utils._compile_jinja_template(chat_template).render(
                 messages=[
                     {"role": "system", "content": "t"},
                     {"role": "user", "content": "t"},
