@@ -628,14 +628,11 @@ class MoRIIOConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
-        # Per attention group: not prefix-cacheable, so read even on a full hit.
-        # Mamba is not the only source of these: a circular-buffer (ring) group
-        # holds one non-prefix-cacheable block per request and must be pulled
-        # even when the attention prefix hits locally.
         attn_groups = [
             kv_cache_config.transfer_groups[group_id]
             for group_id in self._attn_group_ids
         ]
+        # Per attention group: not prefix-cacheable, so read even on a full hit.
         self._attn_group_is_state = [not g.prefix_cacheable for g in attn_groups]
         self._has_state_attn_groups = any(self._attn_group_is_state)
         if self._has_mamba:
@@ -658,12 +655,7 @@ class MoRIIOConnectorScheduler:
             )
         )
         if self._is_hma_required:
-            # MoRIIO handles sliding-window, mamba/KDA and circular-buffer
-            # (ring) groups in READ mode. A ring group owns one block per
-            # request and is never prefix-cacheable, so READ pulls it like any
-            # other state group; it needs no mamba group to accompany it.
-            # WRITE has no prompt-block clamp for rings, so it still fails
-            # closed, as do other hybrid cache specs.
+            # Circular buffer support only implemented for READ mode.
             allow_circular_buffer = self.mode == MoRIIOMode.READ
             unsupported = [
                 g.manager_cls.__name__
@@ -686,7 +678,7 @@ class MoRIIOConnectorScheduler:
                     f"cache group manager(s): {sorted(set(unsupported))}. Pass "
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
-            # Sliding-window MLA slots are MLA latents — WRITE handles them.
+            # SWA not supported in WRITE mode, unless it's SWA MLA
             if self.mode == MoRIIOMode.WRITE and any(
                 issubclass(g.manager_cls, SlidingWindowManager)
                 and not any(
