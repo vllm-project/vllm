@@ -49,7 +49,7 @@ from urllib.request import urlopen
 Parts of the benchmark are built for the gpt-oss-120b model. 
  1. gpt-oss-120b has 2 attention groups FA and SWA.
  2. These attention groups have the same gpu block size (2.3M on H100).
-This fact is exploited in `per_group_block_bytes_from_engine` and 
+This fact is exploited in `KVCacheCalibration.from_engine` and
 `Scenario::max_per_request_block_size` functions that used,
  - to determine the maximum KV cache memory that a benchmark
    run would require and subsequently,
@@ -68,7 +68,7 @@ BLOCK_SIZE = 64
 # size. This lets us use a single PER_GROUP_BLOCK_BYTES value for both
 # groups in the benchmark.
 # If unset via an environment variable, this is computed once at the
-# start of the function via `per_group_block_bytes_from_engine`.
+# start of the function via `KVCacheCalibration.from_engine`.
 # Note:
 # - This value is 2.3M on H100.
 # - With FS offloading, this value should match the offloaded file size.
@@ -99,59 +99,6 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
-def per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
-    """Per Attention group block-size in bytes for the gptoss120b model.
-
-    Create a dummy engine and infer block-sizes from that engine.
-    """
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    from vllm import LLM
-
-    log = Path("block_bytes_calibration.log")
-    print(f"Calibration log: {log}")
-    with (
-        log.open("w") as f,
-        contextlib.redirect_stdout(f),
-        contextlib.redirect_stderr(f),
-    ):
-        llm = LLM(
-            model=MODEL,
-            tensor_parallel_size=1,
-            load_format="dummy",
-            max_model_len=8192,
-            disable_log_stats=True,
-            numa_bind=False,
-            enforce_eager=True,
-            block_size=block_size,
-        )
-        worker = llm.llm_engine.engine_core.engine_core.model_executor.driver_worker
-        runner = worker.model_runner
-        cfg = runner.kv_cache_config
-        from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
-        from vllm.v1.kv_cache_interface import (
-            KVCacheConfig,
-            KVCacheSpecKind,
-        )
-
-        assert isinstance(cfg, KVCacheConfig)
-        assert len(cfg.kv_cache_groups) == 2, "gptoss has FA and SWA"
-
-        group_per_group_block_bytes = []
-        for group in cfg.kv_cache_groups:
-            spec_kind = get_kv_cache_kind(
-                group.manager_config, group.kv_cache_specs.values()
-            )
-            assert spec_kind in {
-                KVCacheSpecKind.FULL_ATTENTION,
-                KVCacheSpecKind.SLIDING_WINDOW,
-            }, f"Unexpected spec kind: {spec_kind}"
-            group_per_group_block_bytes.append(group.page_size_bytes)
-        assert len(set(group_per_group_block_bytes)) == 1, (
-            f"attention groups disagree on block size: {group_per_group_block_bytes}"
-        )
-    return group_per_group_block_bytes[0]
-
-
 def _cell(v: object) -> str:
     """CSV cell: blank for missing, floats rounded to 2 decimals."""
     if v is None:
@@ -159,6 +106,114 @@ def _cell(v: object) -> str:
     if isinstance(v, float):
         return f"{v:.2f}"
     return str(v)
+
+
+class KVCacheCalibration:
+    """Calibrate the benchmark's per-attention-group block size."""
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _redirect_process_output(log_file):
+        """Redirect stdout/stderr descriptors for this process and children."""
+        saved_stdout_fd = os.dup(1)
+        saved_stderr_fd = os.dup(2)
+        try:
+            os.dup2(log_file.fileno(), 1)
+            os.dup2(log_file.fileno(), 2)
+            yield
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_stdout_fd, 1)
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stdout_fd)
+            os.close(saved_stderr_fd)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _engine_core_in_process():
+        """Keep the V1 engine core in-process for callable worker RPCs."""
+        setting = "VLLM_ENABLE_V1_MULTIPROCESSING"
+        previous_value = os.environ.get(setting)
+        os.environ[setting] = "0"
+        try:
+            yield
+        finally:
+            if previous_value is None:
+                os.environ.pop(setting, None)
+            else:
+                os.environ[setting] = previous_value
+
+    @staticmethod
+    def _worker_kv_group_info(worker) -> tuple[tuple[str, int], ...]:
+        """Return each KV group's kind and rank-local page size."""
+        from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
+        from vllm.v1.kv_cache_interface import AttentionSpec
+
+        config = worker.model_runner.kv_cache_config
+        group_info = []
+        for group in config.kv_cache_groups:
+            assert all(
+                isinstance(spec, AttentionSpec)
+                for spec in group.kv_cache_specs.values()
+            ), f"Unexpected spec type in group: {group.manager_config}"
+            kind = get_kv_cache_kind(
+                group.manager_config, group.kv_cache_specs.values()
+            )
+            group_info.append((kind.value, group.page_size_bytes))
+        return tuple(group_info)
+
+    @staticmethod
+    def from_engine(block_size: int = BLOCK_SIZE) -> int:
+        """Infer the whole-model per-group block size from a dummy engine."""
+        log = Path("block_bytes_calibration.log")
+        print(f"Calibration log: {log}")
+        with (
+            log.open("w") as f,
+            KVCacheCalibration._redirect_process_output(f),
+            KVCacheCalibration._engine_core_in_process(),
+        ):
+            from vllm import LLM
+
+            llm = LLM(
+                model=MODEL,
+                tensor_parallel_size=TP_SIZE,
+                load_format="dummy",
+                max_model_len=8192,
+                disable_log_stats=True,
+                numa_bind=False,
+                enforce_eager=True,
+                block_size=block_size,
+            )
+            rank_group_info = llm.collective_rpc(
+                KVCacheCalibration._worker_kv_group_info, timeout=120
+            )
+            assert len(rank_group_info) == TP_SIZE
+            first_rank_group_info = rank_group_info[0]
+            assert all(
+                group_info == first_rank_group_info for group_info in rank_group_info
+            ), f"TP ranks disagree on KV groups: {rank_group_info}"
+            assert len(first_rank_group_info) == 2, "gptoss has FA and SWA"
+            assert {kind for kind, _ in first_rank_group_info} == {
+                "full_attention",
+                "sliding_window",
+            }, f"expected only full attention and SWA groups: {first_rank_group_info}"
+            rank_local_page_sizes = {
+                page_size for _, page_size in first_rank_group_info
+            }
+            assert len(rank_local_page_sizes) == 1, (
+                f"attention groups disagree on block size: {first_rank_group_info}"
+            )
+            del llm
+        return sum(group_info[0][1] for group_info in rank_group_info)
+
+    @staticmethod
+    def resolve() -> float:
+        """Return the environment override, or calibrate a new value."""
+        if PER_GROUP_BLOCK_BYTES is not None:
+            return float(PER_GROUP_BLOCK_BYTES)
+        print("PER_GROUP_BLOCK_BYTES not set; calibrating with a dummy engine...")
+        return KVCacheCalibration.from_engine()
 
 
 @dataclass
@@ -823,6 +878,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[sc.name for sc in SCENARIOS],
     )
 
+    subparsers.add_parser(
+        "calibrate",
+        help="print the calibrated per-attention-group block size",
+    )
+
     run = subparsers.add_parser("run", help="run one scenario built from explicit args")
     run.add_argument(
         "--concurrency", type=int, required=True, help="concurrent requests"
@@ -853,14 +913,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_per_group_block_bytes() -> float:
-    """PER_GROUP_BLOCK_BYTES from the environment, else calibrate."""
-    if PER_GROUP_BLOCK_BYTES is not None:
-        return float(PER_GROUP_BLOCK_BYTES)
-    print("PER_GROUP_BLOCK_BYTES not set; calibrating with a dummy engine...")
-    return per_group_block_bytes_from_engine()
-
-
 def _main() -> None:
     args = build_parser().parse_args()
 
@@ -872,6 +924,11 @@ def _main() -> None:
 
     if args.command == "compare":
         compare(args.session_a, args.session_b)
+        return
+
+    if args.command == "calibrate":
+        per_group_block_bytes = KVCacheCalibration.from_engine()
+        print(f"PER_GROUP_BLOCK_BYTES={per_group_block_bytes}")
         return
 
     if args.mode == "fs":
@@ -900,7 +957,7 @@ def _main() -> None:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
 
-    per_group_block_bytes = _resolve_per_group_block_bytes()
+    per_group_block_bytes = KVCacheCalibration.resolve()
     print(f" ===== Using GPU per-group block bytes: {per_group_block_bytes} =====")
     for spec in specs:
         spec.materialize(per_group_block_bytes)
