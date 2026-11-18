@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
+import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -37,8 +38,11 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+    chunk_layout,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
+    release_slot_buffers,
+    slot_buffers,
 )
 
 # NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
@@ -111,6 +115,12 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     dtype_names: list[str] = field(default_factory=list)
     shapes: list[list[int]] = field(default_factory=list)
     src: int = 0
+    # PP-stage groups (`_stage_handshake`): `stage_setup` runs the handshake;
+    # `stages` holds per stage its rounds (dicts of the fields above), on the
+    # stage's group; `tail` then holds turns on the main group.
+    stage_setup: bool = False
+    stages: list[list[dict] | None] | None = None
+    tail: list[dict] | None = None
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -167,6 +177,135 @@ def _metadata_payload(
     return [(m.name, _dtype_name(m.dtype), list(m.shape)) for m in metadata]
 
 
+def _stage_handshake(
+    group: "PyNcclCommunicator",
+    row: torch.Tensor,
+    n_trainer: int,
+    owner_flags=None,
+) -> list[dict]:
+    """Form one sub-communicator per pipeline stage, so stages receive only
+    their own weights, in parallel.
+
+    Every group rank contributes `row`: its PP rank (-1 on trainer ranks)
+    followed by a 0/1 mask over the planned names of what it needs. Each stage
+    needs the union of its workers' masks. Group rank 0 (a trainer rank) calls
+    `owner_flags(need)` for which trainer ranks own a name some stage needs;
+    a stage's group is those trainer ranks plus its workers, so a trainer rank
+    joins only the rings it sends or must relay on."""
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+    world = group.world_size
+    out = torch.empty(world * row.numel(), dtype=row.dtype, device=group.device)
+    group.all_gather(out, row)
+    rows = out.view(world, -1).cpu()
+    pp = rows[n_trainer:, 0].tolist()
+    stages = sorted(set(pp))
+    workers = [[n_trainer + i for i, r in enumerate(pp) if r == c] for c in stages]
+    need = [rows[ranks, 1:].bool().any(0) for ranks in workers]
+    flags = torch.zeros(len(stages) * n_trainer, dtype=torch.int32, device=group.device)
+    if group.rank == 0:
+        flags.copy_(owner_flags(need).flatten())
+    group.broadcast(flags, src=0)
+    flags = flags.view(len(stages), n_trainer).cpu()
+    out_stages = []
+    for c, ranks in enumerate(workers):
+        members = [b for b in range(n_trainer) if flags[c, b]] + ranks
+        uid = torch.zeros(128, dtype=torch.uint8, device=group.device)
+        if group.rank == members[0]:
+            raw = bytes(group.nccl.ncclGetUniqueId().internal)
+            uid.copy_(torch.frombuffer(bytearray(raw), dtype=torch.uint8))
+        group.broadcast(uid, src=members[0])
+        out_stages.append(
+            {"members": members, "need": need[c], "uid": bytes(uid.cpu().tolist())}
+        )
+    for st in out_stages:  # in stage order on every rank: no init cycle
+        st["comm"] = None
+        if group.rank in st["members"]:
+            st["comm"] = PyNcclCommunicator.from_unique_id_bytes(
+                st["uid"],
+                rank=st["members"].index(group.rank),
+                world_size=len(st["members"]),
+                device=group.device,
+            )
+    return out_stages
+
+
+def _pairs(ops, rows: tuple[int, int] | None, view: torch.Tensor):
+    """(destination, source) per planned write of a received piece; `None`
+    when the tensor was split (`rows`: its dim-0 range here) and a write
+    does not map dim 0 onto dim 0, so the tensor is needed whole."""
+    if rows is None:
+        return [(dst, view[box]) for box, dst in ops]
+    out = []
+    for box, dst in ops:
+        if [b.stop - b.start for b in box] != list(dst.shape):
+            return None
+        lo, hi = max(box[0].start, rows[0]), min(box[0].stop, rows[1])
+        if lo < hi:
+            out.append(
+                (
+                    dst[lo - box[0].start : hi - box[0].start],
+                    view[(slice(lo - rows[0], hi - rows[0]), *box[1:])],
+                )
+            )
+    return out
+
+
+def _coalesce(
+    dsts: list[torch.Tensor], srcs: list[torch.Tensor], roles: list[str]
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Merge copies with equal geometry whose destinations and sources are
+    evenly spaced in one storage each (one weight of every expert in a chunk)
+    into one copy over a view with a leading count dim. `roles` (the name
+    without its indices) keeps apart copies that share a destination but
+    interleave, e.g. w1 and w3 into each expert's fused w13. The plan's writes
+    never overlap, so their order does not matter."""
+    groups: dict[tuple, list[tuple[torch.Tensor, torch.Tensor]]] = {}
+    for d, s, role in zip(dsts, srcs, roles):
+        key = (
+            role,
+            d.dtype,
+            s.dtype,
+            tuple(d.shape),
+            d.stride(),
+            s.stride(),
+            d.untyped_storage().data_ptr(),
+            s.untyped_storage().data_ptr(),
+        )
+        groups.setdefault(key, []).append((d, s))
+    out_d: list[torch.Tensor] = []
+    out_s: list[torch.Tensor] = []
+    for pairs in groups.values():
+        i = 0
+        while i < len(pairs):
+            (d0, s0), j = pairs[i], i
+            if i + 1 < len(pairs):
+                dstep = pairs[i + 1][0].storage_offset() - d0.storage_offset()
+                sstep = pairs[i + 1][1].storage_offset() - s0.storage_offset()
+                while (
+                    dstep > 0
+                    and sstep > 0
+                    and j + 1 < len(pairs)
+                    and pairs[j + 1][0].storage_offset() - pairs[j][0].storage_offset()
+                    == dstep
+                    and pairs[j + 1][1].storage_offset() - pairs[j][1].storage_offset()
+                    == sstep
+                ):
+                    j += 1
+            if j > i:
+                n = j - i + 1
+                d0 = d0.as_strided(
+                    (n, *d0.shape), (dstep, *d0.stride()), d0.storage_offset()
+                )
+                s0 = s0.as_strided(
+                    (n, *s0.shape), (sstep, *s0.stride()), s0.storage_offset()
+                )
+            out_d.append(d0)
+            out_s.append(s0)
+            i = j + 1
+    return out_d, out_s
+
+
 class NCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, NCCLWeightTransferUpdateInfo]
 ):
@@ -196,9 +335,7 @@ class NCCLWeightTransferEngine(
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
         # Metadata of the last update per (model, src), reused by empty update info.
-        self._last_update_info: dict[
-            tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
-        ] = {}
+        self._last_update_info: dict[tuple, NCCLWeightTransferUpdateInfo] = {}
         # With `use_load_plan`: the trainer's metadata from init, and the plan
         # for the target model, built at its first update.
         self._plan_manifest: Manifest | None = None
@@ -228,6 +365,7 @@ class NCCLWeightTransferEngine(
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
         self._last_update_info.clear()
+        self.__dict__.pop("_layouts", None)
         self._plan = self._plan_metadata = self._plan_manifest = None
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
@@ -285,6 +423,9 @@ class NCCLWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import finish_reload
 
         finish_reload(self.model, self.model_config, self.device)
+        # The receive buffers' memory goes back (the KV cache wakes into it);
+        # their views stay valid and the storage regrows at the next update.
+        release_slot_buffers()
         # Release the cached receive buffers and post-load temporaries so memory
         # allocated outside torch (NCCL, other processes on the GPU) can use it.
         torch.accelerator.empty_cache()
@@ -311,13 +452,31 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+        if update_info.stage_setup:
+            self._setup_stages()
+            return
+        if update_info.stages is None:
+            self._receive(update_info, self.model_update_group)
+            return
+        stage, group = self._stage
+        for one in update_info.stages[stage] or ():
+            self._receive(NCCLWeightTransferUpdateInfo(**one), group)
+        for one in update_info.tail or ():
+            self._receive(NCCLWeightTransferUpdateInfo(**one), self.model_update_group)
+
+    def _receive(
+        self, update_info: NCCLWeightTransferUpdateInfo, group: "PyNcclCommunicator"
+    ) -> None:
+        assert group is not None
+        main = group is self.model_update_group
         src = update_info.src
-        if not 0 <= src < self.rank_offset:
+        if main and not 0 <= src < self.rank_offset:
             raise ValueError(
                 f"NCCL update src must be a sender rank in [0, {self.rank_offset}), "
                 f"got {src!r}."
             )
-        key = (self.model, src)
+        key = (self.model, id(group), src)
+        reused = not update_info.names
         if update_info.names:
             self._last_update_info[key] = update_info
         else:
@@ -326,7 +485,8 @@ class NCCLWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import load_planned
 
         plan = self._plan if self.model is self._default_model else None
-        if plan is not None:
+        if plan is not None and not reused:
+            # reused metadata was checked when it first came
             assert self._plan_manifest is not None
             _check_manifest(
                 self._plan_manifest,
@@ -341,7 +501,11 @@ class NCCLWeightTransferEngine(
         load_weights = (
             model.load_weights if plan is None else partial(load_planned, model, plan)
         )
-        if self.packed:
+        if self.packed and plan is not None:
+            self._receive_planned(update_info, src, plan, group)
+        elif not main:
+            raise RuntimeError("PP-stage groups need a packed load plan")
+        elif self.packed:
             # Build iterator of (name, (shape, dtype)) from update_info
             def state_dict_info_iterator():
                 for name, dtype_name, shape in zip(
@@ -352,7 +516,7 @@ class NCCLWeightTransferEngine(
 
             packed_nccl_broadcast_consumer(
                 iterator=state_dict_info_iterator(),
-                group=self.model_update_group,
+                group=group,
                 src=src,
                 post_unpack_func=load_weights,
                 buffer_size_bytes=self.packed_buffer_size_bytes,
@@ -366,11 +530,186 @@ class NCCLWeightTransferEngine(
             ):
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device=self.device)
-                self.model_update_group.broadcast(
-                    weight, src=src, stream=torch.cuda.current_stream()
-                )
+                group.broadcast(weight, src=src, stream=torch.cuda.current_stream())
                 load_weights([(name, weight)])
                 del weight
+
+    def _setup_stages(self) -> None:
+        """Worker side of `_stage_handshake`: needs the plan (built by the
+        first `start_weight_update`), which knows exactly what this rank writes."""
+        from vllm.distributed.parallel_state import get_pp_group
+
+        group = self.model_update_group
+        assert group is not None and self._plan is not None
+        assert self._plan_manifest is not None
+        names = list(self._plan_manifest)
+        row = torch.zeros(1 + len(names), dtype=torch.int32)
+        row[0] = get_pp_group().rank_in_group
+        # a fallback (None) may write anything here: count it as needed
+        row[1:] = torch.tensor(
+            [self._plan.dests.get(n) != () for n in names], dtype=torch.int32
+        )
+        stages = _stage_handshake(group, row.to(group.device), self.rank_offset)
+        mine = [i for i, st in enumerate(stages) if st["comm"] is not None]
+        assert len(mine) == 1, mine
+        self._stage = (mine[0], stages[mine[0]]["comm"])
+
+    def _planned_layout(
+        self, update_info: NCCLWeightTransferUpdateInfo, src: int, plan, group
+    ) -> dict:
+        """Per packed chunk, the copies from the receive buffer into the
+        model, built once per update metadata: an update then runs no
+        per-tensor Python."""
+        import gc
+
+        import regex as re
+
+        nbuf = self.packed_num_buffers
+        cache = self.__dict__.setdefault("_layouts", {})
+        layout = cache.get((id(group), src))
+        if layout is not None and layout["names"] == update_info.names:
+            return layout
+        names, shapes = update_info.names, update_info.shapes
+        dtypes = [getattr(torch, d) for d in update_info.dtype_names]
+        wire = chunk_layout(zip(shapes, dtypes), self.packed_buffer_size_bytes)
+        need = max(wire.sizes, default=0)
+        bufs = slot_buffers(nbuf, need)
+        index_of = re.compile(r"\.\d+(?=\.|$)")
+        chunks = []
+        for k, pieces in enumerate(wire.chunks):
+            dsts: list[torch.Tensor] = []
+            srcs: list[torch.Tensor] = []
+            roles: list[str] = []
+            reshaped: list = []  # sources not viewable as their destination
+            pending: list = []  # unaligned, or split and needed whole: per receive
+            fallbacks: list = []
+            for piece, view in zip(pieces, wire.views(k, bufs[k % nbuf])):
+                index, rows, dtype = piece[0], piece[1], piece[3]
+                name = names[index]
+                dest = plan.get_dest(name)
+                ops = (
+                    None
+                    if dest is None
+                    else [(tuple(slice(*b) for b in box), t) for box, t in dest]
+                )
+                pairs = None if ops is None else _pairs(ops, rows, view)
+                if view.dtype != dtype or (rows is not None and pairs is None):
+                    pending.append((piece, view, name, ops))
+                    continue
+                if pairs is None:
+                    fallbacks.append((name, view))
+                    continue
+                for dst, part in pairs:
+                    try:
+                        part = part.view(dst.shape)
+                    except RuntimeError:
+                        reshaped.append((dst, part))
+                        continue
+                    for word in (torch.int64, torch.int32, torch.int16):
+                        # move whole words (a byte-wise strided copy is far
+                        # below bandwidth); a cast stays elementwise
+                        if (
+                            word.itemsize <= dst.element_size()
+                            or dst.dtype != part.dtype
+                        ):
+                            break
+                        try:
+                            dst, part = dst.view(word), part.view(word)
+                            break
+                        except RuntimeError:
+                            continue
+                    dsts.append(dst)
+                    srcs.append(part)
+                    roles.append(index_of.sub(".#", name))
+            dsts, srcs = _coalesce(dsts, srcs, roles)
+            fb_bytes = sum(t.nbytes for _, t in fallbacks)
+            chunks.append(
+                (wire.sizes[k], dsts, srcs, reshaped, pending, fallbacks, fb_bytes)
+            )
+        layout = cache[(id(group), src)] = {
+            "names": list(names),
+            "shapes": shapes,
+            "chunks": chunks,
+            "need": need,
+        }
+        # These views live as long as the engine: keep the collector from
+        # rescanning ~1e5 of them mid-transfer (full collections cost ~0.3 s).
+        gc.collect()
+        gc.freeze()
+        return layout
+
+    def _receive_planned(
+        self, update_info: NCCLWeightTransferUpdateInfo, src: int, plan, group
+    ) -> None:
+        """Packed receive into reused buffers, then one batched copy per chunk;
+        fallback names still go through `load_weights` in arrival order."""
+        from vllm.distributed.weight_transfer.packed_tensor import _get_streams
+
+        layout = self._planned_layout(update_info, src, plan, group)
+        nbuf = self.packed_num_buffers
+        bufs = slot_buffers(nbuf, layout["need"])  # regrows released storage
+        streams = _get_streams(torch.accelerator.current_device_index(), nbuf)
+        slot_done: list[torch.Event | None] = [None] * nbuf
+        prev: torch.Event | None = None
+        deferred: list[tuple[str, torch.Tensor]] = []
+        joined: dict[str, torch.Tensor] = {}
+        for i, (size, dsts, srcs, reshaped, pending, fallbacks, fb_bytes) in enumerate(
+            layout["chunks"]
+        ):
+            s = i % nbuf
+            done = slot_done[s]
+            if done is not None:
+                done.synchronize()  # its previous chunk is copied out
+            with torch.cuda.stream(streams[s]):
+                group.broadcast(bufs[s][:size], src=src)
+                # chunk i's copies run after every earlier chunk's (fallback
+                # loaders may keep views across calls, as on the packed path)
+                if prev is not None:
+                    streams[s].wait_event(prev)
+                if dsts:
+                    torch._foreach_copy_(dsts, srcs)
+                for dst, part in reshaped:
+                    dst.copy_(part.reshape(dst.shape))
+                # Fallbacks keep their arrival order but load once per call:
+                # a copy outlives the slot, and the plan keeps their writes
+                # disjoint from every direct write.
+                if fb_bytes > (64 << 20):  # too big to copy aside: load now
+                    self.model.load_weights([*deferred, *fallbacks])
+                    deferred = []
+                else:
+                    deferred.extend((n, t.clone()) for n, t in fallbacks)
+                for (index, rows, shape, dtype, _, _), view, name, ops in pending:
+                    full = view if view.dtype == dtype else view.clone().view(dtype)
+                    full = full.view(shape)
+                    pairs = (
+                        None if ops is None or rows is None else _pairs(ops, rows, full)
+                    )
+                    if pairs is not None:  # a realigned piece of a split tensor
+                        for dst, part in pairs:
+                            dst.copy_(part.reshape(dst.shape))
+                        continue
+                    if rows is not None:  # a split tensor needed whole: join it
+                        whole = joined.get(name)
+                        if whole is None:
+                            whole = joined[name] = torch.empty(
+                                layout["shapes"][index], dtype=dtype, device=self.device
+                            )
+                        whole[rows[0] : rows[1]].copy_(full)
+                        if rows[1] < whole.shape[0]:
+                            continue
+                        full = joined.pop(name)
+                    if ops is None:
+                        deferred.append((name, full))  # its own storage
+                    for box, dst in ops or ():
+                        dst.copy_(full[box].reshape(dst.shape))
+                prev = torch.Event()
+                prev.record(streams[s])
+                slot_done[s] = prev
+        for stream in streams:
+            stream.synchronize()
+        if deferred:
+            self.model.load_weights(deferred)
+            torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -414,6 +753,12 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self._group_rank = 0
         # Metadata the worker already holds; an unchanged round sends none.
         self._sent_meta: list[ParamMeta] | None = None
+        # PP-stage groups: opt in by setting `stage_groups` (needs
+        # `use_load_plan`); formed at the first update, once its start has
+        # built the workers' plan.
+        self.stage_groups = False
+        self._stages: list[dict] | None = None
+        self._stage_split: tuple | None = None  # rounds and tail per slices
         # With `use_load_plan`: the metadata the workers plan from, sent at init.
         self._plan_manifest: Manifest | None = None
 
@@ -563,16 +908,154 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         reuse = self.is_sender and meta == self._sent_meta
         if self.is_sender:
             self.client.start_weight_update()
-        for broadcaster, metas in slices:
-            src = group_ranks.index(broadcaster)
-            if self.is_sender:
-                self._send_update(metas, src, reuse)
-            else:
-                self._broadcast(metas, src)
+        if self.stage_groups and self._stages is None:
+            self._setup_stages(meta, group_ranks)
+        if self._stages:
+            self._send_stages(group_ranks, slices)
+        else:
+            for broadcaster, metas in slices:
+                src = group_ranks.index(broadcaster)
+                if self.is_sender:
+                    self._send_update(metas, src, reuse)
+                else:
+                    self._broadcast(metas, src)
         if self.is_sender:
             self.client.finish_weight_update()
             self._sent_meta = meta
         self._post_send_sync()
+
+    def _setup_stages(self, meta: list[ParamMeta], group_ranks: list[int]) -> None:
+        """Trainer side of `_stage_handshake`; rank 0 triggers the workers'
+        side with an `update_weights` RPC that runs concurrently."""
+        group = self.model_update_group
+        assert group is not None and self._plan_manifest is not None
+        names = list(self._plan_manifest)
+        owner = {
+            m.name: group_ranks.index(0 if m.owners is None else m.owners[0])
+            for m in meta
+        }
+
+        size = {m.name: math.prod(m.shape) * m.dtype.itemsize for m in meta}
+
+        def owner_flags(need: list[torch.Tensor]) -> torch.Tensor:
+            # Each trainer rank joins one stage's ring only: the one it sends
+            # the most bytes to (a rank on two rings halves both). What it
+            # owns for other stages goes in a final turn on the main group.
+            nbytes = torch.zeros(len(need), len(group_ranks), dtype=torch.float64)
+            for c, mask in enumerate(need):
+                for i in mask.nonzero().flatten().tolist():
+                    if names[i] in owner:
+                        nbytes[c, owner[names[i]]] += size[names[i]]
+            flags = torch.zeros(len(need), len(group_ranks), dtype=torch.int32)
+            for b in range(len(group_ranks)):
+                if nbytes[:, b].sum() > 0:
+                    flags[int(nbytes[:, b].argmax()), b] = 1
+            return flags.to(group.device)
+
+        row = torch.zeros(1 + len(names), dtype=torch.int32, device=group.device)
+        row[0] = -1
+        exe = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = (
+                exe.submit(self.client.update_weights, {"stage_setup": True})
+                if self.is_sender
+                else None
+            )
+            stages = _stage_handshake(group, row, len(group_ranks), owner_flags)
+            if future is not None:
+                future.result()
+        finally:
+            exe.shutdown(wait=False)
+        for st in stages:
+            st["need"] = {names[i] for i in st["need"].nonzero().flatten().tolist()}
+        self._stages = stages
+
+    def _send_stages(
+        self, group_ranks: list[int], slices: list[tuple[int, list[ParamMeta]]]
+    ) -> None:
+        """One RPC; each stage runs its rounds (one per trainer rank on its
+        ring) back to back, then every rank joins the tail turns: what a rank
+        owns for a stage whose ring it is not on, on the main group."""
+        assert self._stages is not None and self.model_update_group is not None
+        key = [(b, len(metas)) for b, metas in slices]
+        split = self._stage_split
+        if split is None or split[0] != key:
+            rounds: list[list] = [[] for _ in self._stages]
+            tail = []
+            for broadcaster, metas in slices:
+                b = group_ranks.index(broadcaster)
+                home = [c for c, st in enumerate(self._stages) if b in st["members"]]
+                if not home:
+                    continue
+                st = self._stages[home[0]]
+                mine = [m for m in metas if m.name in st["need"]]
+                rest = [
+                    m
+                    for m in metas
+                    if any(
+                        m.name in other["need"]
+                        for c, other in enumerate(self._stages)
+                        if c != home[0]
+                    )
+                ]
+                if mine:
+                    rounds[home[0]].append(
+                        (st["comm"], st["members"].index(b), metas, mine)
+                    )
+                if rest:
+                    tail.append((self.model_update_group, b, metas, rest))
+            split = (key, rounds, tail, set())
+            self._stage_split = split
+        _, rounds, tail, sent = split
+
+        def info(src: int, sub: list[ParamMeta]) -> dict:
+            if id(sub) in sent:
+                return {"src": src}  # the workers hold its metadata
+            sent.add(id(sub))
+            return {
+                "names": [m.name for m in sub],
+                "dtype_names": [_dtype_name(m.dtype) for m in sub],
+                "shapes": [list(m.shape) for m in sub],
+                "src": src,
+            }
+
+        payload = {
+            "stages": [
+                [info(src, sub) for _, src, _, sub in r] or None for r in rounds
+            ],
+            "tail": [info(src, sub) for _, src, _, sub in tail],
+        }
+        turns = [t for r in rounds for t in r if t[0] is not None] + tail
+        exe = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = (
+                exe.submit(self.client.update_weights, payload)
+                if self.is_sender
+                else None
+            )
+            for comm, src, metas, sub in turns:  # one ring per rank: in order
+                if comm.rank != src:
+                    self._discard(sub, src, comm)
+                    continue
+                assert self.source is not None
+                keep = {m.name for m in sub}
+                packed_nccl_broadcast_producer(
+                    iterator=(
+                        p
+                        for p in self._checked_iter(self.source, metas)
+                        if p[0] in keep
+                    ),
+                    group=comm,
+                    src=src,
+                    post_iter_func=lambda item: item[1],
+                    buffer_size_bytes=self.packed_buffer_size_bytes,
+                    num_buffers=self.packed_num_buffers,
+                    layout=self._wire_layout(sub),
+                )
+            if future is not None:
+                future.result()
+        finally:
+            exe.shutdown(wait=False)
 
     def _send_update(self, meta: list[ParamMeta], src: int, reuse: bool) -> None:
         """Rank 0's part of one broadcaster's turn: run its `update_weights`
@@ -590,6 +1073,9 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         if not src:
             # Keep single-broadcaster payloads readable by older servers.
             del payload["src"]
+        for unused in ("stage_setup", "stages", "tail"):
+            if not payload[unused]:
+                del payload[unused]
         # update_weights (workers receive) must run concurrently with the
         # trainer-side broadcast — both rendezvous inside the same NCCL calls.
         exe = ThreadPoolExecutor(max_workers=1)
@@ -631,6 +1117,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
+                layout=self._wire_layout(meta),
             )
         else:
             stream = torch.cuda.current_stream()
@@ -642,25 +1129,40 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 send = tensor if tensor.is_contiguous() else tensor.contiguous()
                 self.model_update_group.broadcast(send, src=src, stream=stream)
 
-    def _discard(self, meta: list[ParamMeta], src: int) -> None:
-        """Receive another broadcaster's parameters and drop them."""
-        assert self.model_update_group is not None
-        device = self.model_update_group.device
-        if self.packed:
-            packed_nccl_broadcast_consumer(
-                iterator=((m.name, (list(m.shape), m.dtype)) for m in meta),
-                group=self.model_update_group,
-                src=src,
-                post_unpack_func=lambda weights: None,
-                buffer_size_bytes=self.packed_buffer_size_bytes,
-                num_buffers=self.packed_num_buffers,
-                device=device,
+    def _wire_layout(self, meta: list[ParamMeta]):
+        """How `meta` travels, built once per parameter list."""
+        cache = self.__dict__.setdefault("_wire_layouts", {})
+        key = (len(meta), meta[0].name if meta else "", meta[-1].name if meta else "")
+        layout = cache.get(key)
+        if layout is None:
+            layout = cache[key] = chunk_layout(
+                ((m.shape, m.dtype) for m in meta), self.packed_buffer_size_bytes
             )
+        return layout
+
+    def _discard(
+        self,
+        meta: list[ParamMeta],
+        src: int,
+        group: "PyNcclCommunicator | None" = None,
+    ) -> None:
+        """Receive another broadcaster's parameters and drop them."""
+        group = group or self.model_update_group
+        assert group is not None
+        device = group.device
+        if self.packed:
+            # Nothing is kept: receive each chunk into one buffer, unread. A
+            # rank that lags here stalls the whole broadcast ring.
+            sizes = self._wire_layout(meta).sizes
+            buf = torch.empty(max(sizes, default=0), dtype=torch.uint8, device=device)
+            for n in sizes:  # on the current stream
+                group.broadcast(buf[:n], src=src)
+            torch.accelerator.current_stream().synchronize()
         else:
             stream = torch.cuda.current_stream()
             for m in meta:
                 weight = torch.empty(m.shape, dtype=m.dtype, device=device)
-                self.model_update_group.broadcast(weight, src=src, stream=stream)
+                group.broadcast(weight, src=src, stream=stream)
 
     @staticmethod
     def _checked_iter(

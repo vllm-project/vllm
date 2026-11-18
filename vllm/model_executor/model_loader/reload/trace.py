@@ -109,6 +109,19 @@ class TraceTensor(torch.Tensor):
             src = args[1] if len(args) > 1 else kwargs.get("src")
             if isinstance(src, cls) and not isinstance(args[0], cls):
                 return src._sink.accept_copy(args[0], src)
+        if func is torch.Tensor.__setitem__ and len(args) == 3:
+            # ``dst[index] = src`` is ``dst[index].copy_(src)`` when the
+            # index selects a view of ``dst`` (an advanced index copies, and
+            # the write would land in that copy: leave it to dispatch).
+            dst, index, src = args
+            if isinstance(src, cls) and not isinstance(dst, cls):
+                with torch._C.DisableTorchFunctionSubclass():
+                    view = dst[index]
+                if view._is_view() and view.untyped_storage()._cdata == (
+                    dst.untyped_storage()._cdata
+                ):
+                    src._sink.accept_copy(view, src)
+                    return None
         self_ = args[0] if args else None
         if isinstance(self_, cls):
             if func in VIEW_OPS:
