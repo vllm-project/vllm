@@ -114,6 +114,18 @@ def benchmark(args):
                         for iteration in range(args.iterations):
                             launch(iteration % args.tables)
                     runtime.synchronize()
+                    out.fill_(-2)
+                    load.zero_()
+                    graph.replay()
+                    torch.testing.assert_close(
+                        out.cpu().long(), expected, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        load.cpu().long(),
+                        expected_load * args.iterations,
+                        rtol=0,
+                        atol=0,
+                    )
                     arms[name] = (graph, load, out)
                 samples = {name: [] for name in arms}
                 for _ in range(args.repeats):
