@@ -594,6 +594,11 @@ class HYV4MLAAttention(nn.Module):
 
         if selected_cls.supports_sink():
             return selected_cls
+        if selected_cls.get_name() == "FLASHINFER_MLA_SPARSE_SM120":
+            # Capability 12: the same FlashInfer kernel takes a per-head sink.
+            from vllm.models.hy_v4_flash.nvidia.sm120 import FlashSM120SparseBackend
+
+            return FlashSM120SparseBackend
 
         from .flashmla_sparse import HYV4FlashMLASparseBackend
 

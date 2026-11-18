@@ -78,10 +78,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
         self.gated_mla = config.gated_mla
         self.learnable_sink = config.learnable_sink
         capability = current_platform.get_device_capability()
-        if capability is None or capability.major not in (9, 10):
-            raise NotImplementedError(
-                "Flash MLA requires Hopper or Blackwell data-center GPUs"
-            )
+        if capability is None or capability.major not in (9, 10, 12):
+            raise NotImplementedError("Flash MLA requires Hopper or Blackwell GPUs")
+        if capability.major == 12:
+            # RTX 50 / RTX PRO Blackwell and DGX Spark: FlashInfer's SM120 kernels
+            from .sm120 import FlashSM120SparseBackend, FlashSM120SWABackend
+
+            sparse_backend, swa_backend = FlashSM120SparseBackend, FlashSM120SWABackend
+        else:
+            sparse_backend, swa_backend = FlashSparseBackend, FlashSWABackend
         if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
             raise ValueError("Flash sparse MLA requires latent512 + rotary64 KV")
         if (
@@ -191,9 +196,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             use_sparse=True,
             indexer=self.indexer,
             topk_indices_buffer=self.indexer.topk_indices_buffer,
-            attn_backend=FlashSWABackend
-            if self.is_window_layer
-            else FlashSparseBackend,
+            attn_backend=swa_backend if self.is_window_layer else sparse_backend,
             sliding_window=config.sliding_window if self.is_window_layer else None,
             sinks=self.learnable_sink_param,
         )
