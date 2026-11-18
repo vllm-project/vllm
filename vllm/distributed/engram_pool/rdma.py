@@ -43,7 +43,20 @@ from vllm.distributed.engram_pool.memory import (
     device_view,
     gpu_numa_node,
 )
-from vllm.distributed.engram_pool.rows import Landed, Tables, locate, wait_landed
+from vllm.distributed.engram_pool.rows import (
+    GATHERERS,
+    READY_FLAGS,
+    READY_LANDED,
+    READY_QPS,
+    READY_SEQ,
+    READY_TIMEOUT,
+    READY_USED,
+    READY_WORLD,
+    SHARD_BASES,
+    SHARD_KEYS,
+    locate,
+    wait_landed,
+)
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 
@@ -53,6 +66,8 @@ SQ_DEPTH = 1024
 # Requests in flight per QP to a gatherer: a fetch posts one per table.
 REQUEST_DEPTH = 64
 MIN_CHAIN: tl.constexpr = tl.constexpr(proxy.MIN_CHAIN)
+# A failed transfer or dead proxy must not hang the GPU forever.
+TIMEOUT_NS = 60 * 10**9
 
 
 class _RequestWQE(ctypes.Structure):
@@ -155,7 +170,7 @@ def _wr_layout(rows, ROWS_PER_WR, QPS, MAX_CHAIN):
 @triton.jit(do_not_specialize=["num_items", "num_vg"])
 def _plan_kernel(
     ids,
-    tables,
+    meta,
     counts,
     owner_pos,
     remote_addr,
@@ -182,8 +197,10 @@ def _plan_kernel(
     peers = tl.arange(0, VG_P2)
     item = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = item < num_items
-    index, shard, local, live = locate(ids, tables, item, valid, world, TABLES, K)
-    gatherer = tl.load(tables.gatherers + shard, mask=live, other=0).to(tl.int64)
+    index, table, owner, local, live = locate(ids, meta, item, valid, TABLES, K)
+    gatherers = tl.load(table + GATHERERS, mask=live, other=0)
+    gatherers = gatherers.to(tl.pointer_type(tl.int32))
+    gatherer = tl.load(gatherers + owner, mask=live, other=0).to(tl.int64)
     gatherer += index * world
     # Positions: ranks within the block, after one atomic per group.
     mine = ((gatherer[:, None] == peers[None, :]) & live[:, None]).to(tl.int32)
@@ -194,9 +211,13 @@ def _plan_kernel(
     tl.store(
         owner_pos + item, tl.where(live, gatherer << 32 | position, -1), mask=valid
     )
-    base = tl.load(tables.bases + shard, mask=live, other=0)
-    tl.store(remote_addr + item, base + local * (WORDS * 8), mask=live)
-    tl.store(keys + item, tl.load(tables.keys + shard, mask=live), mask=live)
+    bases = tl.load(table + SHARD_BASES, mask=live, other=0)
+    bases = bases.to(tl.pointer_type(tl.int64))
+    base_at = tl.load(bases + owner, mask=live, other=0)
+    tl.store(remote_addr + item, base_at + local * (WORDS * 8), mask=live)
+    lkeys = tl.load(table + SHARD_KEYS, mask=live, other=0)
+    lkey = tl.load(lkeys.to(tl.pointer_type(tl.int32)) + owner, mask=live)
+    tl.store(keys + item, lkey, mask=live)
     tl.debug_barrier()
     if _last_program(ticket):
         in_vg = peers < num_vg
@@ -470,10 +491,11 @@ def _post_requests(
 def _place_kernel(
     owner_pos,
     starts,
+    landing,
     out,
     num_words,
     table,
-    landed,
+    ready,
     TABLES: tl.constexpr,
     K: tl.constexpr,
     HOST: tl.constexpr,
@@ -482,7 +504,7 @@ def _place_kernel(
 ):
     """Once table `table`'s rows have landed, copy them to their places in
     `out` (its `[..., K]` rows), zeroing dead rows; one word per lane."""
-    wait_landed(landed, table)
+    wait_landed(ready, table)
     word = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = word < num_words
     row = word // WORDS
@@ -490,7 +512,7 @@ def _place_kernel(
     packed = tl.load(owner_pos + item, mask=valid, other=-1)
     live = packed >= 0
     slot = tl.load(starts + (packed >> 32), mask=live, other=0) + (packed & 0xFFFFFFFF)
-    src = landed.rows.to(tl.pointer_type(tl.uint64)) + slot * WORDS + word - row * WORDS
+    src = landing.to(tl.pointer_type(tl.uint64)) + slot * WORDS + word - row * WORDS
     # NICs rewrite host landing between fetches: bypass caches there.
     if HOST:
         data = tl.load(src, mask=live, other=0, cache_modifier=".cv")
@@ -664,8 +686,20 @@ class RdmaTransport:
         self.ticket = torch.zeros(1, dtype=torch.int32, device=gpu)
         self.desc_at = self.desc.data_ptr()
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
-        # Each table's last seq seen landed.
-        self.done = torch.full((max_tables,), -1, dtype=torch.int64, device=gpu)
+        # Each table's last landed seq, and `wait_landed`'s view of a fetch.
+        self.landed_seq = torch.full((max_tables,), -1, dtype=torch.int64, device=gpu)
+        ready = {
+            READY_SEQ.value: self.seq.data_ptr(),
+            READY_USED.value: self.used.data_ptr(),
+            READY_FLAGS.value: self.flags.data_ptr(),
+            READY_WORLD.value: self.world,
+            READY_QPS.value: self.qps_per_peer,
+            READY_TIMEOUT.value: TIMEOUT_NS,
+            READY_LANDED.value: self.landed_seq.data_ptr(),
+        }
+        self.ready = torch.tensor(
+            [ready[i] for i in range(len(ready))], dtype=torch.int64, device=gpu
+        )
         self.owner_pos = torch.empty(total, dtype=torch.int64, device=gpu)
         self.remote_addr = torch.empty(total, dtype=torch.int64, device=gpu)
         self.keys = torch.empty(total, dtype=torch.int32, device=gpu)
@@ -728,10 +762,9 @@ class RdmaTransport:
             args = ["dmabuf", cumem.size, address, access]
         return self._call("register", *args, fds=[fd])
 
-    def shard(self, num_bytes: int, name: str) -> tuple[torch.Tensor, tuple, list]:
+    def shard(self, num_bytes: int, name: str) -> tuple[torch.Tensor, list, list]:
         """Allocate and register this GPU's shard; returns it (host memory for
-        host shards), every shard's address, key and gatherer, and what keeps
-        them. Collective."""
+        host shards), its `meta` arrays and what keeps them alive. Collective."""
         registered: SharedHost | tuple[CuMem, int]
         if self.host_shards:
             registered = host = SharedHost(num_bytes, f"table_{name}")
@@ -762,12 +795,20 @@ class RdmaTransport:
             bases.append(address)
             keys.append(lkey)
             gatherers.append(gatherer)
-        return local, (bases, keys, gatherers), keep
+        arrays = [
+            torch.tensor(values, dtype=dtype, device="cuda")
+            for values, dtype in (
+                (bases, torch.int64),
+                (keys, torch.int32),
+                (gatherers, torch.int32),
+            )
+        ]
+        return local, [array.data_ptr() for array in arrays], keep + arrays
 
-    def start(self, rows: Tables, ids: torch.Tensor, fetch) -> list:
-        """Start gathering rows `ids` (`[..., TABLES, K]`) of the tables `rows`
-        describes on the current stream; the NICs move them meanwhile."""
-        n, tables, k = ids.numel(), rows.num_rows.numel(), ids.shape[-1]
+    def start(self, meta: torch.Tensor, ids: torch.Tensor, fetch) -> list:
+        """Start gathering rows `ids` (`[..., TABLES, K]`) of the tables in `meta`
+        on the current stream; the NICs move them while the stream goes on."""
+        n, tables, k = ids.numel(), meta.shape[0], ids.shape[-1]
         if n > self.max_items * self.max_tables or tables > self.max_tables:
             raise ValueError(f"{tables} tables of {n} rows exceed the pool's capacity")
         if self.proc.returncode is not None:
@@ -781,7 +822,7 @@ class RdmaTransport:
         self._launch(
             _plan_kernel,
             (triton.cdiv(n, 256),),
-            (ids, rows, self.counts, self.owner_pos, self.remote_addr, self.keys)
+            (ids, meta, self.counts, self.owner_pos, self.remote_addr, self.keys)
             + (n, self.world, num_vg, self.ticket, self.starts)
             + (self.wr_starts, self.wr_counts, self.used),
             dict(
@@ -828,32 +869,22 @@ class RdmaTransport:
         self._launch(
             _place_kernel,
             (triton.cdiv(num_words, 1024),),
-            (self.owner_pos, self.starts, out, num_words, table)
-            + (self.landed(fetch, table),),
+            (self.owner_pos, self.starts, self.landing, out, num_words)
+            + (table, self.ready),
             dict(TABLES=tables, K=k, HOST=self.host_landing, WORDS=words, BLOCK=1024),
         )
 
-    def landed(self, fetch: list, table: int) -> Landed | None:
-        """Where table `table`'s rows of `fetch` land."""
+    def landed(self, fetch: list, table: int) -> tuple | None:
+        """Where table `table`'s rows of `fetch` land: the landing buffer, each
+        row's slot in it, and the descriptor `wait_landed` reads."""
         if not fetch:
             return None
-        return Landed(
-            self.landing,
-            fetch[4][table],
-            self.seq,
-            self.used,
-            self.flags,
-            self.done,
-            self.world,
-            self.qps_per_peer,
-            tl.constexpr(False),
-        )
+        return self.landing, fetch[4][table], self.ready
 
     def _launch(self, kernel, grid, args: tuple, consts: dict) -> None:
         """Launch `kernel` on the current stream, compiled once per constexprs
         and tensor alignment: Triton's per-call dispatch costs ~20 us here."""
-        flat = [x for a in args for x in (a if isinstance(a, tuple) else (a,))]
-        aligned = tuple(a.data_ptr() % 16 == 0 for a in flat if type(a) is torch.Tensor)
+        aligned = tuple(a.data_ptr() % 16 == 0 for a in args if type(a) is torch.Tensor)
         key = (kernel, *consts.values(), *aligned)
         if (compiled := self._compiled.get(key)) is None:
             compiled = kernel.warmup(*args, grid=grid, num_warps=4, **consts)

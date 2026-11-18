@@ -19,13 +19,13 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cache, cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed.engram_pool.group import PeerGroup, join_peer_group
-from vllm.distributed.engram_pool.rows import Landed, Tables, landed_row
+from vllm.distributed.engram_pool.rows import landed_row
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 
@@ -61,11 +61,18 @@ class EngramTable:
     row_stride: int
     row_start: int
     shard: torch.Tensor
-    rows_per_shard: int
-    # Every shard's address, NIC key and gathering NIC's rank.
-    _shards: tuple[torch.Tensor, ...]
+    _meta: torch.Tensor
     _keep: list = field(default_factory=list)
     _loaded: bool = False
+
+
+class Landed(NamedTuple):
+    """`landed_row`'s view of one table of a fetch."""
+
+    rows: torch.Tensor
+    slots: torch.Tensor
+    ready: torch.Tensor
+    placed: bool
 
 
 class EngramFetch:
@@ -88,8 +95,12 @@ class EngramFetch:
     def landed(self, index: int) -> Landed:
         """Table `index`'s rows where they land, for a kernel that reads them
         with `landed_row` instead of `wait`. Launches nothing."""
-        landed = self.pool.transport.landed(self.state, index)
-        return Landed(self.rows[index]) if landed is None else landed
+        got = self.pool.transport.landed(self.state, index)
+        if got is None:
+            rows = self.rows[index]
+            return Landed(rows, rows, rows, True)
+        rows, slots, ready = got
+        return Landed(rows, slots, ready, False)
 
 
 class EngramPool:
@@ -148,7 +159,7 @@ class EngramPool:
             )
         self._where = "host memory" if host_shards else "HBM"
         self._buffer: torch.Tensor | None = None
-        self._fetched: dict[tuple[int, ...], Tables] = {}
+        self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
     @staticmethod
     def _check_same(group: PeerGroup, identity: tuple) -> None:
@@ -173,15 +184,8 @@ class EngramPool:
         row_start = min(rank * rows_per_shard, num_rows)
         shard_rows = min(rows_per_shard, num_rows - row_start)
         num_bytes = max(rows_per_shard * row_stride, _ROW_ALIGN)
-        local, (bases, keys, gatherers), keep = self.transport.shard(num_bytes, name)
-        shards = tuple(
-            torch.tensor(values, dtype=dtype, device="cuda")
-            for values, dtype in (
-                (bases, torch.int64),
-                (keys, torch.int32),
-                (gatherers, torch.int32),
-            )
-        )
+        local, arrays, keep = self.transport.shard(num_bytes, name)
+        meta = torch.tensor([rows_per_shard, num_rows, *arrays], dtype=torch.int64)
         shard = local[: shard_rows * row_stride].view(shard_rows, row_stride)
         logger.info(
             "Engram pool table %r: rows [%d, %d) of %d on this GPU, %.2f GiB in %s",
@@ -193,14 +197,7 @@ class EngramPool:
             self._where,
         )
         return EngramTable(
-            num_rows,
-            row_bytes,
-            row_stride,
-            row_start,
-            shard[:, :row_bytes],
-            rows_per_shard,
-            shards,
-            keep,
+            num_rows, row_bytes, row_stride, row_start, shard[:, :row_bytes], meta, keep
         )
 
     def ready(self, table: EngramTable) -> None:
@@ -215,18 +212,14 @@ class EngramPool:
         self.group.barrier()
         table._loaded = True
 
-    def _tables(self, tables: list[EngramTable]) -> Tables:
+    def _meta(self, tables: list[EngramTable]) -> torch.Tensor:
         key = tuple(id(t) for t in tables)
-        if (found := self._fetched.get(key)) is None:
+        if (meta := self._metas.get(key)) is None:
             if len({t.row_stride for t in tables}) != 1:
                 raise ValueError("One fetch's tables must have equal row sizes")
-            found = Tables(
-                torch.tensor([t.rows_per_shard for t in tables], device="cuda"),
-                torch.tensor([t.num_rows for t in tables], device="cuda"),
-                *(torch.stack(arrays) for arrays in zip(*(t._shards for t in tables))),
-            )
-            self._fetched[key] = found
-        return found
+            meta = torch.stack([t._meta for t in tables]).cuda()
+            self._metas[key] = meta
+        return meta
 
     def _output(self, numel: int) -> torch.Tensor:
         """Placed rows, allocated once a fetch places any."""
@@ -242,11 +235,10 @@ class EngramPool:
             raise ValueError(
                 f"ids {tuple(ids.shape)} do not match {len(tables)} tables"
             )
+        meta = self._meta(tables)
         shape = (len(tables), *ids.shape[:-2], ids.shape[-1], tables[0].row_stride)
         fetch = EngramFetch(self, shape)
-        fetch.state = self.transport.start(
-            self._tables(tables), ids.contiguous(), fetch
-        )
+        fetch.state = self.transport.start(meta, ids.contiguous(), fetch)
         return fetch
 
     def lookup(self, tables: list[EngramTable], ids: torch.Tensor) -> torch.Tensor:
