@@ -271,8 +271,9 @@ class Scenario:
         SWA group: bounded by the 128-token sliding window (2 blocks).
         """
         osl = PHASES[self.phase]
-        turns = BENCH_TURNS - 1
-        fa_tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
+        fa_tokens = (
+            self.prefix_tokens + BENCH_TURNS * self.isl_tokens + (BENCH_TURNS - 1) * osl
+        )
         fa_blocks = fa_tokens / BLOCK_SIZE
         swa_blocks = 128 / BLOCK_SIZE  # gptoss has a sliding window of 128 tokens.
         return (fa_blocks + swa_blocks) * per_group_block_bytes
@@ -464,6 +465,17 @@ class VLLMServer:
         self.port = port
         self.kv_cache_bytes = kv_cache_bytes
         self.proc: subprocess.Popen | None = None
+        self._previous_signal_handlers: dict[int, object] = {}
+
+    def _handle_termination(self, signum: int, _frame: object) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.send_signal(signum)
+        raise SystemExit(128 + signum)
+
+    def _restore_signal_handlers(self) -> None:
+        for signum, handler in self._previous_signal_handlers.items():
+            signal.signal(signum, handler)
+        self._previous_signal_handlers = {}
 
     def start(self) -> None:
         env = dict(os.environ, PYTHONHASHSEED="0")
@@ -484,10 +496,20 @@ class VLLMServer:
             "--port",
             str(self.port),
         ]
-        with self.log_path.open("w") as log:
-            self.proc = subprocess.Popen(
-                cmd, stdout=log, stderr=subprocess.STDOUT, env=env
-            )
+        try:
+            self._previous_signal_handlers = {
+                signal.SIGINT: signal.getsignal(signal.SIGINT),
+                signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            }
+            signal.signal(signal.SIGINT, self._handle_termination)
+            signal.signal(signal.SIGTERM, self._handle_termination)
+            with self.log_path.open("w") as log:
+                self.proc = subprocess.Popen(
+                    cmd, stdout=log, stderr=subprocess.STDOUT, env=env
+                )
+        except BaseException:
+            self._restore_signal_handlers()
+            raise
 
     def wait_ready(self, timeout: int = 1800) -> None:
         assert self.proc is not None
@@ -510,6 +532,8 @@ class VLLMServer:
     def stop(self) -> None:
         """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
         assert self.proc is not None
+        # Restore signal handlers. We are terminating the vLLM process anyhow.
+        self._restore_signal_handlers()
         proc = self.proc
         for attempt in range(1, 6):
             if proc.poll() is not None:
@@ -530,6 +554,15 @@ class VLLMServer:
                 "likely still locked. Aborting to prevent cascading failures."
             )
         print("      vLLM successfully terminated.")
+
+    def assert_running(self) -> None:
+        """Raise if the server exited before expected."""
+        assert self.proc is not None
+        return_code = self.proc.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                self._crash_report(f"Exited before expected: return code {return_code}")
+            )
 
     def _crash_report(self, why: str) -> str:
         assert self.proc is not None
@@ -595,7 +628,19 @@ class GuideLLM:
             f"kind=json,path={log_path.parent / 'guidellm.json'}",
         ]
         with log_path.open("w") as log:
-            subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                return_code = proc.wait()
+            except BaseException:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd)
         return self._parse_report(log_path.with_name("guidellm.json"))
 
     def _parse_report(self, json_path: Path) -> dict:
@@ -669,13 +714,17 @@ class BenchmarkRun:
             self.run_dir / "vllm.log",
             self.port,
             self.spec.gpu.get_num_bytes() // TP_SIZE,
-        ):
+        ) as server:
             print("  [4/5] Running guidellm benchmark...")
+            guidellm_result = self.guidellm.run(
+                self.spec, self.run_dir / "guidellm.log"
+            )
+            server.assert_running()
             result = {
                 "name": self.spec.name,
                 "spec": asdict(self.spec),
                 "status": "ok",
-                **self.guidellm.run(self.spec, self.run_dir / "guidellm.log"),
+                **guidellm_result,
             }
         print("  [5/5] Teardown: vLLM stopped.")
         time.sleep(5)
