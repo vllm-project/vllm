@@ -1066,6 +1066,20 @@ steps:
 #       - vllm/platforms/rocm.py
 #       - tools/benchmark_helion_kernels.py
 
+- label: ":nvidia: (DGX Spark) MoE Kernels"
+  key: kernels-moe-test-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 25
+  device: dgx-spark
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/fused_moe.py
+  - tests/kernels/moe/test_moe.py
+  commands:
+  - pytest -v -s kernels/moe/test_moe.py
+
 - label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   automatic_shard: true
