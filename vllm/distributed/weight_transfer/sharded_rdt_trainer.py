@@ -42,7 +42,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
     DEFAULT_NUM_BUFFERS,
-    Box,
+    PIECE_ALIGNMENT,
     FlatPiece,
     RdtRouter,
     WireBucket,
@@ -51,13 +51,14 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     check_ray_rdt_version,
     deregister_nixl_memory,
     flat_layout,
-    from_wire_box,
     gather_units,
+    meta_nbytes,
     piece_nbytes,
     register_nixl_memory,
-    validate_sharded_rdt_settings,
+    validate_int,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -103,12 +104,9 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Seconds without progress before a producer fails the sync."""
 
     def __post_init__(self) -> None:
-        validate_sharded_rdt_settings(
-            buffer_bytes=self.buffer_bytes,
-            num_buffers=self.num_buffers,
-            num_consumers=self.num_consumers,
-            allow_zero_consumers=False,
-        )
+        validate_int("buffer_bytes", self.buffer_bytes, minimum=1)
+        validate_int("num_buffers", self.num_buffers, minimum=1)
+        validate_int("num_consumers", self.num_consumers, minimum=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,14 +433,13 @@ class _RDTProducerServer:
         served: list[_ServedBucket] = []
         for i, wire in enumerate(buckets):
             pieces, units, nbytes, boxes, dtypes = [], set(), 0, [], []
-            for name, wire_box in wire:
+            for name, box in wire:
                 if name not in self._served:
                     raise ValueError(
                         f"consumer {consumer_id} bucket {i}: {name!r} is not "
                         "served by this trainer rank"
                     )
                 dtype, shape = self._served[name]
-                box: Box = from_wire_box(wire_box)
                 if len(box) != len(shape) or any(
                     not 0 <= a < b <= n for (a, b), n in zip(box, shape)
                 ):
@@ -819,7 +816,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 self._owner_sets.append(list(owners))
             self._name_owner_class.append(class_of[owners])
         self._units = gather_units(
-            [_nbytes(m) for m in self._meta], self._init_info.buffer_bytes
+            [meta_nbytes(m) for m in self._meta], self._init_info.buffer_bytes
         )
         self._owned_names = set(self.source.owned_names(rank))
         self._owned_units = sorted(
@@ -1117,15 +1114,6 @@ class ShardedRDTTrainerWeightTransferEngine(
             handle = ready.ipc_handle()
         return (storages, views, handle), refs, ready
 
-    @staticmethod
-    def _contig_stride(shape) -> tuple:
-        stride: list[int] = []
-        acc = 1
-        for s in reversed(list(shape)):
-            stride.append(acc)
-            acc *= int(s)
-        return tuple(reversed(stride))
-
     def _pack_for_export(self, held: list, slot_idx: int) -> tuple:
         """Copy `held` into export slot `slot_idx` and describe them as views
         of its one storage, the way `publish_unit` rebuilds them. A slot is
@@ -1133,10 +1121,10 @@ class ShardedRDTTrainerWeightTransferEngine(
         offsets: list[int] = []
         cur = 0
         for _, t in held:
-            cur = (cur + 15) & ~15
+            cur = round_up(cur, PIECE_ALIGNMENT)
             offsets.append(cur)
             cur += t.numel() * t.element_size()
-        need = max(16, (cur + 15) & ~15)
+        need = max(PIECE_ALIGNMENT, round_up(cur, PIECE_ALIGNMENT))
         slot = self._export_ring[slot_idx]
         device = held[0][1].device
         if slot is None or slot.numel() < need or slot.device != device:
@@ -1154,15 +1142,14 @@ class ShardedRDTTrainerWeightTransferEngine(
         views: dict[str, tuple] = {}
         refs: dict[str, torch.Tensor] = {}
         for (name, t), off in zip(held, offsets):
-            shape, esz = tuple(t.shape), t.element_size()
-            stride = self._contig_stride(shape)
-            refs[name] = torch.as_strided(slot.view(t.dtype), shape, stride, off // esz)
+            ref = slot[off : off + t.nbytes].view(t.dtype).view(t.shape)
+            refs[name] = ref
             views[name] = (
                 sid,
                 _dtype_name(t.dtype),
-                list(shape),
-                list(stride),
-                off // esz,
+                list(ref.shape),
+                list(ref.stride()),
+                ref.storage_offset(),
             )
         # ordered before the server's reads by the unit's event (`_export`)
         torch._foreach_copy_(list(refs.values()), [t for _, t in held])
@@ -1221,10 +1208,3 @@ class ShardedRDTTrainerWeightTransferEngine(
 
 def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).removeprefix("torch.")
-
-
-def _nbytes(meta: ParamMeta) -> int:
-    n = meta.dtype.itemsize
-    for d in meta.shape:
-        n *= d
-    return n

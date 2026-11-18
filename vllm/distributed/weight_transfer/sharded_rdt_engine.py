@@ -7,6 +7,7 @@ names, from the trainer ranks that own them, and writes them where the plan
 says. The protocol is described in `sharded_rdt_common`.
 """
 
+import itertools
 import math
 import time
 from collections import defaultdict
@@ -36,11 +37,10 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     flat_layout,
     flat_view,
     gather_units,
+    meta_nbytes,
     piece_nbytes,
     register_nixl_memory,
     validate_int,
-    validate_sharded_rdt_settings,
-    wire_box,
 )
 from vllm.logger import init_logger
 
@@ -163,7 +163,7 @@ class _Bucket:
         self.byte_srcs.append(src)
 
     def wire(self) -> WireBucket:
-        return [(name, wire_box(box)) for name, box in self.pieces]
+        return list(self.pieces)
 
     def prepare(self) -> None:
         self.layout = flat_layout([box for _, box in self.pieces], self.dtypes)
@@ -269,12 +269,9 @@ class ShardedRDTWeightTransferEngine(
         """
         from vllm.model_executor.model_loader.reload import check_plannable
 
-        validate_sharded_rdt_settings(
-            buffer_bytes=init_info.buffer_bytes,
-            num_buffers=init_info.num_buffers,
-            num_consumers=init_info.num_consumers,
-            allow_zero_consumers=True,
-        )
+        validate_int("buffer_bytes", init_info.buffer_bytes, minimum=1)
+        validate_int("num_buffers", init_info.num_buffers, minimum=1)
+        validate_int("num_consumers", init_info.num_consumers, minimum=0)
         try:
             check_plannable(self.model)
         except RuntimeError as e:
@@ -306,14 +303,18 @@ class ShardedRDTWeightTransferEngine(
 
         self._drop_plan()
         self._metas = metas
-        nbytes = [_nbytes(m) for m in metas]
+        nbytes = [meta_nbytes(m) for m in metas]
         self._units = {
             m.name: u
             for m, u in zip(metas, gather_units(nbytes, init_info.buffer_bytes))
         }
         self._router = router
+        # distinct per worker of one deployment: DP index, then rank in TP*PP
+        pc = self.parallel_config
         self._consumer_id = (
-            max(0, init_info.replica_rank) * per_replica + self._global_worker_index()
+            max(0, init_info.replica_rank) * per_replica
+            + pc.data_parallel_index * pc.world_size
+            + pc.rank
         )
         self._buffer_bytes = init_info.buffer_bytes
         self._num_buffers = init_info.num_buffers
@@ -326,12 +327,6 @@ class ShardedRDTWeightTransferEngine(
             len(producers),
             len(metas),
         )
-
-    def _global_worker_index(self) -> int:
-        """`data_parallel_index * world_size + rank` over the TP*PP world:
-        distinct per worker of one deployment."""
-        pc = self.parallel_config
-        return pc.data_parallel_index * pc.world_size + pc.rank
 
     def start_weight_update(self) -> None:
         """Begin a direct reload; the first one after an init also plans and
@@ -408,7 +403,7 @@ class ShardedRDTWeightTransferEngine(
                 groups[key].append((meta.name, box, meta.dtype, by_box[box], None))
 
         components = router.components()
-        unit_rank = _component_unit_rank(self._metas, self._units, router)
+        unit_rank = _component_unit_rank(self._metas, self._units, router, components)
         for pieces in groups.values():
             # By destination address, so pieces adjacent in memory (one
             # fused tensor's slices, e.g. per-expert weights) are adjacent in
@@ -701,13 +696,6 @@ def _metas(init_info: ShardedRDTWeightTransferInitInfo) -> list[ParamMeta]:
     return metas
 
 
-def _nbytes(meta: ParamMeta) -> int:
-    n = meta.dtype.itemsize
-    for d in meta.shape:
-        n *= d
-    return n
-
-
 def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]:
     """Producer actor handles, by trainer rank."""
     try:
@@ -804,26 +792,23 @@ def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
 
 def _cut(pieces: list[tuple], budget: int) -> list[list[tuple]]:
     """Consecutive runs of at most `budget` bytes; a larger piece goes alone."""
-    chunks: list[list[tuple]] = []
-    used = budget
-    for piece in pieces:
-        n = piece_nbytes(piece[1], piece[2])
-        if used + n > budget or not chunks:
-            chunks.append([])
-            used = 0
-        chunks[-1].append(piece)
-        used += n
-    return chunks
+    units = gather_units([piece_nbytes(p[1], p[2]) for p in pieces], budget)
+    return [
+        [piece for _, piece in run]
+        for _, run in itertools.groupby(zip(units, pieces), key=lambda x: x[0])
+    ]
 
 
 def _component_unit_rank(
-    metas: list[ParamMeta], units: dict[str, int], router: RdtRouter
+    metas: list[ParamMeta],
+    units: dict[str, int],
+    router: RdtRouter,
+    components: list[int],
 ) -> dict[int, dict[int, int]]:
     """Per coupling component, each unit's index among the units its ranks
     gather. Ordering pulls by it keeps every component in gather order (so
     no rank waits on a unit its consumers pull later) while independent
     components, pipeline stages, pull side by side."""
-    components = router.components()
     rank: dict[int, dict[int, int]] = defaultdict(dict)
     for meta in metas:
         comp = components[router.owners(meta.name)[0]]
