@@ -80,6 +80,7 @@ from .muse_moe_runner import (
     MuseSparkRoutedExperts,
     token_sharded_moe_output,
 )
+from .ops.fp8_rows import dequant_rows, quant_rows
 from .ops.fused_norm_expand import fused_rmsnorm_expand
 from .ops.fused_qk_norm_rope_kv import rocm_fused_qk_norm_rope_kv_insert
 from .ops.router_bf16x3 import (
@@ -147,6 +148,22 @@ class TokenShard:
     def gather(self, x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_gather(x.contiguous(), 0)[: self.num_tokens]
 
+    @property
+    def fp8_gather(self) -> bool:
+        """Whether the attention and pooled expert inputs travel as FP8 rows."""
+        return envs.VLLM_ROCM_MUSE_TSP_FP8_AG
+
+    def gather_fp8(
+        self, x: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather `quant_rows` output; the rows travel as 16-bit words."""
+        full = self.gather(x.view(torch.float16)).view(x.dtype)
+        # One 16-byte aligned row of scales per rank.
+        padded = -(-self.rows // 4) * 4
+        scales = F.pad(scale, (0, padded - self.rows)).view(1, padded)
+        scales = tensor_model_parallel_all_gather(scales, 0)[:, : self.rows]
+        return full, scales.reshape(-1)[: self.num_tokens]
+
     def reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         pad = self.rows * self.world - x.shape[0]
         if pad:
@@ -159,8 +176,12 @@ def norm_residual_then_norm(
     pre_norm: MuseSparkRMSNorm,
     *,
     out_dtype: torch.dtype,
+    fp8_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Post-norm, blend and pre-norm in one kernel; returns `(out, new_stream)`."""
+    """Post-norm, blend and pre-norm in one kernel; returns `(out, new_stream)`.
+
+    With `fp8_scale`, `out` is `quant_rows` output and its scales go there.
+    """
     post_norm, connection = x.post_norm, x.connection
     branch, stream = x.branch, x.stream
     if (
@@ -187,10 +208,15 @@ def norm_residual_then_norm(
             pre_input_scale=(
                 pre_norm.applies_weight_before_norm and pre_norm.has_weight
             ),
-            out_dtype=out_dtype,
+            out_dtype=out_dtype if fp8_scale is None else current_platform.fp8_dtype(),
+            fp8_scale=fp8_scale,
         )
     new_stream = norm_then_gated_residual(x)
-    return pre_norm(new_stream, out_dtype=out_dtype), new_stream
+    out = pre_norm(new_stream, out_dtype=out_dtype)
+    if fp8_scale is not None:
+        out, scale = quant_rows(out)
+        fp8_scale.copy_(scale)
+    return out, new_stream
 
 
 class MuseSparkTorchLinearMethod(UnquantizedLinearMethod):
@@ -394,12 +420,18 @@ class MuseSparkMoE(nn.Module):
     ) -> torch.Tensor:
         if self.pooler is not None:
             hidden_states, _ = self.pooler(hidden_states)
+        x_scale = None
         if shard is not None:
-            hidden_states = shard.gather(hidden_states)
+            if shard.fp8_gather and hidden_states.is_contiguous():
+                hidden_states, x_scale = shard.gather_fp8(*quant_rows(hidden_states))
+            else:
+                hidden_states = shard.gather(hidden_states)
         norm = self.pre_expert_norm
-        if norm is None:
-            return hidden_states
-        if self._experts_take_expanded_input and hidden_states.is_contiguous():
+        if (
+            norm is not None
+            and self._experts_take_expanded_input
+            and hidden_states.is_contiguous()
+        ):
             return fused_rmsnorm_expand(
                 hidden_states,
                 norm.weight if norm.has_weight else None,
@@ -407,8 +439,11 @@ class MuseSparkMoE(nn.Module):
                 norm.fused_gain_center,
                 norm.applies_weight_before_norm and norm.has_weight,
                 self.top_k,
+                x_scale=x_scale,
             )
-        return norm(hidden_states)
+        if x_scale is not None:
+            hidden_states = dequant_rows(hidden_states, x_scale, torch.bfloat16)
+        return hidden_states if norm is None else norm(hidden_states)
 
     def forward(
         self, hidden_states: torch.Tensor, shard: TokenShard | None = None
@@ -735,9 +770,17 @@ class MuseSparkAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         shard: TokenShard | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
-        if shard is not None:
+        """Attention over an input the caller has already normalized.
+
+        `x_scale` marks `hidden_states` as `quant_rows` output (token-sharded only).
+        """
+        if x_scale is not None:
+            assert shard is not None
+            full, scales = shard.gather_fp8(hidden_states, x_scale)
+            hidden_states = dequant_rows(full, scales, torch.bfloat16)
+        elif shard is not None:
             hidden_states = shard.gather(hidden_states)
         qkv, _ = self.qkv_proj(hidden_states)
 
@@ -932,19 +975,29 @@ class MuseSparkDecoderLayer(nn.Module):
 
         With `shard`, the stream holds the current rank's tokens only.
         """
+        x_scale = None
         if isinstance(x, torch.Tensor):
             stream = x
             attn_input = self.self_attn.pre_qkv_proj_norm(
                 stream, out_dtype=self.default_dtype
             )
         else:
+            if shard is not None and shard.fp8_gather:
+                x_scale = torch.empty(
+                    x.stream.numel() // x.stream.shape[-1],
+                    dtype=torch.float32,
+                    device=x.stream.device,
+                )
             attn_input, stream = norm_residual_then_norm(
-                x, self.self_attn.pre_qkv_proj_norm, out_dtype=self.default_dtype
+                x,
+                self.self_attn.pre_qkv_proj_norm,
+                out_dtype=self.default_dtype,
+                fp8_scale=x_scale,
             )
         assert stream.dtype == self.residual_dtype
 
         attn_out = self.self_attn(
-            positions=positions, hidden_states=attn_input, shard=shard
+            positions=positions, hidden_states=attn_input, shard=shard, x_scale=x_scale
         )
         return self.after_attention(stream, attn_out, shard)
 
