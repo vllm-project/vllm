@@ -11,7 +11,6 @@ import regex as re
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -59,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload import weight_update_active
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -70,7 +70,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
     skip_spec_layers,
@@ -172,7 +171,7 @@ def step5_swa_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    gate: torch.Tensor,
+    gate: torch.Tensor | None,
 ) -> None:
     metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     typing.cast(Any, layer.impl).forward_with_headwise_gate(
@@ -477,6 +476,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     """
 
     INDEXER_SHARD_IDS = ("index_q", "index_k", "index_z", "index_g")
+    shard_ids = ("q", "k", "v", *INDEXER_SHARD_IDS)
 
     def __init__(
         self,
@@ -574,7 +574,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         )
         self.register_parameter("weight", weight)
         self.update_param_tp_status()
-        self._loaded_shards: set[str] = set()
 
     @property
     def local_index_q_size(self) -> int:
@@ -587,11 +586,6 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     @property
     def local_index_z_size(self) -> int:
         return self.local_index_kv_heads * self.proxy_dim
-
-    def validate_shard_id(self, loaded_shard_id: Any) -> TypeIs[str | None]:
-        if loaded_shard_id in self.INDEXER_SHARD_IDS:
-            return True
-        return super().validate_shard_id(loaded_shard_id)
 
     def _indexer_source_offset(self, shard_id: str) -> tuple[int, int]:
         if shard_id == "index_q":
@@ -634,16 +628,13 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
                 "tensors; a pre-fused qkv_indexer_proj weight is not supported."
             )
         if loaded_shard_id in self.INDEXER_SHARD_IDS:
+            self.validate_shard_id(loaded_shard_id, param)
             src_offset, shard_size = self._indexer_source_offset(loaded_shard_id)
             dst_offset = self._indexer_dest_offset(loaded_shard_id)
             shard = loaded_weight.narrow(0, src_offset, shard_size)
             param.data.narrow(0, dst_offset, shard_size).copy_(shard)
         else:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-        self._loaded_shards.add(loaded_shard_id)
-
-    def required_shard_ids(self) -> set[str]:
-        return {"q", "k", "v", "index_q", "index_k", "index_z", "index_g"}
 
     def assert_fully_loaded(self, prefix: str) -> None:
         """Fail unless this load covered every shard, then forget the record.
@@ -653,17 +644,17 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
         storage for the whole parameter, so a shard the new weight stream omits
         would otherwise silently become garbage.
         """
-        required = self.required_shard_ids()
-        missing = sorted(required - self._loaded_shards)
+        loaded = self.loaded_shard_ids.pop("weight", set())
+        self.loaded_shard_ids.clear()
+        missing = [shard for shard in self.shard_ids if shard not in loaded]
         if missing:
             raise ValueError(
                 f"Incomplete fused qkv+indexer weight for {prefix}: "
                 f"missing shards {missing}."
             )
-        self._loaded_shards.clear()
 
     def reset_load_state(self) -> None:
-        self._loaded_shards.clear()
+        self.loaded_shard_ids.clear()
 
     def forward(  # type: ignore[override]
         self,
@@ -758,8 +749,7 @@ class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
 def _step5_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     return (
-        parallel.pipeline_parallel_size == 1
-        and parallel.enable_expert_parallel
+        parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
     )
@@ -867,7 +857,7 @@ class Step5Attention(nn.Module):
         rope_theta: float | list[float] | None = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         sliding_window: int | None = None,
@@ -890,7 +880,7 @@ class Step5Attention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
         sparse_indexer_base_rope_parameters = (
-            dict(rope_scaling) if rope_scaling is not None else {}
+            dict(rope_parameters) if rope_parameters is not None else {}
         )
         default_layer_type = (
             "sliding_attention" if self.layer_idx % 2 == 0 else "full_attention"
@@ -903,7 +893,7 @@ class Step5Attention(nn.Module):
         )
         enable_sliding_window = layer_type == "sliding_attention"
         if yarn_only_types and layer_type not in yarn_only_types:
-            rope_scaling = None
+            rope_parameters = None
 
         if sliding_window is not None and enable_sliding_window:
             if swa_num_attention_heads is not None:
@@ -1028,7 +1018,8 @@ class Step5Attention(nn.Module):
                 Step5DSAAttentionBackend.supports_compute_capability(capability)
             ):
                 raise NotImplementedError(
-                    f"Step5 DSA requires SM90, SM100 or SM103; got {capability}."
+                    f"Step5 {vllm_config.kernel_config.step5_attention_backend} "
+                    f"DSA does not support GPU capability {capability}."
                 )
             if self.head_dim not in (128, 192):
                 raise ValueError(
@@ -1107,9 +1098,7 @@ class Step5Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        rope_parameters: dict[str, Any] = (
-            dict(rope_scaling) if rope_scaling is not None else {}
-        )
+        rope_parameters = dict(rope_parameters) if rope_parameters is not None else {}
         rope_parameters.setdefault("rope_type", "default")
         if rope_theta is not None:
             rope_parameters["rope_theta"] = rope_theta
@@ -1173,9 +1162,17 @@ class Step5Attention(nn.Module):
         if self.use_dsa_backend:
             attn_backend = Step5DSAAttentionBackend
         else:
-            from .sparse_attention import Step5SplitKVFlashAttentionBackend
+            from .sparse_attention import (
+                Step5PrimsTSSWABackend,
+                Step5SplitKVFlashAttentionBackend,
+            )
 
-            attn_backend = Step5SplitKVFlashAttentionBackend
+            attn_backend = (
+                Step5PrimsTSSWABackend
+                if vllm_config is not None
+                and vllm_config.kernel_config.step5_attention_backend == "prims_ts"
+                else Step5SplitKVFlashAttentionBackend
+            )
         sparse_impl_args: dict[str, Any] = {}
         if self.use_dsa_backend:
             dsa_vllm_config = typing.cast(VllmConfig, vllm_config)
@@ -1266,6 +1263,7 @@ class Step5Attention(nn.Module):
             and current_platform.is_device_capability(103)
             and typing.cast(Any, self.attn.impl).supports_fused_swa_decode()
         )
+        self.prims_ts_attention = getattr(self.attn.impl, "use_prims_ts", False)
 
     def forward(
         self,
@@ -1285,7 +1283,14 @@ class Step5Attention(nn.Module):
             qkzg = None
             extra_dims = None
 
-        if self.fuse_swa_gate and extra_dims is None:
+        # PrimTS also covers DSA and ungated layers. DSA gets its gate from
+        # qkzg; only gated SWA may need a separate projection here.
+        if (
+            (self.fuse_swa_gate or self.prims_ts_attention)
+            and not self.use_dsa_backend
+            and self.use_head_wise_attn_gate
+            and extra_dims is None
+        ):
             extra_dims, _ = self.g_proj(hidden_states)
 
         attn_metadata, _, kv_cache, slot_mapping = get_attention_context(
@@ -1316,6 +1321,12 @@ class Step5Attention(nn.Module):
             key_cache, value_cache = typing.cast(Any, self.attn.impl)._split_kv_cache(
                 kv_cache
             )
+            q_dtype = (
+                torch.float8_e4m3fn
+                if self.prims_ts_attention
+                and key_cache.dtype in (torch.uint8, torch.float8_e4m3fn)
+                else None
+            )
             if (
                 self.sparse_attn is not None
                 and self.sparse_attn.fuse_qkv_preparation
@@ -1331,6 +1342,7 @@ class Step5Attention(nn.Module):
                     key_cache,
                     value_cache,
                     decode_slots,
+                    q_dtype=q_dtype,
                 )
             else:
                 q, k, v = ops.fused_qknorm_rope_cache(
@@ -1348,9 +1360,11 @@ class Step5Attention(nn.Module):
                     self.rotary_dim if self.use_rope else 0,
                     self.q_norm.variance_epsilon,
                     float(self.zero_centered),
-                    self.attn.kv_cache_dtype,
-                    self.attn._k_scale,
-                    self.attn._v_scale,
+                    q_dtype=q_dtype,
+                    kv_cache_dtype=self.attn.kv_cache_dtype,
+                    q_scale=self.attn._q_scale_float,
+                    k_scale=self.attn._k_scale,
+                    v_scale=self.attn._v_scale,
                 )
             kv_cache_dummy_dep = q.new_empty(0)
         else:
@@ -1380,8 +1394,7 @@ class Step5Attention(nn.Module):
                 decode_slots=decode_slots,
                 prepared_indexer=prepared_indexer,
             )
-        elif self.fuse_swa_gate:
-            assert extra_dims is not None
+        elif self.fuse_swa_gate or self.prims_ts_attention:
             key = k.view(-1, self.num_kv_heads, self.head_dim)
             value = v.view(-1, self.num_kv_heads, self.head_dim)
             if (
@@ -1390,9 +1403,10 @@ class Step5Attention(nn.Module):
                 and self.attn.kv_sharing_target_layer_name is None
             ):
                 unified_kv_cache_update(key, value, self.attn.layer_name)
+            # Q may be FP8; K/V retain the model activation dtype for output.
             attn_output = torch.empty(
                 (q.shape[0], self.num_heads, self.head_dim),
-                dtype=q.dtype,
+                dtype=k.dtype,
                 device=q.device,
             )
             step5_swa_attention_with_output(
@@ -1416,6 +1430,7 @@ class Step5Attention(nn.Module):
         if (
             self.use_head_wise_attn_gate
             and not self.fuse_swa_gate
+            and not self.prims_ts_attention
             and self.sparse_attn is None
         ):
             assert extra_dims is not None
@@ -1461,6 +1476,8 @@ class Step5SparseAttention:
         key_cache,
         value_cache,
         decode_slots,
+        *,
+        q_dtype=None,
     ):
         from .ops.qkv_indexer_norm_rope import qkv_indexer_norm_rope
 
@@ -1501,6 +1518,8 @@ class Step5SparseAttention:
             decode_ring=impl.csa_ring if cache is not None else None,
             decode_z=index_z if cache is not None else None,
             decode_slots=decode_slots,
+            q_dtype=q_dtype,
+            q_scale=owner.attn._q_scale_float,
         )
         return (q, k, v), (
             index_q,
@@ -1570,9 +1589,10 @@ class Step5SparseAttention:
     ) -> torch.Tensor:
         attn = self.owner.attn
         hidden_size = attn.num_heads * attn.head_size_v
+        # Q may be FP8; K/V retain the model activation dtype for output.
         output = torch.empty(
             (query.shape[0], hidden_size),
-            dtype=query.dtype,
+            dtype=key.dtype,
             device=query.device,
         )
 
@@ -1906,7 +1926,7 @@ class Step5DecoderLayer(nn.Module):
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                rope_scaling=getattr(config, "rope_scaling", None),
+                rope_parameters=getattr(config, "rope_parameters", None),
                 sliding_window=sliding_window,
                 use_head_wise_attn_gate=getattr(
                     config, "use_head_wise_attn_gate", False
@@ -2099,8 +2119,18 @@ class Step5Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        # The residual stream stays FP32 across pipeline stages.
+        if self.fp32_residual_connection:
+            dtype = torch.float32
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                )
+            }
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -2437,11 +2467,7 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             moe.experts.update_expert_map()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        from vllm.model_executor.model_loader.mtp_validation import (
-            is_mtp_completeness_check_enabled,
-        )
-
-        validate_completeness = is_mtp_completeness_check_enabled()
+        validate_completeness = not weight_update_active()
         if validate_completeness:
             _reset_fused_qkv_indexer_load_state(self.model)
         skip_prefixes = ["vision_model."]

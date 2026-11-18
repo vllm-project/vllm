@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 CuTeDSLCompileFn = Callable[[], None]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CuTeDSLCompileUnit:
     name: str
     key: Hashable

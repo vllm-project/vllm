@@ -10,9 +10,8 @@ import torch
 from cutlass.cute.runtime import make_fake_stream
 
 from ..common.host import architecture, dynamic_fake, dynamic_view, stream
-from ..common.primitives import launch
+from ..common.primitives import launch, situ_and_mul
 from ..gemm.projection import PreparedProjection
-from .shared import situ
 
 
 class DenseSitu:
@@ -36,7 +35,7 @@ class DenseSitu:
             if col < self.hidden:
                 gate = cutlass.Float32(x[row, col])
                 up = cutlass.Float32(x[row, self.hidden + col])
-                value = situ(gate, up, beta, linear, native=True)
+                value = situ_and_mul(gate, up, beta, linear)
             out[row, col] = cutlass.BFloat16(value)
         cute.arch.griddepcontrol_launch_dependents()
 
