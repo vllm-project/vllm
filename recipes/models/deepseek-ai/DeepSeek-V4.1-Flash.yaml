@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-14
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -406,7 +406,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP4 for concurrency 4 to 24 with capped decode batches (max-num-active-seqs), prefill admitted on an interval, FlashInfer sparse MLA (FlashMLA at 16) and THP-backed Engram host tables."
     source: { label: "InferenceX #4786", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4786", key: "dsv41flash-fp4-b200-vllm-agentic-dspark", revision: becc63b53 }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:d2a073f6b4da63907c8374313f66407798035649cc4b574287df6d20050753c6"
@@ -516,7 +515,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "DEP4 at concurrency 66 and DEP8 at 224 to 576: DeepGEMM MegaMoE, FlashMLA MegaAttention, GPU-resident Engram tables shared across DP ranks, and per-point prefill budgets and KV pools, behind a consistent-hash vLLM Router."
     source: { label: "InferenceX #4786", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4786", key: "dsv41flash-fp4-b200-vllm-agentic-dspark", revision: becc63b53 }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:d2a073f6b4da63907c8374313f66407798035649cc4b574287df6d20050753c6"
@@ -662,7 +660,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP4 for concurrency 4 to 16 with capped decode batches (max-num-active-seqs), prefill admitted on an interval, FlashInfer sparse MLA and THP-backed Engram host tables."
     source: { label: "InferenceX #4783", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4783", key: "dsv41flash-fp4-gb200-vllm-agentic-dspark", revision: 2610b3f }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:ab9450628edc1909b5f242be837822e09a2eb9bdd25fea169f69871a59fa6424"
@@ -749,7 +746,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "DEP4 (TP1 x DP4 + EP4) for concurrency 64 to 256: DeepGEMM MegaMoE, FlashMLA MegaAttention, deep_select indexer top-k, Engram host tables shared across DP ranks, and per-point prefill budgets and KV pools, behind a consistent-hash vLLM Router."
     source: { label: "InferenceX #4783", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4783", key: "dsv41flash-fp4-gb200-vllm-agentic-dspark", revision: 2610b3f }
     image: "vllm/vllm-openai:cu134-nightly-40941f2c4ba96fba0a7e282a5355e89cd74d9ac5@sha256:ab9450628edc1909b5f242be837822e09a2eb9bdd25fea169f69871a59fa6424"
@@ -1538,7 +1534,6 @@ presets:
     # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "The lane's engine settings in a 1P1D layout: one tray of DEP4 prefill (the lane runs several DEP2 prefill engines behind Dynamo) and four trays of DEP16 decode, with MegaMoE, MegaAttention and Engram offload; KV moves over the NVLink fabric."
     source: { label: "InferenceX #3941", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3941", key: "dsv41flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg", revision: f516173 }
     args:
