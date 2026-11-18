@@ -848,7 +848,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if vllm_config.cache_config.mamba_cache_mode == "align":
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-            elif self.gdn_prefill_backend == "triton" and current_platform.is_cuda():
+            elif (
+                self.gdn_prefill_backend == "triton"
+                and current_platform.is_cuda_alike()
+            ):
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
         if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
