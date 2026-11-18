@@ -37,11 +37,11 @@ from vllm.model_executor.utils import set_weight_attrs
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-VLLM_SSD_ATTR = "ssd"
+VLLM_SSM_ATTR = "ssm"
 """Attribute in which to store the vLLM `Mamba2SSM` that serves a Transformers
 mixer, mirroring `VLLM_ATTN_ATTR` for attention."""
 
-VLLM_SSD_SIZES_ATTR = "vllm_ssd_sizes"
+VLLM_MAMBA2_SIZES_ATTR = "vllm_mamba2_sizes"
 """Attribute in which `shard_mamba2_mixer` stores the global `Mamba2Sizes` of a
 Transformers mixer, whose own size attributes it makes rank-local."""
 
@@ -87,7 +87,7 @@ def shard_mamba2_mixer(
     sharded equivalents, laid out as in `MambaMixer2` (including replicating a single
     group to every rank). Its size attributes are then set to their rank-local
     values, so that its forward, which reads them to split its projections, splits
-    this rank's shard. The global sizes are kept in `VLLM_SSD_SIZES_ATTR` for
+    this rank's shard. The global sizes are kept in `VLLM_MAMBA2_SIZES_ATTR` for
     `TransformersMamba2SSM`.
     """
     tp_size = get_tensor_model_parallel_world_size()
@@ -200,9 +200,8 @@ def shard_mamba2_mixer(
         )
 
     # 5. Sizes, made rank-local for the forward
-    setattr(
-        mixer, VLLM_SSD_SIZES_ATTR, Mamba2Sizes(intermediate_size, n_groups, num_heads)
-    )
+    sizes = Mamba2Sizes(intermediate_size, n_groups, num_heads)
+    setattr(mixer, VLLM_MAMBA2_SIZES_ATTR, sizes)
     mixer.intermediate_size = intermediate_size // tp_size
     mixer.num_heads = num_heads // tp_size
     mixer.n_groups = (n_groups + extra_groups) // tp_size
@@ -213,7 +212,7 @@ class TransformersMamba2SSM(Mamba2SSM):
     """`Mamba2SSM` that reads its weights from the Transformers mixer it serves."""
 
     def __init__(self, mixer: nn.Module, vllm_config: "VllmConfig", prefix: str):
-        sizes: Mamba2Sizes = getattr(mixer, VLLM_SSD_SIZES_ATTR)
+        sizes: Mamba2Sizes = getattr(mixer, VLLM_MAMBA2_SIZES_ATTR)
         super().__init__(
             ssm_state_size=mixer.ssm_state_size,
             conv_kernel_size=mixer.conv_kernel_size,
@@ -252,12 +251,12 @@ class TransformersMamba2SSM(Mamba2SSM):
         return self.mixer.conv1d.bias
 
 
-def attach_ssd(mixer: nn.Module, ssd: TransformersMamba2SSM) -> None:
-    """Attach `ssd` to `mixer` and to its `conv1d`, from which the replacements
+def attach_ssm(mixer: nn.Module, ssm: TransformersMamba2SSM) -> None:
+    """Attach `ssm` to `mixer` and to its `conv1d`, from which the replacements
     of `ssd_forward` and `causal_conv1d_forward` find it."""
-    setattr(mixer, VLLM_SSD_ATTR, ssd)
-    # Weak and not a submodule, so `ssd` stays a child of the mixer only
-    mixer.conv1d.__dict__[VLLM_SSD_ATTR] = weakref.ref(ssd)
+    setattr(mixer, VLLM_SSM_ATTR, ssm)
+    # Weak and not a submodule, so `ssm` stays a child of the mixer only
+    mixer.conv1d.__dict__[VLLM_SSM_ATTR] = weakref.ref(ssm)
 
 
 class VllmCausalConv1dForward(nn.Module):
@@ -273,9 +272,9 @@ class VllmCausalConv1dForward(nn.Module):
         state_idx: int = 0,
         **kwargs,
     ) -> torch.Tensor:
-        ssd: Mamba2SSM = conv1d.__dict__[VLLM_SSD_ATTR]()
+        ssm: Mamba2SSM = conv1d.__dict__[VLLM_SSM_ATTR]()
         # [batch=1, dim, num_tokens] -> [num_tokens, dim] and back
-        return ssd.forward_conv(hidden_states[0].T).T[None]
+        return ssm.forward_conv(hidden_states[0].T).T[None]
 
 
 class VllmSSDForward(nn.Module):
@@ -292,9 +291,9 @@ class VllmSSDForward(nn.Module):
         cache: object,
         **kwargs,
     ) -> torch.Tensor:
-        ssd: Mamba2SSM = getattr(module, VLLM_SSD_ATTR)
+        ssm: Mamba2SSM = getattr(module, VLLM_SSM_ATTR)
         # [batch=1, num_tokens, dim] -> [num_tokens, dim] and back
-        return ssd.forward_scan(hidden_states[0], B[0], C[0], dt[0])[None]
+        return ssm.forward_scan(hidden_states[0], B[0], C[0], dt[0])[None]
 
 
 @dataclass(frozen=True)
@@ -327,7 +326,7 @@ def kernelize_linear_attention(model: nn.Module, device_type: str) -> None:
 
 
 class LinearAttentionMixin(HasInnerState, SupportsMambaPrefixCaching):
-    """State interfaces for models whose linear attention layers are all SSD.
+    """State interfaces for models whose linear attention layers are all Mamba2.
 
     The geometry is read from the config before the model exists, so the
     attribute names cover the Mamba2 family's configs.

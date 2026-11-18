@@ -71,9 +71,9 @@ from vllm.model_executor.models.transformers.fusers.attention import (
     VLLM_MLA_ATTN_IMPL,
 )
 from vllm.model_executor.models.transformers.linear_attention import (
-    VLLM_SSD_ATTR,
+    VLLM_SSM_ATTR,
     TransformersMamba2SSM,
-    attach_ssd,
+    attach_ssm,
     kernelize_linear_attention,
 )
 from vllm.model_executor.models.transformers.utils import (
@@ -729,10 +729,10 @@ class Base(
             attn_module = self.get_submodule(attn_prefix)
 
             if isinstance(attn_fuser, SSDFuser):
-                ssd = TransformersMamba2SSM(
-                    attn_module, self.vllm_config, prefix=f"{i}.{VLLM_SSD_ATTR}"
+                ssm = TransformersMamba2SSM(
+                    attn_module, self.vllm_config, prefix=f"{i}.{VLLM_SSM_ATTR}"
                 )
-                attach_ssd(attn_module, ssd)
+                attach_ssm(attn_module, ssm)
                 continue
 
             # `[i]` is the whole-model config unless the checkpoint is
