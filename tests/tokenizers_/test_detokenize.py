@@ -59,12 +59,14 @@ def _run_incremental_decode(
     starting_index: int,
     spaces_between_special_tokens: bool = True,
     fast: bool | None = None,
+    stop: list[str] | None = None,
 ):
     prompt_token_ids = all_input_ids[:starting_index]
 
     params = SamplingParams(
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
+        stop=stop,
     )
     request = EngineCoreRequest(
         request_id="",
@@ -87,7 +89,10 @@ def _run_incremental_decode(
 
     output_text = ""
     for i, token_id in enumerate(all_input_ids[starting_index:]):
-        detokenizer.update([token_id], False)
+        stopped = detokenizer.update([token_id], False)
+        if stopped is not None:
+            output_text += detokenizer.get_next_output_text(True, delta=True)
+            break
         finished = i == len(all_input_ids) - 1
         output_text += detokenizer.get_next_output_text(finished, delta=True)
 
@@ -332,6 +337,34 @@ def test_decode_trailing_replacement_char_flushed_on_finish(
 
     assert decoded_text == tokenizer.decode(ids, skip_special_tokens=True)
     assert out_ids == ids
+
+
+@pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
+@pytest.mark.parametrize("fast", (True, False))
+def test_stop_string_not_reappended_on_finish(tokenizer, fast):
+    """A stop string excluded from output stays excluded at finish.
+
+    update() truncates the output text at the stop string but keeps the
+    stop tokens in the output ids. The finished-read flush must not
+    decode those ids back into the output, on either path.
+    See https://github.com/vllm-project/vllm/issues/68324.
+    """
+    ids = tokenizer.encode(
+        "Hello world. STOP and then more text after the stop.",
+        add_special_tokens=False,
+    )
+
+    decoded_text, _ = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=0,
+        fast=fast,
+        stop=["STOP"],
+    )
+
+    assert decoded_text == "Hello world. "
+    assert "STOP" not in decoded_text
 
 
 # ---------- convert_ids_list_to_tokens collision tests ----------
