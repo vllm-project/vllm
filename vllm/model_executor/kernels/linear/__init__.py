@@ -269,6 +269,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
@@ -686,6 +687,17 @@ def _check_activation_fallback(
     )
 
 
+def _quant_scheme_check(
+    weight_key: QuantKey, activation_key: QuantKey | None
+) -> Callable[[type[MxFp4LinearKernel | Mxfp8LinearKernel]], str | None]:
+    def check(kernel_cls: type[MxFp4LinearKernel | Mxfp8LinearKernel]) -> str | None:
+        if kernel_cls._supports_quant_scheme(weight_key, activation_key):
+            return None
+        return f"quantization scheme {weight_key}x{activation_key} not supported"
+
+    return check
+
+
 def _first_usable_kernel(
     kernels: list[type[_LinearKernelT]],
     config: Any,
@@ -1069,14 +1081,19 @@ def init_mxfp8_linear_kernel(
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape.
 
-    Returns a placeholder for requantization sources, which have no kernel."""
+    Omitted activation keys preserve the existing W8A8 selection and A16
+    fallback. Explicit None requests weight-only execution.
+    Returns a placeholder for requantization sources, which have no kernel.
+    """
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeMxFp8LinearKernel()
 
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
+        activation_quant_key=activation_quant_key,
     )
 
     platform = current_platform._enum
@@ -1106,7 +1123,10 @@ def init_mxfp8_linear_kernel(
     )
 
     kernel_cls, failure_reasons = _first_usable_kernel(
-        possible, config, activation_quant_key
+        possible,
+        config,
+        activation_quant_key,
+        _quant_scheme_check(kMxfp8Static, activation_quant_key),
     )
     if kernel_cls is not None:
         logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
@@ -1182,15 +1202,11 @@ def init_mxfp4_linear_kernel(
         quantization="mxfp4",
     )
 
-    def check_quant_scheme(kernel_cls: type[MxFp4LinearKernel]) -> str | None:
-        if kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
-            return None
-        return (
-            f"quantization scheme {kMxfp4Static}x{activation_quant_key} not supported"
-        )
-
     kernel_cls, failure_reasons = _first_usable_kernel(
-        possible, config, activation_quant_key, check_quant_scheme
+        possible,
+        config,
+        activation_quant_key,
+        _quant_scheme_check(kMxfp4Static, activation_quant_key),
     )
     if kernel_cls is not None:
         logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)

@@ -3,6 +3,12 @@
 
 from dataclasses import dataclass
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
+
 from ..base import LinearKernel
 
 
@@ -15,11 +21,13 @@ class Mxfp8LinearLayerConfig:
 
     Attributes:
         weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
+        activation_quant_key: Requested activation format; None means weight-only.
 
     """
 
     weight_shape: tuple[int, int]
     bmm_batch_size: int | None = None
+    activation_quant_key: QuantKey | None = kMxfp8Dynamic
 
 
 class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):
@@ -32,6 +40,17 @@ class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):
     supports_pre_processed_weights: bool = False
     """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        """Self-quantizing kernels require explicit MXFP8 activations.
+
+        This is separate from input_quant_key(), which describes support for
+        externally quantized inputs, not the precision used inside the GEMM.
+        """
+        return weight_key == kMxfp8Static and activation_key == kMxfp8Dynamic
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
