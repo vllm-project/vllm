@@ -210,7 +210,7 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self._initialize_effective_attention_block_size()
-        self.use_spec_decode = vllm_config.speculative_config is not None
+        self.use_spec_decode = vllm_config.runner_speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
