@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from tests.kernels.mamba.utils import selective_state_update_ref
+from vllm.model_executor.layers.linear_attention.mamba2.prefill.flashinfer import (
+    FlashInferSSDKernel,
+)
 from vllm.model_executor.layers.mamba.ops import (
     ssd_bmm,
     ssd_chunk_scan,
@@ -19,9 +24,6 @@ from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
-)
-from vllm.model_executor.layers.mamba.ops.ssd_flashinfer import (
-    mamba_chunk_scan_flashinfer,
 )
 from vllm.model_executor.layers.mamba.ops.triton_helpers import _autotuned_configs
 from vllm.platforms import current_platform
@@ -1025,9 +1027,9 @@ def test_chunk_scan_fwd_every_config_matches(monkeypatch):
 )
 @pytest.mark.parametrize("has_initial_state", [False, True])
 def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
-    """FlashInfer's scan writes the state at a checkpoint token inside a prefill
-    (off its 128-token grid), alongside each sequence's final state, so prefix
-    caching can store checkpoints from FlashInfer prefills."""
+    """FlashInfer's SSD kernel writes the state at a checkpoint token inside a
+    prefill (off its 128-token grid), alongside each sequence's cached final
+    state, so prefix caching can store checkpoints from FlashInfer prefills."""
     set_random_seed(0)
     lengths, checkpoint_offset = (224, 3), 96
     heads, groups, dim, dstate = 8, 2, 64, 128
@@ -1046,27 +1048,21 @@ def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
         initial.zero_()
     cu_seqlens = torch.tensor([0, lengths[0], tokens], dtype=torch.int32, device=DEVICE)
     out = torch.empty_like(x)
-    checkpoint_states = torch.empty(2, heads, dim, dstate, device=DEVICE)
-
-    mamba_chunk_scan_flashinfer(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        D,
-        dt_bias,
-        cu_seqlens,
-        out,
-        ssm_state,
-        slots,
-        initial,
-        checkpoint_token_indices=torch.tensor(
+    metadata = SimpleNamespace(
+        query_start_loc_p=cu_seqlens,
+        state_indices_tensor_p=slots,
+        has_initial_states_p=torch.ones(2, dtype=torch.bool, device=DEVICE),
+        prep_initial_states=has_initial_state,
+        zero_initial_states_p=torch.zeros_like(initial),
+        checkpoint_token_indices_p=torch.tensor(
             [checkpoint_offset, -1], dtype=torch.int32, device=DEVICE
         ),
-        checkpoint_state_slots=torch.arange(2, dtype=torch.int32, device=DEVICE),
-        checkpoint_states=checkpoint_states,
+        checkpoint_chunk_idx=torch.arange(2, dtype=torch.int32, device=DEVICE),
+        checkpoint_states_p=torch.empty(2, heads, dim, dstate, device=DEVICE),
     )
+    layer = SimpleNamespace(A=A, D=D, dt_bias=dt_bias)
+
+    FlashInferSSDKernel.forward(layer, x, dt, B, C, out, ssm_state, metadata)
 
     # FP64 recurrence, token by token.
     state = initial.double()
@@ -1094,5 +1090,8 @@ def test_flashinfer_ssd_exports_a_checkpoint_mid_prefill(has_initial_state):
     torch.testing.assert_close(out.double(), expected_out, atol=0.1, rtol=0.06)
     torch.testing.assert_close(ssm_state[slots].double(), state, atol=0.05, rtol=0.05)
     torch.testing.assert_close(
-        checkpoint_states[0].double(), expected_checkpoint, atol=0.05, rtol=0.05
+        metadata.checkpoint_states_p[0].double(),
+        expected_checkpoint,
+        atol=0.05,
+        rtol=0.05,
     )

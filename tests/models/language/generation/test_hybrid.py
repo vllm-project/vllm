@@ -1021,9 +1021,9 @@ def test_apc_common_prefix_same_batch(
         assert "two" in output.outputs[0].text
 
 
-def _uses_flashinfer_prefill(model: torch.nn.Module) -> set[bool]:
+def _ssd_kernel_names(model: torch.nn.Module) -> set[str]:
     return {
-        module.use_flashinfer_prefill
+        module.ssd_kernel.backend
         for module in model.modules()
         if isinstance(module, MambaMixer2)
     }
@@ -1038,7 +1038,7 @@ def test_flashinfer_ssd_prefill_matches_triton_with_prefix_caching(
 ) -> None:
     """FlashInfer SSD prefill matches Triton, including prompts resumed from the
     prefix-cache checkpoints it wrote."""
-    # In-process, so the mixers' prefill backend can be checked.
+    # In-process, so the selected SSD backend can be checked.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     max_tokens, num_logprobs = 32, 5
     prompts = [APC_MULTIPLY_BY * prompt for prompt in example_prompts]
@@ -1061,7 +1061,7 @@ def test_flashinfer_ssd_prefill_matches_triton_with_prefix_caching(
         disable_log_stats=False,
     )
     with vllm_runner(**kwargs) as vllm_model:
-        assert vllm_model.apply_model(_uses_flashinfer_prefill) == [{True}]
+        assert vllm_model.apply_model(_ssd_kernel_names) == [{"flashinfer"}]
         filled = vllm_model.generate_greedy_logprobs(prompts, max_tokens, num_logprobs)
         hits_before = _prefix_cache_hits(vllm_model.llm)
         cached = vllm_model.generate_greedy_logprobs(prompts, max_tokens, num_logprobs)

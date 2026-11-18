@@ -10,7 +10,9 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     register_mamba_layers,
 )
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.model_executor.layers.linear_attention.mamba2.prefill.flashinfer import (
+    FlashInferSSDKernel,
+)
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
@@ -79,13 +81,11 @@ def _create_mamba2_builder(
     enable_prefix_caching: bool = True,
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
-    prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
 ) -> Mamba2AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
     )
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
-    vllm_config.mamba_config = MambaConfig(prefill_backend=prefill_backend)
     # get_mamba_chunk_size() reads `mamba_chunk_size` then `chunk_size`.
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
     spec = MambaSpec(
@@ -151,7 +151,9 @@ def test_flashinfer_layout_captures_each_checkpoint_token():
     each checkpoint token, so unless the row names that token, prefix caching
     stores a wrong state.
     """
-    builder = _create_mamba2_builder(prefill_backend=MambaBackendEnum.FLASHINFER)
+    builder = _create_mamba2_builder()
+    # FlashInfer can't be selected on this test's device; its layout can be.
+    builder.ssd_kernel = FlashInferSSDKernel
     meta = _build(builder, seq_lens=[100, 900], query_lens=[100, 900])
 
     assert meta.checkpoint_token_indices_p.tolist() == [-1, 868]

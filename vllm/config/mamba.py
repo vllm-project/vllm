@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum, EnumMeta
+from enum import EnumMeta, StrEnum
 from typing import Any, Literal, get_args
 
 from pydantic import field_validator
@@ -18,12 +18,12 @@ class _MambaBackendEnumMeta(EnumMeta):
         except KeyError:
             valid = ", ".join(cls.__members__.keys())
             raise ValueError(
-                f"Unknown Mamba SSU backend: '{name}'. Valid options are: {valid}"
+                f"Unknown Mamba backend: '{name}'. Valid options are: {valid}"
             ) from None
 
 
-class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
-    """Enumeration of supported Mamba SSU (selective state update) backends."""
+class MambaBackendEnum(StrEnum, metaclass=_MambaBackendEnumMeta):
+    """Enumeration of supported Mamba backends."""
 
     TRITON = "triton"
     FLASHINFER = "flashinfer"
@@ -56,9 +56,10 @@ class MambaConfig:
     be supported by FlashInfer for the active GPU, state dtype, and decoding
     mode."""
 
-    prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    prefill_backend: MambaBackendEnum | None = None
     """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
-    FlashInfer's fused SSD scan (SM100/SM103 only)."""
+    FlashInfer's fused SSD scan (SM10x). A backend that can't run fails at
+    startup. None selects automatically: Triton on GPUs, "cpu" on CPU."""
 
     @field_validator("backend", "prefill_backend", mode="before")
     @classmethod
@@ -85,23 +86,8 @@ class MambaConfig:
                 "or omit `--mamba-ssu-algorithm`."
             )
 
-    def validate_prefill_backend(self) -> None:
-        if self.prefill_backend == MambaBackendEnum.CPU:
-            raise ValueError(
-                "Unknown Mamba prefill backend: 'cpu'. "
-                "Valid options are: triton, flashinfer"
-            )
-        if self.prefill_backend == MambaBackendEnum.FLASHINFER:
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "--mamba-prefill-backend flashinfer requires SM100/SM103."
-                )
-
     def __post_init__(self):
         self.validate_ssu_algorithm()
-        self.validate_prefill_backend()
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
