@@ -348,6 +348,16 @@ def _prefill_uses_deep_select(topk_backend: str, batch_invariant: bool) -> bool:
     )
 
 
+def _deep_select_prefill_topk(
+    logits: torch.Tensor, topk: int, row_ends: torch.Tensor, out: torch.Tensor
+) -> None:
+    """Rank prefill logits with DeepSelect into `out`. DeepSelect writes an
+    out-of-range sentinel to slot 0 of a row with NaN logits; it becomes -1, as
+    in `sparse_topk_remap`."""
+    deep_select_topk(logits, topk, end=row_ends, output_idx=out)
+    out.masked_fill_(out >= row_ends.unsqueeze(1), -1)
+
+
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
@@ -946,11 +956,8 @@ def sparse_attn_indexer(
                                 candidate_block_size,
                             )
                     if use_deep_select:
-                        deep_select_topk(
-                            logits,
-                            topk_tokens,
-                            end=row_ends,
-                            output_idx=topk_indices[rows],
+                        _deep_select_prefill_topk(
+                            logits, topk_tokens, row_ends, topk_indices[rows]
                         )
                     else:
                         ops.top_k_per_row_prefill(

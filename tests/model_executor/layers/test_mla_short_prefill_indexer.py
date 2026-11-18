@@ -758,6 +758,30 @@ def test_sparse_topk_remap_bounds_nan_rows():
     assert (out[0] >= 0).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_dense_prefill_deep_select_bounds_nan_rows():
+    """The dense prefill path turns DeepSelect's out-of-range sentinel in NaN
+    rows into -1, as `sparse_topk_remap` does."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+    )
+
+    if not has_deep_select():
+        pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
+    rows, width, topk = 4, 2048, 512
+    logits = torch.randn(rows, width, dtype=torch.bfloat16, device="cuda")
+    logits[1:, :16] = float("nan")
+    row_ends = torch.tensor(
+        [width, width, width // 2, topk + 1], dtype=torch.int32, device="cuda"
+    )
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+
+    sparse_indexer._deep_select_prefill_topk(logits, topk, row_ends, out)
+    assert (out[1:, 0] == -1).all()
+    assert (out < row_ends.unsqueeze(1)).all()
+    assert (out[0] >= 0).all()
+
+
 def _skip_unless_sm100_sparse_kernels():
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
         pytest.skip("SM100 required")
