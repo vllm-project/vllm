@@ -73,6 +73,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
+from vllm.multimodal.video import snap_ntsc_fps
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_down
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1455,7 +1456,8 @@ def get_candidate_target_fps(
     max_fps: int | float = _MAX_VIDEO_FPS,
 ) -> list[float]:
     """Return the subset of `video_fps` factors that remain multiples
-    of `sampling_fps`.
+    of `sampling_fps`. NTSC rates are treated as the integer rate they
+    approximate (29.97 -> 30, see `snap_ntsc_fps`).
 
     Examples:
         >>> get_candidate_target_fps(video_fps=6, sampling_fps=2)
@@ -1464,6 +1466,8 @@ def get_candidate_target_fps(
         [1, 5]
         >>> get_candidate_target_fps(video_fps=2, sampling_fps=2)
         [2]
+        >>> get_candidate_target_fps(video_fps=29.97, sampling_fps=2)
+        [2, 6]
         >>> get_candidate_target_fps(video_fps=5, sampling_fps=2)
         Traceback (most recent call last):
             ...
@@ -1471,12 +1475,13 @@ def get_candidate_target_fps(
             consistent frame steps.
 
     """
-    video_fps = int(video_fps)
+    if sampling_fps is None:
+        raise ValueError("sampling_fps must be provided")
+
+    video_fps = int(snap_ntsc_fps(video_fps))
     sampling_fps = int(sampling_fps)
     max_fps = int(max_fps)
 
-    if sampling_fps is None:
-        raise ValueError("sampling_fps must be provided")
     if video_fps <= 0 or sampling_fps <= 0:
         raise ValueError(
             "video_fps and sampling_fps must be positive "
@@ -1505,6 +1510,7 @@ def get_target_fps(
     candidate_target_fps: list[float],
 ) -> float | None:
     """Get the target fps that best spans the video and has the most frames sampled."""
+    video_fps = snap_ntsc_fps(video_fps)
     num_frames_sampled = 0
     selected_target_fps = None
     for target_fps in candidate_target_fps:
@@ -1542,6 +1548,7 @@ def get_frame_times_and_chosen_fps(
             0, total_frames, max_frames, endpoint=False, dtype=int
         )
     else:
+        video_fps = snap_ntsc_fps(video_fps)
         step_size = max(int(video_fps / selected_target_fps), 1)
         frame_indices = np.arange(0, total_frames, step_size)
     if len(frame_indices) > max_frames:

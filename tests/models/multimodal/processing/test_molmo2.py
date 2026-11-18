@@ -11,6 +11,9 @@ from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
     Molmo2VisionBackbone,
     build_flat_image_bool_length,
+    get_candidate_target_fps,
+    get_frame_times_and_chosen_fps,
+    get_target_fps,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -144,3 +147,37 @@ def test_vision_pooling_means_preserve_batch_indices_and_drop_invalid_groups(
     )
     actual = Molmo2VisionBackbone.forward(backbone, image_features, token_pooling)
     torch.testing.assert_close(actual, expected_query[[0, 2, 3], 0])
+
+
+@pytest.mark.parametrize(
+    ("ntsc_fps", "integer_fps"),
+    [
+        (30000 / 1001, 30),
+        (29.97, 30),  # containers usually store the rounded rate
+        (59.94, 60),
+        (23.976, 24),
+    ],
+)
+@pytest.mark.parametrize("sampling_fps", [1, 2])
+def test_fps_sampling_treats_ntsc_rates_like_integer_rates(
+    ntsc_fps, integer_fps, sampling_fps
+):
+    """fps-mode sampling (HF processor path) must not truncate 29.97 to 29."""
+    total_frames, max_frames = integer_fps * 10, 384
+
+    def sample(video_fps):
+        candidates = get_candidate_target_fps(video_fps, sampling_fps)
+        target_fps = get_target_fps(
+            video_fps, max_frames, total_frames, "fps", candidates
+        )
+        _, indices = get_frame_times_and_chosen_fps(
+            target_fps, total_frames, max_frames, video_fps
+        )
+        return candidates, target_fps, indices.tolist()
+
+    assert sample(ntsc_fps) == sample(integer_fps)
+
+
+def test_get_candidate_target_fps_rejects_missing_sampling_fps():
+    with pytest.raises(ValueError, match="sampling_fps must be provided"):
+        get_candidate_target_fps(30, None)
