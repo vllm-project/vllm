@@ -255,9 +255,6 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .instrument(request_span.clone())
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "collection", error))?;
-        if let Some(retirement) = &retirement {
-            retirement.confirm(&self.state).await?;
-        }
         // Build the single aggregated response.
         let prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
@@ -284,6 +281,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             collected.sampling_mask.as_ref(),
             &response_opts,
         )?;
+        if let Some(retirement) = &retirement {
+            retirement.confirm(&self.state).await?;
+        }
         info!(
             parent: &request_span,
             elapsed_ms = started_at.elapsed().as_millis() as u64,

@@ -28,6 +28,9 @@ stop-string match in the frontend. For explicit cancellation, wait for the
 The default false value, including a response from an older server, is not an
 acknowledgement.
 
+Generation errors are returned before waiting for retirement confirmation,
+preserving the original gRPC status. Such errors do not acknowledge retirement.
+
 The server captures randomized internal IDs before local cancellation removes
 their public-ID mappings, and reuses EngineCore's existing `abort_requests`
 utility on its ordered input path. It waits for all connected engines to

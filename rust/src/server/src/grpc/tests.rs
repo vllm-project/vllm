@@ -43,7 +43,7 @@ use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
 };
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
@@ -2390,6 +2390,76 @@ async fn retirement_acknowledgement_waits_for_engine_on_abort_and_stop_strings()
 #[serial]
 async fn retirement_failure_does_not_become_a_successful_terminal() {
     assert_retirement_waits_for_engine("stop_stream", true).await;
+}
+
+/// An engine validation error must not wait for a retirement acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_retirement_preserves_engine_validation_error_without_acknowledgement() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (inference, control, health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-retirement-validation".to_vec(),
+        default_ready_response(),
+        Arc::new(FakeTextBackend::default()),
+        None,
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request = decode_add_request(&add);
+                let mut output = request_output(
+                    &request.request_id,
+                    vec![],
+                    Some(EngineCoreFinishReason::Error),
+                );
+                output.error = Some(Box::new(RequestError {
+                    code: RequestError::VALIDATION_ERROR.into(),
+                    message: "structured-output constraint could not be compiled".into(),
+                    retryable: false,
+                }));
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![output],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                release_rx.await.unwrap();
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference,
+        control,
+        health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.generate(pb::GenerateRequest {
+            prompt: Some(pb::generate_request::Prompt::Text("hello".into())),
+            wait_for_retirement: true,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("engine validation errors must bypass retirement confirmation")
+    .expect_err("engine validation error must fail the RPC");
+    expect_test::expect![[r#"
+        (
+            InvalidArgument,
+            "structured-output constraint could not be compiled",
+        )
+    "#]]
+    .assert_debug_eq(&(status.code(), status.message()));
+
+    release_tx.send(()).unwrap();
+    engine_task.await.unwrap();
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
