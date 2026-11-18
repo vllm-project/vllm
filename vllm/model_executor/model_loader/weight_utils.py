@@ -997,44 +997,101 @@ def _get_fs_type(files: list[str]) -> str:
         return ""
 
 
+def _tensor_offsets(f: IO[bytes]) -> dict[str, tuple[int, int]]:
+    """Map each tensor in an open safetensors file to its absolute byte range."""
+    header_len = int.from_bytes(f.read(8), "little")
+    header = json.loads(f.read(header_len))
+    header.pop("__metadata__", None)
+    base = 8 + header_len
+    return {
+        name: (base + t["data_offsets"][0], base + t["data_offsets"][1])
+        for name, t in header.items()
+    }
+
+
+def _node_local_rank() -> tuple[int, int]:
+    """Return this rank's index among the ranks of its node, and their count."""
+    if not torch.distributed.is_initialized():
+        return 0, 1
+    world = get_world_group()
+    local_world_size = max(world.world_size // get_node_count(), 1)
+    return world.local_rank % local_world_size, local_world_size
+
+
+def _bytes_read_by_node(files: list[str], local_expert_ids: set[int]) -> int:
+    """Estimate the checkpoint bytes this node's ranks read under EP: the shared
+    tensors plus local_world_size times this rank's experts (experts are spread
+    evenly over the ranks)."""
+    shared = mine = 0
+    for path in files:
+        with open(path, "rb") as f:
+            for name, (start, end) in _tensor_offsets(f).items():
+                if not should_skip_weight(name, set()):
+                    shared += end - start
+                elif not should_skip_weight(name, local_expert_ids):
+                    mine += end - start
+    return shared + _node_local_rank()[1] * mine
+
+
 def _prefetch_checkpoint(
     file_path: str,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    keep: Callable[[str], bool] | None = None,
 ) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
     Reads the file in blocks so the kernel caches its pages before workers load
-    the same file.
+    the same file. If *keep* is given, reads only the tensors it selects.
     """
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
     with open(file_path, "rb") as f:
-        while f.read(block_size):
-            pass
+        if keep is None:
+            while f.read(block_size):
+                pass
+            return
+        ranges = sorted(r for name, r in _tensor_offsets(f).items() if keep(name))
+        for start, end in ranges:
+            f.seek(start)
+            while start < end and (chunk := f.read(min(block_size, end - start))):
+                start += len(chunk)
 
 
 def _prefetch_all_checkpoints(
     sorted_files: list[str],
     num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    local_expert_ids: set[int] | None = None,
 ) -> None:
-    """Start prefetching checkpoint files into page cache in a background thread."""
+    """Start prefetching checkpoint files into page cache in a background thread.
+
+    The ranks of each node split the files; under EP each rank reads only the
+    shared tensors of its files plus its own experts from every file.
+    """
     if num_prefetch_threads < 1:
         raise ValueError("safetensors prefetch num threads must be >= 1")
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    if torch.distributed.is_initialized():
-        # The page cache is per node and every rank reads every file, so split
-        # the files among the ranks of each node rather than across all ranks.
-        world = get_world_group()
-        local_world_size = max(world.world_size // get_node_count(), 1)
-        local_rank = world.local_rank % local_world_size
+    local_rank, local_world_size = _node_local_rank()
+    work: list[tuple[str, Callable[[str], bool] | None]]
+    if local_expert_ids is None:
+        work = [(p, None) for p in sorted_files[local_rank::local_world_size]]
     else:
-        local_rank, local_world_size = 0, 1
-    paths_to_prefetch = sorted_files[local_rank::local_world_size]
-    total_for_rank = len(paths_to_prefetch)
+
+        def keep_mine(name: str) -> bool:
+            return not should_skip_weight(name, local_expert_ids)
+
+        def keep_my_experts(name: str) -> bool:
+            # should_skip_weight(name, set()) is True only for expert weights.
+            return keep_mine(name) and should_skip_weight(name, set())
+
+        work = [
+            (p, keep_mine if i % local_world_size == local_rank else keep_my_experts)
+            for i, p in enumerate(sorted_files)
+        ]
+    total_for_rank = len(work)
 
     async def _prefetch_all() -> None:
         loop = asyncio.get_running_loop()
@@ -1043,12 +1100,13 @@ def _prefetch_all_checkpoints(
 
         async def prefetch_one(
             path: str,
+            keep: Callable[[str], bool] | None,
             executor: concurrent.futures.ThreadPoolExecutor,
         ) -> None:
             nonlocal completed, next_log_pct
             try:
                 await loop.run_in_executor(
-                    executor, _prefetch_checkpoint, path, block_size
+                    executor, _prefetch_checkpoint, path, block_size, keep
                 )
                 completed += 1
                 if total_for_rank > 0 and next_log_pct <= 100:
@@ -1069,9 +1127,7 @@ def _prefetch_all_checkpoints(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=num_prefetch_threads
         ) as executor:
-            await asyncio.gather(
-                *(prefetch_one(p, executor) for p in paths_to_prefetch)
-            )
+            await asyncio.gather(*(prefetch_one(p, keep, executor) for p, keep in work))
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
@@ -1118,6 +1174,15 @@ def safetensors_weights_iterator(
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = get_available_memory()
     ram_threshold_pct = 90
+    # Whole shards stream fastest; only when they do not fit, read just the
+    # shared tensors and this node's experts.
+    prefetch_expert_ids = None
+    if (
+        local_expert_ids is not None
+        and total_bytes > ram_threshold_pct / 100.0 * avail_bytes
+    ):
+        total_bytes = _bytes_read_by_node(sorted_files, local_expert_ids)
+        prefetch_expert_ids = local_expert_ids
     fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
     fs_name = fs_type.upper() if fs_type else "unknown"
 
@@ -1175,6 +1240,7 @@ def safetensors_weights_iterator(
             sorted_files,
             num_prefetch_threads=safetensors_prefetch_num_threads,
             block_size=safetensors_prefetch_block_size,
+            local_expert_ids=prefetch_expert_ids,
         )
 
     if shuffle_safetensors_files:
