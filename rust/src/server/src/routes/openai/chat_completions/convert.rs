@@ -16,7 +16,7 @@ use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submi
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceObject, ToolChoiceValue,
 };
 use crate::routes::openai::utils::{resolve_generation_prompt_truncation, resolve_n};
 use crate::utils::{
@@ -121,7 +121,10 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
-    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
+    let is_named_tool_choice = matches!(
+        &request.tool_choice,
+        Some(ToolChoice::Object(ToolChoiceObject::Function { .. }))
+    );
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -447,16 +450,12 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
         ToolChoice::Value(ToolChoiceValue::Auto) => Ok(ChatToolChoice::Auto),
         ToolChoice::Value(ToolChoiceValue::None) => Ok(ChatToolChoice::None),
         ToolChoice::Value(ToolChoiceValue::Required) => Ok(ChatToolChoice::Required),
-        ToolChoice::Function {
-            tool_type,
-            function,
-        } if tool_type == "function" => Ok(ChatToolChoice::Function {
-            name: function.name.clone(),
-        }),
-        ToolChoice::AllowedTools {
-            tool_type,
-            allowed_tools,
-        } if tool_type == "allowed_tools" => {
+        ToolChoice::Object(ToolChoiceObject::Function { function }) => {
+            Ok(ChatToolChoice::Function {
+                name: function.name.clone(),
+            })
+        }
+        ToolChoice::Object(ToolChoiceObject::AllowedTools { allowed_tools }) => {
             let names = allowed_tools
                 .tools
                 .iter()
@@ -475,7 +474,6 @@ fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiEr
                 names,
             })
         }
-        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
 
@@ -511,7 +509,8 @@ mod tests {
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
         AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
+        ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -1788,12 +1787,11 @@ mod tests {
     fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
         let request = ChatCompletionRequest {
             tools: Some(Vec::new()),
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
                 function: crate::routes::openai::utils::types::FunctionChoice {
                     name: "f".to_string(),
                 },
-            }),
+            })),
             ..base_request()
         };
 
@@ -1830,12 +1828,11 @@ mod tests {
                 },
                 defer_loading: None,
             }]),
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
+            tool_choice: Some(ToolChoice::Object(ToolChoiceObject::Function {
                 function: crate::routes::openai::utils::types::FunctionChoice {
                     name: "get_weather".to_string(),
                 },
-            }),
+            })),
             ..base_request()
         };
 

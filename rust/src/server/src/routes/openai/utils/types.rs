@@ -437,16 +437,15 @@ pub enum ToolChoiceValue {
 #[serde(untagged)]
 pub enum ToolChoice {
     Value(ToolChoiceValue),
-    Function {
-        #[serde(rename = "type")]
-        tool_type: String,
-        function: FunctionChoice,
-    },
-    AllowedTools {
-        #[serde(rename = "type")]
-        tool_type: String,
-        allowed_tools: AllowedTools,
-    },
+    Object(ToolChoiceObject),
+}
+
+/// Object form of [`ToolChoice`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoiceObject {
+    Function { function: FunctionChoice },
+    AllowedTools { allowed_tools: AllowedTools },
 }
 
 impl Default for ToolChoice {
@@ -455,13 +454,13 @@ impl Default for ToolChoice {
     }
 }
 
-/// Function choice specification for `ToolChoice::Function`.
+/// Function choice specification for `ToolChoiceObject::Function`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
-/// The allowed set of `ToolChoice::AllowedTools`.
+/// The allowed set of `ToolChoiceObject::AllowedTools`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AllowedTools {
     pub mode: AllowedToolsMode,
