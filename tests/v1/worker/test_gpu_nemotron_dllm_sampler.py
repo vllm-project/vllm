@@ -98,16 +98,21 @@ def _denoise_and_commit(sampler, num_reqs, vocab, mask):
     return out, [lsm.cpu() for lsm in log_softmax]
 
 
+@pytest.mark.parametrize(
+    "num_logprobs",
+    [[None, 0, 2, 5], [2, 5, 3, 5]],
+    ids=["mixed", "all_topk"],
+)
 def test_mixed_logprobs_reach_the_commit_step_without_a_host_sync(
-    sync_check_error,
+    sync_check_error, num_logprobs
 ):
-    """A batch mixing no logprobs, logprobs=0 and two top-k widths reports
-    each request's own logprobs on its commit step. logprobs=0 reports each
+    """A batch mixing no logprobs, logprobs=0 and top-k widths reports each
+    request's own logprobs on its commit step. logprobs=0 reports each
     token's logprob on the step it was revealed; top-k comes from the
     converging step. The host never learns which slots converged or commit,
-    so no step syncs with the GPU."""
+    so no step syncs with the GPU. A batch where every request asks for
+    top-k takes the path that skips the logits copy."""
     vocab, mask = 64, 63
-    num_logprobs = [None, 0, 2, 5]
     params = [SamplingParams(temperature=0.0, logprobs=k) for k in num_logprobs]
     sampler = _make_sampler(params, vocab, mask, max_logprobs=20)
     out, (first, converged) = _denoise_and_commit(sampler, len(params), vocab, mask)
