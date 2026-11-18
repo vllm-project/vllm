@@ -31,16 +31,16 @@
 #   dev                 [base]       + all runtime and dev requirements   (not used by CI)
 #
 # PHASE 3, runtime base (FROM the nvidia/cuda image):
-#   vllm-runtime-base    Python, CUDA JIT tools, PyTorch, FlashInfer kernels, runtime requirements, DeepEP
+#   vllm-runtime-base    Python, CUDA JIT tools, PyTorch, FlashInfer kernels, runtime requirements
 #
 # PHASE 4, CI test image (`--target test`):
-#   test-deps  [vllm-runtime-base]  + every test requirement  (changes with requirements/)
+#   test-deps  [vllm-runtime-base]  + every test requirement, DeepEP  (changes with requirements/)
 #   ├─ test-wheel     helper: installs the vLLM wheel, sorts its files by how often they change
 #   ├─ test-src       helper: lays out the source tree
 #   └─ test           CI image: test-deps + one layer per tree from the two helpers
 #
 # PHASE 5, release image (`--target vllm-openai`):
-#   vllm-base  [vllm-runtime-base]  + vLLM wheel
+#   vllm-base  [vllm-runtime-base]  + DeepEP, vLLM wheel
 #   └─ vllm-openai-base  + optional KV connectors, labels
 #      ├─ vllm-sagemaker
 #      └─ vllm-openai          release image (default `docker build` target
@@ -1047,16 +1047,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}" \
         "gguf${GGUF_VERSION}"
 
-# Install the DeepEP wheels built by extensions-build. They depend only on
-# PyTorch, so they are installed here, below every per-commit layer, and are
-# shared by the release and test images. Only the checksum is copied into the
-# image; the wheels are bind-mounted and never become a layer.
-COPY tools/uv_install_cuda.sh /tmp/uv_install_cuda.sh
-COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
-RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
-    --mount=type=cache,target=/opt/uv/cache \
-    /tmp/uv_install_cuda.sh 0 /tmp/ep-kernels-dist/*.whl
-
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
@@ -1160,7 +1150,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # that changes with requirements/, and not in the per-commit wheel install:
 # the test-wheel stage fails if the wheel still has to change a package.
 COPY requirements/cuda.txt requirements/cuda.txt
-RUN --mount=type=cache,target=/opt/uv/cache \
+RUN --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
     # The same CUDA 12 substitutions setup.py makes in the wheel's requirements.
     if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
@@ -1192,6 +1183,17 @@ COPY tests/vllm_test_utils tests/vllm_test_utils
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# The DeepEP wheels built by extensions-build. Last in test-deps (and in
+# vllm-base before the vLLM wheel) because their bytes change whenever
+# extensions-build reruns: here that rebuilds one small layer, not every
+# test dependency layer. Only the checksum enters the image; the wheels are
+# bind-mounted.
+COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh 0 /tmp/ep-kernels-dist/*.whl
+
 #################### STAGE: test-wheel ####################
 # Helper, not shipped: pip-installs the vLLM wheel on top of test-deps, then
 # sorts the installed files into /split/{native,rust,python} for the test stage.
@@ -1202,6 +1204,7 @@ COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 # The test stage takes only vLLM's own files from here, so the install must not
 # change any other package: test dependencies come from the lock in test-deps.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip freeze --system | grep -v '^vllm[ =]' | sort > /tmp/deps-before.txt \
     && /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" /tmp/vllm-dist/*.whl \
@@ -1277,11 +1280,18 @@ ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
-# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern as the
-# DeepEP wheels above.
+# The DeepEP wheels: see the same install at the end of test-deps.
+COPY --from=extensions-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/tmp/ep-kernels-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
+    --mount=type=cache,target=/opt/uv/cache \
+    /tmp/uv_install_cuda.sh 0 /tmp/ep-kernels-dist/*.whl
+
+# Install the vLLM wheel, with the same checksum-plus-bind-mount pattern.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/tmp/vllm-dist \
+    --mount=type=bind,source=tools/uv_install_cuda.sh,target=/tmp/uv_install_cuda.sh \
     --mount=type=cache,target=/opt/uv/cache \
     /tmp/uv_install_cuda.sh "${PYTORCH_NIGHTLY}" /tmp/vllm-dist/*.whl
 
