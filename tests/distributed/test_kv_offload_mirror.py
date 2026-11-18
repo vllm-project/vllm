@@ -3,7 +3,7 @@
 """CPU offloading with an fs secondary tier on an engine whose workers span
 two nodes.
 
-Run by the 2-node CI step: TP over this node's GPUs and PP over the two nodes,
+Run by its own 2-node CI step: TP over this node's GPUs and PP over the two nodes,
 on Ray, so the workers of the second pipeline stage are on the other node. The
 scheduler and its secondary tiers read the CPU region on this node, which the
 workers on the other node fill and read through the region mirror.
