@@ -6,16 +6,17 @@ a fetch is one kernel that loads each row from its owner's memory."""
 import torch
 
 from vllm.distributed.engram_pool.memory import CuMem, device_view
-from vllm.distributed.engram_pool.rows import SHARD_BASES, locate
+from vllm.distributed.engram_pool.rows import Tables, locate
 from vllm.triton_utils import tl, triton
 
 
 @triton.jit(do_not_specialize=["num_items"])
 def _gather_kernel(
     ids,
-    meta,
+    tables,
     out,
     num_items,
+    WORLD: tl.constexpr,
     TABLES: tl.constexpr,
     K: tl.constexpr,
     WORDS: tl.constexpr,
@@ -26,9 +27,8 @@ def _gather_kernel(
     word = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     item = word // WORDS
     valid = item < num_items
-    index, table, owner, local, live = locate(ids, meta, item, valid, TABLES, K)
-    shards = tl.load(table + SHARD_BASES, mask=live, other=0)
-    base = tl.load(shards.to(tl.pointer_type(tl.int64)) + owner, mask=live, other=0)
+    index, shard, local, live = locate(ids, tables, item, valid, WORLD, TABLES, K)
+    base = tl.load(tables.bases + shard, mask=live, other=0)
     column = word - item * WORDS
     data = tl.load(
         base.to(tl.pointer_type(tl.uint64)) + local * WORDS + column, mask=live, other=0
@@ -40,14 +40,14 @@ def _gather_kernel(
 
 
 class NvlinkTransport:
-    """`group` provides rank_in_group and all_gather(bytes)."""
+    """`group` provides rank_in_group, world_size and all_gather(bytes)."""
 
     def __init__(self, group) -> None:
         self.group = group
 
-    def shard(self, num_bytes: int, name: str) -> tuple[torch.Tensor, list, list]:
-        """Allocate this GPU's shard and map every GPU's. Returns the shard, its
-        `meta` arrays (shard addresses) and what keeps them alive. Collective."""
+    def shard(self, num_bytes: int, name: str) -> tuple[torch.Tensor, tuple, list]:
+        """Allocate this GPU's shard and map every GPU's. Returns the shard,
+        every shard's address, key and gatherer, and what keeps them. Collective."""
         memory = CuMem(num_bytes, fabric=True)
         exported = self.group.all_gather(memory.export_fabric())
         addresses = []
@@ -59,18 +59,19 @@ class NvlinkTransport:
             addresses.append(memory.map(imported))
             memory.release(imported)
         own = addresses[self.group.rank_in_group]
-        bases = torch.tensor(addresses, dtype=torch.int64, device="cuda")
-        return device_view(own, num_bytes, memory), [bases.data_ptr(), 0, 0], [bases]
+        zeros = [0] * len(addresses)
+        return device_view(own, num_bytes, memory), (addresses, zeros, zeros), []
 
-    def start(self, meta: torch.Tensor, ids: torch.Tensor, fetch) -> None:
+    def start(self, tables: Tables, ids: torch.Tensor, fetch) -> None:
         if n := ids.numel():
-            out, words = fetch.rows, fetch.row_stride // 8
+            words = fetch.row_stride // 8
             _gather_kernel[(triton.cdiv(n * words, 1024),)](
                 ids,
-                meta,
-                out,
+                tables,
+                fetch.rows,
                 n,
-                TABLES=meta.shape[0],
+                WORLD=self.group.world_size,
+                TABLES=tables.num_rows.numel(),
                 K=ids.shape[-1],
                 WORDS=words,
                 BLOCK=1024,

@@ -82,9 +82,7 @@ def _dequant_rows_kernel(
 
 @triton.jit(do_not_specialize=["num_tokens", "table"])
 def _unpack_fp8_kernel(
-    rows,
-    slots,
-    ready,
+    landed,
     values,
     scales,
     num_tokens,
@@ -92,7 +90,6 @@ def _unpack_fp8_kernel(
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     ROW_STRIDE: tl.constexpr,
-    PLACED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     """Split table `table`'s fetched `[token][head]` rows into MXFP8 values and
@@ -100,7 +97,7 @@ def _unpack_fp8_kernel(
     row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     token, head = row // HEADS, row % HEADS
     valid = token < num_tokens
-    src, live = landed_row(rows, slots, ready, table, row, valid, ROW_STRIDE, PLACED)
+    src, live = landed_row(landed, table, row, valid, ROW_STRIDE)
     cols = tl.arange(0, DIM)
     data = tl.load(src[:, None] + cols[None, :], mask=live[:, None], other=0)
     tl.store(values + row[:, None] * DIM + cols[None, :], data, mask=valid[:, None])
@@ -265,13 +262,10 @@ class PoolEngramBatch(EngramBatch):
     def _unpack(self, fetch: EngramFetch, index: int) -> None:
         if not self._num_tokens:
             return
-        rows, slots, ready, placed = fetch.landed(index)
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
         _unpack_fp8_kernel[(triton.cdiv(self._num_tokens, 128) * 128 * heads // 16,)](
-            rows,
-            slots,
-            ready,
+            fetch.landed(index),
             self.fp8_values[index],
             self.fp8_scales[index],
             self._num_tokens,
@@ -279,7 +273,6 @@ class PoolEngramBatch(EngramBatch):
             HEADS=heads,
             DIM=table.dim,
             ROW_STRIDE=fetch.row_stride,
-            PLACED=placed,
             BLOCK=16,
         )
 
