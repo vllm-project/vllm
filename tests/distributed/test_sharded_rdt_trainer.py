@@ -165,7 +165,7 @@ def test_units_are_global_and_a_rank_gathers_those_it_owns_part_of():
             _Source(_PP, _PP_OWNERS, rank), rank=rank, world=2, buffer_bytes=16
         )
         assert engine._units == [0, 0, 1, 1]
-        assert engine._owned_units == units
+        assert list(engine._owned_units) == units
 
 
 def test_owners_outside_the_trainer_are_refused():
@@ -304,8 +304,9 @@ def test_at_most_lookahead_plus_one_units_are_resident(cpu_ipc, lookahead):
 
 def test_a_source_out_of_order_fails_the_sync(cpu_ipc):
     pairs = _pairs(2)
-    engine = _engine(_Source(pairs[::-1]), buffer_bytes=32)
-    engine._meta = [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in pairs]
+    source = _Source(pairs)
+    engine = _engine(source, buffer_bytes=32)
+    source._pairs = pairs[::-1]  # iter_full now disagrees with the metadata
     server = _attach_server(engine)
     server.register_consumer(0, [])
     with pytest.raises(RuntimeError, match="metadata order"):

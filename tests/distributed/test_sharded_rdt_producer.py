@@ -226,11 +226,11 @@ class TestServe:
             s._publish(0, unit0)
             (flat,) = s.bucket(0, 0, sync_idx)
             if sync_idx == 0:
-                cached = s._sources[0, 0]
+                cached = s._sources[0][0]
             a, b = _boxes(s, flat)
             assert torch.equal(a, w[N][2:6, 1:3]) and torch.equal(b, w[M])
             s.free()
-        assert s._sources[0, 0] is cached
+        assert s._sources[0][0] is cached
 
     def test_a_pull_waits_for_its_unit(self, server):
         s = server()
@@ -426,7 +426,7 @@ def test_strided_boxes_of_consecutive_experts_pack_as_one_copy():
     boxes = [((e, e + 1), (0, 3), (2, 6)) for e in range(4)]
     views = [w[e, :, 2:6] for e in range(4)]
     layout = trainer_mod.flat_layout(boxes, [torch.float32] * 4)
-    src = trainer_mod._sources(0, views, layout)
+    src = trainer_mod._sources(0, views, layout, 4 * 48)
     assert src.typed_idx == ((0, 4),) and src.typed_srcs[0].shape == (4, 3, 4)
     assert torch.equal(src.typed_srcs[0], w[:, :, 2:6])
 
@@ -436,9 +436,10 @@ def test_aligned_contiguous_boxes_copy_as_words():
     views = [w[0:4], w[4:8].view(-1)[:3].view(1, 3)]  # 64 B; 6 B
     boxes = [((0, 4), (0, 8)), ((4, 5), (0, 3))]
     layout = trainer_mod.flat_layout(boxes, [torch.bfloat16] * 2)
-    src = trainer_mod._sources(0, views, layout)
-    assert src.word_idx == (0,) and src.word_srcs[0].dtype == torch.int64
-    assert src.byte_idx == (1,) and src.byte_srcs[0].dtype == torch.uint8
+    src = trainer_mod._sources(0, views, layout, 80)
+    # odd chunks: words 0:8 (piece 0), bytes 64:70 (piece 1)
+    assert src.word_splits == (0, 8, 2) and src.word_srcs[0].dtype == torch.int64
+    assert src.byte_splits == (64, 6, 10) and src.byte_srcs[0].dtype == torch.uint8
 
 
 def test_a_bucket_is_freed_when_ray_drops_it(server):

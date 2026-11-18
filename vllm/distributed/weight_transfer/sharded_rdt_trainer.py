@@ -107,29 +107,40 @@ class _ServedBucket:
     pieces: tuple[tuple[str, tuple[slice, ...]], ...]
     nbytes: int
     layout: tuple[FlatPiece, ...]
-    # each piece's bytes, then the padding up to the next piece: one `split`
-    # of the bucket's block cuts out every piece
-    splits: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _Sources:
     """One bucket's source boxes for one generation of its unit: the
-    contiguous ones as 8-byte words where aligned, else as bytes, with the
-    index of the piece each fills; and the strided ones as runs `(first
-    piece, count)`, each one strided view."""
+    contiguous ones as 8-byte words where aligned, else as bytes, each with
+    the split sizes (in words or bytes) whose odd chunks of the bucket are
+    the pieces they fill; and the strided ones as runs `(first piece,
+    count)`, each one strided view."""
 
     gen: int
-    word_idx: tuple[int, ...]
+    word_splits: tuple[int, ...]
     word_srcs: tuple[torch.Tensor, ...]
-    byte_idx: tuple[int, ...]
+    byte_splits: tuple[int, ...]
     byte_srcs: tuple[torch.Tensor, ...]
     typed_idx: tuple[tuple[int, int], ...]
     typed_srcs: tuple[torch.Tensor, ...]
 
 
+def _splits(
+    idx: list[int], layout: Sequence[FlatPiece], nbytes: int, unit: int
+) -> tuple[int, ...]:
+    """Split sizes, in `unit` bytes, cutting a bucket of `nbytes` into gaps
+    and pieces `idx`, so that its odd chunks are those pieces."""
+    splits, end = [], 0
+    for i in idx:
+        start, size, *_ = layout[i]
+        splits += [(start - end) // unit, size // unit]
+        end = start + size
+    return (*splits, (nbytes - end) // unit)
+
+
 def _sources(
-    gen: int, views: list[torch.Tensor], layout: Sequence[FlatPiece]
+    gen: int, views: list[torch.Tensor], layout: Sequence[FlatPiece], nbytes: int
 ) -> _Sources:
     """Split a bucket's source boxes into contiguous ones and runs of strided
     ones. A run is consecutive strided boxes of one shape and stride from one
@@ -139,7 +150,10 @@ def _sources(
     box. Contiguous boxes copy as 8-byte words when their address and size
     allow (pieces start on 16 B in the bucket), which moves far more bytes
     per element than a byte copy."""
-    word_idx, word_srcs, byte_idx, byte_srcs, runs = [], [], [], [], []
+    word_idx: list[int] = []
+    byte_idx: list[int] = []
+    word_srcs, byte_srcs = [], []
+    runs: list[tuple[int, int, int | None]] = []
     for i, view in enumerate(views):
         if view.is_contiguous():
             raw = view.view(-1).view(torch.uint8)
@@ -181,9 +195,9 @@ def _sources(
         typed_srcs.append(base)
     return _Sources(
         gen,
-        tuple(word_idx),
+        _splits(word_idx, layout, nbytes, 8),
         tuple(word_srcs),
-        tuple(byte_idx),
+        _splits(byte_idx, layout, nbytes, 1),
         tuple(byte_srcs),
         tuple((first, count) for first, count, _ in runs),
         tuple(typed_srcs),
@@ -218,7 +232,13 @@ class _RDTProducerServer:
         self._bucket_bytes = int(bucket_bytes)
         self._stall_timeout = float(stall_timeout_s)
 
-        self._cond = threading.Condition()
+        # One lock; a pull waits on its unit's condition, then on arena room,
+        # and the engine-facing calls on releases, so each event wakes only
+        # the waits it can unblock.
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)  # releases
+        self._room = threading.Condition(self._lock)  # freed arena blocks
+        self._unit_conds: dict[int, threading.Condition] = {}
         self._error: BaseException | None = None
         self._last_progress = time.monotonic()
 
@@ -239,11 +259,11 @@ class _RDTProducerServer:
         self._base_cache: dict[tuple, torch.Tensor] = {}
         # Per unit, its last publish: the signature (an identical publish
         # reuses the tensors), the rebuilt tensors, and their generation, a
-        # new one whenever the tensors change. Per (consumer, seq), the
+        # new one whenever the tensors change. Per consumer and seq, the
         # bucket's source boxes, built once per generation of its unit.
         self._published: dict[int, tuple[Any, dict[str, torch.Tensor], int]] = {}
         self._gens = itertools.count(1)
-        self._sources: dict[tuple[int, int], _Sources] = {}
+        self._sources: dict[int, dict[int, _Sources]] = {}
         # per unit, the trainer's event its published tensors are ready at
         self._ready: dict[int, torch.cuda.Event | None] = {}
         # Packs run one at a time: the GIL serializes their Python anyway, and
@@ -267,17 +287,26 @@ class _RDTProducerServer:
 
     # ---------------- liveness ----------------
 
-    def _progress(self) -> None:
-        """Caller holds `_cond`."""
-        self._last_progress = time.monotonic()
-        self._cond.notify_all()
+    def _unit_cond(self, unit: int) -> threading.Condition:
+        """The condition a pull for `unit` waits on. Caller holds `_lock`."""
+        cond = self._unit_conds.get(unit)
+        if cond is None:
+            cond = self._unit_conds[unit] = threading.Condition(self._lock)
+        return cond
 
-    def _wait_for(self, blocked: Callable[[], bool], what: str) -> None:
-        """Wait while `blocked()`, returning early on an error; fail the sync
-        when nothing on this producer progressed for the stall timeout.
-        Caller holds `_cond`."""
+    def _notify_all(self) -> None:
+        """Wake every wait (an error or a new sync). Caller holds `_lock`."""
+        for cond in (self._cond, self._room, *self._unit_conds.values()):
+            cond.notify_all()
+
+    def _wait_for(
+        self, cond: threading.Condition, blocked: Callable[[], bool], what: str
+    ) -> None:
+        """Wait on `cond` while `blocked()`, returning early on an error;
+        fail the sync when nothing on this producer progressed for the stall
+        timeout. Caller holds `_lock`."""
         while blocked() and self._error is None:
-            self._cond.wait(_STALL_POLL_S)
+            cond.wait(_STALL_POLL_S)
             stalled = time.monotonic() - self._last_progress
             if blocked() and self._error is None and stalled >= self._stall_timeout:
                 msg = (
@@ -287,7 +316,7 @@ class _RDTProducerServer:
                 )
                 logger.error("[rdt-stall] %s", msg)
                 self._error = RuntimeError(msg)
-                self._cond.notify_all()
+                self._notify_all()
         if self._error is not None:
             raise RuntimeError(f"sharded RDT sync failed: {self._error!r}")
 
@@ -304,7 +333,8 @@ class _RDTProducerServer:
             self._resident.clear()
             self._freed_pending.clear()
             self._base_cache.clear()
-            self._progress()
+            self._last_progress = time.monotonic()
+            self._notify_all()
 
     def publish_unit(self, unit: int, entries: tuple) -> None:
         """Rebuild one gathered unit's CUDA-IPC tensors and make them
@@ -366,23 +396,28 @@ class _RDTProducerServer:
                         f"metadata says {self._served.get(name)}"
                     )
             published = (signature, tensors, next(self._gens))
-        with self._cond:
+        with self._lock:
             self._published[unit] = published
             self._resident.append(unit)
+            self._last_progress = time.monotonic()
+            self._unit_cond(unit).notify_all()
             self._release_if_done(unit)
-            self._progress()
 
     def wait_freed(self) -> list[int]:
         """Block until a published unit is released; return the released ones."""
         with self._cond:
-            self._wait_for(lambda: not self._freed_pending, "a released unit")
+            self._wait_for(
+                self._cond, lambda: not self._freed_pending, "a released unit"
+            )
             freed, self._freed_pending = self._freed_pending, []
             return freed
 
     def end_sync(self) -> list[int]:
         """Block until every published unit is released; return the rest."""
         with self._cond:
-            self._wait_for(lambda: bool(self._resident), "every unit's release")
+            self._wait_for(
+                self._cond, lambda: bool(self._resident), "every unit's release"
+            )
             freed, self._freed_pending = self._freed_pending, []
             self._base_cache.clear()
             logger.info(
@@ -396,9 +431,9 @@ class _RDTProducerServer:
 
     def set_gather_error(self, message: str) -> None:
         """Fail the sync: every blocked wait here raises."""
-        with self._cond:
+        with self._lock:
             self._error = RuntimeError(message)
-            self._cond.notify_all()
+            self._notify_all()
 
     # ---------------- consumer-facing ----------------
 
@@ -442,24 +477,16 @@ class _RDTProducerServer:
                     "buckets with a larger buffer_bytes"
                 )
             layout = flat_layout(boxes, dtypes)
-            ends = [start for start, *_ in layout[1:]] + [nbytes]
-            splits = []
-            for (start, size, *_), end in zip(layout, ends):
-                splits += [size, end - start - size]
             served.append(
-                _ServedBucket(
-                    units.pop(), tuple(pieces), nbytes, tuple(layout), tuple(splits)
-                )
+                _ServedBucket(units.pop(), tuple(pieces), nbytes, tuple(layout))
             )
-        with self._cond:
+        with self._lock:
             self._buckets[consumer_id] = served
-            self._sources = {
-                k: v for k, v in self._sources.items() if k[0] != consumer_id
-            }
+            self._sources[consumer_id] = {}
             self._needs[consumer_id] = Counter(b.unit for b in served)
             for unit in list(self._resident):
                 self._release_if_done(unit)
-            self._progress()
+            self._last_progress = time.monotonic()
 
     @ray.method(tensor_transport="nixl")
     def bucket(self, consumer_id: int, seq: int, sync_idx: int) -> list[torch.Tensor]:
@@ -479,32 +506,35 @@ class _RDTProducerServer:
                 "registered here"
             ) from None
         t0 = time.perf_counter()
-        with self._cond:
+        with self._lock:
             if sync_idx < self._sync_idx:
                 raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
             self._wait_for(
-                lambda: (
-                    self._sync_idx != sync_idx
-                    or spec.unit not in self._resident
-                    or self._carve(spec.nbytes, dry_run=True) < 0
-                ),
-                f"unit {spec.unit} of sync {sync_idx} and arena room",
+                self._unit_cond(spec.unit),
+                lambda: self._sync_idx != sync_idx or spec.unit not in self._resident,
+                f"unit {spec.unit} of sync {sync_idx}",
+            )
+            # the unit stays resident until this bucket is served and freed
+            self._wait_for(
+                self._room,
+                lambda: self._carve(spec.nbytes, dry_run=True) < 0,
+                f"arena room for unit {spec.unit} of sync {sync_idx}",
             )
             offset = self._carve(spec.nbytes)
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            # the unit stays published until this bucket is freed
             _, tensors, gen = self._published[spec.unit]
             ready = self._ready.get(spec.unit)
-            self._progress()
-        flat = self._pack_bucket((consumer_id, seq), spec, offset, tensors, gen, ready)
+            sources = self._sources[consumer_id]
+            self._last_progress = time.monotonic()
+        flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
         del tensors
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
 
     def _carve(self, nbytes: int, *, dry_run: bool = False) -> int:
         """First fit for `nbytes` in the arena: its offset, or -1 (no room).
-        Caller holds `_cond`."""
+        Caller holds `_lock`."""
         start = 0
         for offset, size in sorted(self._blocks.items()):
             if offset - start >= nbytes:
@@ -518,49 +548,47 @@ class _RDTProducerServer:
 
     def _pack_bucket(
         self,
-        key: tuple[int, int],
+        sources: dict[int, _Sources],
+        seq: int,
         spec: _ServedBucket,
         offset: int,
         tensors: dict[str, torch.Tensor],
         gen: int,
         ready: torch.cuda.Event | None,
     ) -> torch.Tensor:
-        """Pack a bucket into its arena block, one pack at a time, and wait
-        for its copies: the contiguous boxes as words or bytes with one fused
-        copy each, and the strided ones (e.g. TP column slices) typed, in
-        runs. One strided box or a second dtype would otherwise put every box
-        on the per-tensor path, a kernel each."""
+        """Pack bucket `seq` into its arena block, one pack at a time, and
+        wait for its copies: the contiguous boxes as words or bytes with one
+        fused copy each, each kind cut from the block with one split, and the
+        strided ones (e.g. TP column slices) typed, in runs. One strided box
+        or a second dtype would otherwise put every box on the per-tensor
+        path, a kernel each."""
         assert self._arena is not None
         flat = self._arena[offset : offset + spec.nbytes]
         with self._pack_lock:
             if ready is not None:
                 torch.cuda.current_stream(self._device_index).wait_event(ready)
-            sources = self._sources.get(key)
-            if sources is None or sources.gen != gen:
-                sources = self._sources[key] = _sources(
-                    gen, [tensors[name][sl] for name, sl in spec.pieces], spec.layout
+            src = sources.get(seq)
+            if src is None or src.gen != gen:
+                src = sources[seq] = _sources(
+                    gen,
+                    [tensors[name][sl] for name, sl in spec.pieces],
+                    spec.layout,
+                    spec.nbytes,
                 )
-            # every piece's bytes, from one split; per piece tensor ops are
-            # what a busy producer pays for, and a MoE bucket has hundreds
-            chunks = flat.split(spec.splits)[::2]
-            if sources.word_srcs:
-                torch._foreach_copy_(
-                    [chunks[i].view(torch.int64) for i in sources.word_idx],
-                    list(sources.word_srcs),
-                )
-            if sources.byte_srcs:
-                torch._foreach_copy_(
-                    [chunks[i] for i in sources.byte_idx], list(sources.byte_srcs)
-                )
-            if sources.typed_srcs:
+            if src.word_srcs:
+                words = flat.view(torch.int64).split(src.word_splits)[1::2]
+                torch._foreach_copy_(words, src.word_srcs)
+            if src.byte_srcs:
+                torch._foreach_copy_(flat.split(src.byte_splits)[1::2], src.byte_srcs)
+            if src.typed_srcs:
                 dsts = []
-                for first, count in sources.typed_idx:
+                for first, count in src.typed_idx:
                     start, nbytes, dtype, shape = spec.layout[first]
                     run = flat[start : start + count * nbytes].view(dtype)
                     dsts.append(
                         run.view(shape) if count == 1 else run.view(count, *shape)
                     )
-                torch._foreach_copy_(dsts, list(sources.typed_srcs))
+                torch._foreach_copy_(dsts, src.typed_srcs)
         if flat.is_cuda:
             # Ray synchronizes the device under its cache lock; do it here so
             # its wait is empty.
@@ -578,16 +606,17 @@ class _RDTProducerServer:
     ) -> None:
         """A served bucket's arena block at `offset` is free, and the bucket
         no longer holds its unit."""
-        with self._cond:
+        with self._lock:
             self._blocks.pop(offset, None)
+            self._room.notify_all()
             if sync_idx == self._sync_idx and consumer_id in self._freed:
                 self._freed[consumer_id][unit] += 1
                 self._release_if_done(unit)
-            self._progress()
+            self._last_progress = time.monotonic()
 
     def _release_if_done(self, unit: int) -> None:
         """Release `unit` once every live consumer registered and freed all
-        its buckets of it. Caller holds `_cond`."""
+        its buckets of it. Caller holds `_lock`."""
         if unit not in self._resident:
             return
         for c in self._live:
@@ -596,6 +625,7 @@ class _RDTProducerServer:
                 return
         self._resident.remove(unit)
         self._freed_pending.append(unit)
+        self._cond.notify_all()
 
     def shutdown(self) -> None:
         if self._arena is not None and self._arena.is_cuda:
@@ -638,7 +668,8 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._owner_sets: list[list[int]] = []
         self._name_owner_class: list[int] = []
         self._owned_names: set[str] = set()
-        self._owned_units: list[int] = []
+        # this rank's units in gather order, each with its owned names
+        self._owned_units: dict[int, list[str]] = {}
         # Gathered tensors shared with the server, by unit, and the event
         # that orders the server's reads after them: a CUDA-IPC export must
         # outlive its import, so they stay until released.
@@ -764,9 +795,10 @@ class ShardedRDTTrainerWeightTransferEngine(
             [meta_nbytes(m) for m in self._meta], self._init_info.buffer_bytes
         )
         self._owned_names = set(self.source.owned_names(rank))
-        self._owned_units = sorted(
-            {u for m, u in zip(self._meta, self._units) if m.name in self._owned_names}
-        )
+        self._owned_units = {}
+        for m, u in zip(self._meta, self._units):
+            if m.name in self._owned_names:
+                self._owned_units.setdefault(u, []).append(m.name)
 
     def _meta_digest(self) -> str:
         import hashlib
@@ -1095,13 +1127,8 @@ class ShardedRDTTrainerWeightTransferEngine(
     def _iter_owned_units(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """This rank's units in order, as `(names, tensors)`."""
         assert self.source is not None
-        by_unit: dict[int, list[str]] = {}
-        for m, u in zip(self._meta, self._units):
-            if m.name in self._owned_names:
-                by_unit.setdefault(u, []).append(m.name)
         pairs = self.source.iter_full()
-        for unit in self._owned_units:
-            expected = by_unit[unit]
+        for unit, expected in self._owned_units.items():
             got = list(itertools.islice(pairs, len(expected)))
             names = [name for name, _ in got]
             if names != expected:

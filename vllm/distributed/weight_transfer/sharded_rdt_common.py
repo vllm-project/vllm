@@ -220,13 +220,16 @@ class RdtRouter:
 
     def consumers_of(self, producer: int) -> list[int]:
         """Consumers that may pull from `producer`: the bound on its fan-in."""
+        # (owners, its index among them) per owner set holding it
+        at = [
+            (len(own), own.index(producer))
+            for own in self._owner_sets
+            if producer in own
+        ]
         return [
             c
             for c in range(self.num_consumers)
-            if any(
-                producer in own and own.index(producer) in self._block(len(own), c)
-                for own in self._owner_sets
-            )
+            if any(i in self._block(n, c) for n, i in at)
         ]
 
     def components(self) -> list[int]:
