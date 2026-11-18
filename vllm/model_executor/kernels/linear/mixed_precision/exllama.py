@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -35,9 +36,11 @@ class ExllamaLinearKernel(MPLinearKernel):
         if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
             return (
                 False,
-                "Output features must be a multiple of the pack "
-                "factor (32 / num_bits) so that we can correctly "
-                "pack the zero points",
+                (
+                    "Output features must be a multiple of the pack "
+                    "factor (32 / num_bits) so that we can correctly "
+                    "pack the zero points"
+                ),
             )
 
         if c.act_type != torch.float16:
@@ -46,24 +49,30 @@ class ExllamaLinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "Exllama, supported types are: "
-                f"{cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "Exllama, supported types are: "
+                    f"{cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size <= 0:
             return (
                 False,
-                f"Group size ({c.group_size}) must be positive, "
-                "Exllama does not support channelwise quantization",
+                (
+                    f"Group size ({c.group_size}) must be positive, "
+                    "Exllama does not support channelwise quantization"
+                ),
             )
 
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide"
-                " the number of input features "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide"
+                    " the number of input features "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
 
         return True, None
@@ -99,9 +108,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                     "inference"
                 )
             zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
-            setattr(
-                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
-            )
+            replace_parameter(layer, self.w_zp_name, zeros)
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)

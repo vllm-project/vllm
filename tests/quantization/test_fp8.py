@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -14,6 +15,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
     load_model_without_vllm_runner,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
@@ -56,13 +58,105 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
+@pytest.mark.parametrize("block_quant", [False, True])
+def test_humming_fp8_matches_checkpoint_forward(
+    tmp_path, dist_init, workspace_init, block_quant
+):
+    """FP8 preprocessing must keep weights consistent with gate/up scales."""
+    from transformers import LlamaConfig
+
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        convert_to_humming_moe_kernel_format,
+    )
+
+    LlamaConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        kernel_config=KernelConfig(moe_backend="humming"),
+    )
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic" if block_quant else "static",
+        weight_block_size=[128, 128] if block_quant else None,
+    )
+    with set_current_vllm_config(config), torch.device(DEVICE_TYPE):
+
+        def create(prefix):
+            return FusedMoEFactory(
+                num_experts=2,
+                top_k=1,
+                hidden_size=256,
+                intermediate_size=256,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+                prefix=prefix,
+            ).routed_experts
+
+        layer = create("humming.oracle")
+        reference = create("humming.checkpoint")
+        for parameter in layer.parameters():
+            parameter.data.fill_(1.0)
+        scale_name = "weight_scale_inv" if block_quant else "weight_scale"
+        scale = getattr(layer, f"w13_{scale_name}")
+        scale.data.copy_(
+            0.125 * 2 ** (torch.arange(scale.numel()).reshape(scale.shape) % 4)
+        )
+        reference.load_state_dict(layer.state_dict())
+        if block_quant:
+            schema: dict[str, Any] = {
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+        else:
+            schema = {
+                "quant_method": "compressed-tensors",
+                "format": "float-quantized",
+                "type": "float",
+                "num_bits": 8,
+                "symmetric": True,
+                "strategy": "tensor",
+            }
+        convert_to_humming_moe_kernel_format(reference, quant_config=schema)
+        reference.quant_method._init_moe_kernel(reference)
+        layer.quant_method.process_weights_after_loading(layer)
+        if block_quant:
+            assert layer.w13_weight_scale_inv is layer.w13_weight_scale
+            assert layer.w2_weight_scale_inv is layer.w2_weight_scale
+
+        inputs = torch.full((8, 256), 0.01, dtype=torch.bfloat16)
+        topk_weights = torch.ones((8, 1), dtype=torch.float32)
+        topk_ids = torch.arange(8, dtype=torch.int32).remainder(2).view(8, 1)
+        with set_forward_context(None, config, num_tokens=8):
+            actual = layer.forward_modular(inputs, topk_weights, topk_ids)
+            expected = reference.forward_modular(inputs, topk_weights, topk_ids)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_deepseek_v41_mxfp8_scale_loading(
-    dist_init, default_vllm_config, monkeypatch, tp_rank, scale_dtype
+    default_vllm_config, monkeypatch, tmp_path, tp_rank, scale_dtype
 ):
     """Expand linear scales before TP slicing, including padded shared experts."""
+    from transformers import LlamaConfig
+
     from vllm.model_executor.layers import linear as linear_module
     from vllm.model_executor.layers.linear import (
         ColumnParallelLinear,
@@ -72,14 +166,19 @@ def test_deepseek_v41_mxfp8_scale_loading(
     from vllm.models.deepseek_v41 import quant_config as quant_module
     from vllm.models.deepseek_v41.nvidia import model as model_module
 
-    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    default_vllm_config.model_config = ModelConfig(
+        model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+    )
     quant_config = quant_module.DeepseekV4FP8Config(
         is_checkpoint_fp8_serialized=True, weight_block_size=[32, 32]
     )
     quant_config._resolved_expert_dtype = "fp4"
     for module in (model_module, linear_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
-        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
     block = torch.nn.Module()
     block.attn = torch.nn.Module()
     block.attn.wq_b = ColumnParallelLinear(
@@ -198,7 +297,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="DSV4.1 requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     "weight_block_size,expert_dtype,scale_name",
     [
@@ -210,9 +311,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
 def test_deepseek_v41_vl_mapper_routes_linear_scales(
     weight_block_size, expert_dtype, scale_name
 ):
-    """The VL wrapper must map ``.scale`` keys to the parameter the linear
+    """The VL wrapper must map `.scale` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
-    ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
+    `weight_scale_inv` raised KeyError for native MXFP8 checkpoints."""
     from vllm.models.deepseek_v41.nvidia import model as model_module
     from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 
@@ -240,9 +341,9 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
 
 
 def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
-    """``configure_quant_config`` reads both mappings off the class, before
-    ``__init__`` builds the instance mapper. Without them a Quark config's
-    per-layer keys never match this wrapper's ``language_model.``-rooted
+    """`configure_quant_config` reads both mappings off the class, before
+    `__init__` builds the instance mapper. Without them a Quark config's
+    per-layer keys never match this wrapper's `language_model.`-rooted
     prefixes and every attention shard falls back to the global spec."""
     from vllm.models.deepseek_v41.amd.vl_model import DeepseekV41ForCausalLM
 
@@ -254,8 +355,8 @@ def test_deepseek_v41_vl_exposes_quant_mappings_on_class():
 
 
 def test_deepseek_v41_engram_scale_accepts_quark_name():
-    """Quark exports name the engram scale ``embed.weight_scale``; the
-    ``\\.scale$`` rules only match a literal ``.scale`` suffix, so without an
+    """Quark exports name the engram scale `embed.weight_scale`; the
+    `\\.scale$` rules only match a literal `.scale` suffix, so without an
     explicit rule the tensor is never routed and loading fails."""
     from vllm.models.deepseek_v41.amd import model as model_module
 
@@ -277,7 +378,7 @@ def test_deepseek_v41_engram_scale_accepts_quark_name():
 
 
 def test_deepseek_v41_declines_quark_configs():
-    """``from_config`` rewrites a Quark config into a single global FP8 scheme,
+    """`from_config` rewrites a Quark config into a single global FP8 scheme,
     which would discard the per-layer specs of a mixed-precision export (MXFP4
     experts + 2-D block MXFP8 attention in DeepSeek-V4.1-Flash). QuarkConfig
     knows how to dispatch each scheme, so it must handle every Quark export."""
@@ -362,10 +463,10 @@ _DSV4_NVFP4_DSPARK = {
 def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
     monkeypatch, ckpt_quant_cfg, prefix, expected
 ):
-    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
-    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    """NVFP4 exports keep the routed experts they `ignore` in MXFP4, e.g. the
+    bundled DSpark draft (`mtp.*`, built as `layers.{40 + k}`) of
     DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
-    passed to ``from_config``: the current hf_config below carries none."""
+    passed to `from_config`: the current hf_config below carries none."""
     import vllm.model_executor.layers.quantization.modelopt as modelopt
     import vllm.models.deepseek_v41.quant_config as dsv41_qc
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -382,7 +483,9 @@ def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
         "get_current_vllm_config",
         lambda: SimpleNamespace(model_config=model_config),
     )
-    monkeypatch.setattr(dsv41_qc, "Mxfp4MoEMethod", lambda moe_config: "mxfp4")
+    # The MXFP4 experts' method is built by `_mxfp4_moe_method`, which picks
+    # the platform's class; stub the builder rather than one class.
+    monkeypatch.setattr(dsv41_qc, "_mxfp4_moe_method", lambda moe_config: "mxfp4")
     monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
 
     config = dsv41_qc.DeepseekV4FP8Config.from_config(
@@ -655,14 +758,15 @@ def test_static_fp8_moe_input_scales_remain_scalar() -> None:
 )
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize(
-    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
+    "linear_backend",
+    ["auto", "marlin", "humming"] if current_platform.is_cuda() else ["auto"],
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_model_load_and_run(
     model_id: str,
-    force_marlin: bool,
+    linear_backend: str,
     use_rocm_aiter: bool,
     monkeypatch,
     dist_init,
@@ -672,8 +776,8 @@ def test_model_load_and_run(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     kernel_config = KernelConfig(
-        linear_backend="marlin" if force_marlin else "auto",
-        moe_backend="marlin" if force_marlin else "auto",
+        linear_backend=linear_backend,
+        moe_backend="marlin" if linear_backend == "marlin" else "auto",
     )
     model, vllm_config = load_model_without_vllm_runner(
         model_id,
@@ -771,11 +875,20 @@ def test_scaled_fp8_quant(dtype) -> None:
     )
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="FP8 e4m3fn weight reloading is not supported on e4m3fnuz platforms",
+@pytest.mark.parametrize(
+    "method_cls",
+    [
+        Fp8LinearMethod,
+        pytest.param(
+            Fp8MoEMethod,
+            marks=pytest.mark.skipif(
+                current_platform.is_fp8_fnuz(),
+                reason="Fp8MoEMethod weight reloading is not supported on "
+                "e4m3fnuz platforms",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
 # FP8 weight reloading does not support online quantization
 @pytest.mark.parametrize("weight_block_size", [None, [128, 128]])
 # any postprocessing that is applied to the weights such as padding and repacking
@@ -783,12 +896,13 @@ def test_scaled_fp8_quant(dtype) -> None:
 #
 # this is the case for marlin as well as per-tensor Fp8MoEMethod
 @pytest.mark.parametrize("use_marlin", [False])  # skip True
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_fp8_reloading(
     default_vllm_config,
     method_cls,
     weight_block_size,
     use_marlin,
-    dist_init,
     monkeypatch,
 ):
     # NOTE(rob): this test fails when using DeepGEMM because the

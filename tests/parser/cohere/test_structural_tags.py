@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``adjust_request``: folding tools and JSON schemas into Cohere structural tags."""
+"""`adjust_request`: folding tools and JSON schemas into Cohere structural tags."""
 
 from __future__ import annotations
 
@@ -140,23 +140,29 @@ def _content_types(tag_json: str) -> set[str]:
 @pytest.fixture(scope="module")
 def parser(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
     """Parser configured with a supported Cohere architecture."""
-    return make_parser(
+    parser = make_parser(
         tokenizer, "cohere_command4", model_config=_model_config("Cohere2ForCausalLM")
     )
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 @pytest.fixture(scope="module")
 def parser_no_model_config(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
-    """Parser with no ``model_config`` (cannot resolve architecture)."""
-    return make_parser(tokenizer, "cohere_command4")
+    """Parser with no `model_config` (cannot resolve architecture)."""
+    parser = make_parser(tokenizer, "cohere_command4")
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 @pytest.fixture(scope="module")
 def parser_unsupported_arch(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
     """Parser configured with an architecture that has no structural tag style."""
-    return make_parser(
+    parser = make_parser(
         tokenizer, "cohere_command4", model_config=_model_config("LlamaForCausalLM")
     )
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 class TestAdjustRequestPassthrough:
@@ -305,7 +311,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
         )
 
     def test_responses_request_default_empty_tools(self, parser) -> None:
-        """``ResponsesRequest.tools`` defaults to ``[]``, not ``None``."""
+        """`ResponsesRequest.tools` defaults to `[]`, not `None`."""
         r = ResponsesRequest.model_validate(
             {
                 "input": "hi",
@@ -362,7 +368,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
         ],
     )
     def test_json_wrong_type_raises(self, construct) -> None:
-        """Non-str / non-dict ``json`` fails at Pydantic validation."""
+        """Non-str / non-dict `json` fails at Pydantic validation."""
         with pytest.raises(ValidationError):
             construct()
 

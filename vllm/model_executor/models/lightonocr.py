@@ -4,15 +4,14 @@ from collections.abc import Iterable, Mapping, Sequence
 
 import torch
 import torch.nn as nn
-from transformers import (
-    BatchFeature,
-    PixtralVisionConfig,
-)
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.mistral3 import (
     Mistral3DummyInputsBuilder,
     Mistral3ForConditionalGeneration,
+    Mistral3ImageEmbeddingInputs,
+    Mistral3ImageInputs,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
     init_vision_tower_for_mistral3,
@@ -26,12 +25,15 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
 
 
@@ -102,18 +104,20 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(hf_config)
-
         def replace(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            size = images.get_image_size(item_idx)
-            ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=size.width, image_height=size.height
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                assert isinstance(images, ImageProcessorItems)
+                size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=size.width, image_height=size.height
+                )
             # break/end tokens are not used in LightOnOCR
-            tokens = [image_token_id] * (ncols * nrows)
-            return PromptUpdateDetails.select_token_id(tokens, image_token_id)
+            return [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
@@ -177,6 +181,15 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Mistral3ImageInputs | None:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            return Mistral3ImageEmbeddingInputs(data=image_embeds)
+
+        return super()._parse_and_validate_image_input(**kwargs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

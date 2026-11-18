@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) RL Entrypoints"
   device: h200_35gb
   key: rl-entrypoints-tests
+  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -13,10 +14,13 @@ steps:
   - tests/entrypoints/rl
   commands:
   - pytest -v -s entrypoints/rl/weight_transfer
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer
+  - >-
+    VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s
+    entrypoints/rl
+    --ignore=entrypoints/rl/weight_transfer
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) RL Entrypoints"
       dind: false
       device: mi355_dpx

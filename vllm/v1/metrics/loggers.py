@@ -154,6 +154,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.num_finished_reqs: int = 0
 
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
@@ -164,7 +165,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
-        self.num_preemptions += iteration_stats.num_preempted_reqs
+        self.num_finished_reqs += len(iteration_stats.finished_requests)
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -175,12 +176,12 @@ class LoggingStatLogger(StatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "Engine {:03d}: ".format(self.engine_index)
+        return f"Engine {self.engine_index:03d}: "
 
     def _log_prefix_for_engine(self, engine_idx: int) -> str:
         if self.engine_index == engine_idx:
             return self.log_prefix
-        return "Engine {:03d}: ".format(engine_idx)
+        return f"Engine {engine_idx:03d}: "
 
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
@@ -226,6 +227,7 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         if scheduler_stats is not None:
+            self.num_preemptions += scheduler_stats.num_preempted_reqs
             self._log_iteration_details(scheduler_stats, engine_idx)
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -252,12 +254,10 @@ class LoggingStatLogger(StatLoggerBase):
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
-    def _update_stats(self):
-        now = time.monotonic()
+    def _calc_throughput(self, now: float) -> None:
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
 
-        self._reset(now)
         self.engine_is_idle = not any(
             (
                 prompt_throughput,
@@ -266,15 +266,16 @@ class LoggingStatLogger(StatLoggerBase):
                 self.last_generation_throughput,
             )
         )
-        self.last_generation_throughput = generation_throughput
         self.last_prompt_throughput = prompt_throughput
+        self.last_generation_throughput = generation_throughput
 
     def aggregate_scheduler_stats(self):
         # noop for per engine loggers
         return
 
     def log(self):
-        self._update_stats()
+        now = time.monotonic()
+        self._calc_throughput(now)
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
         log_fn = logger.debug if self.engine_is_idle else logger.info
@@ -299,6 +300,9 @@ class LoggingStatLogger(StatLoggerBase):
         if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
+
+        log_parts.append("Finished: %d reqs")
+        log_args.append(self.num_finished_reqs)
 
         kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
         if any(kv_fetch.values()):
@@ -345,6 +349,8 @@ class LoggingStatLogger(StatLoggerBase):
         if self._enable_perf_stats():
             self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
+        self._reset(now)
+
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.debug(
@@ -370,7 +376,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
     @property
     def log_prefix(self):
-        return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+        return f"{len(self.engine_indexes)} Engines Aggregated: "
 
     def _enable_perf_stats(self) -> bool:
         # Adding per_gpu perf stats across engines can lead to misleading numbers.
@@ -1144,6 +1150,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            self.counter_num_preempted_reqs[engine_idx].inc(
+                scheduler_stats.num_preempted_reqs
+            )
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
@@ -1256,9 +1265,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_watermark["not_watermarked"][engine_idx].inc(
                 iteration_stats.num_not_watermarked_reqs
             )
-        self.counter_num_preempted_reqs[engine_idx].inc(
-            iteration_stats.num_preempted_reqs
-        )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
         # Labeled prompt token counters by source
         pts = iteration_stats.prompt_token_stats
