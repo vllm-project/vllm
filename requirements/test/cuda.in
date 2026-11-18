@@ -13,7 +13,7 @@ pytest-cov
 # testing utils
 albumentations # required for Nemotron Parse in test_common.py
 av  # required for audio_in_video tests
-torchcodec >= 0.14 # required for torchcodec video backend tests
+torchcodec >= 0.16 # required for torchcodec video and image backend tests
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
 httpx
@@ -40,7 +40,7 @@ datamodel_code_generator>=0.81.0 # required for minicpm3 test
 nltk>=3.10.4 # pin transitive rouge-score/lm-eval dep for known GHSAs
 lm-eval[api]>=0.4.12 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==5.22.0
+transformers==5.23.0
 schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
 buildkite-test-collector==0.1.9

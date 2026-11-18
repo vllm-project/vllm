@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm import LLM
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -121,7 +124,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(weight_transfer_config=None),
         model_runner=SimpleNamespace(
-            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
+            load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads()),
+            intermediate_tensors=None,
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
@@ -179,6 +183,31 @@ def test_scoped_max_split_keeps_freed_large_blocks_releasable():
         SimpleNamespace(), max_split_size_mb=20
     )
     assert reserved_while_small_is_live(scoped) - baseline < large
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+@create_new_process_for_each_test("spawn")
+def test_scoped_max_split_reuses_freed_small_tensor_segments():
+    """Freed 1-10 MiB tensors (20 MiB segments) must be reused under load_model's
+    limit, not stranded: a loader that yields many of them filled the device."""
+    torch.accelerator.empty_cache()
+    with gpu_worker.Worker._scoped_allocator_max_split(
+        SimpleNamespace(), gpu_worker._MAX_SPLIT_SIZE_MB
+    ):
+        before = torch.accelerator.memory_reserved()
+        for i in range(100):
+            tensor = torch.empty(
+                (1 + i % 9) * 1024 * 1024 + 4096, dtype=torch.uint8, device="cuda"
+            )
+            del tensor
+        grown = torch.accelerator.memory_reserved() - before
+    # One segment is enough; at max_split_size_mb:20 this grows by 2000 MiB.
+    assert grown <= 20 * 1024 * 1024
 
 
 @pytest.mark.skipif(
@@ -749,12 +778,15 @@ def test_ranks_agree_on_extensible_kv_cache(
         reduced.append((value, op))
         return int(any_rank_unsupported)
 
-    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", lambda: local_reason)
+    monkeypatch.setattr(
+        gpu_worker, "vmm_unavailable_reason", lambda export_handle_types: local_reason
+    )
     monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
     monkeypatch.setattr(
         gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
     )
-    assert Worker.extensible_kv_cache_unsupported_reason(SimpleNamespace()) == expected
+    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=None))
+    assert Worker.extensible_kv_cache_unsupported_reason(worker) == expected
     assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
 
 
@@ -991,3 +1023,22 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool"]
     Worker.discard(worker, ("weights",))
     assert log == ["release", "pool", "pool"]
+
+
+@create_new_process_for_each_test("spawn")
+def test_startup_heap_frozen_before_weight_loading(monkeypatch):
+    """Ensure objects alive before startup are frozen by the time weights
+    load, so the loader and memory-profiling gc.collect() calls skip them."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    frozen_before = gc.get_freeze_count()
+    frozen_at_load = 0
+    load_weights = DefaultModelLoader.load_weights
+
+    def spy_load_weights(self, model, model_config):
+        nonlocal frozen_at_load
+        frozen_at_load = gc.get_freeze_count()
+        return load_weights(self, model, model_config)
+
+    monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
+    LLM("facebook/opt-125m", enforce_eager=True)
+    assert frozen_at_load > frozen_before
