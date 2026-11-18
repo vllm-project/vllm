@@ -199,6 +199,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterTritonPerTensorFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
@@ -266,6 +267,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
@@ -380,6 +382,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
     },
     "machete": {
@@ -489,6 +492,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -831,7 +835,7 @@ def init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -871,7 +875,7 @@ def init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -930,7 +934,7 @@ def init_int8_linear_kernel(
         activation_quant_key=_int8_activation_quant_key(config),
     )
 
-    logger.info_once(
+    logger.debug_once(
         "Selected %s for %s",
         kernel_type.__name__,
         module_name,
@@ -1011,7 +1015,7 @@ def choose_mp_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
-            logger.info_once("Using %s for mixed-precision linear", kernel.__name__)
+            logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
             failure_reasons.append(
@@ -1033,14 +1037,19 @@ def init_mxfp8_linear_kernel(
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape.
 
-    Returns a placeholder for requantization sources, which have no kernel."""
+    Omitted activation keys preserve the existing W8A8 selection and A16
+    fallback. Explicit None requests weight-only execution.
+    Returns a placeholder for requantization sources, which have no kernel.
+    """
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeMxFp8LinearKernel()
 
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
+        activation_quant_key=activation_quant_key,
     )
 
     platform = current_platform._enum
@@ -1082,6 +1091,13 @@ def init_mxfp8_linear_kernel(
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
+        if not kernel_cls._supports_quant_scheme(kMxfp8Static, activation_quant_key):
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: quantization scheme "
+                f"{kMxfp8Static}x{activation_quant_key} not supported"
+            )
+            continue
+
         can_implement, reason = kernel_cls.can_implement(config)
         if not can_implement:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
@@ -1091,7 +1107,7 @@ def init_mxfp8_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1196,7 +1212,7 @@ def init_mxfp4_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1259,7 +1275,7 @@ def init_mxfp6_linear_kernel(
             failure_reasons.append(reason)
             continue
 
-        logger.info_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1297,7 +1313,7 @@ def init_wfp8_a16_linear_kernel(
     )
 
     if module_name:
-        logger.info_once(
+        logger.debug_once(
             "Selected %s for %s",
             kernel_type.__name__,
             module_name,
@@ -1394,7 +1410,7 @@ def init_nvfp4_linear_kernel(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "
                 f"supported: {reason}"
             )
-        logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
         return force_kernel(config)
 
     # Auto-select from registry (or --linear-backend filtered).
@@ -1444,7 +1460,7 @@ def init_nvfp4_linear_kernel(
                 "\n - ".join(failure_reasons),
             )
 
-        logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1524,6 +1540,7 @@ __all__ = [
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
+    "AiterTritonPerTensorFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
