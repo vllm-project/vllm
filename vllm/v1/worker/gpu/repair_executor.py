@@ -28,6 +28,7 @@ connector plumbing was absorbed into vllm/v1/worker/gpu/kv_connector.py.
 """
 
 import dataclasses
+import inspect
 import os
 import time
 from collections import Counter
@@ -77,10 +78,49 @@ class _ReplayProbeAbort(BaseException):
     except-Exception cannot swallow it)."""
 
 
+def _replay_inert_kwargs(layer: Any, kwargs: dict[str, Any]) -> bool:
+    """Whether explicitly-passed keyword extras are inert under the replay.
+
+    The replay calls layer(positions, hidden_states, residual) with the
+    extras omitted. That binds identically to the model's explicit call
+    only when every passed value is None AND the layer signature defaults
+    each name to None; any other default (or an unresolvable signature)
+    means the replay would bind a different value than the model's own
+    loop, so it must refuse.
+
+    Args:
+        layer: The probe-captured layer 0 (signature source).
+        kwargs: The keyword arguments the model's loop passed to it.
+
+    Returns:
+        True when omitting the extras in the replay is binding-equivalent.
+
+    """
+    if any(value is not None for value in kwargs.values()):
+        return False
+    try:
+        signature = inspect.signature(layer.forward)
+    except (TypeError, ValueError):
+        return False
+    for name in kwargs:
+        param = signature.parameters.get(name)
+        if param is None or param.default is not None:
+            return False
+    return True
+
+
 def verify_replay_compatibility(model: Any) -> None:
     """Refuse the repair policy unless the model's own forward reduces to
     exactly what the replay executes: embed_input_ids feeding
     layer(positions, hidden_states, residual).
+
+    Keyword extras are accepted only when they are replay-inert: every
+    explicitly-passed value is None and the layer signature defaults each
+    to None (an explicit None binds identically to the default, so the
+    replay's 3-positional call is binding-equivalent -- e.g. MistralModel
+    threads t_cond=None through LlamaModel.forward's **extra_layer_kwargs
+    even for plain text models). Any valued extra (Ministral-3 conditioning
+    tensors, Gemma4 per-layer inputs) still refuses.
 
     Drives one tiny forward of the inner model with a pre-hook on layer
     0 that captures the layer's actual arguments and aborts the call
@@ -149,7 +189,11 @@ def verify_replay_compatibility(model: Any) -> None:
         handle.remove()
     args = captured.get("args")
     kwargs = captured.get("kwargs") or {}
-    if args is None or len(args) != 3 or kwargs:
+    if (
+        args is None
+        or len(args) != 3
+        or (kwargs and not _replay_inert_kwargs(layers[0], kwargs))
+    ):
         n_args = len(args) if args is not None else 0
         raise RuntimeError(
             "kv_load_failure_policy='repair' requires native layers called "
@@ -584,6 +628,84 @@ def _execute_preflight(
             capability=capability,
             error_detail=error_detail,
         )
+
+
+def repair_capability(model: Any) -> dict[str, Any]:
+    """Machine-readable replay-capability verdict for the repair policy.
+
+    Wraps the replay canary plus the executor's structural cache-seam
+    check into stable reason codes the distributed preflight can
+    all-gather: the verdict reads only model structure, so every TP rank
+    computes the same dict by construction, and the consensus fails
+    closed on any divergence or any refusal. The caller (the model
+    runner init) keeps the fail-fast behavior: it raises the refusal
+    text when compatible is False.
+
+    Returns:
+        A dict with compatible (bool), reason_code (one of ok,
+        no_layer_stack, no_embed_seam, layer_signature,
+        post_embed_transform, probe_failed, no_self_attn_cache_path,
+        kv_sharing_unsupported) and detail (the refusal text).
+
+    """
+    verdict: dict[str, Any] = {
+        "compatible": False,
+        "reason_code": "",
+        "detail": "",
+    }
+    try:
+        verify_replay_compatibility(model)
+    except RuntimeError as exc:
+        message = str(exc)
+        verdict["detail"] = message
+        # Order matters: the post-embed-transform message also contains
+        # the embed_input_ids token, so it must be classified first.
+        if "layer stack" in message:
+            verdict["reason_code"] = "no_layer_stack"
+        elif "transforms the embedding" in message:
+            verdict["reason_code"] = "post_embed_transform"
+        elif "embed_input_ids" in message:
+            verdict["reason_code"] = "no_embed_seam"
+        elif "cannot verify" in message:
+            verdict["reason_code"] = "probe_failed"
+        else:
+            verdict["reason_code"] = "layer_signature"
+        return verdict
+    layer0 = model.model.layers[0]
+    self_attn = getattr(layer0, "self_attn", None)
+    for layer in model.model.layers:
+        attn = getattr(getattr(layer, "self_attn", None), "attn", None)
+        if getattr(attn, "kv_sharing_target_layer_name", None) is not None:
+            # KV-shared layers (Gemma4 YOCO cross-decoder, eagle sharing)
+            # bind several layers to one physical cache: the repair
+            # write-set and report geometry assume one cache per layer.
+            verdict["reason_code"] = "kv_sharing_unsupported"
+            verdict["detail"] = (
+                "kv_load_failure_policy='repair': layer "
+                + type(layer).__name__
+                + " shares its KV cache with another layer "
+                "(kv_sharing_target_layer_name); the repair write-set and "
+                "report geometry is one-cache-per-layer -- switch the "
+                "policy to 'recompute'"
+            )
+            return verdict
+    if not hasattr(self_attn, "attn"):
+        # The executor's fence and abort re-zero reach every layer's
+        # cache through layer.self_attn.attn (_repair_cache_views); a
+        # canary-compatible model without that seam fails every repair
+        # loudly at repair time -- surface it as an init-time fact.
+        verdict["reason_code"] = "no_self_attn_cache_path"
+        verdict["detail"] = (
+            "kv_load_failure_policy='repair': layer 0 ("
+            + type(layer0).__name__
+            + ") lacks the self_attn.attn cache seam the repair executor's "
+            "fence and re-zero reach through; switch the policy to "
+            "'recompute'"
+        )
+        return verdict
+    verdict["compatible"] = True
+    verdict["reason_code"] = "ok"
+    return verdict
 
 
 def execute_repair_only(
