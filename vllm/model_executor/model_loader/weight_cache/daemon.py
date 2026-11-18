@@ -91,7 +91,7 @@ import os
 import select
 import signal
 import socket
-import threading
+import time
 from collections.abc import Callable, Iterable
 
 import torch
@@ -150,11 +150,12 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import 
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed import (
-    WeightShardSeed,
-)
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
+    WEIGHT_COPY_LEASE_TIMEOUT_S,
+    WeightShardSeed,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -411,9 +412,7 @@ class WeightCacheDaemon:
                 conn, _ = server.accept()
                 self._serve_connection(conn)
         finally:
-            release_error = self._shutdown(server, socket_path, lock_fd)
-            if release_error:
-                raise release_error[0]
+            self._shutdown(server, socket_path, lock_fd)
 
     def _serve_connection(self, conn: socket.socket) -> None:
         with conn:
@@ -429,50 +428,24 @@ class WeightCacheDaemon:
                 with contextlib.suppress(OSError):
                     send_msg(conn, {"status": "error", "message": str(e)})
 
-    def _release_weights_on_shutdown(self, release_error: list[Exception]) -> None:
-        try:
-            self.weight_seed.release()
-        except Exception as e:
-            release_error.append(e)
-            logger.exception("Error releasing weight cache during shutdown")
-
-    def _drain_shutdown_clients(
-        self, server: socket.socket, release_thread: threading.Thread
-    ) -> None:
-        shutdown_clients = []
+    def _drain_shutdown_clients(self, server: socket.socket) -> None:
+        self.weight_seed.start_release()
+        deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S
         # Keep accepting local lease acknowledgements until the source
         # registrations and weights are safe to tear down.
-        while release_thread.is_alive():
+        while self.weight_seed.active_copies and time.monotonic() < deadline:
             try:
                 conn, _ = server.accept()
             except TimeoutError:
                 continue
             conn.settimeout(5.0)
-            client_thread = threading.Thread(
-                target=self._serve_connection,
-                args=(conn,),
-                name="vllm-weight-cache-shutdown-client",
-                daemon=True,
-            )
-            shutdown_clients.append(client_thread)
-            client_thread.start()
-        release_thread.join()
-        for client_thread in shutdown_clients:
-            client_thread.join(timeout=5.0)
+            self._serve_connection(conn)
+        self.weight_seed.finish_release()
 
-    def _shutdown(
-        self, server: socket.socket, socket_path: str, lock_fd: int
-    ) -> list[Exception]:
-        release_error: list[Exception] = []
-        release_thread = threading.Thread(
-            target=self._release_weights_on_shutdown,
-            args=(release_error,),
-            name="vllm-weight-cache-shutdown-release",
-        )
-        release_thread.start()
+    def _shutdown(self, server: socket.socket, socket_path: str, lock_fd: int) -> None:
         server.settimeout(0.5)
         try:
-            self._drain_shutdown_clients(server, release_thread)
+            self._drain_shutdown_clients(server)
         finally:
             server.close()
             for watcher in self._watchers:
@@ -481,7 +454,6 @@ class WeightCacheDaemon:
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
-        return release_error
 
     def _acquire_gpu_lock(self, socket_path: str) -> int:
         """Take an exclusive lock guarding this GPU's socket path.
