@@ -123,7 +123,7 @@ async def test_online_beam_search_bounds_finished_histories(
 ):
     from vllm.entrypoints.generate.beam_search import online
 
-    live = weakref.WeakValueDictionary()
+    live = weakref.WeakValueDictionary[int, BeamSearchSequence]()
 
     class TrackedSequence(BeamSearchSequence):
         # Allow weak references for lifetime tracking in this test.
