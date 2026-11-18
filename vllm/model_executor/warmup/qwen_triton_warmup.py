@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm up Qwen Triton kernels from the loaded model's compile keys."""
 
-import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -225,23 +224,12 @@ def _warm_fused_post_conv_kernel(
     )
 
     qkv_dim = 2 * config.h * config.k + config.hv * config.v
-    # The kernel specializes on the stride and alignment of a and b. On ROCm the
-    # prefill gets them as the two halves of the packed in_proj_ba output, so
-    # ROCm also warms that layout.
-    packed_ba_layouts = (False, True) if current_platform.is_rocm() else (False,)
-    for length, packed_ba in itertools.product(
-        _FLA_POST_CONV_WARMUP_LENGTHS, packed_ba_layouts
-    ):
+    for length in _FLA_POST_CONV_WARMUP_LENGTHS:
         conv_output = torch.empty(
             (length, qkv_dim), dtype=config.conv_dtype, device=device
         )
-        if packed_ba:
-            b, a = torch.empty(
-                (length, 2 * config.hv), dtype=config.conv_dtype, device=device
-            ).chunk(2, dim=-1)
-        else:
-            a = torch.empty((length, config.hv), dtype=config.conv_dtype, device=device)
-            b = torch.empty_like(a)
+        a = torch.empty((length, config.hv), dtype=config.conv_dtype, device=device)
+        b = torch.empty_like(a)
 
         fused_post_conv_prep(
             conv_output,

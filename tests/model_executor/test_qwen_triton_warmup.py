@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp as mtp_ops  # noqa: E501
-import vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv as post_conv_ops  # noqa: E501
 from vllm.model_executor.warmup.qwen_triton_warmup import (
     _FLA_POST_CONV_WARMUP_LENGTHS,
     _QwenGDNWarmupConfig,
@@ -62,45 +61,6 @@ def test_qwen_gdn_prefill_warmup_kernels_compile_on_gpu() -> None:
     _warm_state_gather_scatter_kernels(device, config)
     assert _FLA_POST_CONV_WARMUP_LENGTHS == (1, 2, 16)
     torch.accelerator.synchronize(device)
-
-
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only prefill layout")
-@pytest.mark.parametrize("hv", [8, 12])
-def test_qwen_gdn_post_conv_warmup_covers_packed_ba_layout(hv: int) -> None:
-    """The ROCm prefill passes b/a as the halves of the packed ba projection;
-    serving that layout must reuse the warmed kernel variants."""
-    # hv 8: the a/b strides (8 contiguous, 16 packed) specialize differently.
-    # hv 12: only the 16-byte alignment of the packed a (24 bytes in) differs.
-    device = torch.device("cuda")
-    config = replace(
-        _cuda_gdn_config(),
-        hv=hv,
-        a_log=torch.zeros(hv, dtype=torch.float32, device=device),
-        dt_bias=torch.zeros(hv, dtype=torch.float32, device=device),
-    )
-    kernel = post_conv_ops._fused_post_conv_kernel
-    kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
-    kernel_cache.clear()
-    _warm_fused_post_conv_kernel(device, config)
-    torch.accelerator.synchronize(device)
-    warmed = set(kernel_cache)
-
-    qkv_dim = 2 * config.h * config.k + hv * config.v
-    for num_tokens in (1, 2, 16, 37):
-        ba = torch.zeros((num_tokens, 2 * hv), dtype=config.conv_dtype, device=device)
-        b, a = ba.chunk(2, dim=-1)
-        post_conv_ops.fused_post_conv_prep(
-            torch.zeros((num_tokens, qkv_dim), dtype=config.conv_dtype, device=device),
-            a,
-            b,
-            config.a_log,
-            config.dt_bias,
-            config.h,
-            config.k,
-            config.v,
-        )
-    torch.accelerator.synchronize(device)
-    assert set(kernel_cache) == warmed
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only Triton kernel")

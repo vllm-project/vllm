@@ -1518,9 +1518,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return self._output_projection(core_attn_out, z)
 
-    def _warmup_prefill_kernels(
-        self, qkv_or_qkvz: torch.Tensor, v_dim: int, packed_ba: bool = False
-    ) -> None:
+    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
 
         During V1 profile runs, `_forward_core` returns early because
@@ -1544,9 +1542,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The decode path uses `gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule`
         which has fixed kernel parameters (no autotuning), so only the
         prefill (chunked) path needs warming up.
-
-        `packed_ba` builds b and a as the halves of one packed tensor, as
-        the caller's prefill path passes them.
         """
         if self._prefill_kernels_warmed_up:
             return
@@ -1569,13 +1564,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         dummy_mixed_qkv = torch.randn(
             T, qkv_or_qkvz.shape[-1] - v_dim, device=device, dtype=dtype
         )
-        if packed_ba:
-            dummy_b, dummy_a = torch.randn(
-                T, 2 * num_v_heads, device=device, dtype=dtype
-            ).chunk(2, dim=-1)
-        else:
-            dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
-            dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+        dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+        dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         q, k, v, g, beta = fused_post_conv_prep(
             conv_output=dummy_mixed_qkv,
             a=dummy_a,
@@ -1765,11 +1755,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
             v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
-            # prepare_gdn_attention_core_inputs returns b/a as ba.chunk views
-            # for the flat layout and as contiguous copies otherwise.
-            self._warmup_prefill_kernels(
-                qkvz, v_dim, packed_ba=not self.gqa_interleaved_layout
-            )
+            self._warmup_prefill_kernels(qkvz, v_dim)
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
