@@ -150,7 +150,10 @@ class AttentionConfig:
     KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
     the DCP group equal to the TP group), each rank attends a gathered copy of
     its tokens' context instead of the DCP-local cache. A mixed step's decode
-    tokens stay sharded by head (on the DCP path under DCP)."""
+    tokens stay sharded by head (on the DCP path under DCP). Model-specific
+    planners can apply higher floors; DeepSeek-V4.1 additionally requires DCP=1
+    and 3072 prefill tokens per step with 2048 per request, or a long-context
+    tail of 1024 tokens at 32K+ context."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
