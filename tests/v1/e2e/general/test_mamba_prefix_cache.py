@@ -11,6 +11,9 @@ import vllm.envs as envs
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    xpu_gdn_kernel_supports_checkpoints,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
@@ -558,7 +561,7 @@ def _run_mamba_prefix_cache_mrv2(
     additional_config: dict[str, Any] = GDN_PREFILL_CONFIG,
 ):
     backend = additional_config["gdn_prefill_backend"]
-    internal_checkpoints = backend == "flashinfer" or (
+    internal_checkpoints = backend in ("flashinfer", "sycl") or (
         backend == "triton" and current_platform.is_cuda()
     )
     global async_scheduling_mode
@@ -885,6 +888,19 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_xpu() or not xpu_gdn_kernel_supports_checkpoints(),
+    reason="Needs a vllm-xpu-kernels SYCL GDN op with prefill checkpoints.",
+)
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_async_sycl(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(
+        monkeypatch,
+        async_scheduling=True,
+        additional_config={"gdn_prefill_backend": "sycl"},
+    )
 
 
 @pytest.mark.skipif(

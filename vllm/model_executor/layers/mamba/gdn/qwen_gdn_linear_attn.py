@@ -146,6 +146,18 @@ def xpu_gdn_kernel_available() -> bool:
     return hasattr(torch.ops._xpu_C, "gdn_attention")
 
 
+# The SYCL GDN kernel processes prefills in 64-token chunks.
+SYCL_GDN_CHECKPOINT_ALIGNMENT = 64
+
+
+def xpu_gdn_kernel_supports_checkpoints() -> bool:
+    """Whether the SYCL GDN op writes internal prefill checkpoints itself."""
+    return xpu_gdn_kernel_available() and any(
+        arg.name == "checkpoint_offsets"
+        for arg in torch.ops._xpu_C.gdn_attention.default._schema.arguments
+    )
+
+
 def _aiter_flydsl_unsupported_reasons(
     vllm_config: VllmConfig, head_k_dim: int | None, head_v_dim: int | None
 ) -> list[str]:
@@ -842,15 +854,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
-        # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so an
-        # align-mode checkpoint needs no split prefill.
+        # The FlashInfer, Triton/FLA and SYCL prefills emit mid-prefill states,
+        # so an align-mode checkpoint needs no split prefill. SYCL writes them
+        # straight into the cache, without the exporter.
         self._checkpoint_alignment: int | None = None
         if vllm_config.cache_config.mamba_cache_mode == "align":
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
             elif self.gdn_prefill_backend == "triton" and current_platform.is_cuda():
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
-        if self._checkpoint_alignment is not None:
+            elif (
+                self.gdn_prefill_backend == "sycl"
+                and xpu_gdn_kernel_supports_checkpoints()
+            ):
+                self._checkpoint_alignment = SYCL_GDN_CHECKPOINT_ALIGNMENT
+        if (
+            self._checkpoint_alignment is not None
+            and self.gdn_prefill_backend != "sycl"
+        ):
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
