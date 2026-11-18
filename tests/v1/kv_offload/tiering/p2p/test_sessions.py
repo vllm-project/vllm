@@ -763,12 +763,12 @@ class TestClientFlows:
             (2, False),
         ]
         assert not any(_released(f) for f in failures)
-        for req_id in ("req-1", "req-2"):
+        for abort in aborts:
             conn.enqueue(
                 {
                     TYPE_KEY: AbortAckMsg.TYPE,
-                    AbortAckMsg.ROUND_SEQ: 0,
-                    AbortAckMsg.KV_REQUEST_ID: req_id,
+                    AbortAckMsg.ROUND_SEQ: abort[AbortFetchMsg.ROUND_SEQ],
+                    AbortAckMsg.KV_REQUEST_ID: abort[AbortFetchMsg.KV_REQUEST_ID],
                 }
             )
         assert session.poll().loads == []
@@ -806,6 +806,157 @@ class TestClientFlows:
         assert session.poll().loads == []
         assert session._client.has_active_loads is False
 
+    def test_late_abort_ack_after_id_reuse_does_not_complete_new_load(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=101, kv_request_id="req-k", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        load = _client_load(session, "req-k")
+        load.submitted_at = time.monotonic() - load.timeout_s - 1.0
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (101, False)
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-k",
+            }
+        )
+        assert session.poll().loads == []
+        assert _released(failure)
+        assert "req-k" not in session._client._requests
+
+        session.request_blocks(
+            job_id=202, kv_request_id="req-k", keys=[OffloadKey(b"k2")], block_ids=[1]
+        )
+        new_round = conn._sent[-1][FetchMsg.ROUND_SEQ]
+        assert new_round != 0
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-k",
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is True
+        assert session._client._requests["req-k"].loads[new_round].job_id == 202
+
+    def test_late_transfer_done_after_id_reuse_does_not_complete_new_load(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=101, kv_request_id="req-k", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        load = _client_load(session, "req-k")
+        load.submitted_at = time.monotonic() - load.timeout_s - 1.0
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (101, False)
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-k",
+            }
+        )
+        assert session.poll().loads == []
+        assert _released(failure)
+
+        session.request_blocks(
+            job_id=202, kv_request_id="req-k", keys=[OffloadKey(b"k2")], block_ids=[1]
+        )
+        new_round = conn._sent[-1][FetchMsg.ROUND_SEQ]
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-k",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is True
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: new_round,
+                TransferDoneMsg.KV_REQUEST_ID: "req-k",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        (success,) = session.poll().loads
+        assert (success.job_id, success.success) == (202, True)
+        assert session._client.has_active_loads is False
+
+    def test_session_round_allocator_is_o1_and_never_reuses_rounds(self):
+        """Rounds come from a session-wide counter, not a per-id map.
+
+        Completing many unique ids must not retain per-id round state.
+        Reusing an id after idle prune must send a round that was never
+        used, so a delayed completion for a retired round cannot match.
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        n = 1000
+        first_round = None
+        for i in range(n):
+            rid = f"req-{i}"
+            session.request_blocks(
+                job_id=i, kv_request_id=rid, keys=[OffloadKey(b"k")], block_ids=[0]
+            )
+            round_seq = conn._sent[-1][FetchMsg.ROUND_SEQ]
+            if i == 0:
+                first_round = round_seq
+            conn.enqueue(
+                {
+                    TYPE_KEY: TransferDoneMsg.TYPE,
+                    TransferDoneMsg.ROUND_SEQ: round_seq,
+                    TransferDoneMsg.KV_REQUEST_ID: rid,
+                    TransferDoneMsg.SUCCESS: True,
+                }
+            )
+            assert session.poll().loads == [
+                LoadResult(job_id=i, kv_request_id=rid, success=True)
+            ]
+
+        assert first_round is not None
+        assert session._client._requests == {}
+        assert session._client.has_active_loads is False
+        assert not hasattr(session._client, "_next_round")
+
+        session.request_blocks(
+            job_id=n, kv_request_id="req-0", keys=[OffloadKey(b"k2")], block_ids=[1]
+        )
+        new_round = conn._sent[-1][FetchMsg.ROUND_SEQ]
+        assert new_round != first_round
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: first_round,
+                TransferDoneMsg.KV_REQUEST_ID: "req-0",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is True
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: new_round,
+                TransferDoneMsg.KV_REQUEST_ID: "req-0",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=n, kv_request_id="req-0", success=True)
+        ]
+        session.close()
+
     def test_active_loads_work_list_tracks_in_flight(self):
         """collect_results / has_active_loads use the _active_loads work-list,
         armed when a fetch is issued and discarded exactly when its load
@@ -824,6 +975,7 @@ class TestClientFlows:
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
+        fetch_round = conn._sent[-1][FetchMsg.ROUND_SEQ]
         assert client._active_loads == {"req-1"}
         assert client.has_active_loads is True
 
@@ -831,7 +983,7 @@ class TestClientFlows:
         conn.enqueue(
             {
                 TYPE_KEY: TransferDoneMsg.TYPE,
-                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.ROUND_SEQ: fetch_round,
                 TransferDoneMsg.KV_REQUEST_ID: "req-1",
                 TransferDoneMsg.SUCCESS: True,
             }
@@ -1118,6 +1270,7 @@ class TestLookupFlow:
         session.flush_pending_lookups()
         lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         session.request_blocks(1, "load", [OffloadKey(b"key")], [0])
+        round_seq = conn._sent[-1][FetchMsg.ROUND_SEQ]
         session.add_stored_blocks("store", [OffloadKey(b"key")], [1], 2)
         if partial_fetch:
             session.add_stored_blocks("store", [OffloadKey(b"unused")], [2], 3)
@@ -1137,7 +1290,7 @@ class TestLookupFlow:
                 TYPE_KEY: TransferDoneMsg.TYPE,
                 TransferDoneMsg.KV_REQUEST_ID: "load",
                 TransferDoneMsg.SUCCESS: True,
-                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.ROUND_SEQ: round_seq,
             }
         )
         lookup_clock.now = _LOOKUP_TIMEOUT_S
@@ -3176,6 +3329,7 @@ class TestDisconnect:
         session._client.on_transfer_done("req-7", success=False, round_seq=0)
         session.finish_request("req-7")
         session.request_blocks(8, "req-7", [OffloadKey(b"new")], [1])
+        round_seq = conn._sent[-1][FetchMsg.ROUND_SEQ]
         loads = session.poll().loads
         assert len(loads) == 1 and loads[0].job_id == 7 and not loads[0].success
         assert loads[0].request_finished
@@ -3183,7 +3337,7 @@ class TestDisconnect:
             {
                 TYPE_KEY: TransferDoneMsg.TYPE,
                 TransferDoneMsg.KV_REQUEST_ID: "req-7",
-                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.ROUND_SEQ: round_seq,
                 TransferDoneMsg.SUCCESS: False,
             }
         )
