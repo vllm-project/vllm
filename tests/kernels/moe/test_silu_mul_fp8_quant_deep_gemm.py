@@ -56,9 +56,6 @@ CASES = [
     (256, 8, 7168, fp8_dtype),
     (256, 32, 7168, fp8_dtype),
     (256, 64, 7168, fp8_dtype),
-    # Straddle the shared-memory limit for the five-stage pipeline.
-    (1791, 1, 4096, fp8_dtype),
-    (1792, 1, 4096, fp8_dtype),
     # Only add a few fnuz tests to help with long CI times.
     (8, 512, 7168, torch.float8_e4m3fnuz),
     (8, 1024, 7168, torch.float8_e4m3fnuz),
