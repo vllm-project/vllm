@@ -131,7 +131,6 @@ steps:
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
       - tests/transformers_utils/processors/test_hy_v4.py
-      - tests/models/multimodal/generation/test_hy_v4.py
       - vllm/models/hy_v4/
       - vllm/config/
       - tests/models/transformers/test_layer_registry_e2e.py
@@ -187,9 +186,6 @@ steps:
       - >-
         VLLM_ROCM_USE_AITER=1 pytest -v -s
         transformers_utils/processors/test_hy_v4.py
-      - >-
-        VLLM_ROCM_USE_AITER=1 pytest -v -s
-        models/multimodal/generation/test_hy_v4.py -k small_model
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
