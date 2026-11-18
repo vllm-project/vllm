@@ -597,6 +597,7 @@ class _AddedTokenTokenizer:
     END_THINK_ID = 1_000_002
     USER_ID = 1_000_003
     EOS_ID = 1_000_004
+    REF_ID = 1_000_005
 
     def get_added_vocab(self) -> dict[str, int]:
         return {
@@ -605,6 +606,7 @@ class _AddedTokenTokenizer:
             "</think>": self.END_THINK_ID,
             "<｜User｜>": self.USER_ID,
             "<｜end▁of▁sentence｜>": self.EOS_ID,
+            "<｜ref｜>": self.REF_ID,
         }
 
     def encode(self, text: str, add_special_tokens: bool = False, **kwargs):
@@ -693,3 +695,126 @@ def test_renderer_keeps_reserved_tokens_as_text(text):
         _AddedTokenTokenizer.EOS_ID,
     ):
         assert ids.count(special) == base.count(special)
+
+
+REF = "<｜ref｜>"
+RESERVED = [
+    IMAGE_PLACEHOLDER,
+    "<think>",
+    "</think>",
+    "<｜User｜>",
+    "<｜end▁of▁sentence｜>",
+]
+RESERVED_IDS = [
+    _AddedTokenTokenizer.IMAGE_ID,
+    _AddedTokenTokenizer.THINK_ID,
+    _AddedTokenTokenizer.END_THINK_ID,
+    _AddedTokenTokenizer.USER_ID,
+    _AddedTokenTokenizer.EOS_ID,
+]
+
+
+def _call(name="f", arguments="{}"):
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        ],
+    }
+
+
+def _extra_special_ids(build, text, special_id):
+    """How many more times `special_id` is in the prompt of `text` than of 'x'."""
+    tok = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
+
+    def count(value):
+        messages, tools = build(value)
+        kwargs = {"tools": tools} if tools else {}
+        return tok.apply_chat_template(messages, tokenize=True, **kwargs).count(
+            special_id
+        )
+
+    return count(f"a {text} b") - count("x")
+
+
+@pytest.mark.parametrize("field", ["content", "reasoning_content"])
+def test_assistant_keeps_grounding_tokens_only(field):
+    # As in deepseek-recipe: grounding tokens stay special tokens in assistant
+    # content and reasoning content, every other reserved token is plain text.
+    def build(value):
+        if field == "content":
+            return [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": value},
+                {"role": "user", "content": "ok"},
+            ], None
+        return [
+            {"role": "user", "content": "go"},
+            {**_call(), "reasoning_content": value},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ], None
+
+    assert _extra_special_ids(build, REF, _AddedTokenTokenizer.REF_ID) == 1
+    for text, special_id in zip(RESERVED, RESERVED_IDS):
+        assert _extra_special_ids(build, text, special_id) == 0
+
+
+def test_user_and_tool_text_do_not_keep_grounding_tokens():
+    def user(value):
+        return [{"role": "user", "content": value}], None
+
+    def tool(value):
+        return [
+            {"role": "user", "content": "go"},
+            _call(),
+            {"role": "tool", "tool_call_id": "c1", "content": value},
+            {"role": "user", "content": "ok"},
+        ], None
+
+    for build in (user, tool):
+        assert _extra_special_ids(build, REF, _AddedTokenTokenizer.REF_ID) == 0
+
+
+@pytest.mark.parametrize(
+    "field", ["arguments", "arguments_key", "double_encoded", "name", "description"]
+)
+@pytest.mark.parametrize("text", RESERVED + [REF])
+def test_tool_fields_are_plain_text(field, text):
+    # As in deepseek-recipe: tool call names and arguments and tool definitions
+    # are plain text, grounding tokens included.
+    def build(value):
+        tools = None
+        if field == "arguments":
+            call = _call(arguments=json.dumps({"x": value}))
+        elif field == "arguments_key":
+            call = _call(arguments=json.dumps({value: 1}))
+        elif field == "double_encoded":
+            call = _call(arguments=json.dumps(json.dumps({"x": value})))
+        elif field == "name":
+            call = _call(name="f" + value)
+        else:
+            call = _call()
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": value,
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        messages = [
+            {"role": "user", "content": "go"},
+            call,
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        return messages, tools
+
+    ids = dict(zip(RESERVED + [REF], RESERVED_IDS + [_AddedTokenTokenizer.REF_ID]))
+    assert _extra_special_ids(build, text, ids[text]) == 0

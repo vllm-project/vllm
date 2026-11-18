@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import json
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -19,18 +20,36 @@ from .deepseek_v41_encoding import (
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
-# Message text is sanitized by default: every added token in it (control tokens
-# such as '<think>', '</think>', '<｜User｜>', the image placeholder, ...) is
-# encoded as plain text, never as the special token, for every role and replayed
-# assistant turns. The model's own delimiters are never part of replayed text,
-# so a match is a mention (or an injection), not structure. Images must be
-# provided as image content parts.
+# Client-supplied text is sanitized by default, as in deepseek-recipe: every
+# added token in it (control tokens such as '<think>', '</think>',
+# '<｜User｜>', the image placeholder, ...) is encoded as plain text, never as the
+# special token. This covers message text of every role (replayed assistant
+# turns included), tool call names and arguments, tool definitions and the
+# response format schema. The model's own delimiters are never part of replayed
+# text, so a match is a mention (or an injection), not structure. Images must
+# be provided as image content parts.
 #
 # Added tokens are matched in plain text by the tokenizer, so escaped text is
 # replaced by per-call sentinels before the prompt is rendered, and each
 # sentinel is encoded as ordinary text afterwards.
 _ESCAPE_OPEN = "\ue000"
 _ESCAPE_CLOSE = "\ue001"
+
+# As in deepseek-recipe, the only special tokens that assistant content and
+# reasoning content can contain are the grounding tokens; every other added
+# token there is plain text.
+_ASSISTANT_SPECIAL_TOKENS = frozenset(
+    {
+        "<｜ref｜>",
+        "<｜/ref｜>",
+        "<｜box｜>",
+        "<｜/box｜>",
+        "<｜point｜>",
+        "<｜/point｜>",
+        "<｜polygon｜>",
+        "<｜/polygon｜>",
+    }
+)
 
 
 def _make_escape(
@@ -48,15 +67,42 @@ def _make_escape(
     return escape
 
 
+def _escape_deep(value: Any, escape: Callable[[Any], Any]) -> Any:
+    """Escape every key and string of a JSON-like value."""
+    if isinstance(value, dict):
+        return {escape(k): _escape_deep(v, escape) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_escape_deep(v, escape) for v in value]
+    return escape(value)
+
+
+def _escape_arguments(arguments: Any, escape: Callable[[Any], Any]) -> Any:
+    """Tool call arguments as the encoder reads them, with every key and string
+    escaped (the encoder accepts JSON strings, including double-encoded ones)."""
+    parsed = arguments
+    for _ in range(2):
+        if not isinstance(parsed, str):
+            break
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            break
+    if not isinstance(parsed, dict):
+        parsed = {"arguments": arguments}
+    return _escape_deep(parsed, escape)
+
+
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
     escape: Callable[[Any], Any] | None = None,
+    escape_assistant: Callable[[Any], Any] | None = None,
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # tool_reference, and ValueError (400) instead of the reference's asserts.
     # A tool_reference renders as the tool name; `_add_updated_tool_schemas`
     # lists the referenced tools after the user turn.
     escape = escape or (lambda text: text)
+    escape_assistant = escape_assistant or escape
     result: list[dict[str, Any]] = []
     for original_message in messages:
         content = original_message.get("content")
@@ -72,18 +118,20 @@ def _normalize_messages(
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
 
+        # Assistant text keeps the grounding tokens, as in deepseek-recipe.
+        text_escape = escape_assistant if role == "assistant" else escape
         if "reasoning_content" in message:
-            message["reasoning_content"] = escape(message["reasoning_content"])
+            message["reasoning_content"] = text_escape(message["reasoning_content"])
         content = message.get("content")
         if isinstance(content, str):
-            message["content"] = escape(content)
+            message["content"] = text_escape(content)
         elif isinstance(content, list):
             parts = []
             tool_references = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
-                    parts.append(escape(block.get("text", "")))
+                    parts.append(text_escape(block.get("text", "")))
                 elif part_type in (
                     "image_url",
                     "input_image",
@@ -104,6 +152,11 @@ def _normalize_messages(
             message["content"] = "\n\n".join(parts)
             if tool_references:
                 message["_tool_references"] = tool_references
+        # Tool call names and arguments are plain text for every token.
+        for tool_call in message.get("tool_calls") or []:
+            function = tool_call["function"]
+            function["name"] = escape(function.get("name"))
+            function["arguments"] = _escape_arguments(function.get("arguments"), escape)
 
     return result
 
@@ -151,12 +204,17 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """Wrap an HF tokenizer with the V4.1 prompt encoder."""
     wrapped = copy.copy(tokenizer)
     added_vocab = tokenizer.get_added_vocab()
-    added_tokens_re = (
-        re.compile(
-            "|".join(re.escape(t) for t in sorted(added_vocab, key=len, reverse=True))
+
+    def tokens_re(tokens: list[str]) -> re.Pattern[str] | None:
+        if not tokens:
+            return None
+        return re.compile(
+            "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
         )
-        if added_vocab
-        else None
+
+    added_tokens_re = tokens_re(list(added_vocab))
+    assistant_tokens_re = tokens_re(
+        [t for t in added_vocab if t not in _ASSISTANT_SPECIAL_TOKENS]
     )
     plain_token_ids: dict[str, list[int]] = {}
 
@@ -171,8 +229,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             # The generic renderer's conversation has already flattened text
             # parts with '\n'. V4.1 encodes the original messages with '\n\n'.
             nonce = uuid.uuid4().hex
+            escape = _make_escape(added_tokens_re, nonce)
             conversation = _normalize_messages(
-                messages, _make_escape(added_tokens_re, nonce)
+                messages, escape, _make_escape(assistant_tokens_re, nonce)
             )
             conversation = _add_updated_tool_schemas(conversation, tools)
             # As in deepseek-recipe, deferred tools load through tool search.
@@ -195,6 +254,11 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     system = {"role": "system", "content": ""}
                     conversation.insert(0, system)
                 system["tools"] = listed
+            # Tool definitions and the response format schema are plain text.
+            for message in conversation:
+                for key in ("tools", "updated_tools", "response_format"):
+                    if key in message:
+                        message[key] = _escape_deep(message[key], escape)
 
             thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
             if "thinking" not in kwargs and "enable_thinking" not in kwargs:
