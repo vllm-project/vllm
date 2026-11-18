@@ -503,7 +503,7 @@ def test_plan_failure_leaves_a_note_and_retries(monkeypatch):
     with pytest.raises(RuntimeError, match="unreachable") as info:
         fleet.engine.start_weight_update()
     assert "mid-reload" in "".join(info.value.__notes__)
-    assert fleet.engine._plan is None
+    assert not fleet.engine._planned
     fleet.engine._hooks = hooks
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
 

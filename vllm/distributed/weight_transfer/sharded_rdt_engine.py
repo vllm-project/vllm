@@ -129,15 +129,13 @@ _Piece = tuple[str, Box, torch.dtype, list[Any]]
 class _Bucket:
     """One pull: the pieces one producer serves to this worker, and where
     they go. It lands as one flat byte tensor (pieces at `flat_layout`) in a
-    slot of the receive arena; per piece, `copies` are its destinations."""
+    slot of the receive arena."""
 
     producer: int
     seq: int
     unit: int
     pieces: list[tuple[str, Box]]
-    dtypes: list[torch.dtype]
     nbytes: int
-    copies: list[list[Any]] = field(default_factory=list)
     # Built once by `prepare`, used every sync: where each piece sits in the
     # bucket; contiguous destinations of the sent dtype as bytes, runs of
     # pieces adjacent in both the bucket and memory merged into one, with
@@ -147,6 +145,7 @@ class _Bucket:
     byte_dsts: list[torch.Tensor] = field(default_factory=list)
     byte_srcs: list[tuple[int, int]] = field(default_factory=list)
     typed: list[tuple[int, torch.Tensor]] = field(default_factory=list)
+    typed_dsts: list[torch.Tensor] = field(default_factory=list)
     staged: list[tuple[int, _Staging, tuple[slice, ...]]] = field(default_factory=list)
     # Per receive slot, built when the arena is: where the bucket lands, and
     # the source views of its copy-out.
@@ -174,10 +173,11 @@ class _Bucket:
     def wire(self) -> WireBucket:
         return list(self.pieces)
 
-    def prepare(self) -> None:
-        self.layout = flat_layout([box for _, box in self.pieces], self.dtypes)
+    def prepare(self, dtypes: list[torch.dtype], copies: list[list[Any]]) -> None:
+        """Build the copy-out from each piece's sent dtype and destinations."""
+        self.layout = flat_layout([box for _, box in self.pieces], dtypes)
         for i, ((_, box), dests, dtype) in enumerate(
-            zip(self.pieces, self.copies, self.dtypes, strict=True)
+            zip(self.pieces, copies, dtypes, strict=True)
         ):
             for dest in dests:
                 if isinstance(dest, _Staging):
@@ -189,6 +189,7 @@ class _Bucket:
                     self._add_byte_copy(self.layout[i][:2], dest)
                 else:
                     self.typed.append((i, dest))
+                    self.typed_dsts.append(dest)
 
 
 @dataclass(slots=True)
@@ -252,7 +253,7 @@ class ShardedRDTWeightTransferEngine(
         self._producers: list[Any] = []
         self._hooks: _PullHooks | None = None
         # Built at the first start_weight_update after an init.
-        self._plan: LoadPlan | None = None
+        self._planned = False
         self._buckets: list[_Bucket] = []
         # Receive arena: `num_buffers` slots of the largest bucket of at most
         # `buffer_bytes`, pinned with NIXL from planning until the plan is
@@ -347,7 +348,7 @@ class ShardedRDTWeightTransferEngine(
                 "Sharded RDT engine not initialized; call init_transfer_engine()."
             )
         start_reload(self.model)
-        if self._plan is not None:
+        if self._planned:
             return
         # Trace the real tensors `start_reload` just viewed back, so every
         # destination is the one direct reload restores.
@@ -363,7 +364,7 @@ class ShardedRDTWeightTransferEngine(
                 "is mid-reload; the next start_weight_update plans again"
             )
             raise
-        self._plan, self._buckets = plan, buckets
+        self._planned, self._buckets = True, buckets
         logger.info(
             "Sharded RDT plan: %d buckets, %d pieces (%d loaded in full), "
             "%.1f MiB, receive arena %.1f MiB, in %.2f s",
@@ -418,31 +419,27 @@ class ShardedRDTWeightTransferEngine(
         for (producer, unit), pieces in groups.items():
             pieces = [seg for piece in pieces for seg in _rows(piece, cap)]
             for chunk in _cut(pieces, cap):
-                buckets.append(
-                    _Bucket(
-                        producer=producer,
-                        seq=-1,
-                        unit=unit,
-                        pieces=[(name, box) for name, box, *_ in chunk],
-                        dtypes=[dt for _, _, dt, _ in chunk],
-                        nbytes=sum(piece_nbytes(box, dt) for _, box, dt, _ in chunk),
-                        copies=[dests for *_, dests in chunk],
-                    )
+                bucket = _Bucket(
+                    producer=producer,
+                    seq=-1,
+                    unit=unit,
+                    pieces=[(name, box) for name, box, *_ in chunk],
+                    nbytes=sum(piece_nbytes(box, dt) for _, box, dt, _ in chunk),
                 )
+                bucket.prepare([dt for _, _, dt, _ in chunk], [d for *_, d in chunk])
+                buckets.append(bucket)
 
         def order(b: _Bucket) -> tuple:
             comp = components[b.producer]
             return (unit_rank[comp][b.unit], comp, b.unit, b.producer)
 
         buckets.sort(key=order)
-        for b in buckets:
-            b.prepare()
-            for _, staging, _ in b.staged:
-                staging.count += 1
         seqs: dict[int, int] = defaultdict(int)
         for b in buckets:
             b.seq = seqs[b.producer]
             seqs[b.producer] += 1
+            for _, staging, _ in b.staged:
+                staging.count += 1
         return buckets
 
     def _bucket_cap(self, groups: dict[tuple[int, int], list[_Piece]]) -> int:
@@ -520,17 +517,19 @@ class ShardedRDTWeightTransferEngine(
 
         """
         validate_int("sync_idx", update_info.sync_idx, minimum=0)
-        if self._plan is None or self._hooks is None:
+        if not self._planned or self._hooks is None:
             raise RuntimeError(
                 "Sharded RDT: no load plan; call start_weight_update() first."
             )
         hooks, sync_idx = self._hooks, update_info.sync_idx
         todo = iter(self._buckets)
-        # handle -> (bucket, slot); slots free to land a pull in, and per
-        # slot the copy-out still reading it
+        # handle -> (bucket, slot); slots free to land a pull in; per slot,
+        # an event recorded after its copy-out, and whether it is pending
         inflight: dict[Any, tuple[_Bucket, int]] = {}
         free = list(range(self._num_buffers))
-        copied: list[torch.cuda.Event | None] = [None] * self._num_buffers
+        cuda = self.device.type == "cuda"
+        copied = [torch.cuda.Event() for _ in free] if cuda else []
+        pending = [False] * self._num_buffers
 
         def refill() -> None:
             while free:
@@ -549,9 +548,9 @@ class ShardedRDTWeightTransferEngine(
             # it must be done by then; issuing a pull into it may go ahead.
             for handle in ready:
                 slot = inflight[handle][1]
-                if copied[slot] is not None:
+                if pending[slot]:
                     copied[slot].synchronize()
-                    copied[slot] = None
+                    pending[slot] = False
             t0 = time.perf_counter()
             landed = [inflight.pop(handle) for handle in ready]
             hooks.get(ready, [bucket.targets[slot] for bucket, slot in landed])
@@ -564,9 +563,9 @@ class ShardedRDTWeightTransferEngine(
             t2 = time.perf_counter()
             for bucket, slot in landed:
                 self._apply(bucket, slot)
-                if self.device.type == "cuda":
-                    copied[slot] = torch.cuda.Event()
+                if cuda:
                     copied[slot].record()
+                    pending[slot] = True
             spent[1] += t1 - t0
             spent[2] += time.perf_counter() - t2
 
@@ -595,7 +594,7 @@ class ShardedRDTWeightTransferEngine(
         if byte_srcs:
             torch._foreach_copy_(bucket.byte_dsts, byte_srcs)
         if typed_srcs:
-            torch._foreach_copy_([dest for _, dest in bucket.typed], typed_srcs)
+            torch._foreach_copy_(bucket.typed_dsts, typed_srcs)
         loads = []
         for (_, staging, rows), src in zip(bucket.staged, staged_srcs):
             if staging.count == 1:
@@ -649,11 +648,7 @@ class ShardedRDTWeightTransferEngine(
             return ref
 
         def wait(refs: list[Any]) -> list[Any]:
-            # Ray limitation: `ray.wait` returns at most `num_returns`, so
-            # block for one, then take every other one already ready.
-            ray.wait(refs, num_returns=1)
-            ready, _ = ray.wait(refs, num_returns=len(refs), timeout=0)
-            return ready
+            return ray.wait(refs, num_returns=1)[0]
 
         def get(refs: list[Any], targets: list[torch.Tensor]) -> None:
             for tensors, target in zip(ray.get(refs), targets, strict=True):
@@ -675,7 +670,7 @@ class ShardedRDTWeightTransferEngine(
         return _PullHooks(issue=issue, wait=wait, get=get, register=register)
 
     def _drop_plan(self) -> None:
-        self._plan = None
+        self._planned = False
         self._buckets = []
         if self._arena is not None:
             deregister_nixl_memory(self._arena)
