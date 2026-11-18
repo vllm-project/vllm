@@ -342,8 +342,8 @@ class Worker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         loader = self.model_runner.model_loader
-        if loader is not None:
-            loader.on_sleep(level)
+        assert loader is not None
+        loader.on_sleep(level)
 
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
@@ -397,8 +397,8 @@ class Worker(WorkerBase):
         self.synchronize_device()
 
         loader = self.model_runner.model_loader
-        if loader is not None:
-            loader.on_wake_up(tags)
+        assert loader is not None
+        loader.on_wake_up(tags)
 
     def discard(self, tags: tuple[str, ...]) -> None:
         if has_kv_transfer_group() and "kv_cache" in tags:

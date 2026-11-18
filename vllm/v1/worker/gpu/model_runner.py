@@ -214,10 +214,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
-        # Set in load_model(). Kept alive (rather than discarded once the
-        # model is constructed) so Worker.sleep/wake_up can notify it of
-        # GPU-memory-validity transitions via the optional on_sleep/on_wake_up
-        # hooks, and so reload_weights() can route through the same loader.
         self.model_loader: BaseModelLoader | None = None
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
