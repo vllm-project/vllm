@@ -6,7 +6,13 @@ helper at a time, from a test kernel that calls the helper itself on every
 lane.
 
 Roundings, packings, scale codes and data movement are bit-exact: there is a
-closed form for each, so a tolerance would only hide a wrong one.
+closed form for each, so a tolerance would only hide a wrong one. The hardware
+transcendentals are held instead to the 1 ulp AMD documents for them, the
+helpers built on those to the first-order bound of their own roundings, and
+the MFMAs to the a-priori bound of their accumulation -- all of that in
+`bounds.py`, from the ISA and from the arithmetic, never measured from the
+kernel it is used to check. The single exception is the FP8 MFMA's block-max
+term, which the ISA does not size; `bounds.py` says so where it is set.
 
 This is the primitive tier (T1) of #68016, a debugging aid that reaches into
 this model's internals on purpose. It is not the numerical contract; that is
@@ -23,11 +29,13 @@ it.
 
 The machinery is in `tests/models/common/specialized_decode/`: `harness.py`
 runs a device helper, `inputs.py` builds what makes a rounding rule
-observable. Another model's helpers belong in a file under its own
+observable, `bounds.py` says how far off a helper that cannot be exact may
+land. Another model's helpers belong in a file under its own
 `tests/models/<model>/` directory, over its own imports."""
 
+import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -50,13 +58,14 @@ pytest.importorskip("aiter")
 
 import flydsl.expr as fx  # noqa: E402
 
+from tests.models.common.specialized_decode import bounds as B  # noqa: E402
 from tests.models.common.specialized_decode import harness as H  # noqa: E402
 from tests.models.common.specialized_decode import inputs as I  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.attention import device as attn  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common import gfx942 as gfx  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common import mx, ops  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942  # noqa: E402
-from vllm.models.deepseek_v41.amd.mono.stages import moe  # noqa: E402
+from vllm.models.deepseek_v41.amd.mono.stages import moe, seam  # noqa: E402
 
 _PKG = "vllm.models.deepseek_v41.amd.mono"
 DEV, F32, I32 = I.DEV, I.F32, I.I32
@@ -110,6 +119,18 @@ _FP8_MAX: dict[str, float] = {"dsv41": mx.FP8_MAX, "dsv41_attn": attn.FP8_MAX}
 for _table in (_BF16, _FP8_PACK, _POW2):
     _ids = [{id(f) for f in _table[c] if f} for c in ("dsv41", "dsv41_attn")]
     assert not _ids[0] & _ids[1], "the two copies now share a helper"
+# The same, for the helpers the tables further down hold to a bound rather
+# than to a closed form, which this file reaches for one at a time.
+for _one, _other in (
+    (ops.hw_exp2, attn.hw_exp2),
+    (ops.hw_rcp, attn.hw_rcp),
+    (ops.hw_rsq, attn.hw_rsq),
+    (ops.div_rn, attn.div_rn),
+    (ops.butterfly, attn.butterfly),
+    (ops.mfma_bf16, attn.mfma_bf16),
+    (mx.mfma_scaled, attn.mfma_scaled),
+):
+    assert _one is not _other, "the two copies now share a helper"
 
 
 def _run(key: str, fn: H.DeviceFn, n_out: int, *cols: torch.Tensor) -> torch.Tensor:
@@ -220,6 +241,456 @@ def test_scale_codes(lib: str) -> None:
         assert torch.equal(got[:, -2].view(F32).double(), R.e8m0(code))
     assert torch.equal(got[:, -1].view(F32).double(), 1 / R.e8m0(code))
     assert (v == 0).any() and ((v > 0) & (v < R.FLT_MIN)).any()
+
+
+# ---------------------------------------------------------------- transcendentals
+# The roundings a helper performs, read off its source and the ISA and written
+# out through a `RoundingModel`, which then reports what they can add up to.
+# One rounding is `B.F32_ROUNDOFF`: an f32 op, `/` (v_div_scale, the fmas and
+# the fixup, which together are correctly rounded) and fmath.sqrt (MLIR
+# math.sqrt at fastmath=none, so also correctly rounded -- if it ever lowers
+# to the 1-ulp v_sqrt_f32 instead, `_score` is held too tightly and says so by
+# failing). A product with a constant the compiler had to round first is two
+# roundings; v_exp_f32, v_log_f32 and v_rsq_f32 are `rounding.transcendental`.
+def _sigmoid_rounding(rounding: B.RoundingModel, logit: torch.Tensor) -> torch.Tensor:
+    """`stages/seam.py` sigmoid: 1 / (1 + hw_exp2(z * RN_f32(-log2 e)))."""
+    exponent = rounding(logit * -math.log2(math.e), 2 * B.F32_ROUNDOFF)
+    denominator = rounding(1 + rounding.transcendental(torch.exp2(exponent)))
+    return rounding(1 / denominator)
+
+
+def _score_rounding(rounding: B.RoundingModel, logit: torch.Tensor) -> torch.Tensor:
+    """`stages/moe.py` _score squared, which is
+    hw_log2(1 + hw_exp2(x * RN_f32(log2 e))) * RN_f32(ln 2), the logit itself
+    past 20. Squared because that is what the score is compared as, and the
+    square is what turns the final sqrt's rounding into the 2^-23 below."""
+    exponent = rounding(logit * math.log2(math.e), 2 * B.F32_ROUNDOFF)
+    grown = rounding.transcendental(torch.exp2(exponent))
+    # v_log_f32 carries the same 1 ulp as the other two but no flush term:
+    # its argument is >= 1 here, so its result is never a subnormal.
+    log2 = rounding(torch.log2(rounding(1 + grown)), B.TRANSCENDENTAL_RELATIVE)
+    softplus = rounding(log2 * math.log(2), 2 * B.F32_ROUNDOFF)
+    return rounding(torch.where(logit > 20, logit, softplus), 2 * B.F32_ROUNDOFF)
+
+
+class _Transcendental(NamedTuple):
+    """A helper that cannot be exact, and what holds it to account."""
+
+    # (count, seed) -> one column per argument of the helper.
+    inputs: Callable[[int, int], list[torch.Tensor]]
+    # The float64 definition, over those columns.
+    reference: Callable[..., torch.Tensor]
+    # The helper's own roundings. None for a bare instruction, which has no
+    # roundings of its own and is held to the 1 ulp the ISA documents.
+    rounding: Callable[[B.RoundingModel, torch.Tensor], torch.Tensor] | None
+    # The copies that define it, under the id each is checked as.
+    copies: dict[str, H.DeviceFn]
+    # Applied to both sides before they are compared, where the bound is
+    # natural on something other than what the helper returns.
+    measured: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+
+# The log-uniform half of a mixed draw: 2^-30 reaches a sigmoid's and a
+# score's flat regions and the transcendentals' flush to zero, 2^6 is already
+# past where either saturates.
+_SMALL = (-30.0, 6.0)
+_TRANSCENDENTALS: dict[str, _Transcendental] = {
+    "hw_exp2": _Transcendental(
+        # Down to -150, not -126: below -126 the result cannot be a
+        # normal float32 and the hardware flushes it to zero, which is
+        # half of what the ISA documents and is otherwise never reached.
+        inputs=lambda count, seed: [I.mixed_floats(count, -150, 127, _SMALL, seed)],
+        reference=torch.exp2,
+        rounding=None,
+        copies={"dsv41": ops.hw_exp2, "dsv41_attn": attn.hw_exp2},
+    ),
+    "hw_rcp": _Transcendental(
+        inputs=lambda count, seed: [I.log_uniform(count, -126, 126, seed)],
+        reference=torch.reciprocal,
+        rounding=None,
+        copies={"dsv41": ops.hw_rcp, "dsv41_attn": attn.hw_rcp},
+    ),
+    "hw_rsq": _Transcendental(
+        inputs=lambda count, seed: [
+            I.log_uniform(count, -126, 127, seed, signed=False)
+        ],
+        reference=torch.rsqrt,
+        rounding=None,
+        copies={"dsv41": ops.hw_rsq, "dsv41_attn": attn.hw_rsq},
+    ),
+    "sigmoid": _Transcendental(
+        inputs=lambda count, seed: [I.mixed_floats(count, -80, 80, _SMALL, seed)],
+        reference=torch.sigmoid,
+        rounding=_sigmoid_rounding,
+        copies={"dsv41": seam.sigmoid},
+    ),
+    "_score": _Transcendental(
+        # 20 and its two neighbours on purpose: that is where both the helper
+        # and `torch.softplus` stop computing softplus and return the logit.
+        inputs=lambda count, seed: [
+            torch.cat(
+                [
+                    I.mixed_floats(count - 3, -40, 40, _SMALL, seed),
+                    I.neighbours(torch.full((1,), 20.0, device=DEV)),
+                ]
+            )
+        ],
+        reference=R.sqrt_softplus_score,
+        rounding=_score_rounding,
+        copies={"dsv41": moe._score},
+        measured=torch.square,
+    ),
+}
+
+
+def _transcendental_cases() -> list[Any]:
+    return [
+        pytest.param(lib, name, id=f"{lib}-{name}")
+        for name, case in _TRANSCENDENTALS.items()
+        for lib in case.copies
+    ]
+
+
+def _transcendental_error(lib: str, name: str, seed: int, count: int) -> float:
+    """The largest error of helper `name` of `lib` over `count` inputs, in
+    units of what it is allowed: f32 ulps for a bare instruction, else its own
+    rounding bound widened by how far its exact formula sits from the
+    reference it is being read against."""
+    case = _TRANSCENDENTALS[name]
+    helper = case.copies[lib]
+    columns = case.inputs(count, seed)
+    got = _run(
+        f"t_{lib}_{name}", lambda *w: [H.i32(helper(*map(H.f32, w)))], 1, *columns
+    )
+    result = got.view(F32)[:, 0].double()
+    exact = [column.double() for column in columns]
+    reference = case.reference(*exact)
+    if case.measured is not None:
+        result, reference = case.measured(result), case.measured(reference)
+    if case.rounding is None:
+        return (
+            ((result - reference).abs() / B.transcendental_bound(reference))
+            .max()
+            .item()
+        )
+    rounding = B.RoundingModel()
+    modelled = case.rounding(rounding, *exact)
+    # What the helper's own roundings can add up to, plus how far its exact
+    # formula sits from the reference it is read against -- the kernels
+    # compute a formula, the reference defines the function, and the two are
+    # not the same expression.
+    rounding_bound = rounding.bound(modelled)
+    formula_gap = (modelled.detach() - reference).abs()
+    # That second term is the one that could quietly absorb a wrong rounding
+    # model, so it is held to a thousandth of the first rather than trusted.
+    # Measured on gfx950 it is ~2e-9 of it for both modelled helpers.
+    assert formula_gap.max() <= 1e-3 * rounding_bound.max(), (
+        f"{name}: the modelled formula is {formula_gap.max():.3g} from the "
+        f"reference, against a rounding bound of {rounding_bound.max():.3g}"
+    )
+    bound = formula_gap + rounding_bound
+    # An exact hit is an exact hit even where the bound itself underflows to
+    # zero, which it does wherever the reference does.
+    error = torch.where(result == reference, 0.0, (result - reference).abs() / bound)
+    return error.max().item()
+
+
+@pytest.mark.parametrize(("lib", "name"), _transcendental_cases())
+def test_transcendentals(lib: str, name: str) -> None:
+    """Each hardware transcendental against torch in float64, to the 1 ulp the
+    ISA documents; each helper built on them to the first-order bound of its
+    own roundings. Over 2^22 inputs spanning every binade the helper is used
+    on, including results too small to be a normal float32 -- which the
+    hardware flushes to zero, and which the bound allows it to."""
+    error = _transcendental_error(lib, name, seed=0, count=1 << 22)
+    assert error <= 1, f"{name}: {error:.3g} of its bound"
+
+
+_DIV_RN: dict[str, H.DeviceFn] = {"dsv41": ops.div_rn, "dsv41_attn": attn.div_rn}
+
+
+@pytest.mark.parametrize("lib", _DIV_RN)
+def test_div_rn(lib: str) -> None:
+    """div_rn(x, d, RN(1 / d)): the IEEE quotient, bit for bit. The one place
+    a 1-ulp reciprocal is not good enough, so it is the only arithmetic here
+    with a closed form to check against."""
+    div_rn = _DIV_RN[lib]
+    count = 1 << 22
+    # One draw split in two: two draws of one seed would be x == d.
+    drawn = I.log_uniform(2 * count, -60, 60, seed=3)
+    numerator, denominator = drawn[:count], drawn[count:]
+    # In f32 throughout: the helper is handed RN(1 / d), and rounding f64 to
+    # f32 is a second rounding that lands on a different float for some d.
+    reciprocal = 1 / denominator
+    got = _run(
+        f"div_{lib}",
+        lambda *w: [H.i32(div_rn(*map(H.f32, w)))],
+        1,
+        numerator,
+        denominator,
+        reciprocal,
+    )
+    quotient = R.f32_rne(numerator.double() / denominator.double())
+    I.assert_bit_exact(got[:, 0], I.bits(quotient), "div_rn", numerator)
+
+
+# ---------------------------------------------------------------- reductions
+_BUTTERFLY: dict[str, H.DeviceFn] = {
+    "dsv41": ops.butterfly,
+    "dsv41_attn": attn.butterfly,
+}
+# What the device side is handed for each op `R.wave_butterfly` names.
+_BUTTERFLY_OPS: dict[str, Callable[[Any, Any], Any]] = {
+    "add": lambda a, b: a + b,
+    "max": fx.max,
+}
+
+
+@pytest.mark.parametrize("op", ["add", "max"])
+@pytest.mark.parametrize("offsets", [(32, 16, 8, 4, 2, 1), (16, 8, 4, 2, 1)])
+@pytest.mark.parametrize("lib", _BUTTERFLY)
+def test_butterfly(lib: str, offsets: tuple[int, ...], op: str) -> None:
+    """butterfly(v, offsets, op): every lane holds the float32 reduction in
+    exactly the documented order (the order is the numerical contract)."""
+    butterfly = _BUTTERFLY[lib]
+    combine = _BUTTERFLY_OPS[op]
+    values = I.log_uniform(R.WAVE * 4096, -20, 20, seed=4)
+    got = _run(
+        f"bfly_{lib}_{''.join(map(str, offsets))}_{op}",
+        lambda w: [H.i32(butterfly(H.f32(w), offsets, combine))],
+        1,
+        values,
+    )
+    folded = R.wave_butterfly(values, offsets, op)
+    I.assert_bit_exact(got[:, 0], folded.view(I32), "butterfly", values)
+    if op == "add":
+        # Otherwise the test would hold every fold order at once, and the
+        # order is the one thing it is here to pin down.
+        other_order = R.wave_butterfly(values, offsets[::-1], op)
+        assert not torch.equal(folded, other_order), "inputs blind to the order"
+
+
+_SUM_PARTIALS: dict[str, H.DeviceFn] = {"dsv41": ops.sum_partials}
+
+
+@pytest.mark.parametrize("tp", [2, 4, 8])
+@pytest.mark.parametrize("lib", _SUM_PARTIALS)
+def test_sum_partials(lib: str, tp: int) -> None:
+    """sum_partials: the ranks' bf16 pair partials summed in float32 in rank
+    order 0 .. tp - 1, bit for bit.
+
+    The order only has consequences from three ranks up -- f32 addition
+    commutes, so `tp=2` cannot tell rank 0 from rank 1 and the order check
+    below skips it. It is kept for the shape of the reduction, not for the
+    ordering claim.
+    """
+    sum_partials = _SUM_PARTIALS[lib]
+    partials = I.wide_bf16((1 << 16, tp, 2), (-8, 8), seed=5)
+
+    def body(*words: Any) -> list[Any]:
+        polled = [[words[rank]] for rank in range(tp)]
+        return [
+            H.i32(x) for x in sum_partials(lambda reqs: polled, None, lambda s: s, tp)
+        ]
+
+    got = _run(f"sp_{lib}_{tp}", body, 2, partials.view(-1, tp * 2).view(I32))
+    in_order = partials[:, 0].float()
+    for rank in range(1, tp):
+        in_order = in_order + partials[:, rank].float()
+    I.assert_bit_exact(got.view(F32), in_order, "sum_partials", partials.float().sum(1))
+    backwards = partials.float().flip(1)
+    reversed_order = backwards[:, 0]
+    for rank in range(1, tp):
+        reversed_order = reversed_order + backwards[:, rank]
+    assert tp == 2 or not torch.equal(in_order, reversed_order), (
+        "inputs blind to the rank order"
+    )
+
+
+# ---------------------------------------------------------------- MFMA
+def _mfma_error(
+    lanes: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    acc: torch.Tensor,
+    k: int,
+    block: int | None = None,
+) -> float:
+    """What the instruction returned for D = C + A B^T, read off its lanes and
+    taken over the bound `bounds.py` derives for an accumulation of `k`."""
+    product = I.from_acc_lanes(lanes.view(F32).double())
+    reference = acc + a @ b.transpose(1, 2)
+    bound = B.mfma_accumulation_bound(a, b, acc, k, block)
+    return ((product - reference).abs() / bound).max().item()
+
+
+_MFMA_BF16: dict[str, H.DeviceFn] = {
+    "dsv41": ops.mfma_bf16,
+    "dsv41_attn": attn.mfma_bf16,
+    # gfx942 has no 16 x 16 x 32 bf16 MFMA, so `common/gfx942.py` builds one
+    # out of two 16 x 16 x 16. A variant of the same instruction rather than a
+    # third copy of a helper, so it is keyed on its own id.
+    "dsv41-k32": gfx.mfma_bf16_k32,
+}
+
+
+@pytest.mark.parametrize("variant", _MFMA_BF16)
+def test_mfma_bf16(variant: str) -> None:
+    """The 16 x 16 x 32 bf16 MFMA on its documented lane layout, against the
+    float64 product."""
+    mfma = _MFMA_BF16[variant]
+    a, b, acc = I.bf16_mfma_operands(256, seed=7)
+
+    def body(*words: Any) -> list[Any]:
+        operands = [
+            fx.Vector.from_elements(list(words[i : i + 4]), fx.Int32) for i in (0, 4)
+        ]
+        accumulator = fx.Vector.from_elements([H.f32(w) for w in words[8:]], fx.Float32)
+        d = mfma(
+            operands[0].bitcast(fx.BFloat16),
+            operands[1].bitcast(fx.BFloat16),
+            accumulator,
+        )
+        return [H.i32(d[i]) for i in range(4)]
+
+    lanes = [I.mfma_lanes(t, 8).contiguous().view(I32) for t in (a, b)]
+    # A pytest id may hold a "-"; a kernel name may not.
+    got = _run(f"mfma_{variant.replace('-', '_')}", body, 4, *lanes, I.acc_lanes(acc))
+    error = _mfma_error(got, a.double(), b.double(), acc.double(), 32)
+    assert error <= 1, f"{error:.3g} of the fp32 accumulation bound"
+
+
+class _ScaledMfma(NamedTuple):
+    """One copy's scaled MFMA, and what it can be asked to do."""
+
+    mfma: H.DeviceFn
+    # The (A, B) operand format pairs the copy's callers use.
+    formats: tuple[tuple[int, int], ...]
+    # Which byte of a scale word the row (A) and the column (B) take theirs
+    # from.
+    selectors: tuple[tuple[int, int], ...]
+    # Whether the wrapper lets its caller say so. The attention copy fixes
+    # both at byte 0 and takes no argument for them, which is why its row
+    # carries the one selector and does not pass it on.
+    takes_selectors: bool
+
+
+_MFMA_SCALED: dict[str, _ScaledMfma] = {
+    "dsv41": _ScaledMfma(
+        mfma=mx.mfma_scaled,
+        formats=((mx.FP8, mx.FP8), (mx.FP4, mx.FP8), (mx.FP4, mx.FP4)),
+        selectors=((0, 0), (1, 2), (3, 1)),
+        takes_selectors=True,
+    ),
+    "dsv41_attn": _ScaledMfma(
+        mfma=attn.mfma_scaled,
+        formats=((attn.FP8, attn.FP8),),
+        selectors=((0, 0),),
+        takes_selectors=False,
+    ),
+}
+
+
+def _scaled_cases() -> list[Any]:
+    out = []
+    for lib, spec in _MFMA_SCALED.items():
+        for formats in spec.formats:
+            names = "x".join("fp4" if fmt else "fp8" for fmt in formats)
+            for selector in spec.selectors:
+                out.append(
+                    pytest.param(lib, formats, selector, id=f"{lib}-{names}-{selector}")
+                )
+    return out
+
+
+def _scaled_mfma_error(
+    lib: str,
+    formats: tuple[int, int],
+    selector: tuple[int, int],
+    seed: int,
+    tiles: int,
+) -> tuple[float, float]:
+    """The scaled MFMA of `lib` on random operands of the formats `formats`,
+    whose scale words hold four E8M0 codes each and whose `selector` byte is
+    the lane's -> (error over its bound, error over the fp32 accumulation
+    term of that bound alone)."""
+    spec = _MFMA_SCALED[lib]
+    operands = I.mx_mfma_operands(tiles, formats, seed)
+    a_words, b_words = operands.a_words, operands.b_words
+    a_count, b_count = a_words.shape[1], b_words.shape[1]
+    extra = selector if spec.takes_selectors else ()
+
+    def body(*words: Any) -> list[Any]:
+        a = fx.Vector.from_elements(list(words[:a_count]), fx.Int32)
+        b = fx.Vector.from_elements(list(words[a_count : a_count + b_count]), fx.Int32)
+        accumulator = fx.Vector.from_elements(
+            [H.f32(w) for w in words[a_count + b_count : -2]], fx.Float32
+        )
+        d = spec.mfma(a, b, accumulator, words[-2], words[-1], *formats, *extra)
+        return [H.i32(d[i]) for i in range(4)]
+
+    got = _run(
+        f"mfs_{lib}_{formats[0]}{formats[1]}_{selector[0]}{selector[1]}",
+        body,
+        4,
+        a_words,
+        b_words,
+        I.acc_lanes(operands.acc),
+        operands.scale_words[0],
+        operands.scale_words[1],
+    )
+
+    def scaled(values: torch.Tensor, side: int) -> torch.Tensor:
+        """`values` [tiles, 16, 128] times the scale of its K block, from the
+        `selector` byte of that row's or column's scale word."""
+        code = operands.scale_codes[side, :, selector[side]]
+        scale = R.e8m0(code.view(tiles, 4, 16).transpose(1, 2))
+        return values * scale.repeat_interleave(32, -1)
+
+    a = scaled(operands.a_values, 0)
+    b = scaled(operands.b_values, 1)
+    # Every product of one K block is summed at the precision of the largest
+    # of them, which only costs anything where the operands within a block
+    # span more than the 2^14 an FP4 pair ever can.
+    block = None if formats == (I.MX_FP4, I.MX_FP4) else 32
+    acc = operands.acc.double()
+    error = _mfma_error(got, a, b, acc, 128, block)
+    # The same error against the fp32 accumulation term on its own, i.e. what
+    # this instruction would be allowed if it did sum a K block as an fp32 sum
+    # of the separate products. See `test_mfma_scaled`.
+    return error, _mfma_error(got, a, b, acc, 128, None)
+
+
+# `mfma_scaled` wraps the scaled f8f6f4 MFMA, which gfx942 does not have. A
+# skipif keeps the ids collected and skipped there; filtering `_scaled_cases`
+# instead would drop them from the collected count silently.
+@pytest.mark.skipif(GFX942, reason="the scaled f8f6f4 MFMA is gfx950 only")
+@pytest.mark.parametrize(("lib", "formats", "selector"), _scaled_cases())
+def test_mfma_scaled(
+    lib: str, formats: tuple[int, int], selector: tuple[int, int]
+) -> None:
+    """The 16 x 16 x 128 scaled MFMA (f8f6f4) with E8M0 scale words whose
+    `selector` byte is the lane's (row or column, K block l / 16) code:
+    against the float64 product of the exactly dequantized operands.
+
+    The FP8 bound is dominated by `B._FP8_BLOCK_PRECISION`, an envelope on
+    what a block sum drops rather than a documented accuracy, so this asserts
+    the instruction computes the right product -- not a 1-ulp claim. The
+    second assertion is what keeps that term honest: the error has to be too
+    large for the fp32 accumulation term alone to explain.
+    """
+    error, fp32_only = _scaled_mfma_error(lib, formats, selector, seed=8, tiles=256)
+    assert error <= 1, f"{error:.3g} of the bound"
+    if formats != (I.MX_FP4, I.MX_FP4):
+        # The block term is not free headroom: an fp32 sum of the separate
+        # products does not explain what this instruction returns, and misses
+        # by more than an order of magnitude (~31x on gfx950). If a part ever
+        # does accumulate a block in fp32, this fails and the 2^-14 envelope
+        # above it should go rather than be inherited by the next model.
+        assert fp32_only > 10, (
+            f"{fp32_only:.3g} of the fp32-only bound: the block term is no "
+            f"longer doing anything, so it is no longer justified"
+        )
 
 
 # ---------------------------------------------------------------- conversions
