@@ -768,6 +768,12 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if (
+                self.vllm_config.structured_outputs_config.max_grammar_recoveries
+                and request.structured_output_request is not None
+                and request.structured_output_request.num_grammar_recoveries
+            ):
+                request.spec_token_ids = []
             if input_budget <= draft_slots:
                 break
 
@@ -2347,6 +2353,29 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
+            grammar_recovery_prefix = None
+            original_generated_len = len(generated_token_ids)
+            if (
+                self.vllm_config.structured_outputs_config.max_grammar_recoveries
+                and request.status == RequestStatus.RUNNING
+                and not output_is_stale
+            ):
+                grammar_recovery_prefix = (
+                    self.structured_output_manager.get_recovery_prefix(
+                        request, generated_token_ids
+                    )
+                )
+                if grammar_recovery_prefix is not None:
+                    logger.warning(
+                        "Grammar recovery for request %s: rejected token %s at "
+                        "generated offset %d; discarding %d tokens.",
+                        req_id,
+                        generated_token_ids[grammar_recovery_prefix],
+                        grammar_recovery_prefix,
+                        original_generated_len - grammar_recovery_prefix,
+                    )
+                    generated_token_ids = generated_token_ids[:grammar_recovery_prefix]
+
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
@@ -2362,6 +2391,11 @@ class Scheduler(SchedulerInterface):
                     num_draft_tokens = num_verified = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
+                if grammar_recovery_prefix is not None:
+                    num_accepted = min(
+                        len(generated_token_ids),
+                        max(original_generated_len - num_sampled, 0),
+                    )
                 num_rejected = len(scheduled_spec_token_ids) - num_accepted
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
@@ -2454,6 +2488,15 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_ERROR
                 request.resumable = False
                 stopped = True
+
+            if grammar_recovery_prefix is not None and not stopped:
+                structured_req = request.structured_output_request
+                assert structured_req is not None
+                structured_req.num_grammar_recoveries += 1
+                # Reset worker state via the existing preemption/re-prefill
+                # protocol; old in-flight outputs depend on the rejected suffix.
+                self.running.remove(request)
+                self._preempt_request(request, time.monotonic(), drop_stale_output=True)
 
             routed_experts = None
             should_emit_output = bool(
@@ -2960,6 +3003,14 @@ class Scheduler(SchedulerInterface):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
+                continue
+
+            if (
+                self.vllm_config.structured_outputs_config.max_grammar_recoveries
+                and request.structured_output_request is not None
+                and request.structured_output_request.num_grammar_recoveries
+            ):
+                request.spec_token_ids = []
                 continue
 
             if request.is_prefill_chunk:

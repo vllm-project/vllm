@@ -409,3 +409,33 @@ shown below:
     ```
 
 See also: [full example](../../examples/features/structured_outputs/structured_outputs_offline.py)
+
+## Experimental recovery after grammar rejection
+
+`max_grammar_recoveries` enables bounded recovery when XGrammar rejects an
+actual sampled output. It defaults to `0`, preserving fail-on-rejection
+behavior. To allow at most one recovery per request, add:
+
+```text
+--structured-outputs-config '{"backend":"xgrammar","max_grammar_recoveries":1}'
+```
+
+The scheduler checks the returned tokens before appending them to request
+history. On rejection it retains only the legal prefix, drops the invalid
+suffix and obsolete in-flight output, and requeues the request through the
+existing preemption path. It recomputes from the retained context and stops
+using speculative drafts for the remainder of that request. Already committed
+JSON remains in the grammar state. Exhausting the budget uses the existing
+error path.
+
+Recovery applies to XGrammar, including single-token main-model output. It
+does not repair the prospective mask or implement a reasoning protocol: if
+the existing boundary logic does not submit a token to the grammar, this
+check cannot detect its invalidity. Recovery requires extra model computation,
+adds latency, and does not preserve the original random-number trajectory.
+The opt-in path also probes the grammar for successful output blocks.
+
+This is an experimental recovery mechanism. Current-main model-serving,
+pipeline-parallel, disaggregated-prefill, and performance validation remain
+pending. Unit tests exercise scheduler state and grammar constraints; they do
+not establish production readiness.

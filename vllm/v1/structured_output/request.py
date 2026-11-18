@@ -24,6 +24,7 @@ class StructuredOutputRequest:
         Future[StructuredOutputGrammar] | StructuredOutputGrammar | Exception | None
     ) = None
     reasoning_ended: bool | None = None
+    num_grammar_recoveries: int = 0
     reasoning_parser_kwargs: dict[str, Any] | None = None
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.

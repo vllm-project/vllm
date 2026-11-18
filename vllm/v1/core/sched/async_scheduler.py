@@ -47,7 +47,13 @@ class AsyncScheduler(Scheduler):
             )
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = spec_token_placeholders
+            request.spec_token_ids = (
+                []
+                if self.vllm_config.structured_outputs_config.max_grammar_recoveries
+                and request.structured_output_request is not None
+                and request.structured_output_request.num_grammar_recoveries
+                else spec_token_placeholders
+            )
 
             # Set the next step index in which this request is eligible to be
             # scheduled for decode (for PP microbatching).

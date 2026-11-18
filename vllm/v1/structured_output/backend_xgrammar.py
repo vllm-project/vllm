@@ -189,7 +189,12 @@ class XgrammarBackend(StructuredOutputBackend):
             matcher=xgr.GrammarMatcher(
                 ctx,
                 override_stop_tokens=list(stop_token_ids) if stop_token_ids else None,
-                max_rollback_tokens=self.num_speculative_tokens,
+                max_rollback_tokens=(
+                    self.num_speculative_tokens
+                    + bool(
+                        self.vllm_config.structured_outputs_config.max_grammar_recoveries
+                    )
+                ),
             ),
             vocab_size=self.vocab_size,
             ctx=ctx,
@@ -294,6 +299,25 @@ class XgrammarGrammar(StructuredOutputGrammar):
             # Rollback the FSM to the initial state
             self.matcher.rollback(len(accepted_tokens))
         return accepted_tokens
+
+    def validate_generated_tokens(self, tokens: list[int]) -> int:
+        """Probe sampled tokens without committing, returning the valid length.
+
+        Unlike draft validation, a generated batch includes a bonus token and
+        follows accept_tokens semantics for tokens after grammar termination.
+        """
+        advanced = 0
+        try:
+            for i, token in enumerate(tokens):
+                if self.matcher.is_terminated():
+                    return len(tokens)
+                if not self.matcher.accept_token(token):
+                    return i
+                advanced += 1
+            return len(tokens)
+        finally:
+            if advanced:
+                self.matcher.rollback(advanced)
 
     def rollback(self, num_tokens: int) -> None:
         self.matcher.rollback(num_tokens)

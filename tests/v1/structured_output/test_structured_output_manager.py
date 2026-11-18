@@ -793,3 +793,55 @@ def test_clear_backend_without_grammar(skip_tokenizer_init, max_num_seqs):
     for executor in executors:
         with pytest.raises(RuntimeError, match="cannot schedule new futures"):
             executor.submit(int, 0)
+
+
+@pytest.mark.parametrize("remaining_close", [None, 1, 2, 3])
+def test_kimi_recovery_probes_actual_prefix(tokenizer, remaining_close):
+    """Keep the old draft-boundary policy, but detect the rejected actual suffix."""
+    config = VllmConfig(
+        model_config=ModelConfig(model=TOKENIZER),
+        device_config=DeviceConfig(device="cpu"),
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="xgrammar",
+            reasoning_parser="kimi_k3",
+            max_grammar_recoveries=1,
+        ),
+    )
+    manager = StructuredOutputManager(config)
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+    )
+    params.verify(
+        config.model_config, None, config.structured_outputs_config, tokenizer
+    )
+    prefix = tokenizer.encode(".") + tokenizer.encode("<|close|>think<|sep|>")
+    raw = prefix + tokenizer.encode("<|open|>think<|sep|>")
+    actual = prefix + tokenizer.encode("<|open|>response")
+    split = 0 if remaining_close is None else len(prefix) - remaining_close
+    request = Request(
+        request_id="kimi-recovery",
+        prompt_token_ids=tokenizer.encode("context") + raw[:split],
+        sampling_params=params,
+        pooling_params=None,
+        reasoning_ended=False,
+    )
+    try:
+        manager.grammar_init(request)
+        _wait_for_grammar(request)
+        before = list(request.all_token_ids)
+        assert (
+            manager._get_constraint_bounds(request, raw[split:]).grammar_start
+            == len(raw[split:]) + 1
+        )
+        assert (
+            manager.get_recovery_prefix(request, actual[split:]) == len(prefix) - split
+        )
+        assert list(request.all_token_ids) == before
+        assert request.structured_output_request.grammar.num_processed_tokens == 0
+        kept = actual[split : len(prefix)]
+        request.append_output_token_ids(kept)
+        assert manager.accept_tokens(request, kept)
+        assert request.structured_output_request.reasoning_ended
+        assert request.structured_output_request.grammar.num_processed_tokens == 0
+    finally:
+        manager.clear_backend()
