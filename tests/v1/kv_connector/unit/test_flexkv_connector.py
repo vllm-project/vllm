@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FlexKVConnectorV1.
 
-These tests mock the ``flexkv`` package so they can run without a real FlexKV
+These tests mock the `flexkv` package so they can run without a real FlexKV
 installation.  They verify:
 
-1. That ``FlexKVConnectorV1`` raises a helpful ``ImportError`` when FlexKV is
+1. That `FlexKVConnectorV1` raises a helpful `ImportError` when FlexKV is
    not installed.
 2. That all public methods are correctly delegated to the underlying
-   ``FlexKVConnectorV1Impl``.
+   `FlexKVConnectorV1Impl`.
 """
 
 import sys
@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -31,7 +32,7 @@ from .utils import create_vllm_config
 
 def _make_vllm_config(
     kv_connector: str = "FlexKVConnectorV1",
-    kv_role: str = "kv_both",
+    kv_role: KVRole = "kv_both",
 ) -> VllmConfig:
     """Return a minimal VllmConfig with a KVTransferConfig attached."""
     vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
@@ -49,22 +50,20 @@ def _make_kv_cache_config() -> KVCacheConfig:
 def _make_flexkv_module(
     impl_mock: MagicMock,
 ) -> tuple[types.ModuleType, types.ModuleType]:
-    """Build a fake ``flexkv`` package hierarchy that returns *impl_mock*
-    when ``FlexKVConnectorV1Impl`` is instantiated."""
+    """Build a fake `flexkv` package hierarchy that returns *impl_mock*
+    when `FlexKVConnectorV1Impl` is instantiated."""
     flexkv_mod = types.ModuleType("flexkv")
     integration_mod = types.ModuleType("flexkv.integration")
     vllm_mod = types.ModuleType("flexkv.integration.vllm")
     adapter_mod = types.ModuleType("flexkv.integration.vllm.vllm_v1_adapter")
 
     # Make FlexKVConnectorV1Impl() return our mock instance.
-    # The "# type: ignore" markers below are needed because ModuleType does
-    # not declare these attributes statically; they are set dynamically.
     FlexKVConnectorV1ImplCls = MagicMock(return_value=impl_mock)
-    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls  # type: ignore
+    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls  # type: ignore[attr-defined]
 
-    flexkv_mod.integration = integration_mod  # type: ignore
-    integration_mod.vllm = vllm_mod  # type: ignore
-    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore
+    flexkv_mod.integration = integration_mod  # type: ignore[attr-defined]
+    integration_mod.vllm = vllm_mod  # type: ignore[attr-defined]
+    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore[attr-defined]
 
     return flexkv_mod, adapter_mod
 

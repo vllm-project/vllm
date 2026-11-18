@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -28,14 +29,20 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import (
     WeightsMapper,
+    _merge_multimodal_embeddings,
     get_draft_quant_config,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
+    SupportsPP,
+    SupportsQuant,
+    _require_is_multimodal,
+)
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
@@ -252,10 +259,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
         self.pattern_len = len(self.pattern_str)
         assert self.pattern_len > 0
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens: VocabParallelEmbedding | None = None
 
         # Build flat list of layers
         self.layers = torch.nn.ModuleDict()
@@ -330,13 +334,19 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
-    """NemotronH MTP model."""
+class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbeddings):
+    """NemotronH MTP model.
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"language_model.": ""},
-        orig_to_new_substr={"embeddings": "embed_tokens"},
-    )
+    The draft block is trained on the target decoder's input stream. On a
+    multimodal checkpoint the placeholder positions therefore carry the
+    target's image or audio embeddings, not the text embedding of the
+    placeholder token.
+    """
+
+    has_own_embed_tokens = False
+    has_own_lm_head = False
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"language_model.": ""})
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -372,14 +382,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             prefix=maybe_prefix(prefix, "mtp"),
         )
 
-        # LM head for generating logits
-        self.has_own_lm_head = False
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | None = None
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
@@ -395,6 +398,22 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            multimodal_embeddings,
+            _require_is_multimodal(is_multimodal),
+        )
 
     def forward(
         self,
@@ -426,6 +445,13 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         )
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Only MTP weights are loaded: the embedding and LM head are the
+        target's, shared after loading, so a target refit also updates the
+        drafter."""
+        name = name.removeprefix("language_model.")
+        return not name.startswith("mtp.")
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
         stacked_params_mapping = [
@@ -456,27 +482,13 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
-            is_lm_head_weight = name.startswith("lm_head.")
-            if is_lm_head_weight:
-                self.has_own_lm_head = True
-            # Only process MTP and LM head weights -
-            # skip all non-MTP and non-LM head weights
-            if (
-                not name.startswith("mtp.")
-                and "embeddings" not in name
-                and not is_lm_head_weight
-            ):
+            if self.is_unused_checkpoint_weight(name):
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
                 continue
 
             name = name.replace("mtp.layers.", "model.layers.")
-
-            if "embeddings" in name:
-                name = name.replace("embeddings", "embed_tokens")
-                if name.startswith("backbone."):
-                    name = name.replace("backbone.", "model.")
 
             if "scale" in name or "zero_point" in name:
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
@@ -557,10 +569,5 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             assert weight_loader is not None
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        if not self.has_own_lm_head:
-            loaded_params.update(
-                name for name in params_dict if name.startswith("lm_head.")
-            )
 
         return loaded_params

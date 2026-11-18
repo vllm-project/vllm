@@ -10,7 +10,7 @@ import torch
 
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -32,12 +32,15 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
                 compilation.max_cudagraph_capture_size,
                 scheduler.max_num_seqs * layers.window,
             )
-            # Replay batches hold at least `window` rows: step by window, or by 1/8
-            # of the power-of-two interval once wider (256 in [2048, 4096)).
+            # Step by window, or by 1/8 of the power-of-two interval once wider
+            # (256 in [2048, 4096)).
             sizes, s = [bound], layers.window
             while s < bound:
                 sizes.append(s)
                 s += max(layers.window, 1 << max(s.bit_length() - 4, 0))
+            # Prefill chunks far from their prompt's end replay one row each.
+            small = min(layers.window, bound)
+            sizes += [1 << i for i in range(small.bit_length()) if 1 << i < small]
         sizes = sorted(set(sizes))
         if max(sizes) > scheduler.max_num_batched_tokens:
             raise ValueError(
@@ -46,9 +49,12 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
             )
         compilation.cudagraph_capture_sizes = sizes
         compilation.max_cudagraph_capture_size = max(sizes)
+        compilation.prefill_cudagraph_capture_token_sizes = sizes
         replay_config = copy(vllm_config)
         replay_config.compilation_config = compilation
-        super().__init__(replay_config, device, CUDAGraphMode.PIECEWISE, 1)
+        super().__init__(
+            replay_config, device, CUDAGraphMode.PIECEWISE, {1: scheduler.max_num_seqs}
+        )
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
             layers.run_layers, replay_config
@@ -56,8 +62,9 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         config, act = vllm_config.model_config.hf_config, vllm_config.model_config.dtype
         assert isinstance(act, torch.dtype)
         hc, h, f32 = config.hc_mult, config.hidden_size, torch.float32
-        mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
-        ids = torch.int64 if mega_moe else torch.int32
+        # DeepseekV4Model.forward casts input_ids to int64 for native MegaMoE only.
+        native = vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        ids = torch.int64 if native else torch.int32
         # hidden_states, positions, input_ids, pre_mix, post_mix, res_mix, residual
         shapes = [(h,), (), (), (hc,), (hc, 1), (hc, hc), (hc, h)]
         dtypes = [act, torch.int64, ids, f32, f32, f32, act]
@@ -67,9 +74,21 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         ]
 
     def capture_replay_graphs(
-        self, prepare: Callable[[BatchExecutionDescriptor], None]
+        self,
+        prepare: Callable[[BatchExecutionDescriptor], None],
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture each size on the replay batch ``prepare`` sets on the layers."""
+        """Capture each size on the replay batch `prepare` sets on the layers.
+
+        On the model graphs' `stream` they share its free blocks of the graph
+        pool: a replay graph runs in a model graph's eager break, after it has
+        gathered its inputs into `input_buffers` and before the model graph
+        reads its outputs from the break's own buffers, so no model graph
+        tensor in the pool is live while it runs. Aux hidden states captured
+        before the replay layers would be, so with those it keeps its own.
+        """
+        if self.layers.has_early_aux():
+            stream = None
 
         def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
             prepare(desc)
@@ -85,11 +104,11 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs")
+        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs", stream)
         self.layers.replay_batch = None
 
     def run(self, rows: torch.Tensor, inputs: tuple) -> tuple[torch.Tensor, ...]:
-        """Replay the forward context's graph on ``rows`` of ``inputs``."""
+        """Replay the forward context's graph on `rows` of `inputs`."""
         num_rows = rows.shape[0]
         for buf, t in zip(self.input_buffers, inputs):
             torch.index_select(t, 0, rows, out=buf[:num_rows])

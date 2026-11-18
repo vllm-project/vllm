@@ -46,6 +46,7 @@ class BlockStored(KVCacheEvent):
     kv_cache_spec_sliding_window: int | None = None
     locality: str | None = None
     session_id: str | None = None
+    lookahead_token_ids: list[list[int]] | None = None
 
 
 class BlockRemoved(KVCacheEvent):

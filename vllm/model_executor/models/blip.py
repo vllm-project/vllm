@@ -36,7 +36,7 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
     return grid_length * grid_length
 
 
-# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
+# Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164
 class BlipVisionEmbeddings(nn.Module):
     def __init__(self, config: BlipVisionConfig | Blip2VisionConfig):
         super().__init__()
@@ -127,13 +127,6 @@ class BlipAttention(nn.Module):
             self.head_dim,
             self.scale,
             prefix=f"{prefix}.attn",
-        )
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return (
-            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
         )
 
     def forward(
