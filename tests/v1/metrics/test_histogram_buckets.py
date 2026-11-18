@@ -19,6 +19,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +330,26 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_kv_admission_reserved_blocks_gauge():
+    """Both kinds are exported per engine from the engine's SchedulerStats."""
+    config = build_logger_config(ObservabilityConfig())
+    stats = SchedulerStats(num_watermark_blocks=5, num_inflight_load_reserved_blocks=3)
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        logger.record(scheduler_stats=stats, iteration_stats=None, engine_idx=1)
+        for engine, watermark, inflight_load in ((0, 0, 0), (1, 5, 3)):
+            for kind, expected in (
+                ("watermark", watermark),
+                ("inflight_load", inflight_load),
+            ):
+                value = prometheus_client.REGISTRY.get_sample_value(
+                    "vllm:kv_admission_reserved_blocks",
+                    {"model_name": TEST_MODEL, "engine": str(engine), "kind": kind},
+                )
+                assert value == expected, (engine, kind)
     finally:
         unregister_vllm_metrics()
