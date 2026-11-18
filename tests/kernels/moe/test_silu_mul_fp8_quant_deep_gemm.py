@@ -55,6 +55,9 @@ CASES = [
     (256, 8, 7168, fp8_dtype),
     (256, 32, 7168, fp8_dtype),
     (256, 64, 7168, fp8_dtype),
+    # Straddle the shared-memory limit for the five-stage pipeline.
+    (1791, 1, 4096, fp8_dtype),
+    (1792, 1, 4096, fp8_dtype),
     # Only add a few fnuz tests to help with long CI times.
     (8, 512, 7168, torch.float8_e4m3fnuz),
     (8, 1024, 7168, torch.float8_e4m3fnuz),
@@ -222,9 +225,11 @@ def test_masked_triton_silu_quant_clamps_valid_tokens(
     ceil_ue8m0: bool, clamp_limit: float
 ):
     """The fallback applies the same limits as explicitly clamped inputs."""
-    E, T, H = 3, 4, 2048
+    E, T, H = 10, 33, 2048
     set_random_seed(42)
-    counts = torch.tensor([0, 1, T], dtype=torch.int32, device=DEVICE)
+    counts = torch.tensor(
+        [0, 1, 2, 3, 15, 16, 17, 31, 32, T], dtype=torch.int32, device=DEVICE
+    )
     y = torch.randn(E, T, 2 * H, dtype=torch.bfloat16, device=DEVICE) * 20
     clamped = torch.cat(
         (
@@ -238,8 +243,9 @@ def test_masked_triton_silu_quant_clamps_valid_tokens(
     )
     results = []
     for values, limit in ((y, clamp_limit), (clamped, None)):
-        q = torch.empty(E, T, H, dtype=fp8_dtype, device=DEVICE)
+        q = torch.ones(E, T, H, dtype=fp8_dtype, device=DEVICE)
         s = torch.empty_strided(shape, strides, dtype=dtype, device=DEVICE)
+        s.fill_(1)
         fp8_min, fp8_max = get_fp8_min_max()
         _silu_mul_fp8_quant_deep_gemm[(E * (H // 128),)](
             values,
@@ -261,6 +267,9 @@ def test_masked_triton_silu_quant_clamps_valid_tokens(
             NUM_STAGES=4,
             num_warps=1,
         )
+        valid = torch.arange(T, device=DEVICE)[None, :] < counts[:, None]
+        assert torch.all(q.float()[~valid] == 1)
+        assert torch.all(s[~valid] == 1)
         results.append((q, s))
     valid = torch.arange(T, device=DEVICE)[None, :] < counts[:, None]
     for actual, expected in zip(results[0], results[1]):
@@ -273,7 +282,7 @@ def test_masked_triton_silu_quant_clamps_valid_tokens(
     not current_platform.is_cuda() or not current_platform.has_device_capability(80),
     reason="Requires the native SM80+ masked activation kernel",
 )
-@pytest.mark.parametrize("H", [128, 4096])
+@pytest.mark.parametrize("H", [128, 384, 4096])
 @pytest.mark.parametrize("scale_fmt", list(DeepGemmQuantScaleFMT))
 @pytest.mark.parametrize("limit", [0.0, 0.5, 10.1])
 @pytest.mark.parametrize("empty", [False, True])

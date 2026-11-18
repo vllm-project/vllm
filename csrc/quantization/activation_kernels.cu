@@ -1,5 +1,6 @@
 #include "torch_utils.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "core/utils.hpp"
@@ -665,10 +666,14 @@ void persistent_masked_m_silu_mul_quant(
   // TODO: Get this from cuda_arch ?
   static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
 
+  // When E*T is smaller, the omitted workers have no valid tokens.
+  const int grid_size = static_cast<int>(std::max<int64_t>(
+      1, std::min<int64_t>(SILU_V2_BLOCK_COUNT, static_cast<int64_t>(E) * T)));
+
   #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G, \
                  STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, STAGES)               \
     static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                \
-    int sms = SILU_V2_BLOCK_COUNT;                                            \
+    int sms = grid_size;                                                      \
     static constexpr int max_shared_mem_bytes =                               \
         GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                              \
     dim3 grid(sms), block(THREAD_COUNT);                                      \
@@ -695,19 +700,31 @@ void persistent_masked_m_silu_mul_quant(
           });                                                                 \
     });
 
-  #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \
-                      STRIDE_YS_P, CEIL_UE8M0)                                \
-    if (H >= 4096 && (NUM_GROUPS % 8) == 0) {                                 \
-      /* 8 warp config */                                                     \
-      static constexpr int NUM_STAGES = 4;                                    \
-      static constexpr int THREAD_COUNT = 256;                                \
-      KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, NUM_STAGES); \
-    } else {                                                                  \
-      /* 1 warp config */                                                     \
-      static constexpr int THREAD_COUNT = 32;                                 \
-      KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 2);          \
+  #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,      \
+                      STRIDE_YS_P, CEIL_UE8M0)                             \
+    if (H >= 4096 && (NUM_GROUPS % 8) == 0) {                              \
+      static constexpr int THREAD_COUNT = 256;                             \
+      if (!CEIL_UE8M0 && clamp_limit.has_value() &&                        \
+          (static_cast<int64_t>(E) + 1) * 16 + 20 * 1024 <= 48 * 1024) {   \
+        KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,     \
+               STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 5);     \
+      } else {                                                             \
+        static constexpr int NUM_STAGES = CEIL_UE8M0 ? 4 : 3;              \
+        KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,     \
+               STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT,         \
+               NUM_STAGES);                                                \
+      }                                                                    \
+    } else if (NUM_GROUPS >= 16 &&                                         \
+               (static_cast<int64_t>(E) + 1) * 16 + 2048 <= 48 * 1024) {   \
+      /* Warmup must stay within one token and the shared-memory limit. */ \
+      static constexpr int THREAD_COUNT = 32;                              \
+      KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,       \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 4);       \
+    } else {                                                               \
+      /* 1 warp config */                                                  \
+      static constexpr int THREAD_COUNT = 32;                              \
+      KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,       \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 2);       \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);
