@@ -704,6 +704,29 @@ async def async_request_openai_responses(
     return output
 
 
+class _DelimitedSSEFrames:
+    """Read blank-line-delimited events without parsing an incomplete transcript."""
+
+    _separator = re.compile(rb"\r?\n\r?\n")
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+
+    def add_chunk(self, chunk: bytes) -> list[str]:
+        # A CRLF pair of line endings can straddle the transport boundary.
+        search_from = max(0, len(self._pending) - 3)
+        self._pending.extend(chunk)
+        frames = []
+        start = 0
+        for boundary in self._separator.finditer(self._pending, search_from):
+            if boundary.start() > start:
+                frames.append(self._pending[start : boundary.start()].decode("utf-8"))
+            start = boundary.end()
+        if start:
+            del self._pending[:start]
+        return frames
+
+
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -760,7 +783,7 @@ async def async_request_openai_audio(
         output.input_audio_duration = input_audio_duration
         diarized = payload.get("response_format") == "diarized_json"
 
-        generated_text = ""
+        text_parts: list[str] = []
         st = time.perf_counter()
         output.start_time = st
         most_recent_timestamp = st
@@ -772,7 +795,9 @@ async def async_request_openai_audio(
                     first_chunk_received = False
                     diarized_done = False
                     stream_error: str | None = None
-                    handler = StreamedResponseHandler()
+                    handler = (
+                        _DelimitedSSEFrames() if diarized else StreamedResponseHandler()
+                    )
 
                     async for chunk_bytes in response.content.iter_any():
                         if not chunk_bytes:
@@ -799,7 +824,7 @@ async def async_request_openai_audio(
                                         first_chunk_received = True
                                         output.ttft = timestamp - st
                                     # Segment deltas do not expose inter-token times.
-                                    generated_text += text
+                                    text_parts.append(text)
                                     most_recent_timestamp = timestamp
                                 elif (
                                     diarized
@@ -824,7 +849,8 @@ async def async_request_openai_audio(
                                             timestamp - most_recent_timestamp
                                         )
 
-                                    generated_text += content or ""
+                                    if content:
+                                        text_parts.append(content)
                                     # Only token chunks advance the request
                                     # end; the trailing usage chunk carries no
                                     # token.
@@ -838,7 +864,7 @@ async def async_request_openai_audio(
                                     if (pt := usage.get("prompt_tokens")) is not None:
                                         output.prompt_len = pt
 
-                    output.generated_text = generated_text
+                    output.generated_text = "".join(text_parts)
                     if stream_error is not None:
                         output.success = False
                         output.error = stream_error

@@ -293,6 +293,52 @@ def test_diarized_audio_stream(monkeypatch: pytest.MonkeyPatch, complete: bool) 
     assert metrics.request_goodput == pytest.approx(1 / 6)
 
 
+@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
+def test_fragmented_diarized_transcript(monkeypatch, separator):
+    text = "测试ab" * 512
+    events = [
+        {"type": "transcript.text.delta", "delta": text},
+        {"type": "transcript.text.segment", "text": text, "speaker": "A"},
+        {
+            "type": "transcript.text.done",
+            "text": text,
+            "usage": {"type": "tokens", "input_tokens": 7, "output_tokens": 9},
+        },
+    ]
+    wire = (
+        separator.join(
+            b"data: " + json.dumps(event, ensure_ascii=False).encode()
+            for event in events
+        )
+        + separator
+        + b"data: [DONE]"
+        + separator
+    )
+    # Split UTF-8 characters, frame delimiters, and the repeated full transcript.
+    chunks = [(0.0, wire[i : i + 7]) for i in range(0, len(wire), 7)]
+    request = _make_input("http://test/v1/audio/transcriptions", 16, "audio")
+    request.extra_body = {"response_format": "diarized_json"}
+
+    # Bound the amount of JSON parsed independently of machine speed.
+    loads = json.loads
+    parsed_chars = 0
+
+    def count_input(payload):
+        nonlocal parsed_chars
+        parsed_chars += len(payload)
+        return loads(payload)
+
+    monkeypatch.setattr(request_func_module.json, "loads", count_input)
+    output = asyncio.run(async_request_openai_audio(request, _FakeSession(chunks)))
+    assert output.success, output.error
+    assert (output.generated_text, output.prompt_len, output.output_tokens) == (
+        text,
+        7,
+        9,
+    )
+    assert parsed_chars <= len(wire)
+
+
 def _run(
     request_func,
     api_url: str,
