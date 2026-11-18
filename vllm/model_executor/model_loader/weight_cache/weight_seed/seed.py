@@ -46,7 +46,7 @@ class WeightShardSeed(Seedable):
         self._daemon = daemon
         self._movers: dict[SeedBackend, WeightMover] = {}
         self._active_copies = 0
-        self._lease_condition = threading.Condition(daemon._state_lock)
+        self._lease_condition = threading.Condition(threading.RLock())
         self._release_pending = False
 
     def _mover(self, backend: SeedBackend) -> WeightMover:
@@ -108,15 +108,14 @@ class WeightShardSeed(Seedable):
             return self._acknowledge()
         daemon = self._daemon
         backend = parse_seed_backend(request.get("seed_backend", PEER_IPC_BACKEND))
-        with daemon._state_lock:
-            if not daemon.has_weights or self._release_pending:
-                raise ValueError("Weights were released")
+        with self._lease_condition:
+            if self._release_pending:
+                raise ValueError("Weights are being released")
             mover = self._mover(backend)
             tensors, kinds, aliases, attrs = daemon._seed_state()
             manifest, storages = build_manifest(tensors, kinds)
             seed = mover.prepare_seed(storages)
-            with self._lease_condition:
-                self._active_copies += 1
+            self._active_copies += 1
             return {
                 "cache_config": asdict(daemon.cache_key),
                 # Matched instead of the checkpoint fingerprint by a mirror
