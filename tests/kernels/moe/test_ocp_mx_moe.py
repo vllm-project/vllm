@@ -1449,6 +1449,7 @@ def test_gpt_oss_quant_config_supplies_clamped_swiglu_params():
     from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 
     fake_method = types.SimpleNamespace(
+        moe=None,
         mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         w13_precision_config=None,
         w2_precision_config=None,

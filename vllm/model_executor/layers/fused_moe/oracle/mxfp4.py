@@ -2296,8 +2296,12 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
         if mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and moe_config is not None:
+            # Weight post-processing and lazy init may run without a current
+            # vLLM config, so there is no user override to apply.
+            if get_current_vllm_config_or_none() is not None:
+                activation_key = _resolve_activation_key(activation_key)
             quant_config.deferred_activation_key = _aiter_deferred_activation_key(
-                moe_config, _resolve_activation_key(activation_key)
+                moe_config, activation_key
             )
         return quant_config
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
