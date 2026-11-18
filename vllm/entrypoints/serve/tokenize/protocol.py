@@ -152,10 +152,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
             response_format=self.response_format,
         )
 
-    def build_tok_params(
-        self,
-        model_config: ModelConfig,
-    ) -> TokenizeParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=None,
             max_output_tokens=0,
