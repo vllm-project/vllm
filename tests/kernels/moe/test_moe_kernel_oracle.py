@@ -315,7 +315,10 @@ def test_return_or_raise(
             oracle.return_or_raise(
                 Int8MoeBackend.TRITON, available_backends, kernel_classes
             )
-        assert logger.info_once.call_args_list == []
+        assert not any(
+            logged.args[0].startswith("Using")
+            for logged in logger.debug_once.call_args_list
+        )
         return
 
     backend, kernel_class = oracle.return_or_raise(
@@ -323,7 +326,7 @@ def test_return_or_raise(
     )
     assert backend is Int8MoeBackend.TRITON
     assert kernel_class is kernel_classes[supported]
-    assert logger.info_once.call_args_list == [call(expected_log)]
+    assert logger.debug_once.call_args_list[-1] == call(expected_log)
 
 
 # oracle class -> a backend it maps to kernel classes for.
@@ -633,10 +636,10 @@ def test_make_moe_kernel_assembly(oracle, mismatched, batched, monkeypatch):
     assert experts_kwargs.get("max_num_tokens") == (64 if batched else None)
     assert experts_kwargs.get("num_dispatchers") == (3 if batched else None)
 
-    expected_logs = [call("Using %s", "SimpleNamespace")]
-    if experts_log is not None:
-        expected_logs.append(call(experts_log, experts_cls.__name__))
-    assert logger.info_once.call_args_list == expected_logs
+    assert logger.info_once.call_args_list == [call("Using %s", "SimpleNamespace")]
+    assert logger.debug_once.call_args_list == (
+        [call(experts_log, experts_cls.__name__)] if experts_log is not None else []
+    )
 
 
 def test_make_kernel_delegates() -> None:
