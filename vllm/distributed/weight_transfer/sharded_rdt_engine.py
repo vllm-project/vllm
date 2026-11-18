@@ -262,8 +262,9 @@ class ShardedRDTWeightTransferEngine(
 
         Raises:
             ValueError: invalid settings or metadata.
-            RuntimeError: the model cannot be planned (`check_plannable`), or
-                a producer cannot be found.
+            RuntimeError: the model cannot be planned (`check_plannable`:
+                e.g. `VLLM_RELOAD_MODE` is not `direct`), or a producer
+                cannot be found.
 
         """
         from vllm.model_executor.model_loader.reload import check_plannable
@@ -274,7 +275,12 @@ class ShardedRDTWeightTransferEngine(
             num_consumers=init_info.num_consumers,
             allow_zero_consumers=True,
         )
-        check_plannable(self.model)
+        try:
+            check_plannable(self.model)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"The 'sharded_rdt' weight transfer backend cannot plan this model: {e}"
+            ) from e
         check_ray_rdt_version()
         metas = _metas(init_info)
         num_consumers = init_info.num_consumers or (

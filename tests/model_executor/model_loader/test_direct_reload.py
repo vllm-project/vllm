@@ -614,16 +614,6 @@ def _config(**overrides) -> SimpleNamespace:
             {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
             None,
         ),
-        (
-            "layerwise",
-            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
-            "requires VLLM_RELOAD_MODE=direct",
-        ),
-        (
-            "layerwise",
-            {"weight_transfer_config": SimpleNamespace(backend="nccl")},
-            None,
-        ),
     ],
     ids=[
         "defaults",
@@ -634,9 +624,7 @@ def _config(**overrides) -> SimpleNamespace:
         "torchao",
         "lora",
         "draft-lm-head-quant",
-        "sharded-rdt-direct",
-        "sharded-rdt-layerwise",
-        "layerwise-nccl",
+        "sharded-rdt",
     ],
 )
 def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):

@@ -539,7 +539,7 @@ def test_receive_without_a_plan_raises(monkeypatch):
 def test_init_refuses_layerwise(monkeypatch):
     model = _cold_start(_toy_model, _checkpoint(_TOY_SHAPES, seed=0))
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+    with pytest.raises(RuntimeError, match="sharded_rdt.*VLLM_RELOAD_MODE=direct"):
         _Fleet(monkeypatch, model, _TOY_SHAPES)
 
 
