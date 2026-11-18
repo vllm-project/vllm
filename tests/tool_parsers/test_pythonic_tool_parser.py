@@ -243,24 +243,47 @@ def test_make_valid_python_streaming_argument_recovery():
     assert make_valid_python("[get_weather(city") is None
     assert make_valid_python("[get_weather(city=") is None
 
-    # Completed first parameter should successfully close and parse
-    completed_first = make_valid_python("[get_weather(city='San Francisco'")
-    assert completed_first is not None
-    candidate, suffix = completed_first
+    # In-progress string parameter streams incrementally
+    streaming_str = make_valid_python("[get_weather(city='San Francisco")
+    assert streaming_str is not None
+    assert streaming_str[0] == "[get_weather(city='San Francisco')]"
+
+    # A string that just closed is withheld until the following token decides
+    # whether an adjacent string literal continues it
+    assert make_valid_python("[get_weather(city='San Francisco'") is None
+
+    # Trailing comma or parenthesis after complete parameter closes cleanly
+    trailing_comma = make_valid_python("[get_weather(city='San Francisco',")
+    assert trailing_comma is not None
+    candidate, suffix = trailing_comma
     assert candidate == "[get_weather(city='San Francisco')]"
     assert suffix == ")]"
 
-    # Trailing comma after complete parameter should remain valid
-    trailing_comma = make_valid_python("[get_weather(city='San Francisco',")
-    assert trailing_comma is not None
+    trailing_paren = make_valid_python("[get_weather(city='San Francisco')")
+    assert trailing_paren is not None
+    assert trailing_paren[0] == "[get_weather(city='San Francisco')]"
+
+    # Adjacent string literals (implicit concatenation)
+    assert make_valid_python("[send(text='hello ' 'world'") is None
+    adjacent_closed = make_valid_python("[send(text='hello ' 'world')")
+    assert adjacent_closed is not None
+    assert adjacent_closed[0] == "[send(text='hello ' 'world')]"
+
+    # Incomplete numeric values (floats, scientific notation) are withheld
+    assert make_valid_python("[set_price(amount=1.") is None
+    assert make_valid_python("[set_price(amount=1.25") is None
+    assert make_valid_python("[set_price(amount=2.5e-3") is None
+    completed_num = make_valid_python("[set_price(amount=1.25,")
+    assert completed_num is not None
+    assert completed_num[0] == "[set_price(amount=1.25)]"
 
     # Incomplete second parameter name should be withheld
     assert make_valid_python("[get_weather(city='San Francisco', metric") is None
     assert make_valid_python("[get_weather(city='San Francisco', metric=") is None
 
-    # Completed second parameter should successfully close and parse
+    # Completed second parameter
     completed_second = make_valid_python(
-        "[get_weather(city='San Francisco', metric='celsius'"
+        "[get_weather(city='San Francisco', metric='celsius')"
     )
     assert completed_second is not None
     assert (
@@ -270,13 +293,13 @@ def test_make_valid_python_streaming_argument_recovery():
     # Nested dictionaries and structures with internal commas
     assert make_valid_python("[register(data={'key'") is None
     assert make_valid_python("[register(data={'key':") is None
-    nested_dict = make_valid_python("[register(data={'key': 'value'")
+    nested_dict = make_valid_python("[register(data={'key': 'value'}")
     assert nested_dict is not None
     assert nested_dict[0] == "[register(data={'key': 'value'})]"
 
     # Parameters following a nested structure with commas
     nested_with_next = make_valid_python(
-        "[register(data={'k1': 1, 'k2': 2}, username='alice'"
+        "[register(data={'k1': 1, 'k2': 2}, username='alice')"
     )
     assert nested_with_next is not None
     assert (
