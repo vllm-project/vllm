@@ -73,6 +73,7 @@ pub fn lower_text_request(
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
     validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    request.validate_cache_salt()?;
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -1835,6 +1836,61 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.generate_request.arrival_time, None);
+    }
+
+    fn lower_with_cache_salt(cache_salt: Option<String>) -> Result<PreparedTextRequest> {
+        let request = TextRequest {
+            cache_salt,
+            ..sample_request()
+        };
+        lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            StructuredOutputBackend::Xgrammar,
+            &stub_tokenizer(),
+        )
+    }
+
+    #[test]
+    fn lower_text_request_accepts_omitted_and_valid_cache_salt() {
+        let omitted = lower_with_cache_salt(None).unwrap();
+        assert_eq!(omitted.generate_request.cache_salt, None);
+
+        let expected = "a".repeat(128);
+        let valid = lower_with_cache_salt(Some(expected.clone())).unwrap();
+        assert_eq!(
+            valid.generate_request.cache_salt.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn lower_text_request_rejects_empty_cache_salt() {
+        let err = lower_with_cache_salt(Some(String::new())).unwrap_err();
+        assert!(err.is_request_validation_error());
+        assert!(err.to_string().contains("non-empty string"));
+    }
+
+    #[test]
+    fn lower_text_request_rejects_oversized_cache_salt() {
+        let err = lower_with_cache_salt(Some("B".repeat(129))).unwrap_err();
+        assert!(err.is_request_validation_error());
+        assert!(err.to_string().contains("at most 128 characters"));
+        assert!(lower_with_cache_salt(Some("B".repeat(1024 * 1024))).is_err());
+    }
+
+    #[test]
+    fn lower_text_request_rejects_forbidden_cache_salt_characters() {
+        for salt in ["tenant@victim", "../../etc/passwd", r"..\..\secret", "a\0b"] {
+            let err = lower_with_cache_salt(Some(salt.to_string())).unwrap_err();
+            assert!(err.is_request_validation_error(), "{salt:?}");
+            assert!(
+                err.to_string().contains("must not contain"),
+                "{salt:?}: {err}"
+            );
+        }
     }
 
     #[test]
