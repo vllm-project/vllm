@@ -316,6 +316,7 @@ def test_prefill_checkpoint_resumes_suffix(
     layer.kda_safe_gate = True
     layer.kda_lower_bound = -5.0
     layer.kda_prefill_backend = backend
+    layer.kda_prefill_conv = "causal_conv1d"
     layer._conv_state_dim_first = dim_first
     layer.conv1d = SimpleNamespace(
         weight=torch.randn(width, 1, 4, device=device) * 0.1, bias=None
