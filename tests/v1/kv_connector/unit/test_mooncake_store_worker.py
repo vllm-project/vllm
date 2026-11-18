@@ -2757,9 +2757,19 @@ def test_recv_thread_splits_disk_offload_loads_by_budget():
     assert second_sizes == [[expected_size]]
 
 
-def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
+def test_recv_thread_drains_remaining_sub_batches_after_failure():
+    """A failing sub-batch must not stop the remaining ones: each key is
+    an independent store object, and the tp_rank rotation means a later
+    sub-batch can hold an EARLIER logical block -- skipping it would
+    leave that block unfetched yet unreported (garbage treated as
+    computed under the flat channel, and an unrepairable multi-block
+    cascade under the evidence channel). Every failing batch's blocks
+    are reported."""
     store = MagicMock()
-    store.batch_get_into_multi_buffers.return_value = [-10, -10]
+    store.batch_get_into_multi_buffers.side_effect = [
+        [-10, -10],
+        [-10],
+    ]
     thread = _make_store_recving_thread(
         store,
         disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_FOR_SPLIT,
@@ -2773,7 +2783,7 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
 
     thread._handle_request(req)
 
-    assert store.batch_get_into_multi_buffers.call_count == 1
+    assert store.batch_get_into_multi_buffers.call_count == 2
     assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 

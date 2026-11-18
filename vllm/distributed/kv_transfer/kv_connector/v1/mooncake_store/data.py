@@ -227,6 +227,14 @@ class LoadSpec:
     can_load: bool
     token_len: int = 0
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+    # The identity of this load attempt, assigned by the core scheduler
+    # at transfer initiation (see KVConnectorBase_V1.note_transfer_attempt).
+    # Additive: None for attempts scheduled before the transfer-identity
+    # contract, which the repair policy's evidence gates reject. A
+    # worker-role connector implementing the hole-repair policy must echo
+    # this in every KVLoadFailureReport and KVLoadAttestation the attempt
+    # produces.
+    transfer_generation: int | None = None
 
 
 @dataclass(slots=True)

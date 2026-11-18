@@ -60,6 +60,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  
     ReqMeta,
     TailKeyBoundary,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.evidence import (  # noqa: E501
+    AttemptEvidence,
+    EvidenceBuffer,
+    evidence_enabled,
+    validate_evidence_certification,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     ATTENTION_STORE_LAYOUTS,
     AttentionStoreLayout,
@@ -106,6 +112,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     group_kernel_blocks,
 )
+from vllm.v1.outputs import KVLoadAttestation, KVLoadFailureReport
 
 from .metrics import MooncakeStoreConnectorStats
 
@@ -487,6 +494,42 @@ class KVTransferThread(threading.Thread):
                 self._handle_request(request_data)
             except Exception:
                 req_id = getattr(request_data, "req_id", "<unknown>")
+                # A pre-GET crash escaping _handle_request leaves the
+                # request's evidence non-terminal in the buffer forever
+                # (the request also parks -- pre-existing behavior). Drop
+                # the entry here: the buffer cannot grow with crashed
+                # attempts, and the missing attestation fails the delivery
+                # closed at the scheduler. Idempotent for attempts that
+                # finalized.
+                evidence_buffer = getattr(self, "_evidence_buffer", None)
+                if evidence_buffer is not None:
+                    # Drop ONLY the crashed attempt's entry. A stale
+                    # attempt's handler crashing late must not destroy the
+                    # CURRENT attempt's registered evidence (an
+                    # identity-blind drop is an availability loss: the
+                    # delivery would fail closed with the terminal
+                    # attestation lost). The crashed attempt's own entry --
+                    # matched by generation when the failed request data
+                    # carries one -- is still dropped, so a pre-GET crash
+                    # never leaves a non-terminal entry. An identity-less
+                    # crashed ReqMeta can only drop an identity-less entry:
+                    # a crashed no-identity handler must never destroy a
+                    # REGISTERED attempt's evidence.
+                    crashed_gen = getattr(
+                        getattr(request_data, "load_spec", None),
+                        "transfer_generation",
+                        None,
+                    )
+                    current = evidence_buffer.get_attempt(req_id)
+                    if current is not None and (
+                        (
+                            crashed_gen is not None
+                            and current.transfer_generation is not None
+                            and current.transfer_generation == crashed_gen
+                        )
+                        or (crashed_gen is None and current.transfer_generation is None)
+                    ):
+                        evidence_buffer.drop(req_id)
                 logger.exception("Error in %s (req=%s)", self.name, req_id)
 
     def _handle_request(self, req_meta: Any):
@@ -1241,6 +1284,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
         is_hma_required: bool = False,
+        evidence_buffer: EvidenceBuffer | None = None,
+        evidence_layer_counts: Sequence[int] | None = None,
+        evidence_certification: str = "content",
     ):
         super().__init__(
             store_service.store,
@@ -1275,6 +1321,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self.coord = coord
         self.store_service = store_service
 
+        # Repair-policy evidence contract: per-attempt bookkeeping handed
+        # to the worker's get_load_* drain. None disables production
+        # evidence (the connector then behaves exactly as before -- the
+        # flat failure channels only).
+        self._evidence_buffer = evidence_buffer
+        self._evidence_layer_counts = (
+            list(evidence_layer_counts) if evidence_layer_counts is not None else None
+        )
+        self._evidence_certification = evidence_certification
+
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
@@ -1290,6 +1346,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return failed
 
     def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
+        if self._evidence_buffer is not None:
+            # The structured evidence channel owns load failures when
+            # production evidence is active (single-group, non-HMA): the
+            # request-level and per-block flat channels would race the
+            # repair admission, and the evidence gates already fail the
+            # delivery closed on every unrepresentable shape.
+            return
         # Request-level failure survives cross-rank aggregation until every
         # transfer is drained, including layouts with globally unique block IDs.
         self.set_failed_request(req_id)
@@ -1323,6 +1386,29 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def _load_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
+        # Start the per-attempt evidence bookkeeping. The transfer
+        # identity is captured ONCE here, from the load spec the
+        # scheduler-role connector built when the attempt was scheduled
+        # -- never re-read at emission time, so a delayed old attempt
+        # can never inherit a newer attempt's identity.
+        evidence: AttemptEvidence | None = None
+        if self._evidence_buffer is not None and req_meta.load_spec is not None:
+            num_layers = (
+                self._evidence_layer_counts[0] if self._evidence_layer_counts else 0
+            )
+            evidence = AttemptEvidence(
+                req_id=req_id,
+                transfer_generation=req_meta.load_spec.transfer_generation,
+                num_layers=num_layers,
+                block_size=self.block_size,
+                restored_extent=token_len,
+                certification_mode=self._evidence_certification,
+            )
+            self._evidence_buffer.start_attempt(evidence)
+        # Reverse map physical block id -> logical block index for the
+        # evidence accounting (built BEFORE the tp_rank rotation reorders
+        # the key lists).
+        block_logical: dict[int, int] = {}
         mask_num = (
             req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
             // self.block_size
@@ -1373,11 +1459,29 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 req_meta.block_ids[g_idx],
                 store_shard_ids,
             )
+            if evidence is not None and g_idx == 0:
+                # Evidence counts (group, block) cells for the single
+                # prefix-cacheable group (see the worker's activation
+                # gate): one cell per expected block, layers folded.
+                for start, _end in chunks:
+                    logical = start // db.store_layout.block_size
+                    if logical >= len(req_meta.block_ids[g_idx]):
+                        continue
+                    evidence.note_expected_block(logical)
+                    evidence.block_ids[logical] = req_meta.block_ids[g_idx][logical]
+                    block_logical[req_meta.block_ids[g_idx][logical]] = logical
             addr_list.extend(g_addrs)
             size_list.extend(g_sizes)
             block_id_list.extend(g_block_ids)
 
         if not key_list:
+            if evidence is not None:
+                # Nothing to load for this rank: a terminal but VACUOUS
+                # attempt (expected set empty). The scheduler's
+                # completeness gate refuses to count a vacuous
+                # attestation, so the delivery fails closed -- never a
+                # non-terminal entry left parked in the buffer.
+                evidence.finalize()
             return
 
         # Rotate aligned lists by tp_rank for load balancing.
@@ -1414,6 +1518,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     # tp_rank rotation means oversized_key isn't necessarily
                     # the first block in the request's original order.
                     self._report_load_error(req_id, block_id_list_c)
+                    if evidence is not None:
+                        # The whole attempt failed before any GET. The
+                        # terminal sweep below counts every expected block
+                        # failed, but this early return skips it -- finalize
+                        # here so the truthful all-failed attestation is
+                        # still emitted (multi-block failure -> no report
+                        # -> the scheduler fails closed).
+                        for logical in evidence.expected_blocks:
+                            evidence.note_block_outcome(logical, False)
+                        evidence.finalize()
                     oversized_key_bytes = _estimate_disk_offload_staging_bytes(
                         size_list_c[oversized_key_index]
                     )
@@ -1473,6 +1587,22 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     if value < 0
                 ]
+                if evidence is not None:
+                    # Record the per-object outcomes -- successes load
+                    # their block; failures are recorded again below
+                    # (idempotent: a failed block is never loaded).
+                    for _key, value, block_id in zip(
+                        batch_keys, res, batch_block_ids, strict=True
+                    ):
+                        if value >= 0:
+                            # An id outside the enumerated map is left
+                            # unrecorded -- never a phantom entry; the
+                            # terminal sweep only ever counts blocks in
+                            # expected_blocks, so an unmapped id can only
+                            # fail the accounting closed, never inflate it.
+                            logical = block_logical.get(block_id)
+                            if logical is not None:
+                                evidence.note_block_outcome(logical, True)
                 self._record_operation(
                     "load_get",
                     load_get_start,
@@ -1487,6 +1617,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         [block_id for _, _, block_id in failed]
                         + remaining_blocks[len(batch_block_ids) :],
                     )
+                    if evidence is not None:
+                        for _key, _value, block_id in failed:
+                            logical = block_logical.get(block_id)
+                            if logical is not None:
+                                evidence.note_block_outcome(logical, False)
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
                         "(batch_keys=%d, first_failures=%s)",
@@ -1494,10 +1629,26 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         len(batch_keys),
                         [(key, value) for key, value, _ in failed[:3]],
                     )
-                    break
+                    # Keep draining the remaining batches. The previous
+                    # `break` left every later block unfetched yet
+                    # unreported -- the evidence accounting would (and,
+                    # for truthfulness, must) count them failed, turning
+                    # any single-object failure into an unrepairable
+                    # multi-block one. Loading the surviving objects is
+                    # safe (each key is independent) and lets the honest
+                    # accounting represent the genuinely repairable shape.
                 remaining_blocks = remaining_blocks[len(batch_block_ids) :]
         except Exception as e:
             self._report_load_error(req_id, remaining_blocks)
+            if evidence is not None:
+                # Unmapped ids stay unrecorded (see the success site); the
+                # terminal sweep counts every expected-but-unrecorded
+                # block failed.
+                evidence.note_blocks_failed(
+                    logical
+                    for logical in (block_logical.get(b) for b in remaining_blocks)
+                    if logical is not None
+                )
             self._record_operation(
                 "load_get",
                 load_get_start,
@@ -1512,6 +1663,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 e,
             )
 
+        # The attempt reached its terminal state on every path above
+        # (full success, partial GET failure, or contained exception).
+        # Blocks with no recorded outcome were never fetched (e.g. the
+        # oversized-key skip returns before the GET loop): count them
+        # failed so loaded + failed == expected holds.
+        if evidence is not None:
+            for logical in evidence.expected_blocks:
+                if (
+                    logical not in evidence.loaded_blocks
+                    and logical not in evidence.failed_blocks
+                ):
+                    evidence.note_block_outcome(logical, False)
+            evidence.finalize()
 
 # ============================================================
 # Store Worker
@@ -1535,6 +1699,18 @@ class MooncakeStoreWorker:
 
     # Bare workers built with __new__ in tests read this default.
     _reuse_pd_transfer_engine: bool = False
+    # Evidence-contract defaults, defined at CLASS level so the evidence
+    # getters and the cleanup paths are safe on every construction path
+    # -- including a constructor that raises midway, whose
+    # partially-initialized instance must not AttributeError during
+    # teardown or getter probes (post_forward calls the getters
+    # unconditionally). Fully-constructed instances shadow these with
+    # their own values below.
+    evidence_buffer: EvidenceBuffer | None = None
+    _evidence_single_group: bool = False
+    _evidence_layer_counts: Sequence[int] | None = None
+    _evidence_certification: str = "none"
+    _evidence_staged: list[AttemptEvidence] | None = None
 
     @staticmethod
     def _create_mem_pool(
@@ -1753,6 +1929,15 @@ class MooncakeStoreWorker:
                 "(global_segment_size=%d), KV transfer disabled.",
                 store_config.global_segment_size,
             )
+            # The evidence getters are called unconditionally by
+            # post_forward even for a capacity-only worker: keep the
+            # class-level disabled defaults (no AttributeError, empty
+            # evidence lists).
+            self.evidence_buffer = None
+            self._evidence_single_group = False
+            self._evidence_layer_counts = None
+            self._evidence_certification = "none"
+            self._evidence_staged = None
             return
 
         if (
@@ -1790,6 +1975,61 @@ class MooncakeStoreWorker:
                 self._lookup_key_prefixes,
                 self._record_kv_connector_operation,
             )
+        # Repair-policy evidence contract: production reports +
+        # attestations. ACTIVATION GATES: evidence activates ONLY under an
+        # explicitly configured repair policy -- under every other policy
+        # (including the default "fail") the evidence channels stay off
+        # and the flat failure channels behave as before; emitting
+        # evidence under them would raise in the scheduler's evidence
+        # handler and the flat-channel suppression would destroy the only
+        # working failure channel. AND only for exactly one
+        # prefix-cacheable group in a single-group (non-HMA) scheduler
+        # layout: store block ids are group-local, so evidence from a
+        # multi-group layout cannot be represented without conflation,
+        # and the scheduler's report consumer is single-group-shaped. A
+        # multi-group downgrade therefore keeps the flat channels and
+        # never produces a successful attestation for a group whose
+        # result was dropped -- evidence is entirely off.
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._evidence_single_group = evidence_enabled(
+            # Defensive read: config objects that predate the
+            # kv_load_failure_policy field (or test fakes without it)
+            # disable evidence -- exactly the pre-evidence behavior.
+            getattr(kv_transfer_config, "kv_load_failure_policy", None)
+            if kv_transfer_config is not None
+            else None,
+            len(self._kv_cache_config.prefix_cacheable_group_ids),
+            self._is_hma_required,
+        )
+        if self._evidence_single_group:
+            # One Mooncake store object packs every KV-cache layer of the
+            # (single) group for its block; the scheduler's cell unit is
+            # (block, layer), so the layer count here must match the
+            # consumer validator's bound (the TARGET model's attention
+            # layers -- model_config.get_num_layers, NOT the group's
+            # layer_names, which can additionally include EAGLE/MTP draft
+            # attention layers whose indices exceed the validator's bound
+            # and would reject the honest report as malformed).
+            self._evidence_layer_counts = (self.num_layers,)
+            # Certification honestly reflects what the GET path actually
+            # verifies. The store keys are keyed by the block's chained
+            # token hash (an identity key, NOT a digest of the KV payload
+            # bytes), so GET success means the bytes stored under that
+            # identity key were returned: correct content iff the store's
+            # key-to-data binding is trustworthy (the documented
+            # store-trust assumption) -- the "content" mode. Deployments
+            # that do not trust the store key-to-data binding configure
+            # evidence_certification="none"; the "sha256" mode is never
+            # claimed because the GET path performs no independent digest
+            # check.
+            self._evidence_certification = validate_evidence_certification(
+                str(extra_config.get("evidence_certification", "content"))
+            )
+        else:
+            self._evidence_layer_counts = None
+            self._evidence_certification = "none"
+        self.evidence_buffer = EvidenceBuffer() if self._evidence_single_group else None
+        self._evidence_staged = None
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
@@ -2330,6 +2570,9 @@ class MooncakeStoreWorker:
                     group.prefix_cacheable for group in self._kv_cache_groups
                 ],
                 is_hma_required=self._is_hma_required,
+                evidence_buffer=self.evidence_buffer,
+                evidence_layer_counts=self._evidence_layer_counts,
+                evidence_certification=self._evidence_certification,
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()
@@ -2411,6 +2654,26 @@ class MooncakeStoreWorker:
         if self._capacity_only:
             return set(), set()
 
+        # get_transfer_results is the FIRST getter of every post_forward
+        # drain. Any evidence staging still alive here belongs to an
+        # INTERRUPTED earlier pass (an exception or abort between the
+        # reports and attestations getters): drop it so the pass's reports
+        # are never re-emitted (the in-step duplicate fold does not dedupe
+        # across steps; the consumer's fail-safe only degrades the
+        # duplicate to a lost repair).
+        self._evidence_staged = None
+
+        # The finished/preempted-request evidence drop must run for EVERY
+        # role: the send-ledger cleanup below is can_put-gated (it owns the
+        # send thread), so a pure kv_consumer deployment would leak one
+        # buffer entry per stuck request forever. Finished requests never
+        # deliver another pass; preempted requests are re-admitted with a
+        # NEW transfer generation, so their old attempt's evidence is
+        # stale regardless.
+        if self.evidence_buffer is not None:
+            for req_id in finished_req_ids | set(meta.preempted_req_ids):
+                self.evidence_buffer.drop(req_id)
+
         if self.can_put:
             self._close_ended_store_requests(finished_req_ids, meta)
 
@@ -2436,6 +2699,76 @@ class MooncakeStoreWorker:
         for recv_thread in self.kv_recv_threads:
             block_ids |= recv_thread.get_and_clear_block_ids_with_load_errors()
         return block_ids
+
+    def _evidence_step_attempts(self) -> list[AttemptEvidence]:
+        """The terminal attempts of this step, staged exactly once.
+
+        `get_load_failure_reports` and `get_load_attestations` are both
+        called in the same post_forward (reports first); staging the
+        drained attempts here once lets both getters observe the SAME
+        attempts instead of whichever drained first -- a reports getter
+        that raises mid-drain must not consume the attempt before the
+        attestations getter observed it.
+        """
+        if self.evidence_buffer is None:
+            return []
+        staged = self._evidence_staged
+        if staged is None:
+            staged = self.evidence_buffer.drain_terminal()
+            self._evidence_staged = staged
+        return staged
+
+    def get_load_failure_reports(self) -> list[KVLoadFailureReport]:
+        """Drain the terminal attempts' structured failure reports.
+
+        A report is emitted only when the actual failure geometry fits the
+        v1 single-region contract (exactly one failed block with a healthy
+        contiguous prefix). Any other shape -- multi-block failures,
+        whole-request exceptions, multi-group layouts -- emits nothing for
+        that attempt, and the scheduler's evidence gates fail the delivery
+        closed to recomputation.
+        """
+        if self.evidence_buffer is None:
+            return []
+        reports: list[KVLoadFailureReport] = []
+        for evidence in self._evidence_step_attempts():
+            if not evidence.failed_blocks:
+                continue
+            report = evidence.to_failure_report()
+            if report is not None:
+                reports.append(report)
+            else:
+                logger.warning(
+                    "Mooncake load failure for req=%s affects %d blocks "
+                    "(generation=%r): not representable by the v1 "
+                    "single-region repair contract -> no report, the "
+                    "scheduler will fail the delivery closed to "
+                    "recomputation",
+                    evidence.req_id,
+                    len(evidence.failed_blocks),
+                    evidence.transfer_generation,
+                )
+        return reports
+
+    def get_load_attestations(self) -> list[KVLoadAttestation]:
+        """Drain the terminal attempts' per-rank attestations.
+
+        One terminal attestation per completed load attempt (healthy or
+        failed), derived from the ACTUAL GET outcomes. The accounting is
+        in (block, layer) cells -- the unit the scheduler's
+        reconciliation enforces -- with the store's shard-objects folded
+        per block. Non-terminal attempts stay buffered until their receive
+        handler completes; an interrupted attempt never attests success.
+        """
+        if self.evidence_buffer is None:
+            return []
+        staged = self._evidence_step_attempts()
+        attestations = [evidence.to_attestation() for evidence in staged]
+        # The attestation getter runs last in post_forward: release the
+        # staging so the next step drains afresh (the get_finished head
+        # is the backstop for a pass interrupted before this point).
+        self._evidence_staged = None
+        return attestations
 
     def get_transfer_results(
         self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
