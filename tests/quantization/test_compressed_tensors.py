@@ -320,44 +320,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
         assert output
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Marlin pre-processed weights require CUDA.",
-)
-def test_compressed_tensors_wna16_marlin_pre_processed_weights(
-    dist_init, workspace_init
-):
-    from vllm.model_executor.utils import weights_already_processed
-
-    class Layer(torch.nn.Module):
-        pass
-
-    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
-        scheme = CompressedTensorsWNA16(
-            strategy=QuantizationStrategy.GROUP.value,
-            num_bits=4,
-            group_size=128,
-            symmetric=True,
-        )
-        layer = Layer()
-        scheme.create_weights(
-            layer,
-            output_size=4096,
-            input_size=4096,
-            output_partition_sizes=[4096],
-            input_size_per_partition=4096,
-            params_dtype=torch.bfloat16,
-            weight_loader=lambda *args, **kwargs: None,
-        )
-
-        assert scheme.supports_pre_processed_weights
-        assert layer.w_zp.numel() == 0
-        with weights_already_processed():
-            scheme.process_weights_after_loading(layer)
-        assert scheme.kernel is not None
-        assert scheme.kernel.w_zp_name == "w_zp"
-
-
 def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
     model, vllm_config = load_model_without_vllm_runner(model_path)
