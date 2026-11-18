@@ -62,7 +62,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0

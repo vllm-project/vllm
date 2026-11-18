@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TP2: `Qwen3_5RMSNorm.forward_fused` vs the unfused chain it replaces,
 (all-reduce +) Gemma norm, then scaled_fp8_quant / scaled_fp4_quant, for real
-ModelOpt static FP8 and NVFP4 consumers.
+ModelOpt static FP8 and NVFP4 and compressed-tensors per-token FP8 consumers.
 
 All cases run in one 2-rank spawn; spawning per case re-imports vLLM and
 recreates the FlashInfer workspaces, which costs far more than the kernels.
@@ -39,6 +39,7 @@ def _worker(local_rank, world_size, port):
     from vllm import _custom_ops as ops
     from vllm.config import get_current_vllm_config
     from vllm.config.model import ModelConfig
+    from vllm.config.quantization import resolve_quantization_config
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
         fused_allreduce_gemma_rms_norm,
@@ -48,7 +49,11 @@ def _worker(local_rank, world_size, port):
         ModelOptFp8Config,
         ModelOptNvFp4Config,
     )
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTokenSym,
         kFp8StaticTensorSym,
         kNvfp4Dynamic,
     )
@@ -62,9 +67,15 @@ def _worker(local_rank, world_size, port):
     get_current_vllm_config().model_config = ModelConfig()
     dtype = torch.bfloat16
 
-    def make_linear(nvfp4):
-        """A loaded ModelOpt linear whose input quant the norm can fuse."""
-        if nvfp4:
+    def make_linear(key):
+        """A loaded linear whose input quant the norm can fuse."""
+        input_scale = None
+        if key == kFp8DynamicTokenSym:
+            # Online PTPC FP8: per-channel weights, per-token inputs.
+            quant_config = OnlineQuantizationConfig(
+                resolve_quantization_config("fp8_per_channel", None)
+            )
+        elif key == kNvfp4Dynamic:
             quant_config = ModelOptNvFp4Config(
                 is_checkpoint_nvfp4_serialized=True,
                 kv_cache_quant_algo=None,
@@ -92,14 +103,16 @@ def _worker(local_rank, world_size, port):
                     param.data.copy_(torch.randint(0, 256, param.shape))
                 else:
                     param.data.copy_(torch.rand(param.shape) + 0.5)
-            linear.input_scale.data.fill_(input_scale)
+            if input_scale is not None:
+                linear.input_scale.data.fill_(input_scale)
             linear.quant_method.process_weights_after_loading(linear)
         return linear
 
-    linears = {nvfp4: make_linear(nvfp4) for nvfp4 in (False, True)}
+    keys = (kFp8StaticTensorSym, kFp8DynamicTokenSym, kNvfp4Dynamic)
+    linears = {key: make_linear(key) for key in keys}
 
-    def run_one(nvfp4, allreduce, num_tokens):
-        linear = None if nvfp4 is None else linears[nvfp4]
+    def run_one(key, allreduce, num_tokens):
+        linear = None if key is None else linears[key]
         set_random_seed(42)
         norm = Qwen3_5RMSNorm(HIDDEN_SIZE, eps=1e-6, reduce_inputs=allreduce).cuda()
         with torch.no_grad():
@@ -131,10 +144,11 @@ def _worker(local_rank, world_size, port):
             return
 
         assert qa is not None and y is not None
-        # FlashInfer's AR+norm+quant kernel matches its AR+norm bitwise; the
-        # Triton norm-quant (no all-reduce, or above the workspace budget)
-        # reduces the sum of squares in a different order than FlashInfer's
-        # norm, so off-by-one codes appear where the normed values differ.
+        assert qa.quant_key == key
+        # FlashInfer's AR+norm(+quant) matches its AR+norm bitwise; the Triton
+        # norm-quant (no all-reduce, or above the workspace budget) reduces the
+        # sum of squares in a different order than FlashInfer's norm, so
+        # off-by-one codes appear where the normed values differ.
         exact = allreduce and num_tokens < FALLBACK_TOKENS
         if exact:
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
@@ -142,8 +156,7 @@ def _worker(local_rank, world_size, port):
             assert (y != ref_y).float().mean().item() <= 1e-4
             torch.testing.assert_close(y, ref_y, rtol=2**-7, atol=0)
 
-        if nvfp4:
-            assert qa.quant_key == kNvfp4Dynamic
+        if key == kNvfp4Dynamic:
             ref_q, ref_sf = ops.scaled_fp4_quant(
                 ref_y, linear.input_global_scale_inv, True, backend="flashinfer-cutedsl"
             )
@@ -151,8 +164,11 @@ def _worker(local_rank, world_size, port):
             sf = _swizzled_sf_rows(qa.scale, num_tokens, HIDDEN_SIZE)
             ref_sf = _swizzled_sf_rows(ref_sf, num_tokens, HIDDEN_SIZE)
             sf_mismatch = (sf != ref_sf).float().mean().item()
+        elif key == kFp8DynamicTokenSym:
+            ref_q, ref_sf = ops.scaled_fp8_quant(ref_y, use_per_token_if_dynamic=True)
+            dist = (_fp8_codes(qa.data) - _fp8_codes(ref_q)).abs()
+            sf_mismatch = (qa.scale != ref_sf).float().mean().item()
         else:
-            assert qa.quant_key == kFp8StaticTensorSym
             ref_q, _ = ops.scaled_fp8_quant(
                 ref_y, linear.input_scale, group_shape=(-1, -1)
             )
@@ -166,10 +182,10 @@ def _worker(local_rank, world_size, port):
             assert (dist > 0).float().mean().item() <= 1e-4
             assert sf_mismatch <= 1e-4
 
-    for nvfp4 in (False, True):
+    for key in keys:
         for num_tokens in (1, 17, 333, FALLBACK_TOKENS):
-            run_one(nvfp4, True, num_tokens)
-        run_one(nvfp4, False, 17)
+            run_one(key, True, num_tokens)
+        run_one(key, False, 17)
     for allreduce in (False, True):
         run_one(None, allreduce, 17)
     cleanup_dist_env_and_memory()

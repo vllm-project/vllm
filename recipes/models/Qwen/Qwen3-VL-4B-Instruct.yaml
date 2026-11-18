@@ -3,7 +3,7 @@ meta:
   slug: "qwen3-vl-4b-instruct"
   provider: "Qwen"
   description: "Qwen3-VL dense 4B vision-language model supporting image, video, and text workloads."
-  date_added: 2026-11-06
+  date_added: 2025-09-24
   date_updated: 2026-11-06
   tasks:
     - multimodal

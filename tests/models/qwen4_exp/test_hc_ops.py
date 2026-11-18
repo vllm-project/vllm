@@ -165,8 +165,8 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
 
 
 @requires_hc_up_gate_mix
-# 1 and 1023 use the single-CTA configuration, 4097 the CTA-pair one.
-@pytest.mark.parametrize("num_tokens", [1, 1023, 4097])
+# 1, 1023 and 1599 use the single-CTA configuration, 1600 and 4097 the pair.
+@pytest.mark.parametrize("num_tokens", [1, 1023, 1599, 1600, 4097])
 def test_hc_up_gate_mix(num_tokens: int) -> None:
     # lowrank is a column slice of the merged down+inject output, as in the model.
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -190,8 +190,12 @@ def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
     hc = GatedResidual(HyperConnectionConfig())
     assert hc.pad_size > 0
     linear = hc.input_mix_weight_down_block_inject
+    with torch.no_grad():
+        linear.weight.fill_(1.0)
     for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
-        weight = torch.ones(rows, hc.hyper_hidden_size)
+        weight = torch.full((rows, hc.hyper_hidden_size), 2.0)
         weight.shard_id = shard_id
         set(linear.load_weights([("weight", weight)]))
+    assert (linear.weight[: hc.hc_lowrank + hc.hc_count] == 2).all()
+    assert not linear.weight[hc.hc_lowrank + hc.hc_count :].any()
     assert linear.pop_missing_shards() == []

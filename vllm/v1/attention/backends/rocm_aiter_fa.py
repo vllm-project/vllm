@@ -334,7 +334,7 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
     # Every decode has max_query_len query tokens (spec-decode verify batches):
@@ -346,14 +346,14 @@ class AiterFlashAttentionDecodeMetadata:
     swa_max_seq_len: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
     max_seq_len: int
     query_start_loc: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkSlidingWindowMetadata:
     swa_cu_seqlens: torch.Tensor
     swa_seq_starts: torch.Tensor
@@ -363,7 +363,7 @@ class AiterChunkSlidingWindowMetadata:
     swa_workspace: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkContextMetadata:
     workspace: torch.Tensor
     cu_seq_lens_chunk: torch.Tensor
@@ -375,7 +375,7 @@ class AiterChunkContextMetadata:
     swa_metadata: AiterChunkSlidingWindowMetadata | None
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
     max_seq_len: int
@@ -383,7 +383,7 @@ class AiterFlashAttentionChunkPrefillMetadata:
     chunk_context_metadata: AiterChunkContextMetadata
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterKVSharingMetadata:
     workspace: torch.Tensor
     query_start_loc: torch.Tensor
@@ -427,7 +427,7 @@ class AiterFlashAttentionMetadata:
     kv_sharing_metadata: AiterKVSharingMetadata | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class AsmKvScaleTables:
     """Dense per-slot scale tables the asm decode kernel reads for an fp8 cache.
 
@@ -585,14 +585,14 @@ class AiterFlashAttentionMetadataBuilder(
         # The first of query_len query tokens needs the window before it.
         window = self.aot_sliding_window[0] + query_len
         lens = seq_lens[:num_decodes]
-        first_block = torch.clamp(lens - window, min=0) // self.block_size
-        index = (first_block.to(torch.int64)[:, None] + self._swa_block_offsets).clamp_(
+        first_block = (lens - window).clamp_(min=0) // self.block_size
+        index = (self._swa_block_offsets + first_block[:, None]).clamp_(
             max=block_table.shape[1] - 1
         )
         swa_block_table = self._swa_block_table[:num_decodes]
         torch.gather(block_table[:num_decodes], 1, index, out=swa_block_table)
         swa_seq_lens = self._swa_seq_lens[:num_decodes]
-        swa_seq_lens.copy_(lens - first_block * self.block_size)
+        torch.sub(lens, first_block, alpha=self.block_size, out=swa_seq_lens)
         return (
             swa_block_table,
             swa_seq_lens,
@@ -783,9 +783,9 @@ class AiterFlashAttentionMetadataBuilder(
                     swa_workspace=swa_workspace,
                 )
 
-            # allocate the equal amount of workspace for
-            # each chunk prefill request
-            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends
+            # Split the workspace only among extends that have context to read.
+            num_extends_with_context = max(int((computed_kv_lens > 0).sum()), 1)
+            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends_with_context
             num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
 
             chunk_starts = (

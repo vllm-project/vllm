@@ -14,7 +14,6 @@ from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
@@ -65,9 +64,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             return get_model(
                 vllm_config=self.vllm_config,
                 model_config=self.draft_model_config,
-                load_config=get_pp_safe_draft_load_config(
-                    get_draft_load_config(self.vllm_config)
-                ),
+                load_config=get_draft_load_config(self.vllm_config),
             )
 
     def load_model(self, target_model: nn.Module) -> None:
