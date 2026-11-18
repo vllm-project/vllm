@@ -335,6 +335,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         model needs inline system messages merged into the leading block.
         The template is compiled as `apply_chat_template` compiles it, so
         HF-only syntax such as `{% generation %}` does not count as a failure.
+        That compiler renders in an `ImmutableSandboxedEnvironment`.
         """
         if not chat_template:
             return True
