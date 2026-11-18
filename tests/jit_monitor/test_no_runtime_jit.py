@@ -28,23 +28,19 @@ pytestmark = pytest.mark.skip(reason="Kernel warmup coverage is still incomplete
 class JitModel:
     model: str
     draft: str | None = None
-    trust_remote_code: bool = False
 
 
 JIT_MONITOR_MODELS = [
     JitModel("Qwen/Qwen3-0.6B"),
-    JitModel("deepseek-ai/DeepSeek-V2-Lite-Chat", trust_remote_code=True),
-    JitModel("deepseek-ai/DeepSeek-V3", trust_remote_code=True),
+    JitModel("deepseek-ai/DeepSeek-V2-Lite-Chat"),
+    JitModel("deepseek-ai/DeepSeek-V3"),
     JitModel("ibm-granite/granite-4.0-tiny-preview"),
     JitModel(
         "vllm-project/deepseek_mtp_main_random",
         draft="vllm-project/deepseek_mtp_draft_random",
-        trust_remote_code=True,
     ),
     JitModel(
-        "vllm-project/deepseek-v3-random",
-        draft="vllm-project/eagle-deepseek-v3-random",
-        trust_remote_code=True,
+        "vllm-project/deepseek-v3-random", draft="vllm-project/eagle-deepseek-v3-random"
     ),
 ]
 
@@ -102,7 +98,6 @@ def can_run_without_jit(spec: JitModel):
     """
     llm = LLM(
         spec.model,
-        trust_remote_code=spec.trust_remote_code,
         max_model_len=2048,
         max_num_seqs=8,
         gpu_memory_utilization=0.80,
