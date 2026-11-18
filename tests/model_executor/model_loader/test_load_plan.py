@@ -35,7 +35,11 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import copy_weight_, replace_parameter
+from vllm.model_executor.utils import (
+    _BYTE_CONTAINERS,
+    copy_weight_,
+    replace_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -43,8 +47,6 @@ _MODEL_CONFIG = SimpleNamespace(
 _CPU = torch.device("cpu")
 BF16 = torch.bfloat16
 U8, E8M0, E4M3 = torch.uint8, torch.float8_e8m0fnu, torch.float8_e4m3fn
-# 1-byte containers whose every byte pattern is a value worth checking
-_BYTE_DTYPES = (U8, torch.int8, E8M0, torch.float4_e2m1fn_x2)
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +89,7 @@ def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     return {
         name: torch.randint(256, shape, generator=gen, dtype=U8).view(dtype)
-        if dtype in _BYTE_DTYPES
+        if dtype in _BYTE_CONTAINERS
         else torch.randn(shape, generator=gen).to(dtype)
         for name, (shape, dtype) in shapes.items()
     }
