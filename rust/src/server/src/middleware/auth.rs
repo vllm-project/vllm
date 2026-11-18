@@ -33,11 +33,7 @@ pub async fn authenticate_api_key(
     }
 
     // Accept the Anthropic-style `x-api-key` header as an alternative to Bearer.
-    if let Some(key) = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-    {
+    if let Some(key) = req.headers().get("x-api-key").and_then(|value| value.to_str().ok()) {
         if verify_raw_key(key, state.api_key_hashes()) {
             return next.run(req).await;
         }

@@ -18,6 +18,10 @@ This means any model served by vLLM with proper tool calling support can act as 
 
 Claude Code requires a model with strong tool calling capabilities. The model must support the OpenAI-compatible tool calling API. See [Tool Calling](../../features/tool_calling.md) for details on enabling tool calling for your model.
 
+Use the Python frontend for Claude Code (`VLLM_USE_RUST_FRONTEND=0` when starting
+vLLM). The Rust frontend does not yet support the streaming and tool calls
+required by this workflow.
+
 ## Installation
 
 First, install Claude Code by following the [official installation guide](https://docs.anthropic.com/en/docs/claude-code/getting-started).
