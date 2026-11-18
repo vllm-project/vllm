@@ -232,7 +232,7 @@ def exported_weight_bytes(storages: Iterable["StorageRecord"] | None) -> int:
     if storages is None:
         return 0
     return sum(
-        record.allocation_nbytes
+        record.storage.nbytes()
         for record in storages
         if record.storage.device.type != "cpu"
     )

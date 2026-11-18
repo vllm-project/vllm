@@ -89,12 +89,11 @@ def _export_vmm_test_model(connection):
         model.register_buffer("host_table", torch.arange(3))
         model.register_buffer("empty", torch.empty(0, device="cuda:0"))
         state, backend = _state_for_model(model, "vmm")
+        entries = [backend.export_storage(record) for record in state.storages]
         send_msg(
             connection,
             {
-                "storages": [
-                    backend.export_storage(record) for record in state.storages
-                ],
+                "storages": entries,
                 "manifest": state.manifest,
                 "aliases": state.aliases,
             },
@@ -104,15 +103,13 @@ def _export_vmm_test_model(connection):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
     """The FD holder imports after the producer exits; tensor views own the mapping."""
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        storage_bytes,
-    )
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (  # noqa: E501
         recv_msg,
     )
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
+        storage_bytes,
     )
 
     client, server = socket.socketpair()
@@ -182,7 +179,8 @@ def test_vmm_peer_copy_preserves_views_and_current_device():
     source = PeerIpcMover(0, backend)
     client, server = socket.socketpair()
     with client, server:
-        send_msg(server, source.prepare_seed(state.storages))
+        seed = source.prepare_seed(state.storages)
+        send_msg(server, seed)
         seed = recv_msg(client)
     with torch.accelerator.device_index(1):
         copied = get_mover("peer_ipc").fill(
@@ -1381,15 +1379,13 @@ def test_ipc_rope_matching(
 
     from vllm.config import LoadConfig, ModelConfig, VllmConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        storage_bytes,
-    )
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
         hash_rope_parameters,
     )
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
+        storage_bytes,
     )
 
     is_reload, rope_type, theta, factor, max_position, rank, mismatch = case

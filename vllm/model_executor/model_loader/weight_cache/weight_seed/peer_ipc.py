@@ -11,7 +11,7 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     storage_bytes,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.cuda_ipc import (
-    TensorEntry,
+    CudaIpcBackend,
 )
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
@@ -40,7 +40,7 @@ class PeerIpcMover(WeightMover):
         # name the daemon's device; None means the device is already current
         # (e.g. the loader's own thread).
         self._device_index = device_index
-        self._ipc_backend = ipc_backend
+        self._ipc_backend = ipc_backend or CudaIpcBackend()
 
     def prepare_seed(self, storages: list["StorageRecord"]) -> dict:
         if self._device_index is not None:
@@ -49,12 +49,7 @@ class PeerIpcMover(WeightMover):
         gpu_uuid = None
         if torch.accelerator.device_count() > 0 and current_platform.is_cuda_alike():
             gpu_uuid = current_platform.get_device_uuid(index)
-        exporter = lambda record: (
-            TensorEntry.from_storage(record.storage)
-            if self._ipc_backend is None
-            else self._ipc_backend.export_storage(record)
-        )
-        entries = [exporter(record) for record in storages]
+        entries = [self._ipc_backend.export_storage(record) for record in storages]
         return {
             "backend": self.name,
             "storages": entries,

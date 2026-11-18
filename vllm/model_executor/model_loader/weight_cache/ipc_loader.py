@@ -37,6 +37,7 @@ from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
     get_draft_load_config,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_backends import IPC_BACKENDS
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     TensorKind,
     storage_bytes,
@@ -76,7 +77,7 @@ _T = TypeVar("_T")
 
 
 class IpcModelLoader(BaseModelLoader):
-    """Load a model using the weight cache daemon's negotiated sharing backend.
+    """Load a model using the weight cache daemon's sharing backend.
 
     The model is initialized on the meta device and every parameter/buffer is
     replaced by the daemon's post-quantized tensor, so
@@ -221,7 +222,10 @@ class IpcModelLoader(BaseModelLoader):
         else:
             state = self._state_for_key(cache_key, device_index, is_reload=True)
         buffers = [
-            storage_bytes(record.storage)[: record.nbytes] for record in state.storages
+            storage_bytes(record.storage)[: storage["nbytes"]]
+            for record, storage in zip(
+                state.storages, state.manifest["storages"], strict=True
+            )
         ]
         tensors = rebuild_tensors(state.manifest, buffers)
         params = dict(model.named_parameters())
@@ -329,7 +333,10 @@ class IpcModelLoader(BaseModelLoader):
         so the daemon can be asked to release its cache afterwards.
         """
         buffers = [
-            storage_bytes(record.storage)[: record.nbytes] for record in state.storages
+            storage_bytes(record.storage)[: storage["nbytes"]]
+            for record, storage in zip(
+                state.storages, state.manifest["storages"], strict=True
+            )
         ]
         if self.mode == "copy":
             buffers = [buffer.clone() for buffer in buffers]
@@ -416,10 +423,6 @@ class IpcModelLoader(BaseModelLoader):
     def _request_state(
         self, cache_key: WeightCacheKey, device_index: int, *, is_reload: bool = False
     ) -> WeightCacheState:
-        from vllm.model_executor.model_loader.weight_cache.ipc_backends import (
-            IPC_BACKENDS,
-        )
-
         with self._connect(self.state_timeout_s) as conn:
             send_msg(
                 conn,
@@ -427,32 +430,31 @@ class IpcModelLoader(BaseModelLoader):
                     "cmd": "get_state",
                     "cache_key": cache_key,
                     "is_reload": is_reload,
-                    "backends": tuple(IPC_BACKENDS),
                 },
             )
             response = recv_msg(conn)
-        status = response.get("status")
-        if status == "mismatch":
-            raise CacheConfigMismatchError(
-                f"WeightCacheKey mismatch on fields: {response.get('fields')}"
+            status = response.get("status")
+            if status == "mismatch":
+                raise CacheConfigMismatchError(
+                    f"WeightCacheKey mismatch on fields: {response.get('fields')}"
+                )
+            if status != "ok":
+                raise WeightCacheUnavailableError(
+                    f"Weight cache daemon error: {response.get('message')}"
+                )
+            self._check_gpu_uuid(response.get("gpu_uuid"))
+            backend = response.get("backend")
+            if backend not in IPC_BACKENDS:
+                raise CacheConfigMismatchError(
+                    f"weight_cache_backend mismatch: unsupported backend {backend!r}"
+                )
+            records = [entry.rebuild(device_index) for entry in response["storages"]]
+            return WeightCacheState(
+                manifest=response["manifest"],
+                storages=records,
+                aliases=response["aliases"],
+                attrs=response["attrs"],
             )
-        if status != "ok":
-            raise WeightCacheUnavailableError(
-                f"Weight cache daemon error: {response.get('message')}"
-            )
-        self._check_gpu_uuid(response.get("gpu_uuid"))
-        backend = response["backend"]
-        if backend not in IPC_BACKENDS:
-            raise CacheConfigMismatchError(
-                f"Weight cache daemon uses unsupported backend {backend!r}"
-            )
-        records = [entry.rebuild(device_index) for entry in response["storages"]]
-        return WeightCacheState(
-            manifest=response["manifest"],
-            storages=records,
-            aliases=response["aliases"],
-            attrs=response["attrs"],
-        )
 
     def _connect(self, timeout: float) -> socket.socket:
         socket_path = self._resolve_socket_path()

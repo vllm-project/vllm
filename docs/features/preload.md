@@ -96,17 +96,19 @@ sides; the producer and consumer differ only in where they use the same state
 type. The daemon captures its state before starting listeners or reporting
 readiness. For each `get_state` consumer, the daemon's backend exports every
 storage in the state once. CUDA IPC still creates fresh per-consumer handle
-reductions. VMM passes FDs with `SCM_RIGHTS` over the owner-verified Unix
-socket, not as serialized process-local integers. After receiving the handles,
-the consumer first calls each `StorageEntry.rebuild(device)` to obtain
-`StorageRecord`s, then decodes those records and the received manifest, aliases
-and attrs into `WeightCacheState`. It uses the manifest to rebuild all tensor
-views. Each engine owns its imported mappings until the last view is destroyed.
-A connected engine does not need the daemon to stay alive to retain its
-imported allocations, but future engines need a live daemon to fetch them. Both
-`zero_copy` and `copy` loader modes work with either backend. Same-host peer
-seeding detects VMM storage and transfers its descriptors; remote seeding
-continues to use its configured copy mover.
+reductions. VMM entries hold `SharedFileDescriptor` objects: the existing
+pickle persistent-ID protocol encodes their references, while `SCM_RIGHTS`
+passes the actual FDs over the owner-verified Unix socket, never as serialized
+process-local integers. The consumer calls each `StorageEntry.rebuild(device)`
+to obtain `StorageRecord`s, constructs `WeightCacheState`, then rebuilds all
+tensor views from the manifest. The daemon's state owns the producer
+allocations; the returned tensors and records keep the consumer's imported
+mappings alive. A connected engine does not need the daemon to stay alive to
+retain those mappings, but future engines need a live daemon to fetch them.
+Both `zero_copy` and `copy` loader modes work with either backend. Same-host
+peer seeding detects VMM storage and transfers its descriptors; remote seeding
+continues to use its configured copy mover. VMM uses the existing FD transport
+and D2D protocols; this PR does not rewrite either one.
 
 Both backends can be deployed independently of the serving Pod, provided GPU
 access, socket mounts, ownership and container settings allow it. VMM does not
@@ -258,11 +260,10 @@ the source by `--model` path instead, as an engine without the files matches
 its daemon; give both sides the same `--model` in that case.
 
 D2D seeding copies each source storage once, transferring only the logical
-`nbytes` prefix rather than the `allocation_nbytes` padding. The mirror then
-uses the manifest to rebuild every view at its recorded offset and strides, so
-views that post-processing leaves on one storage (such as MLA's `W_UV` and
-`W_UK_T`) keep their layout and stay shared, and the mirror uses as much memory
-as the source.
+`nbytes` prefix recorded in the manifest rather than the full physical
+allocation. The mirror then calls `rebuild_tensors` to rebuild every view at
+its recorded offset and strides, so views that post-processing leaves on one
+storage (such as MLA's `W_UV` and `W_UK_T`) keep their layout and stay shared.
 
 A same-host mirror keeps every GPU visible — a CUDA IPC handle names its
 device by index, so the source's indices must resolve — and the launcher
@@ -357,10 +358,10 @@ daemons at a trusted deployment.
    default). It drops the model and startup runtime resources before accepting
    engine connections.
 2. An engine started with `--load-format ipc_cache` builds its model on the
-   meta device (no storage) and requests the storage handles and state metadata
-   from the daemon on its GPU. It first rebuilds each handle into a
-   `StorageRecord` and decodes a `WeightCacheState` from those records and the
-   received metadata, then uses the manifest to rebuild all tensor views.
+   meta device (no storage) and requests the storage entries and state metadata
+   from the daemon on its GPU. It rebuilds each entry into a `StorageRecord`,
+   constructs `WeightCacheState`, then uses the manifest to recreate all tensor
+   views.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model

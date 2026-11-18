@@ -116,9 +116,7 @@ from vllm.distributed.device_communicators.flashinfer_all_reduce import (
 from vllm.logger import configure_logging, init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    StorageEntry,
-)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import StorageEntry
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     recv_msg,
     send_msg,
@@ -154,12 +152,12 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.compiled import 
 from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autotune import (  # noqa: E501
     FlashInferWarmupCache,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed import (
-    WeightShardSeed,
-    build_manifest,
-)
+from vllm.model_executor.model_loader.weight_cache.weight_seed import WeightShardSeed
 from vllm.model_executor.model_loader.weight_cache.weight_seed.loader import (
     PeerModelLoader,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    build_manifest,
 )
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -593,7 +591,8 @@ class WeightCacheDaemon:
         elif cmd == "seed":
             # A same-host peer's D2D request; the pickle plane can carry the
             # peer_ipc seed's local sharing handles, which JSON cannot.
-            send_msg(conn, self.d2d.handle_request(request))
+            response = self.d2d.handle_request(request)
+            send_msg(conn, response)
         elif cmd == "release":
             release_conn = conn.dup()
             threading.Thread(
@@ -627,26 +626,17 @@ class WeightCacheDaemon:
         if not self.has_weights:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
-        supported = request.get("backends", ["cuda_ipc"])
-        if not isinstance(supported, (list, tuple)):
-            send_msg(conn, {"status": "error", "message": "Invalid sharing backends"})
-            return
-        if self.backend_name not in supported:
-            send_msg(conn, {"status": "mismatch", "fields": ["weight_cache_backend"]})
-            return
         storages, manifest, aliases, attrs = self._export_state()
-        send_msg(
-            conn,
-            {
-                "status": "ok",
-                "backend": self.backend_name,
-                "storages": storages,
-                "manifest": manifest,
-                "aliases": aliases,
-                "attrs": attrs,
-                "gpu_uuid": get_current_device_uuid(),
-            },
-        )
+        response = {
+            "status": "ok",
+            "backend": self.backend_name,
+            "storages": storages,
+            "manifest": manifest,
+            "aliases": aliases,
+            "attrs": attrs,
+            "gpu_uuid": get_current_device_uuid(),
+        }
+        send_msg(conn, response)
         logger.info_once(
             "Weight cache %s daemon rank %d sent %d storages (+%d aliases) to engine",
             self.role,

@@ -60,7 +60,9 @@ class MooncakeMover(WeightMover):
 
     def prepare_seed(self, storages: list["StorageRecord"]) -> dict:
         engine = self._get_engine()
-        regions = [[record.storage.data_ptr(), record.nbytes] for record in storages]
+        regions = [
+            [record.storage.data_ptr(), record.storage.nbytes()] for record in storages
+        ]
         new = [
             (pointer, nbytes)
             for pointer, nbytes in regions

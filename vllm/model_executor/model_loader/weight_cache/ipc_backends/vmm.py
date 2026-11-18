@@ -42,6 +42,7 @@ class VmmAllocation:
         self.ptr = 0
         self.handle = 0
         self.mapped = False
+        self.shared_fd = shared_fd
         self.fd: SharedFileDescriptor | None = None
         self.driver = get_vmm_driver()
         if not isinstance(self.driver, CudaVmmDriver):
@@ -63,9 +64,8 @@ class VmmAllocation:
             self.driver.map(self.ptr, self.size, self.handle)
             self.mapped = True
             self.driver.set_access(self.ptr, self.size, device_index)
-            self.fd = shared_fd or SharedFileDescriptor(
-                self.driver.export_fd(self.handle)
-            )
+            if shared_fd is None:
+                self.fd = SharedFileDescriptor(self.driver.export_fd(self.handle))
         except BaseException:
             with suppress(BaseException):
                 self.close()
@@ -85,6 +85,7 @@ class VmmAllocation:
 
     def close(self) -> None:
         if not self.mapped and not self.handle and not self.ptr:
+            self._finish_close()
             return
         with ExitStack() as stack:
             stack.enter_context(torch.accelerator.device_index(self.device_index))
@@ -127,18 +128,12 @@ class VmmStorage:
 
     fd: SharedFileDescriptor
     size: int
-    nbytes: int
 
     def rebuild(self, device_index: int) -> StorageRecord:
         with torch.accelerator.device_index(device_index):
             allocation = VmmAllocation(self.size, device_index, self.fd)
             storage = allocation.tensor().untyped_storage()
-        return StorageRecord(
-            owner=allocation,
-            storage=storage,
-            nbytes=self.nbytes,
-            allocation_nbytes=self.size,
-        )
+        return StorageRecord(owner=allocation, storage=storage)
 
 
 class VmmBackend(IPCBackend):
@@ -154,15 +149,13 @@ class VmmBackend(IPCBackend):
             assert device.index is not None
             with torch.accelerator.device_index(device.index):
                 source = storage_bytes(storage)
-                allocation = VmmAllocation(record.nbytes, device.index)
+                allocation = VmmAllocation(storage.nbytes(), device.index)
                 buffer = allocation.tensor()
                 buffer[: source.numel()].copy_(source)
                 torch.accelerator.synchronize(device)
                 records[index] = StorageRecord(
                     owner=allocation,
                     storage=buffer.untyped_storage(),
-                    nbytes=record.nbytes,
-                    allocation_nbytes=allocation.size,
                 )
                 storages[index] = records[index].storage
                 del source, buffer, storage, record, allocation
@@ -170,7 +163,8 @@ class VmmBackend(IPCBackend):
         return records
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
-        if isinstance(record.owner, VmmAllocation):
-            assert record.owner.fd is not None
-            return VmmStorage(record.owner.fd, record.owner.size, record.nbytes)
+        owner = record.owner
+        if isinstance(owner, VmmAllocation):
+            assert owner.fd is not None
+            return VmmStorage(owner.fd, owner.size)
         return TensorEntry.from_storage(record.storage)

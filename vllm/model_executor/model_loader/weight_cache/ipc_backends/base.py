@@ -4,30 +4,24 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
 import torch
 
 TensorKind = Literal["param", "buffer"]
-"""Whether a cached tensor is a model parameter or a buffer."""
 
 
-@dataclass
+@dataclass(slots=True)
 class StorageRecord:
-    owner: Any
+    owner: object
     storage: torch.UntypedStorage
-    nbytes: int
-    allocation_nbytes: int
 
 
 class StorageEntry(Protocol):
-    def rebuild(self, device: int) -> StorageRecord:
-        """Import the storage on a local device."""
-        ...
+    def rebuild(self, device_index: int) -> StorageRecord: ...
 
 
 def storage_bytes(storage: torch.UntypedStorage) -> torch.Tensor:
-    """A flat byte tensor covering the whole storage."""
     return torch.empty(0, dtype=torch.uint8, device=storage.device).set_(storage)
 
 
@@ -36,15 +30,7 @@ class IPCBackend(ABC):
 
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
         """Return records for the canonical storages after warmup."""
-        return [
-            StorageRecord(
-                owner=storage,
-                storage=storage,
-                nbytes=storage.nbytes(),
-                allocation_nbytes=storage.nbytes(),
-            )
-            for storage in storages
-        ]
+        return [StorageRecord(owner=storage, storage=storage) for storage in storages]
 
     @abstractmethod
     def export_storage(self, record: StorageRecord) -> StorageEntry:

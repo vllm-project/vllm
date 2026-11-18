@@ -11,7 +11,6 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     IPCBackend,
     StorageEntry,
     StorageRecord,
-    TensorKind,
     storage_bytes,
 )
 
@@ -22,10 +21,7 @@ class TensorEntry:
 
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
-
-    @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: TensorKind) -> "TensorEntry":
-        return cls.from_storage(tensor.untyped_storage())
+    fd: int = -1
 
     @classmethod
     def from_storage(cls, storage: torch.UntypedStorage) -> "TensorEntry":
@@ -47,12 +43,7 @@ class TensorEntry:
             args[6] = device_index
             buffer = rebuild_cuda_tensor(*args)
         storage = buffer.untyped_storage()
-        return StorageRecord(
-            owner=buffer,
-            storage=storage,
-            nbytes=storage.nbytes(),
-            allocation_nbytes=storage.nbytes(),
-        )
+        return StorageRecord(owner=buffer, storage=storage)
 
 
 class CudaIpcBackend(IPCBackend):
