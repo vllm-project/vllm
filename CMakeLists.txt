@@ -1621,6 +1621,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # family gets its own translation unit so ninja compiles them in parallel.
   set(VLLM_SKINNY_SRC
     "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_swmmac.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
     "csrc/rocm/skinny_gemms_wvsplitkq.cu")
