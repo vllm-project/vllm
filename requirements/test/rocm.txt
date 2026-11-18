@@ -2951,9 +2951,7 @@ kernels==0.18.3 \
     --hash=sha256:b6cc4718f46dc6c892b57e7d7a1debdf83c3065e2a401d027fb9283211857597 \
     --hash=sha256:b957b4f63947f207877968b35c4791ec221eb73ec63a826572987762701f4fa9 \
     --hash=sha256:fbd7f4d6fbf010c976bcaf7c4bdbeeeb1c028633957c5f8bb50da4a04bf724a8
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
+    # via transformers
 kiwisolver==1.5.0 \
     --hash=sha256:012b1eb16e28718fa782b5e61dc6f2da1f0792ca73bd05d54de6cb9561665fc9 \
     --hash=sha256:01808c6d15f4c3e8559595d6d1fe6411c68e4a3822b4b9972b44473b24f4e679 \
