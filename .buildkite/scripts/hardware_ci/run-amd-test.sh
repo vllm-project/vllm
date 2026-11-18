@@ -107,15 +107,35 @@ fi
 # ---------------------------------------------------------------------------
 # DPX GPU partition lock
 # ---------------------------------------------------------------------------
-# DPX nodes expose exactly one GPU partition per pod. A host-wide lock file
-# prevents a second job from landing on the same device simultaneously.
+# A DPX pod exposes one render node per claimed GPU partition. Lock every
+# node so a second job cannot land on any of them. One-GPU jobs still take
+# the single node; 2- and 4-GPU jobs take each of theirs.
 _acquire_dpx_lock() {
   local dev=(/dev/dri/renderD*)
-  [[ ${#dev[@]} == 1 ]] \
-    || { echo "DPX: expected exactly one render device, found ${#dev[@]}" >&2; return 1; }
-  mkdir -p "$HF_HOME/.vllm-dpx-locks"
-  exec 9>>"$HF_HOME/.vllm-dpx-locks/$(stat -Lc %t-%T "${dev[0]}").lock"
-  flock -w 600 9 || { echo "DPX GPU collision on ${dev[0]}" >&2; return 134; }
+  local device device_id
+  # An unmatched glob is one literal path, and it is not a character device.
+  [[ ${#dev[@]} == "$gpus" && -c ${dev[0]} ]] || {
+    echo "DPX: expected exactly $gpus render device(s), found ${#dev[@]} (${dev[*]})" >&2
+    return 1
+  }
+  for device in "${dev[@]}"; do
+    [[ -c $device ]] || {
+      echo "DPX: $device is not a character device" >&2
+      return 1
+    }
+  done
+  mkdir -p "$HF_HOME/.vllm-dpx-locks" || return 1
+  # Global so bash does not close the locks when this function returns.
+  dpx_gpu_lock_fds=()
+  for device in "${dev[@]}"; do
+    device_id=$(stat -Lc %t-%T "$device") || return 1
+    exec {dpx_gpu_lock_fd}>>"$HF_HOME/.vllm-dpx-locks/${device_id}.lock" || return 1
+    dpx_gpu_lock_fds+=("$dpx_gpu_lock_fd")
+    flock -w 600 "$dpx_gpu_lock_fd" || {
+      echo "DPX GPU collision on $device ($device_id)" >&2
+      return 134
+    }
+  done
 }
 
 if [[ ${BUILDKITE_AGENT_META_DATA_QUEUE:-} == *dpx* && $gpus != 0 ]]; then

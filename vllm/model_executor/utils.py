@@ -180,7 +180,9 @@ def replace_parameter(
 
     Custom attributes set on `new_tensor` (e.g. kernel dispatch flags such as
     `is_shuffled`) are carried over to the parameter, except `weight_loader`,
-    which is always taken from the existing parameter.
+    which is always taken from the existing parameter, and the direct-reload
+    attributes `_ckpt` and `fill_on_reload`, which belong to the parameter they
+    were set on.
 
     Under direct reload, a `new_tensor` larger than the parameter at cold start
     may be written into the parameter's existing storage on a reload, so do not
@@ -214,7 +216,9 @@ def replace_parameter(
     new_tensor_attrs.pop("_weight_loader", None)
     # A checkpoint record belongs to the parameter it was recorded on (direct
     # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    # Likewise the reload zero-fill flag: it is declared per parameter.
     new_tensor_attrs.pop("_ckpt", None)
+    new_tensor_attrs.pop("fill_on_reload", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
