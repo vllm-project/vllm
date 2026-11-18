@@ -30,6 +30,7 @@ from vllm.v1.core.sched.output import (
     RepairWork,
     SchedulerOutput,
 )
+from vllm.v1.outputs import RepairResultReport
 from vllm.v1.worker.gpu.repair_executor import (
     _repair_cache_views,
     _repair_sync_profile_enabled,
@@ -1618,3 +1619,99 @@ def test_single_kv_group_guard_refuses_multi_group_at_init():
     )
     with pytest.raises(RuntimeError, match="single KV cache group"):
         create_scheduler(vllm_config, kv_cache_config=two_groups)
+
+
+# ---- A5: error handling and cleanup beyond the mapped battery ----
+
+
+def test_verdict_collective_failure_after_clean_run_fails_closed(monkeypatch):
+    """A failure of the VERDICT collective itself after a clean
+    full-depth replay (process-group error or backend timeout) must
+    converge to an aborted verdict with ranks_agree False: a successful
+    transaction is never fabricated, and the scheduler's eviction
+    remains the authoritative invalidation (the clean run's rows are
+    not re-zeroed -- documented best-effort)."""
+    from vllm.v1.worker.gpu import repair_executor
+
+    works, tokens, positions, input_ids, meta = _single_work_setup()
+    model = _FakeModel(n_layers=4)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("pg timeout inside the verdict collective")
+
+    monkeypatch.setattr(repair_executor, "_ranks_repair_agree", _raise)
+    results = _run_repair(model, works, tokens, positions, input_ids, meta)
+
+    ra = results[0]
+    # The clean run executed every layer, but the transaction failed.
+    assert ra.executed_layers == 1
+    assert ra.aborted
+    assert not ra.structural_check
+    assert ra.commit_check["ranks_agree"] is False
+    assert "pg timeout" in (ra.error_detail or "")
+
+
+def test_request_gone_before_verdict_settles_without_touching():
+    """A request that finished (or was otherwise removed) before its
+    repair verdict arrived must settle the plan without crashing: the
+    disposition is derived from the verdict alone, no restoration or
+    truncation touches a request object that no longer exists."""
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r1 = create_request(num_tokens=3328)
+    scheduler.add_request(r1)
+    admit_sync_external_hit(scheduler, r1, 3072)
+    out1 = scheduler.schedule()
+    reports, attestations = full_fault_evidence(scheduler, r1)
+    deliver(scheduler, out1, [r1], reports=reports, attestations=attestations)
+    plan = scheduler.recovery_plans[r1.request_id]
+
+    out2 = scheduler.schedule()
+    assert out2.repair_works is not None
+    # The request disappears before the verdict arrives.
+    scheduler.requests.pop(r1.request_id, None)
+    disposition = scheduler._consume_repair_result(
+        RepairResultReport(
+            request_id=r1.request_id,
+            plan_id=plan.plan_id,
+            epoch=plan.admitted_step,
+            structural_check=True,
+            executed_layers=plan.layer_end,
+            span=plan.repair_span,
+            aborted=False,
+            commit_check={},
+            error_detail=None,
+        )
+    )
+    assert disposition == "committed"
+    assert scheduler.recovery_plans.get(r1.request_id) is None
+
+    # The aborted twin: same shape, failed verdict, still no crash.
+    # A fresh scheduler: the first scenario's dangling per-request state
+    # (the hand-popped request's step bookkeeping) is orthogonal to the
+    # verdict path under test here.
+    scheduler = make_scheduler(kv_load_failure_policy="repair")
+    r2 = create_request(num_tokens=3328)
+    scheduler.add_request(r2)
+    admit_sync_external_hit(scheduler, r2, 3072)
+    out3 = scheduler.schedule()
+    reports2, attestations2 = full_fault_evidence(scheduler, r2)
+    deliver(scheduler, out3, [r2], reports=reports2, attestations=attestations2)
+    plan2 = scheduler.recovery_plans[r2.request_id]
+    out4 = scheduler.schedule()
+    assert out4.repair_works is not None
+    scheduler.requests.pop(r2.request_id, None)
+    disposition2 = scheduler._consume_repair_result(
+        RepairResultReport(
+            request_id=r2.request_id,
+            plan_id=plan2.plan_id,
+            epoch=plan2.admitted_step,
+            structural_check=False,
+            executed_layers=0,
+            span=plan2.repair_span,
+            aborted=True,
+            commit_check={},
+            error_detail="boom",
+        )
+    )
+    assert disposition2 == "aborted"
+    assert scheduler.recovery_plans.get(r2.request_id) is None
