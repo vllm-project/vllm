@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The GLM-5.3-Flash specialized decode (layer mode): one routing decision per step,
-then a whole-layer MonoKernel launch for every MoE decoder layer 3..43 inside the
-stock layer loop.
+then a whole-layer MonoKernel launch for every MoE decoder layer 3..43 in place of
+vLLM's layer.
 
 Same interface as NVIDIA's executor (`nvidia/specialized_decode/runtime/decode.py`),
 which `common/model.py` picks by platform. Built by the model state once the weights
@@ -10,8 +10,8 @@ are loaded (`Glm5NextModelState`): reads vLLM's loaded weights in place (`weight
 and builds every width's launches before memory profiling and graph capture.
 `prepare_kv` binds them to every KV cache vLLM allocates (the CUDA-graph
 memory-profiling cache, then the real one). Each step `plan` returns a `Step` or
-None (vLLM's step); `run` runs the backbone with `Step.layer(i)`, the launch
-replacing decoder layer i (None for vLLM's layers). Weight reloads are not
+None (vLLM's step); `run` runs the backbone's layers with `Step.layer(i)`, the
+launch replacing decoder layer i (None for vLLM's layers). Weight reloads are not
 supported."""
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class SpecializedDecode:
             for i in kernel_layers(backbone.config)
             if start <= i < end and not isinstance(backbone.layers[i], PPMissingLayer)
         }
-        vllm_config = backbone.vllm_config
+        vllm_config = cfg.vllm_config
         self.ctx = DecodeContext(
             vllm_config=vllm_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -221,9 +221,20 @@ class SpecializedDecode:
     def run(
         self, step: Step, input_ids: torch.Tensor | None, inputs_embeds: Any
     ) -> Any:
-        """The backbone's forward with this step's launches in place of the kernel
-        layers."""
-        return self.backbone(input_ids, step.positions, None, inputs_embeds, step=step)
+        """`Glm5NextModel.forward` with this step's launches in place of the kernel
+        layers. Its pipeline, sequence-parallel and EAGLE3 aux-state branches are
+        left out: the config and `model_refusals` refuse those."""
+        backbone = self.backbone
+        if inputs_embeds is None:
+            inputs_embeds = backbone.embed_input_ids(input_ids)
+        hidden, residual, post, comb = inputs_embeds, None, None, None
+        for idx, layer in enumerate(
+            backbone._active_layers, start=backbone.start_layer
+        ):
+            hidden, residual, post, comb = (step.layer(idx) or layer)(
+                step.positions, hidden, residual, post, comb
+            )
+        return backbone.norm(hidden)
 
     def health(self) -> torch.Tensor:
         return self.watch.health()
@@ -236,6 +247,7 @@ class SpecializedDecode:
     def compute_logits(
         self, logits_processor: Any, lm_head: Any, hidden_states: torch.Tensor
     ) -> torch.Tensor | None:
-        """Runs `after_step`; None: vLLM computes the logits."""
+        """The once-per-step hook (`after_step`); returns None, so vLLM computes the
+        logits."""
         self.after_step()
         return None

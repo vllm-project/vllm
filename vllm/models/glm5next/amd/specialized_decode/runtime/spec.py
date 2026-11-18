@@ -12,7 +12,7 @@ they are bound (`decode.SpecializedDecode.prepare_kv`)."""
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import POLL_STAGES
@@ -94,6 +94,7 @@ class DecodeConfig:
     token counts that run the kernels."""
 
     tp_size: int
+    vllm_config: VllmConfig = field(repr=False, compare=False)
     widths: tuple[int, ...] = WIDTHS
     tokens: tuple[int, ...] = STEP_TOKENS
     # a kernel wait expires (and the engine fail-stops) only when a peer is this
@@ -238,7 +239,10 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
             + "; ".join(reasons)
             + "."
         )
-    return DecodeConfig(tp_size=vllm_config.parallel_config.tensor_parallel_size)
+    return DecodeConfig(
+        tp_size=vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config=vllm_config,
+    )
 
 
 # the kernels' poll stages, in the order of the error words

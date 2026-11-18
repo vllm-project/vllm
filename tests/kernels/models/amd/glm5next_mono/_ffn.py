@@ -378,7 +378,7 @@ def _check_slow_rank(rank: int, tp: int, device) -> None:
     lay = _Layer(rank, tp, device)
     from vllm.models.glm5next.amd.specialized_decode.mono.abi import FaultSpec
 
-    timeout = DecodeConfig(tp_size=tp).poll_timeout_us
+    timeout = DecodeConfig.poll_timeout_us
     fault = FaultSpec(rank=1, step=0, us=10_000_000)
     rt = _runtime(2, rank, tp, timeout, early_out=True, fault=fault)
     op = FlashFfnOp(rt, lay.weights(), 0)

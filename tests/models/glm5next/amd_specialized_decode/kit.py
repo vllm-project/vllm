@@ -69,7 +69,7 @@ def make_vllm_config(**overrides: Any) -> SimpleNamespace:
 
 
 class FakeLayer(nn.Module):
-    """A vLLM-style layer: (positions, hidden, residual) -> (hidden, residual)."""
+    """A decoder layer: (positions, hidden, residual, post, comb) -> the same four."""
 
     def __init__(self, idx: int) -> None:
         super().__init__()
@@ -78,29 +78,35 @@ class FakeLayer(nn.Module):
         self.calls = 0
         self.attn_name = f"layers.{idx}.attn"
 
-    def forward(self, positions, hidden, residual):
+    def forward(self, positions, hidden, residual, post, comb):
         self.calls += 1
         residual = hidden if residual is None else residual + hidden
-        return hidden + 1, residual
+        return hidden + 1, residual, post, comb
 
 
 class FakeBackbone(nn.Module):
-    def __init__(self, vllm_config: Any = None, n: int = 5) -> None:
+    """`Glm5NextModel` with fake layers; its forward is vLLM's step."""
+
+    def __init__(self, n: int = 5) -> None:
         super().__init__()
-        self.vllm_config = vllm_config or make_vllm_config()
         self.config = SimpleNamespace(
             num_hidden_layers=n, mlp_layer_types=["dense"] + ["sparse"] * (n - 1)
         )
         self.layers = nn.ModuleList(FakeLayer(i) for i in range(n))
+        self._active_layers = self.layers
         self.start_layer, self.end_layer = 0, n
+        self.norm = nn.Identity()
 
-    def forward_layers(self, step, tokens: int):
-        hidden, residual = torch.zeros(tokens, 4), None
-        positions = torch.zeros(tokens, dtype=torch.long)
-        for idx, layer in enumerate(self.layers):
-            kernel = step.layer(idx) if step is not None else None
-            hidden, residual = (kernel or layer)(positions, hidden, residual)
-        return hidden, residual
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(input_ids.shape[0], 4)
+
+    def forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
+        hidden, residual, post, comb = self.embed_input_ids(input_ids), None, None, None
+        for layer in self._active_layers:
+            hidden, residual, post, comb = layer(
+                positions, hidden, residual, post, comb
+            )
+        return self.norm(hidden)
 
 
 @dataclass
@@ -110,10 +116,10 @@ class FakeKernel:
     words: torch.Tensor
     launches: list = field(default_factory=list)
 
-    def launch(self, step, hidden, residual):
+    def launch(self, step, hidden, residual, post, comb):
         self.launches.append((self.idx, step.tokens, step.width))
         residual = hidden if residual is None else residual + hidden
-        return hidden + 1, residual
+        return hidden + 1, residual, post, comb
 
     def health(self) -> torch.Tensor:
         return self.words

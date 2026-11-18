@@ -143,7 +143,9 @@ def _decode(monkeypatch, log=None, rank=0, **fakes):
     log = [] if log is None else log
     kit.patch_layers(monkeypatch, log, rank=rank, **fakes)
     backbone = kit.FakeBackbone()
-    d = SpecializedDecode(backbone, spec.DecodeConfig(tp_size=4))
+    d = SpecializedDecode(
+        backbone, spec.DecodeConfig(tp_size=4, vllm_config=kit.make_vllm_config())
+    )
     d.prepare_kv()
     return d, backbone, log
 
@@ -164,7 +166,7 @@ def test_decode_step_runs_the_kernel_layers(monkeypatch, tokens, width):
     fc = kit.forward_context(kit.decode_metadata(_names(backbone)))
     step = _plan(monkeypatch, d, fc, tokens)
     assert step is not None and step.step.width == width
-    hidden, _ = backbone.forward_layers(step, tokens)
+    hidden = d.run(step, torch.zeros(tokens, dtype=torch.long), None)
     assert backbone.layers[0].calls == backbone.layers[4].calls == 1
     assert all(backbone.layers[i].calls == 0 for i in kit.KERNEL_LAYERS)
     assert [k.launches for k in d.kernels[width].values()] == [
@@ -196,7 +198,8 @@ def test_other_steps_run_vllm_layers(monkeypatch, case):
     fc = kit.forward_context(md, case.get("mode", CUDAGraphMode.FULL))
     tokens = case.get("tokens", 2)
     assert _plan(monkeypatch, d, fc, tokens) is None
-    backbone.forward_layers(None, tokens)
+    ids = torch.zeros(tokens, dtype=torch.long)
+    backbone(ids, ids, None)
     assert all(layer.calls == 1 for layer in backbone.layers)
 
 
@@ -262,7 +265,9 @@ def test_caches_index_into_tuples_and_skip_other_layers(monkeypatch):
     backbone = kit.FakeBackbone()
     for i in (1, 3):
         backbone.layers[i].pair = (torch.zeros(2), torch.zeros(3))
-    d = SpecializedDecode(backbone, spec.DecodeConfig(tp_size=4))
+    d = SpecializedDecode(
+        backbone, spec.DecodeConfig(tp_size=4, vllm_config=kit.make_vllm_config())
+    )
     d.prepare_kv()
     assert ("bind", ("1.rec", "3.rec")) in log
     assert d.caches()["3.rec"].numel() == 3

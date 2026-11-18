@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import torch
 from torch import nn
@@ -989,7 +989,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
-        self.vllm_config = vllm_config
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1020,11 +1019,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-        step: Any = None,
         **kwargs,
     ) -> torch.Tensor:
-        """`step` is a ROCm specialized decode step (`SpecializedDecode.run`):
-        `step.layer(i)` is the launch replacing decoder layer i, or None."""
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1055,8 +1051,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            kernel = step.layer(idx) if step is not None else None
-            hidden_states, residual, post, comb = (kernel or layer)(
+            hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
 
@@ -1299,6 +1294,9 @@ class Glm5NextForCausalLM(
         )
         self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
 
+    def get_model_state_cls(self) -> "type[ModelState]":
+        return _model_state_cls()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -1372,9 +1370,6 @@ class Glm5NextForCausalLM(
                 return logits
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def get_model_state_cls(self) -> "type[ModelState]":
-        return _model_state_cls()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

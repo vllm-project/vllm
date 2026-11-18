@@ -3,8 +3,8 @@
 `--monokernel` (or `--additional-config '{"decode_backend": "latency_specialized"}'`)
 on CDNA4 (gfx950: measured on MI355X; MI350X is the same chip and CU count but
 untested) runs each MoE decoder layer 3-43 of a decode
-step as one persistent FlyDSL launch (256 CTAs, one per CU), inside vLLM's
-layer loop. There are two launch kinds (`mono/ffn/kernel.py`):
+step as one persistent FlyDSL launch (256 CTAs, one per CU), in place of
+vLLM's decoder layer. There are two launch kinds (`mono/ffn/kernel.py`):
 
 - **KDA layers** (30): attention-side mHC seam, in-projections, short conv,
   KDA gates and recurrence, gated norm, o_proj and its TP reduce;
