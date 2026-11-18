@@ -15,29 +15,20 @@ from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
     REASONING_EFFORT_MAPPINGS,
     encode_messages,
-    thinking_end_token,
-    thinking_start_token,
 )
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
-_THINK_TOKENS_RE = re.compile(
-    "|".join(re.escape(t) for t in (thinking_start_token, thinking_end_token))
-)
-
-# '<think>' / '</think>' in text supplied by the client (these roles) is encoded
-# as plain text, never as the special token. Assistant turns are left as is, so
-# replayed reasoning keeps the token ids the model actually generated.
-_ESCAPED_ROLES = ("system", "developer", "user", "tool")
-
-# The image placeholder in client-supplied text (any role, replayed assistant
-# turns included) has no image behind it, so it is always encoded as plain text.
-# Images must be provided as image content parts.
-_IMAGE_PLACEHOLDER_RE = re.compile(re.escape(IMAGE_PLACEHOLDER))
-
-# Added tokens such as '</think>' or '<｜User｜>' are matched in plain text by the
-# tokenizer. Escaped text is replaced by per-call sentinels before the prompt is
-# rendered, and each sentinel is encoded as ordinary text afterwards.
+# Message text is sanitized by default: every added token in it (control tokens
+# such as '<think>', '</think>', '<｜User｜>', the image placeholder, ...) is
+# encoded as plain text, never as the special token, for every role and replayed
+# assistant turns. The model's own delimiters are never part of replayed text,
+# so a match is a mention (or an injection), not structure. Images must be
+# provided as image content parts.
+#
+# Added tokens are matched in plain text by the tokenizer, so escaped text is
+# replaced by per-call sentinels before the prompt is rendered, and each
+# sentinel is encoded as ordinary text afterwards.
 _ESCAPE_OPEN = "\ue000"
 _ESCAPE_CLOSE = "\ue001"
 
@@ -79,25 +70,17 @@ def _normalize_messages(
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
 
-        def check(text: Any, role: Any = role) -> Any:
-            if not isinstance(text, str):
-                return text
-            text = _IMAGE_PLACEHOLDER_RE.sub(lambda m: escape(m.group(0)), text)
-            if role not in _ESCAPED_ROLES:
-                return text
-            return _THINK_TOKENS_RE.sub(lambda m: escape(m.group(0)), text)
-
         if "reasoning_content" in message:
-            message["reasoning_content"] = check(message["reasoning_content"])
+            message["reasoning_content"] = escape(message["reasoning_content"])
         content = message.get("content")
         if isinstance(content, str):
-            message["content"] = check(content)
+            message["content"] = escape(content)
         elif isinstance(content, list):
             parts = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
-                    parts.append(check(block.get("text", "")))
+                    parts.append(escape(block.get("text", "")))
                 elif part_type in (
                     "image_url",
                     "input_image",
@@ -110,7 +93,7 @@ def _normalize_messages(
                 elif part_type == "tool_reference":
                     # The system prompt already lists every tool, deferred
                     # ones included, so the name is all the model needs.
-                    parts.append(check(block.get("name", "")))
+                    parts.append(escape(block.get("name", "")))
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "

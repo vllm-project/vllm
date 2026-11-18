@@ -6,7 +6,7 @@ import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -354,7 +354,11 @@ def render_with_media(request, monkeypatch):
             _, prompt = asyncio.run(renderer.render_messages_async(messages, params))
         else:
             _, prompt = renderer.render_messages(messages, params)
-        assert prompt.get("prompt") == expected
+        # The renderer returns token ids: the engine would otherwise tokenize
+        # the text again and match reserved tokens in client text.
+        assert prompt.get("prompt_token_ids") == [len(expected)]
+        # Expose the rendered text for ordering assertions.
+        cast(dict[str, Any], prompt)["prompt"] = expected
         return prompt
 
     return run
@@ -530,19 +534,31 @@ class _AddedTokenTokenizer:
 
     vocab_size = 100
     IMAGE_ID = 1_000_000
+    THINK_ID = 1_000_001
+    END_THINK_ID = 1_000_002
+    USER_ID = 1_000_003
+    EOS_ID = 1_000_004
 
     def get_added_vocab(self) -> dict[str, int]:
-        return {IMAGE_PLACEHOLDER: self.IMAGE_ID}
+        return {
+            IMAGE_PLACEHOLDER: self.IMAGE_ID,
+            "<think>": self.THINK_ID,
+            "</think>": self.END_THINK_ID,
+            "<｜User｜>": self.USER_ID,
+            "<｜end▁of▁sentence｜>": self.EOS_ID,
+        }
 
     def encode(self, text: str, add_special_tokens: bool = False, **kwargs):
+        added = self.get_added_vocab()
         ids: list[int] = []
         while text:
-            idx = text.find(IMAGE_PLACEHOLDER)
-            if idx < 0:
+            hits = [(text.find(t), t) for t in added if t in text]
+            if not hits:
                 ids += [ord(c) for c in text]
                 break
-            ids += [ord(c) for c in text[:idx]] + [self.IMAGE_ID]
-            text = text[idx + len(IMAGE_PLACEHOLDER) :]
+            idx, tok = min(hits)
+            ids += [ord(c) for c in text[:idx]] + [added[tok]]
+            text = text[idx + len(tok) :]
         return ids
 
 
@@ -575,3 +591,46 @@ def test_image_part_still_encodes_special_token():
         ]
     )
     assert ids.count(_AddedTokenTokenizer.IMAGE_ID) == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"x {IMAGE_PLACEHOLDER}",
+        "x <think>",
+        "x </think>",
+        "x <｜User｜>",
+        "x <｜end▁of▁sentence｜>",
+    ],
+)
+def test_renderer_keeps_reserved_tokens_as_text(text):
+    # The online renderer passes tokenize=False; the V4.1 renderer must still
+    # return token ids, otherwise the engine tokenizes the text again and
+    # matches the reserved tokens as special tokens.
+    cls = RENDERER_REGISTRY.load_renderer_cls("deepseek_v41")
+    renderer = cast(DeepseekV4Renderer, cls.__new__(cls))
+    renderer.model_config = SimpleNamespace(
+        multimodal_config=None,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        enable_prompt_embeds=False,
+        is_multimodal_model=False,
+        hf_config=SimpleNamespace(),
+    )
+    tokenizer = get_deepseek_v41_tokenizer(_AddedTokenTokenizer())
+    renderer.tokenizer = tokenizer
+    messages = [{"role": "user", "content": text}]
+    params = ChatParams(chat_template_kwargs={"tokenize": False})
+    _, prompt = renderer.render_messages(messages, params)
+    _, baseline = renderer.render_messages([{"role": "user", "content": "x"}], params)
+    ids = cast(dict[str, Any], prompt)["prompt_token_ids"]
+    base = cast(dict[str, Any], baseline)["prompt_token_ids"]
+    # The chat template adds its own '<think>'; the text must add nothing.
+    for special in (
+        _AddedTokenTokenizer.IMAGE_ID,
+        _AddedTokenTokenizer.THINK_ID,
+        _AddedTokenTokenizer.END_THINK_ID,
+        _AddedTokenTokenizer.USER_ID,
+        _AddedTokenTokenizer.EOS_ID,
+    ):
+        assert ids.count(special) == base.count(special)
