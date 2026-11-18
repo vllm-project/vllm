@@ -667,10 +667,11 @@ def test_replayssm_mixer_selects_mtp_layout(
     expected_B_shape,
     expected_max_seqlen,
 ):
-    import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
+    import vllm.model_executor.layers.mamba.mamba2_ssm as mod
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as dispatch
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
-    mixer = mod.MambaMixer2.__new__(mod.MambaMixer2)
+    mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
     mixer.prefix = "mixer"
     mixer.tped_intermediate_size = 0

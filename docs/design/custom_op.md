@@ -120,7 +120,7 @@ For example:
 
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
 
---8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
+--8<-- "vllm/model_executor/layers/mamba/mamba2_ssm.py:mixer2_gated_rms_norm"
 
 --8<-- "vllm/model_executor/layers/mamba/short_conv.py:short_conv"
 ```

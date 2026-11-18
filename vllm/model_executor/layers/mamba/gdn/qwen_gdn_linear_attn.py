@@ -43,7 +43,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
+from vllm.model_executor.layers.mamba.mamba2_ssm import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,

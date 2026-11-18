@@ -15,7 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+from vllm.model_executor.layers.mamba.mamba2_ssm import (
     Mamba2SSM,
     Mixer2RMSNormGated,
     mamba_v2_sharded_weight_loader,

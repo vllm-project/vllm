@@ -1,0 +1,1204 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+import itertools
+from dataclasses import dataclass
+
+import torch
+from torch import nn
+
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+    is_conv_state_dim_first,
+    mamba_state_alignment,
+)
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
+from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
+    selective_state_update_replayssm_output_only,
+)
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
+    selective_state_update_replayssm_spec,
+)
+from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+    mamba_chunk_scan_combined_varlen,
+)
+from vllm.model_executor.layers.mamba.ops.ssd_flashinfer import (
+    FLASHINFER_SSD_HEAD_DIM,
+    FLASHINFER_SSD_STATE_SIZE,
+    mamba_chunk_scan_flashinfer,
+)
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    plan_replayssm_decode,
+    selective_state_update,
+    selective_state_update_replayssm_flashinfer,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    LoaderFunction,
+    sharded_weight_loader,
+)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+logger = init_logger(__name__)
+
+
+def _view_mtp_decode_tensor(
+    tensor: torch.Tensor, decode_batch: int, spec_query_len: int
+) -> torch.Tensor:
+    return tensor.view(decode_batch, spec_query_len, *tensor.shape[1:])
+
+
+# Added by the IBM Team, 2024
+
+
+# Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
+# --8<-- [start:mixer2_gated_rms_norm]
+@CustomOp.register("mixer2_gated_rms_norm")
+class Mixer2RMSNormGated(CustomOp):
+    # --8<-- [end:mixer2_gated_rms_norm]
+
+    def __init__(
+        self,
+        full_hidden_size: int,
+        full_n_groups: int,
+        use_rms_norm: bool = True,
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.full_hidden_size = full_hidden_size
+        self.group_size = full_hidden_size // full_n_groups
+        self.per_rank_hidden_size = full_hidden_size // self.tp_size
+        self.n_groups = full_hidden_size // self.group_size
+
+        self.variance_epsilon = eps
+        self.use_rms_norm = use_rms_norm
+        if self.use_rms_norm:
+            # Register norm weight only if we're actually applying RMSNorm
+            self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
+            set_weight_attrs(self.weight, {"weight_loader": sharded_weight_loader(0)})
+        else:
+            # Avoid checkpoint mismatch by skipping unused parameter
+            self.register_parameter("weight", None)
+        assert self.full_hidden_size % self.tp_size == 0, (
+            "Tensor parallel world size must divide hidden size."
+        )
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ):
+        # Three tensor-parallel cases:
+        #   1. n_groups is 1
+        #      In this case we parallelize along the reduction dim.
+        #      Each rank computes a local sum of squares followed by AllReduce
+        #   2. tp_size divides n_groups
+        #      Each rank only reduces within its local group(s).
+        #      No collective ops necessary.
+        #   3. The general case can be pretty complicated so we AllGather
+        #      the input and then redundantly compute the RMSNorm.
+        input_dtype = x.dtype
+        x = x * nn.functional.silu(gate.to(torch.float32))
+        if not self.use_rms_norm:
+            return x.to(input_dtype)
+
+        if self.n_groups == 1:
+            if self.tp_size > 1:
+                # Compute local sum and then reduce to obtain global sum
+                local_sums = x.pow(2).sum(dim=-1, keepdim=True)
+                global_sums = tensor_model_parallel_all_reduce(local_sums)
+                # Calculate the variance
+                count = self.tp_size * x.shape[-1]
+                variance = global_sums / count
+
+            else:
+                variance = x.pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
+        else:
+            redundant_tp: bool = self.n_groups % self.tp_size != 0
+            if redundant_tp:
+                # To handle the general case, redundantly apply the variance
+                x = tensor_model_parallel_all_gather(x, -1)
+
+            *prefix_dims, hidden_dim = x.shape
+            group_count = hidden_dim // self.group_size
+            x_grouped = x.view(*prefix_dims, group_count, self.group_size)
+            variance = x_grouped.pow(2).mean(-1, keepdim=True)
+            x_grouped = x_grouped * torch.rsqrt(variance + self.variance_epsilon)
+            x = x_grouped.view(*prefix_dims, hidden_dim)
+
+            if redundant_tp:
+                start = self.per_rank_hidden_size * self.tp_rank
+                end = start + self.per_rank_hidden_size
+                x = x[..., start:end]
+
+        return self.weight * x.to(input_dtype)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        input_dtype = x.dtype
+        if not self.use_rms_norm:
+            # Keep gate in float32 for numerical stability during silu
+            return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
+
+        if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
+            return self.forward_native(x, gate)
+
+        return rms_norm_gated(
+            x,
+            self.weight.data,
+            bias=None,
+            z=gate,
+            eps=self.variance_epsilon,
+            norm_before_gate=False,
+        )
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(x, gate)
+
+
+def mamba_v2_sharded_weight_loader(
+    shard_spec: list[tuple[int, int, float]],
+    tp_size: int,
+    tp_rank: int,
+) -> LoaderFunction:
+    """Create a weight loader for mamba v2. This ensures that the projections
+    are correctly sharded so that they can be split into x, B, C. It also
+    ensures that all the groups corresponding to a head shard is placed
+    together with it.
+    """
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        # - track boundary of (sharded) param, and loaded_weight, respectively
+        boundary, loaded_boundary = 0, 0
+
+        # - iterate over the shard specs
+        for full_dim, extra, duplicate_groups in shard_spec:
+            # - full dim is the model dim (before TP).
+            # - extra > 0, means there is expected overall increase
+            #   of dimensions. This is so because of replication.
+            # - ratio is used map the tp_rank to the actual shard
+            #   rank. This is useful when there is replication of
+            #   groups to accompany head shards.
+
+            # - size of the loaded shard
+            shard_size = full_dim // tp_size
+
+            # - compute the rank into the loaded shard.
+            # - if there is replication, different TP shards will
+            #   take from the same rank.
+            # NOTE: currently we only support duplication
+            # in the case where num_groups == 1
+            rank = 0 if duplicate_groups else tp_rank
+
+            # - leftmost boundary index into loaded weight.
+            loaded_skip = rank * shard_size
+            loaded_start_idx = loaded_boundary + loaded_skip
+
+            # - take these many dims from the loaded weight.
+            take = min(shard_size, full_dim - extra - loaded_skip)
+
+            # - always shard on dim 0
+            # - the ignore is for a mundane mypy error as it does not
+            #   seem to handle slices well.
+            # https://github.com/python/mypy/issues/2410
+            target_slice = param.data[boundary : (boundary + take), ...]
+            param.data[
+                boundary : (boundary + take), ...  # type: ignore[misc]
+            ] = loaded_weight[
+                loaded_start_idx : (
+                    loaded_start_idx + take
+                )  # type: ignore[misc]
+            ].view_as(target_slice)
+
+            # move indexing boundaries
+            boundary += shard_size
+            loaded_boundary += full_dim - extra
+
+    return loader
+
+
+@dataclass
+class Mamba2StepContext:
+    """The state and metadata of a Mamba2 layer for one step, shared by the
+    convolution and the scan."""
+
+    attn_metadata: Mamba2AttentionMetadata
+    conv_state: torch.Tensor
+    ssm_state: torch.Tensor
+    x_cache: torch.Tensor | None
+    dt_cache: torch.Tensor | None
+    B_cache: torch.Tensor | None
+    ring_start: torch.Tensor | None
+    prev_num_accepted: torch.Tensor | None
+
+    def split_tokens(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the scheduled tokens of `x` into its decode and prefill tokens,
+        dropping any padding."""
+        num_decode_tokens = self.attn_metadata.num_decode_tokens
+        num_prefill_tokens = self.attn_metadata.num_prefill_tokens
+        d, p = torch.split(
+            x[: num_decode_tokens + num_prefill_tokens],
+            [num_decode_tokens, num_prefill_tokens],
+            dim=0,
+        )
+        return d, p
+
+
+class Mamba2SSM(MambaBase, nn.Module):
+    """The stateful core of a Mamba2 layer: causal convolution, SSD scan and
+    recurrent state handling.
+
+    It owns the layer's state but not its weights. Subclasses provide
+    `conv_weights`, `conv_bias`, `A`, `D` and `dt_bias`.
+    """
+
+    conv_weights: torch.Tensor
+    A: torch.Tensor
+    D: torch.Tensor
+    dt_bias: torch.Tensor
+
+    @property
+    def conv_bias(self) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    def __init__(
+        self,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        intermediate_size: int,
+        n_groups: int = 1,
+        num_heads: int = 128,
+        head_dim: int = 64,
+        activation: str = "silu",
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        # For TP, the sharding plan is as follows:
+        # - for the conv modules, since
+        #   conv_dim = intermediate_size * 2 * n_groups * ssm_state_size,
+        #   we shard intermediate_size and n_groups
+        # - since intermediate_size = n_heads * head_dim, sharding on
+        #   intermediate_size is achieved by sharding on n_heads.
+        # - IF, world_size divides groups, then sharding
+        #   (n_groups / world_size, n_heads / world_size)
+        #   also maintains the invariant n_heads % n_groups == 0
+        # - HOWEVER IF, world_size DOES NOT divide groups, then we need
+        #   to allocate extra space in the shard, such that groups
+        #   may be replicated to follow the head shard.
+        # - NOTE: currently for the world size DOES NOT divide groups
+        #   case, we only support the case when n_groups == 1
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        assert num_heads % self.tp_size == 0, (
+            "Tensor parallel world size must divide num heads."
+        )
+
+        assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
+            "If tensor parallel world size does not divide num_groups, "
+            "then num_groups must equal 1."
+        )
+
+        self.ssm_state_size = ssm_state_size
+        self.conv_kernel_size = conv_kernel_size
+        self._checkpoint_exporter = MambaPrefillCheckpointExporter(
+            state_len=conv_kernel_size - 1
+        )
+        self.activation = activation
+
+        self.intermediate_size = intermediate_size
+        self.head_dim = head_dim
+        self.num_heads = num_heads
+
+        self.n_groups = n_groups
+        if n_groups % self.tp_size != 0:
+            # - for TP we shard conv_dim by sharding on n_groups,
+            # - but if n_groups cannot divide tp_size, we need to
+            #   extend some extra groups
+            groups = MambaStateShapeCalculator.extra_groups_for_head_shards(
+                n_groups, self.tp_size
+            )
+            self.n_groups = n_groups + groups
+
+        self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
+        self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
+
+        self._ssd_kernels_warmed_up = False
+
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+        self.model_config = model_config
+        self.cache_config = cache_config
+        self.prefix = prefix
+        self.use_replayssm = (
+            cache_config.use_replayssm if cache_config is not None else False
+        )
+        self.replayssm_buffer_len = (
+            cache_config.replayssm_buffer_len
+            if cache_config is not None and cache_config.use_replayssm
+            else None
+        )
+        self.mamba_config = vllm_config.mamba_config
+        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        self.state_alignment = mamba_state_alignment(vllm_config)
+        self.use_flashinfer_prefill = (
+            self.mamba_config.prefill_backend == MambaBackendEnum.FLASHINFER
+        )
+        if self.use_flashinfer_prefill and (
+            self.head_dim != FLASHINFER_SSD_HEAD_DIM
+            or self.ssm_state_size != FLASHINFER_SSD_STATE_SIZE
+            or (model_config is not None and model_config.dtype != torch.bfloat16)
+        ):
+            raise ValueError(
+                "--mamba-prefill-backend flashinfer requires bfloat16 activations, "
+                f"head_dim {FLASHINFER_SSD_HEAD_DIM} and ssm_state_size "
+                f"{FLASHINFER_SSD_STATE_SIZE}; got head_dim {self.head_dim}, "
+                f"ssm_state_size {self.ssm_state_size}"
+            )
+        self.D_bf16_cache: torch.Tensor | None = None
+        self.D_bf16_version = -1
+        if self.use_replayssm and self.num_heads % self.tp_size != 0:
+            raise ValueError(
+                "--use-replayssm requires tensor-parallel heads to divide evenly"
+            )
+        # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
+        _n_state = 5 if self.use_replayssm else 2
+        self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
+        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        # Triton plans each decode step in one layer per cache group.
+        self._plans_replayssm_decode = True
+        # Stochastic-rounding seed slot, bound by
+        # initialize_replayssm_ring_trackers(); the first layer also
+        # holds the whole buffer and refreshes it once per step.
+        self._replayssm_rand_seed: torch.Tensor | None = None
+        self._replayssm_rand_seeds: torch.Tensor | None = None
+
+        self.num_spec = vllm_config.num_speculative_tokens
+
+        # Pre-compute sizes for forward pass
+        self.tped_intermediate_size = self.intermediate_size // self.tp_size
+        self.tped_conv_size = self.conv_dim // self.tp_size
+        self.tped_dt_size = self.num_heads // self.tp_size
+
+        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
+            hidden_states_B_C,
+            [
+                self.tped_intermediate_size,
+                self.groups_ssm_state_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
+            ],
+            dim=-1,
+        )
+
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+
+    def D_bf16(self) -> torch.Tensor:
+        """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the
+        float32 parameter is (re)loaded."""
+        if self.D_bf16_cache is None or self.D_bf16_version != self.D._version:
+            self.D_bf16_cache = self.D.detach().to(torch.bfloat16)
+            self.D_bf16_version = self.D._version
+        return self.D_bf16_cache
+
+    def _warmup_ssd_kernels(self, hidden_states_B_C: torch.Tensor) -> None:
+        """Run a minimal SSD forward pass to trigger Triton autotuning
+        while GPU memory is still plentiful (before SSM cache allocation).
+        """
+        if self._ssd_kernels_warmed_up:
+            return
+        self._ssd_kernels_warmed_up = True
+        logger.info_once("Warming up Mamba2 SSD Triton kernels...")
+
+        device = hidden_states_B_C.device
+        dtype = hidden_states_B_C.dtype
+
+        nheads = self.num_heads // self.tp_size
+        ngroups = self.n_groups // self.tp_size
+        headdim = self.head_dim
+        dstate = self.ssm_state_size
+
+        if self.model_config is None:
+            return
+        chunk_size = self.model_config.get_mamba_chunk_size()
+
+        # Triton's autotuner includes tensor dtypes in its cache key,
+        # so state_dtype must match what real inference uses.
+        ssm_state_dtype = self.get_state_dtype()[1]
+
+        # SSD kernel autotune keys depend on dtype and head dimensions,
+        # not on sequence length or batch size, so a single shape suffices.
+        seqlen = chunk_size
+        batch = 1
+        nchunks = seqlen // chunk_size  # = 1
+
+        x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
+        dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
+        B = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
+        C = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
+        cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
+        cu_chunk_seqlens = torch.tensor(
+            [i * chunk_size for i in range(nchunks + 1)],
+            device=device,
+            dtype=torch.int32,
+        )
+        last_chunk_indices = torch.tensor(
+            [nchunks - 1], device=device, dtype=torch.int32
+        )
+        seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
+        out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
+        final_states = torch.empty(
+            batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
+        )
+        final_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
+
+        # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
+        # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
+        # HAS_FINAL_STATES, producing separate compiled binaries. Warm up
+        # all code paths so none triggers JIT compilation during inference.
+        for use_initial_states, write_final_states in itertools.product(
+            (False, True), repeat=2
+        ):
+            initial_states = (
+                torch.randn(
+                    batch,
+                    nheads,
+                    headdim,
+                    dstate,
+                    device=device,
+                    dtype=ssm_state_dtype,
+                )
+                if use_initial_states
+                else None
+            )
+            try:
+                mamba_chunk_scan_combined_varlen(
+                    x=x,
+                    dt=dt,
+                    A=self.A,
+                    B=B,
+                    C=C,
+                    chunk_size=chunk_size,
+                    cu_seqlens=cu_seqlens,
+                    cu_chunk_seqlens=cu_chunk_seqlens,
+                    last_chunk_indices=last_chunk_indices,
+                    seq_idx=seq_idx,
+                    out=out,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    initial_states=initial_states,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    state_dtype=ssm_state_dtype,
+                    final_states_out=final_states if write_final_states else None,
+                    final_state_indices=(
+                        final_state_indices if write_final_states else None
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "Mamba2 SSD kernel warmup failed for layer %s "
+                    "(initial_states=%s, final_states=%s). First inference may "
+                    "experience latency spike or OOM due to autotuner.",
+                    self.prefix,
+                    use_initial_states,
+                    write_final_states,
+                    exc_info=True,
+                )
+
+        if self.use_flashinfer_prefill:
+            for use_initial_states in (False, True):
+                mamba_chunk_scan_flashinfer(
+                    x,
+                    dt,
+                    self.A,
+                    B,
+                    C,
+                    self.D_bf16(),
+                    self.dt_bias,
+                    cu_seqlens,
+                    out,
+                    final_states,
+                    final_state_indices,
+                    torch.ones(batch, device=device, dtype=torch.bool)
+                    if use_initial_states
+                    else None,
+                )
+
+        logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
+        torch.accelerator.empty_cache()
+
+    def forward_conv(self, hidden_states_B_C: torch.Tensor) -> torch.Tensor:
+        """Run the causal convolution, updating the conv state, and return its
+        output. Used by callers that split the conv and the scan, e.g. the
+        Transformers modeling backend."""
+        output = torch.empty_like(hidden_states_B_C)
+        torch.ops.vllm.mamba2_conv(
+            hidden_states_B_C, output, _encode_layer_name(self.prefix)
+        )
+        return output
+
+    def forward_scan(
+        self,
+        hidden_states: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        dt: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the SSD scan on the split output of `forward_conv`, updating the
+        SSM state, and return the scan output."""
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.mamba2_scan(
+            hidden_states, B, C, dt, output, _encode_layer_name(self.prefix)
+        )
+        return output
+
+    def conv_ssm_forward(
+        self,
+        projected_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        hidden_states_B_C, dt = torch.split(
+            projected_states[..., self.tped_intermediate_size :],
+            [self.tped_conv_size, self.tped_dt_size],
+            dim=-1,
+        )
+        ctx = self._step_context()
+        if ctx is None:
+            # V1 profile run -- warm up SSD kernels so that autotuning
+            # completes before SSM cache allocation.
+            self._warmup_ssd_kernels(hidden_states_B_C)
+            return
+
+        hidden_states_B_C_d, raw_hidden_states_B_C_p = ctx.split_tokens(
+            hidden_states_B_C
+        )
+        # Decode convolves in place, as `hidden_states_B_C` is internal to the op
+        hidden_states_B_C_d, hidden_states_B_C_p = self._conv(
+            ctx, hidden_states_B_C_d, raw_hidden_states_B_C_p
+        )
+        hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(hidden_states_B_C_d)
+        hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(hidden_states_B_C_p)
+        dt_d, dt_p = ctx.split_tokens(dt)
+        self._scan(
+            ctx,
+            (hidden_states_d, B_d, C_d, dt_d),
+            (hidden_states_p, B_p, C_p, dt_p),
+            ctx.split_tokens(output),
+            raw_hidden_states_B_C_p=raw_hidden_states_B_C_p,
+        )
+
+    def conv_forward(self, hidden_states_B_C: torch.Tensor, output: torch.Tensor):
+        ctx = self._step_context()
+        if ctx is None:
+            output.copy_(hidden_states_B_C)
+            return
+        output_d, output_p = ctx.split_tokens(output)
+        hidden_states_B_C_d, hidden_states_B_C_p = ctx.split_tokens(hidden_states_B_C)
+        # Decode convolves in place, so do it in `output` to leave the input intact
+        output_d.copy_(hidden_states_B_C_d)
+        conv_d, conv_p = self._conv(
+            ctx, output_d, hidden_states_B_C_p, export_checkpoint=True
+        )
+        if conv_d.data_ptr() != output_d.data_ptr():
+            output_d.copy_(conv_d)
+        output_p.copy_(conv_p)
+
+    def scan_forward(
+        self,
+        hidden_states: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        dt: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        ctx = self._step_context()
+        if ctx is None:
+            # V1 profile run, see `conv_ssm_forward`
+            self._warmup_ssd_kernels(hidden_states)
+            return
+        hidden_states_d, hidden_states_p = ctx.split_tokens(hidden_states)
+        B_d, B_p = ctx.split_tokens(B)
+        C_d, C_p = ctx.split_tokens(C)
+        dt_d, dt_p = ctx.split_tokens(dt)
+        self._scan(
+            ctx,
+            (hidden_states_d, B_d, C_d, dt_d),
+            (hidden_states_p, B_p, C_p, dt_p),
+            ctx.split_tokens(output),
+        )
+
+    def _step_context(self) -> "Mamba2StepContext | None":
+        """The state and metadata of this layer for the current step, or `None`
+        during the profile run."""
+        forward_context = get_forward_context()
+        # attn_metadata contains metadata necessary for the mamba2 triton
+        # kernels to operate in continuous batching and in chunked prefill
+        # modes; they are computed at top-level model forward since they
+        # stay the same and reused for all mamba layers in the same iteration
+        attn_metadata_raw = forward_context.attn_metadata
+
+        assert self.cache_config is not None
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
+            return None
+        assert isinstance(attn_metadata, Mamba2AttentionMetadata)
+
+        # conv_state must be (..., dim, width-1) for the conv kernels.
+        # DS layout stores it that way directly; SD layout needs a
+        # transpose (which keeps dim contiguous via stride tricks).
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        ring_start = prev_num_accepted = None
+        if self.use_replayssm:
+            x_cache, dt_cache, B_cache = self.kv_cache[2:5]
+            ring_start = self._replayssm_ring_start
+            if self.use_replayssm_trackers:
+                prev_num_accepted = self._replayssm_prev_num_accepted
+        else:
+            x_cache = dt_cache = B_cache = None
+
+        return Mamba2StepContext(
+            attn_metadata=attn_metadata,
+            conv_state=conv_state,
+            ssm_state=self.kv_cache[1],
+            x_cache=x_cache,
+            dt_cache=dt_cache,
+            B_cache=B_cache,
+            ring_start=ring_start,
+            prev_num_accepted=prev_num_accepted,
+        )
+
+    def _export_checkpoint(
+        self,
+        ctx: "Mamba2StepContext",
+        raw_hidden_states_B_C_p: torch.Tensor,
+        varlen_states: torch.Tensor | None = None,
+    ) -> None:
+        """Store the prefill checkpoints' pre-convolution windows and, given
+        the scan's per-chunk `varlen_states`, their SSM states."""
+        attn_metadata = ctx.attn_metadata
+        assert attn_metadata.checkpoint_meta is not None
+        assert attn_metadata.query_start_loc_p is not None
+        self._checkpoint_exporter.export(
+            attn_metadata.checkpoint_meta,
+            raw_qkv=raw_hidden_states_B_C_p,
+            conv_state=ctx.conv_state,
+            recurrent_checkpoint=varlen_states,
+            recurrent_state=None if varlen_states is None else ctx.ssm_state,
+            cu_seqlens=attn_metadata.query_start_loc_p,
+            recurrent_rows=attn_metadata.checkpoint_chunk_idx,
+        )
+
+    def _conv(
+        self,
+        ctx: "Mamba2StepContext",
+        hidden_states_B_C_d: torch.Tensor,
+        hidden_states_B_C_p: torch.Tensor,
+        export_checkpoint: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convolve the decode and prefill tokens, updating the conv state.
+        The decode tokens are convolved in place. `export_checkpoint` stores
+        the prefill checkpoints' conv windows, for callers whose scan cannot
+        see the pre-convolution input."""
+        attn_metadata = ctx.attn_metadata
+        # Process prefill requests
+        if attn_metadata.num_prefills > 0:
+            if export_checkpoint and attn_metadata.checkpoint_chunk_idx is not None:
+                self._export_checkpoint(ctx, hidden_states_B_C_p)
+            # 2. Convolution sequence transformation
+            # - It will read the initial states for every sequence,
+            #   that has "has_initial_states_p" == True,
+            #   from "cache_indices", using "state_indices_tensor_p".
+            # - It writes the state at the sequence end to the "conv_state"
+            #   cache in positions pointed to by "state_indices_tensor_p".
+            x = hidden_states_B_C_p.transpose(
+                0, 1
+            )  # this is the form that causal-conv see
+            hidden_states_B_C_p = causal_conv1d_fn(
+                x,
+                self.conv_weights,
+                self.conv_bias,
+                activation=self.activation,
+                conv_states=ctx.conv_state,
+                has_initial_state=attn_metadata.has_initial_states_p,
+                cache_indices=attn_metadata.state_indices_tensor_p,
+                metadata=attn_metadata,
+                query_start_loc=attn_metadata.query_start_loc_p,
+            ).transpose(0, 1)[: attn_metadata.num_prefill_tokens]
+
+        # Process decode requests
+        if attn_metadata.num_decodes > 0:
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+            assert state_indices_tensor_d is not None
+            # 2. Convolution sequence transformation
+            hidden_states_B_C_d = causal_conv1d_update(
+                hidden_states_B_C_d,
+                ctx.conv_state,
+                self.conv_weights,
+                self.conv_bias,
+                self.activation,
+                conv_state_indices=state_indices_tensor_d,
+                num_accepted_tokens=attn_metadata.num_accepted_tokens,
+                query_start_loc=attn_metadata.query_start_loc_d,
+                # ReplaySSM keeps one physical state block while a speculative
+                # decode call still processes the full target + draft window.
+                max_query_len=(
+                    1 + self.num_spec
+                    if self.use_replayssm and self.num_spec > 0
+                    else state_indices_tensor_d.size(-1)
+                ),
+            )
+
+        return hidden_states_B_C_d, hidden_states_B_C_p
+
+    def _scan(
+        self,
+        ctx: "Mamba2StepContext",
+        decode_inputs: tuple[torch.Tensor, ...],
+        prefill_inputs: tuple[torch.Tensor, ...],
+        outputs: tuple[torch.Tensor, torch.Tensor],
+        raw_hidden_states_B_C_p: torch.Tensor | None = None,
+    ):
+        """Scan the decode and prefill tokens, given as `(hidden_states, B, C,
+        dt)`, into `outputs`, updating the SSM state. Without the prefill's
+        pre-convolution `raw_hidden_states_B_C_p`, only the checkpoints' SSM
+        states are stored and `_conv` must store their conv windows."""
+        attn_metadata = ctx.attn_metadata
+        ssm_state = ctx.ssm_state
+        ring_start = ctx.ring_start
+        prev_num_accepted = ctx.prev_num_accepted
+        use_spec_decode = self.num_spec > 0
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+        state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+        replayssm_state_indices_d = attn_metadata.replayssm_state_indices_d
+        preallocated_ssm_out_d, preallocated_ssm_out_p = outputs
+        x_cache, dt_cache, B_cache = ctx.x_cache, ctx.dt_cache, ctx.B_cache
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        query_start_loc_d = attn_metadata.query_start_loc_d
+
+        # Process prefill requests
+        if attn_metadata.num_prefills > 0:
+            hidden_states_p, B_p, C_p, dt_p = prefill_inputs
+            has_initial_states_p = attn_metadata.has_initial_states_p
+            prep_initial_states = attn_metadata.prep_initial_states
+            query_start_loc_p = attn_metadata.query_start_loc_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
+
+            # 3. State Space Model sequence transformation
+            # NOTE: final output is an in-place update of out tensor
+            assert preallocated_ssm_out_p is not None
+            assert state_indices_tensor_p is not None
+            has_checkpoints = checkpoint_chunk_idx is not None
+            if self.use_flashinfer_prefill and not has_checkpoints:
+                assert query_start_loc_p is not None
+                mamba_chunk_scan_flashinfer(
+                    hidden_states_p.view(
+                        num_prefill_tokens,
+                        self.num_heads // self.tp_size,
+                        self.head_dim,
+                    ),
+                    dt_p,
+                    self.A,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    self.D_bf16(),
+                    self.dt_bias,
+                    query_start_loc_p,
+                    preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
+                    ssm_state,
+                    state_indices_tensor_p,
+                    has_initial_states_p if prep_initial_states else None,
+                )
+            else:
+                initial_states = None
+                if has_initial_states_p is not None and prep_initial_states:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p],
+                        0,
+                    )
+                # Without checkpoints, the SSD scan writes each sequence's final
+                # state straight into its ssm_state slot.
+                varlen_states = mamba_chunk_scan_combined_varlen(
+                    hidden_states_p.view(
+                        num_prefill_tokens,
+                        self.num_heads // self.tp_size,
+                        self.head_dim,
+                    ),
+                    dt_p,
+                    self.A,
+                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                    chunk_size=attn_metadata.chunk_size,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    seq_idx=attn_metadata.seq_idx_p,
+                    cu_seqlens=query_start_loc_p,
+                    cu_chunk_seqlens=attn_metadata.cu_chunk_seqlen_p,
+                    last_chunk_indices=last_chunk_indices_p,
+                    initial_states=initial_states,
+                    return_intermediate_states=has_checkpoints,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    out=preallocated_ssm_out_p.view(
+                        num_prefill_tokens, -1, self.head_dim
+                    ),
+                    state_dtype=ssm_state.dtype,
+                    final_states_out=None if has_checkpoints else ssm_state,
+                    final_state_indices=None
+                    if has_checkpoints
+                    else state_indices_tensor_p,
+                )
+
+            if has_checkpoints:
+                # update ssm states
+                # - varlen state is a (num_chunks, nheads, headdim, dstate)
+                #   tensor
+                final_states = varlen_states[last_chunk_indices_p]
+                if raw_hidden_states_B_C_p is None:
+                    # `_conv` stored the conv windows; a zero-width input
+                    # skips them here.
+                    raw_hidden_states_B_C_p = hidden_states_p[:, :0]
+                self._export_checkpoint(ctx, raw_hidden_states_B_C_p, varlen_states)
+                ssm_state[state_indices_tensor_p] = final_states
+            if (
+                ring_start is not None
+                and not self.use_replayssm_trackers
+                and self._plans_replayssm_decode
+            ):
+                # Triton decode appends to the ring that prefill leaves empty.
+                ring_start.index_fill_(0, state_indices_tensor_p.long(), 0)
+
+        # Process decode requests
+        if attn_metadata.num_decodes > 0:
+            hidden_states_d, B_d, C_d, dt_d = decode_inputs
+            assert state_indices_tensor_d is not None
+
+            # 3. State Space Model sequence transformation
+            n_groups = self.n_groups // self.tp_size
+            A_d = (
+                self.A[:, None, ...][:, :, None]
+                .expand(-1, self.head_dim, self.ssm_state_size)
+                .to(dtype=torch.float32)
+            )
+            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+            hidden_states_d = hidden_states_d.view(
+                -1, self.num_heads // self.tp_size, self.head_dim
+            )
+
+            assert preallocated_ssm_out_d is not None
+            # - the hidden is reshaped into (bs, num_heads, head_dim)
+            # - mamba_cache_params.ssm_state's slots will be selected
+            #   using state_indices_tensor_d
+            # NOTE: final output is an in-place update of out tensor
+            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
+                num_decode_tokens, -1, self.head_dim
+            )
+            if self.use_replayssm:
+                assert self.replayssm_buffer_len is not None
+                if self.use_replayssm_trackers:
+                    # Both kernels replay a window of ring_len - (1 + num_spec).
+                    assert x_cache is not None
+                    assert (
+                        x_cache.size(2) == self.replayssm_buffer_len + 1 + self.num_spec
+                    )
+                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+                    assert ring_start is not None
+                    assert prev_num_accepted is not None
+                    assert attn_metadata.replayssm_scratch is not None
+                    fi_cu_seqlens = query_start_loc_d
+                    fi_max_seqlen = None
+                    if use_spec_decode:
+                        spec_query_len = 1 + self.num_spec
+                        fi_max_seqlen = spec_query_len
+                        assert replayssm_state_indices_d is not None
+                        decode_batch = replayssm_state_indices_d.size(0)
+                        if num_decode_tokens == decode_batch * spec_query_len:
+                            hidden_states_d = _view_mtp_decode_tensor(
+                                hidden_states_d, decode_batch, spec_query_len
+                            )
+                            dt_d = _view_mtp_decode_tensor(
+                                dt_d, decode_batch, spec_query_len
+                            )
+                            B_d = _view_mtp_decode_tensor(
+                                B_d, decode_batch, spec_query_len
+                            )
+                            C_d = _view_mtp_decode_tensor(
+                                C_d, decode_batch, spec_query_len
+                            )
+                            preallocated_ssm_out_d = _view_mtp_decode_tensor(
+                                preallocated_ssm_out_d,
+                                decode_batch,
+                                spec_query_len,
+                            )
+                            fi_cu_seqlens = None
+                            fi_max_seqlen = None
+                    if self._replayssm_rand_seeds is not None:
+                        self._replayssm_rand_seeds.random_(0, 2**32)
+                    selective_state_update_replayssm_flashinfer(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
+                        x_cache,
+                        B_cache,
+                        dt_cache,
+                        ring_start,
+                        prev_num_accepted,
+                        D=D_d,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                        state_batch_indices=replayssm_state_indices_d,
+                        scratch=attn_metadata.replayssm_scratch,
+                        enable_stochastic_rounding=(
+                            self.mamba_config.enable_stochastic_rounding
+                        ),
+                        stochastic_rounding_philox_rounds=(
+                            self.mamba_config.stochastic_rounding_philox_rounds
+                        ),
+                        rand_seed=self._replayssm_rand_seed,
+                        cu_seqlens=fi_cu_seqlens,
+                        max_seqlen=fi_max_seqlen,
+                        enable_pdl=False,
+                    )
+                elif self.use_replayssm_trackers:
+                    assert ring_start is not None
+                    assert prev_num_accepted is not None
+                    assert replayssm_state_indices_d is not None
+                    assert query_start_loc_d is not None
+                    selective_state_update_replayssm_spec(
+                        ssm_state,
+                        x_cache,
+                        B_cache,
+                        dt_cache,
+                        ring_start,
+                        prev_num_accepted,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
+                        cu_seqlens=query_start_loc_d,
+                        max_seqlen=1 + self.num_spec,
+                        state_batch_indices=replayssm_state_indices_d,
+                        D=D_d,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                    )
+                else:
+                    assert ring_start is not None
+                    assert attn_metadata.write_pos_d is not None
+                    assert attn_metadata.is_flush_d is not None
+                    if self._plans_replayssm_decode:
+                        # Plan this step once per cache group: every layer of
+                        # the group reads the same write_pos/is_flush rows.
+                        plan_replayssm_decode(
+                            ring_start,
+                            state_indices_tensor_d,
+                            attn_metadata.write_pos_d,
+                            attn_metadata.is_flush_d,
+                            buffer_len=self.replayssm_buffer_len,
+                            seq_lens=attn_metadata.replayssm_seq_lens_d,
+                            align_block_size=attn_metadata.replayssm_align_block_size,
+                        )
+                    selective_state_update_replayssm_output_only(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        D_d,
+                        dt_bias,
+                        dt_softplus=True,
+                        x_cache=x_cache,
+                        dt_cache=dt_cache,
+                        B_cache=B_cache,
+                        bc_pre=attn_metadata.bc_pre_scratch,
+                        write_pos=attn_metadata.write_pos_d,
+                        is_flush=attn_metadata.is_flush_d,
+                        max_cache_len=self.replayssm_buffer_len,
+                        state_batch_indices=state_indices_tensor_d,
+                        out=preallocated_ssm_out_d,
+                        enable_stochastic_rounding=(
+                            self.mamba_config.enable_stochastic_rounding
+                        ),
+                        cache_philox_rounds=(
+                            self.mamba_config.stochastic_rounding_philox_rounds
+                        ),
+                    )
+            else:
+                selective_state_update(
+                    ssm_state,
+                    hidden_states_d,
+                    dt_d,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=state_indices_tensor_d,
+                    dst_state_batch_indices=state_indices_tensor_d,
+                    out=preallocated_ssm_out_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    cu_seqlens=query_start_loc_d,
+                    is_blackwell=self.is_blackwell,
+                )
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        # The block-boundary state can be exported from inside one forward
+        # pass, so the scheduler need not split the prefill; every reader
+        # acts on this only in align mode. The metadata builder puts a chunk
+        # end exactly on the checkpoint, so any token position works.
+        return 1
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
+        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
+        if self.use_replayssm:
+            return MambaStateDtypeCalculator.append_replayssm_ring(
+                base_dtype, self.model_config.dtype
+            )
+        return base_dtype
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
+            intermediate_size=self.intermediate_size,
+            tp_world_size=tp_world_size,
+            n_groups=self.n_groups,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
+        )
+        if self.use_replayssm:
+            assert self.replayssm_buffer_len is not None
+            return MambaStateShapeCalculator.append_replayssm_ring(
+                base_shapes=base_shape,
+                n_groups=self.n_groups,
+                tp_world_size=tp_world_size,
+                logical_window=self.replayssm_buffer_len,
+                backend=self.mamba_config.backend,
+                num_speculative_tokens=self.num_spec,
+            )
+        return base_shape
+
+    @property
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA2
+
+
+@eager_break_during_capture
+def mamba2_conv(
+    hidden_states_B_C: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self.conv_forward(hidden_states_B_C=hidden_states_B_C, output=output)
+
+
+direct_register_custom_op(
+    op_name="mamba2_conv",
+    op_func=mamba2_conv,
+    mutates_args=["output"],
+)
+
+
+@eager_break_during_capture
+def mamba2_scan(
+    hidden_states: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    dt: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self.scan_forward(hidden_states=hidden_states, B=B, C=C, dt=dt, output=output)
+
+
+direct_register_custom_op(
+    op_name="mamba2_scan",
+    op_func=mamba2_scan,
+    mutates_args=["output"],
+)
