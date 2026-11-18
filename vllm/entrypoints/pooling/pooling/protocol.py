@@ -65,9 +65,12 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     data: T
     task: PoolingTask = "plugin"
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
+            default_tok_params,
             add_special_tokens=not model_config.is_encoder_decoder,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,

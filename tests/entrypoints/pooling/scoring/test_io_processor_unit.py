@@ -134,7 +134,8 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     processor = llm_reranker_processor
     processor.chat_template = default_template
     processor.renderer = SimpleNamespace(
-        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32),
+        default_chat_tok_params=TokenizeParams(max_total_tokens=32),
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="classify",
