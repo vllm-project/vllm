@@ -3405,12 +3405,44 @@ def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
     rocm_aiter_ops.refresh_env_variables()
 
 
+@pytest.mark.parametrize("moe_backend", ["aiter", "aiter_mxfp4_mxfp4"])
+@pytest.mark.skip_global_cleanup
+def test_block_fp8_source_layout_ignores_pinned_moe_backend(moe_backend) -> None:
+    """A pinned --moe-backend (an FP8 one rejecting the refined block key, or the
+    target's) must not decide the layout of a block-FP8 source: the unaligned TP4
+    shard 352 refines to [32, 32] instead of being padded or raising."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        resolve_fp8_moe_weight_block_shape,
+    )
+
+    config = SimpleNamespace(
+        moe_backend=moe_backend,
+        tp_size=4,
+        ep_size=1,
+        intermediate_size=1408,
+        intermediate_size_per_partition=352,
+        hidden_dim=2048,
+        is_lora_enabled=False,
+        has_bias=False,
+        tp_shard_with_padding=False,
+    )
+    with skip_checkpoint_backend_selection():
+        shape, refine = resolve_fp8_moe_weight_block_shape(
+            config, [128, 128], kFp8Dynamic128Sym, True
+        )
+    assert (shape, refine) == ([32, 32], (4, 4))
+    assert not config.tp_shard_with_padding
+    assert config.intermediate_size_per_partition == 352
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
 # 192 is not a multiple of the 128 block: the source then allocates its scales on a
 # refined block grid, which `dequantize_weight` must follow.
 @pytest.mark.parametrize("intermediate_size", [256, 192])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
-    intermediate_size, default_vllm_config, dist_init, monkeypatch
+    intermediate_size, default_vllm_config, monkeypatch
 ) -> None:
     """A block-FP8 checkpoint requantized to MXFP4 by online quantization
     (`--quantization-config.moe mxfp4`, which replaces
