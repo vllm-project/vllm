@@ -42,6 +42,9 @@ _MODEL_CONFIG = SimpleNamespace(
 )
 _CPU = torch.device("cpu")
 BF16 = torch.bfloat16
+U8, E8M0, E4M3 = torch.uint8, torch.float8_e8m0fnu, torch.float8_e4m3fn
+# 1-byte containers whose every byte pattern is a value worth checking
+_BYTE_DTYPES = (U8, torch.int8, E8M0, torch.float4_e2m1fn_x2)
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +86,9 @@ class _Toy(torch.nn.Module):
 def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     return {
-        name: torch.randn(shape, generator=gen).to(dtype)
+        name: torch.randint(256, shape, generator=gen, dtype=U8).view(dtype)
+        if dtype in _BYTE_DTYPES
+        else torch.randn(shape, generator=gen).to(dtype)
         for name, (shape, dtype) in shapes.items()
     }
 
@@ -298,7 +303,7 @@ _TOY_SHAPES = {
     "embed.weight": ((10, 4), BF16),
     "lm_head.weight": ((10, 4), BF16),  # tied: the loader skips it
     "proj.weight": ((4, 6), BF16),  # transposing loader, transposing PWAL
-    "router.bias": ((5,), BF16),  # FP32 parameter: a cast (direct)
+    "router.bias": ((5,), BF16),  # FP32 parameter: a direct cast
     "strided.weight": ((8, 3), BF16),  # every other row
 }
 
@@ -334,7 +339,6 @@ def test_toy_loaders():
     assert plan.get_boxes("lm_head.weight") is None
     assert plan.get_dest("lm_head.weight") == []
 
-    # a cast is a direct write: the copy converts the received bf16
     ((box, dest),) = plan.get_dest("router.bias")
     assert box == ((0, 5),)
     assert dest.dtype == torch.float32
@@ -418,6 +422,10 @@ def test_fused_experts_under_expert_tp(tp_rank):
 
 
 # ------------------------------------------------------------ fallbacks
+
+
+def _raw_copy(param, loaded):
+    param.copy_(loaded)
 
 
 def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
@@ -575,94 +583,27 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
 
 
 @pytest.mark.parametrize(
-    "sent,held",
+    "loader,sent,held,cast",
     [
-        (torch.float8_e8m0fnu, torch.uint8),
-        (torch.uint8, torch.float8_e8m0fnu),
-        (torch.int8, torch.uint8),
-        (torch.uint8, torch.int8),
-        (torch.float4_e2m1fn_x2, torch.uint8),
+        (copy_weight_, E8M0, U8, None),  # byte containers copy as bytes
+        (copy_weight_, U8, E8M0, None),
+        (copy_weight_, torch.float4_e2m1fn_x2, U8, None),
+        (_raw_copy, torch.int8, U8, None),  # same-width integer casts keep bits
+        (_raw_copy, U8, torch.int8, None),
+        (copy_weight_, BF16, E4M3, E4M3),  # value casts replay by value
+        (copy_weight_, E4M3, BF16, BF16),
+        (copy_weight_, torch.float8_e5m2, E4M3, E4M3),
     ],
-    ids=str,
+    ids=lambda v: getattr(v, "__name__", str(v)),
 )
-def test_byte_containers_stay_direct(sent, held):
-    """Byte containers sent as another container dtype (E8M0 scales into
-    uint8 or back, int8 experts into uint8, packed FP4): the loader's copy
-    keeps the bytes, so the name is direct and the planned update writes the
-    sent bytes."""
-    name, scales = "layer.weight", torch.arange(256).to(torch.uint8)
-    make, _ = _single(None, shape=(256,), dtype=held)
-    model = _cold_start(make, {name: scales.flip(0).view(sent)})
-    start_reload(model)
-    plan = _plan(model, {name: ((256,), sent)})
-    assert plan.get_dest(name) is not None
-    _planned_reload(model, plan, {name: scales.view(sent)})
-    assert torch.equal(model.layer.weight.view(torch.uint8), scales)
-
-
-def test_e8m0_into_uint8_through_copy_weight_is_a_view():
-    """An E8M0 checkpoint into a uint8 scale parameter through
-    `copy_weight_` reaches the plan as a view, not a cast: the write keeps
-    the checkpoint dtype (no replayed conversion) and the parameter holds
-    the sent bytes, as at cold start."""
-    name = "layer.weight"
-    make, _ = _single(copy_weight_, shape=(8,), dtype=torch.uint8)
-    shapes = {name: ((8,), torch.float8_e8m0fnu)}
-    model, plan = _check_plan_equals_cold_start(make, shapes)
-    (write,) = plan.entries[name].writes
-    assert write.dtype is None
-    ((_, dest),) = plan.get_dest(name)
-    assert dest.dtype == torch.float8_e8m0fnu
-    sent = _checkpoint(shapes, seed=2)[name]  # the last planned update
-    assert torch.equal(model.layer.weight, sent.view(torch.uint8))
-
-
-def test_cast_of_a_reinterpreting_view_falls_back():
-    """U8 scales the loader views as E8M0 and casts into bf16: the replay
-    would convert the uint8 checkpoint bytes, not the E8M0 values."""
-    make, _ = _single(
-        lambda p, w: p.copy_(w.view(torch.float8_e8m0fnu)), shape=(8,), dtype=BF16
-    )
-    _, plan = _check_plan_equals_cold_start(make, {"layer.weight": ((8,), torch.uint8)})
-    assert plan.get_dest("layer.weight") is None
-    assert "a view of the torch.uint8" in plan.entries["layer.weight"].reason
-
-
-@pytest.mark.parametrize(
-    "sent,held", [(torch.int8, torch.uint8), (torch.uint8, torch.int8)], ids=str
-)
-def test_same_width_integer_copy_is_a_byte_copy(sent, held):
-    """A raw `param.copy_` (not `copy_weight_`) between int8 and uint8 is a
-    cast that keeps every bit, so the plan writes it as a byte copy."""
-    name = "layer.weight"
-    make, _ = _single(lambda p, w: p.copy_(w), shape=(8,), dtype=held)
-    _, plan = _check_plan_equals_cold_start(make, {name: ((8,), sent)})
-    (write,) = plan.entries[name].writes
-    assert write.dtype is None
-    ((_, dest),) = plan.get_dest(name)
-    assert dest.dtype == sent
-
-
-@pytest.mark.parametrize(
-    "sent,held",
-    [
-        (BF16, torch.float8_e4m3fn),
-        (torch.float8_e4m3fn, BF16),
-        (torch.float8_e5m2, torch.float8_e4m3fn),
-    ],
-    ids=str,
-)
-def test_float8_value_cast_is_direct(sent, held):
-    """A copy-time cast into or out of a float8 value format is direct: the
-    planned copy into a destination in the parameter's dtype converts by
-    value, as the loader's copy_ did."""
-    name = "layer.weight"
-    make, _ = _single(copy_weight_, shape=(8,), dtype=held)
-    _, plan = _check_plan_equals_cold_start(make, {name: ((8,), sent)})
-    (write,) = plan.entries[name].writes
-    assert write.dtype == held
-    ((_, dest),) = plan.get_dest(name)
-    assert dest.dtype == held
+def test_copy_time_dtype_change_stays_direct(loader, sent, held, cast):
+    """`cast` is the write's dtype; `None` is a byte copy in the sent dtype."""
+    make, _ = _single(loader, shape=(8,), dtype=held)
+    _, plan = _check_plan_equals_cold_start(make, {"layer.weight": ((8,), sent)})
+    (write,) = plan.entries["layer.weight"].writes
+    assert write.dtype == cast
+    ((_, dest),) = plan.get_dest("layer.weight")
+    assert dest.dtype == (cast or sent)
 
 
 def test_tensors_sharing_one_storage():
