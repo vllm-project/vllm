@@ -158,23 +158,26 @@ RUN microdnf install -y pkgconf-pkg-config xz && \
 
 # Torchcodec video decoder (no s390x wheels; CPU / FFmpeg only s390x does not support audio decoding).
 FROM python-install AS torchcodec-builder
-ARG TORCHCODEC_VERSION=v0.14.0
+ARG TORCHCODEC_VERSION=v0.17.0
 WORKDIR /tmp
 ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+# Image decoders are left out (TORCHCODEC_BUILD_IMAGE=0) so the build doesn't
+# need libjpeg/libpng/libwebp; vLLM decodes images with Pillow in that case.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=ffmpeg-build,source=/usr/local,target=/usr/local \
     git clone --depth 1 --branch ${TORCHCODEC_VERSION} \
         https://github.com/pytorch/torchcodec.git && \
     cd torchcodec && \
     uv pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu && \
-    uv pip install pybind11 setuptools wheel && \
+    uv pip install pybind11 scikit-build-core && \
     pybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" && \
     export pybind11_DIR CMAKE_PREFIX_PATH="${pybind11_DIR}:${CMAKE_PREFIX_PATH}" && \
     export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 && \
     export TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR=1 && \
-    export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build" && \
-    python setup.py bdist_wheel
+    export TORCHCODEC_BUILD_IMAGE=0 && \
+    export BUILD_VERSION="${TORCHCODEC_VERSION#v}" && \
+    python -m pip wheel --no-build-isolation --no-deps -w dist .
 
 # Build OpenCV from source for s390x
 FROM python-install AS opencv-builder

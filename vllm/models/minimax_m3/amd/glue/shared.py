@@ -47,11 +47,18 @@ class SharedWeights:
     # decode, fused: AITER's stage-1 / stage-2 shared-weight arguments (no scratch)
     fused1: dict[str, torch.Tensor] | None = None
     fused2: dict[str, torch.Tensor] | None = None
+    # decode, separate: the down layer's own weight is row-major FP8 with uint8
+    # scales, as vLLM's Triton dot_scaled GEMM reads them (not when AITER's
+    # FlyDSL MXFP8 linear preshuffled it and viewed the scales as E8M0)
+    dn_triton: bool = False
 
 
 def fp8_rows(linear) -> tuple[torch.Tensor, torch.Tensor]:
     """`linear`'s FP8 weight [N, K] and per-row E8M0 scales [N, K / 32] (uint8)."""
-    w = linear.weight.data
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
+
+    # row-major even when AITER's FlyDSL MXFP8 linear preshuffled it in place
+    w = row_major_weight(linear)
     n, k = w.shape
     assert w.element_size() == 1, f"FP8 weight expected, got {w.dtype}"
     s = linear.weight_scale.data.view(torch.uint8)
@@ -146,8 +153,17 @@ def build_shared_weights(
             "shared_w2_bf16": shuffle_weight(dequant_bf16(dn, dn_s), layout=(16, 16))
         }
     elif decode:
+        from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+            row_major_weight,
+        )
+
         out.gu, out.gu_s = shuffle_weight(gu, layout=(16, 16)), gu_s
         out.dn, out.dn_s = shuffle_weight(dn, layout=(16, 16)), dn_s
+        down = mlp.down_proj
+        out.dn_triton = (
+            row_major_weight(down) is down.weight.data
+            and down.weight_scale.dtype == torch.uint8
+        )
     if sp:
         inter = gu.shape[0] // 2  # this rank's [gate | up] split
         gate, up = _gather(gu[:inter], 0, group), _gather(gu[inter:], 0, group)
@@ -187,7 +203,8 @@ def shared_decode(
     )
     dn = mlp.down_proj
     if (
-        s <= AITER_DOWN_MAX_ROWS
+        not sw.dn_triton
+        or s <= AITER_DOWN_MAX_ROWS
         or s in AITER_DOWN_EXTRA_ROWS
         or dn.weight_scale.shape[0]
         != dn.weight.shape[0]  # block scales: no Triton route
