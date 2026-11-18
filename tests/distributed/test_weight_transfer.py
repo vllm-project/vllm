@@ -1788,12 +1788,13 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
-def _packed_ipc_engine(monkeypatch, buf: torch.Tensor):
-    """A packed IPC worker engine whose handle rebuilds to `buf`."""
+def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
+    """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
+    `bufs[i]`."""
     import vllm.distributed.weight_transfer.packed_tensor as packed_mod
     import vllm.model_executor.model_loader.reload as reload_mod
 
-    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *args: buf)
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
     monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
     monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
     model = MagicMock(spec=torch.nn.Module)
@@ -1819,29 +1820,37 @@ def _packed_ipc_chunk(handle: dict, names: list[str], n: int):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
-    """Only the first chunk carries the handle; finishing inside a split
-    tensor raises instead of dropping it."""
-    buf = torch.arange(4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
-    engine, model = _packed_ipc_engine(monkeypatch, buf)
+    """Only the first chunk of a transfer carries the handle, also for a second
+    transfer in one update; finishing inside a split tensor raises, also when
+    retried."""
+    bufs = [
+        torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+        for k in (0, 4)
+    ]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
     uuid = str(torch.cuda.get_device_properties(0).uuid)
-    first = _packed_ipc_chunk({uuid: tuple(range(8))}, ["w"], 8)  # 2 chunks
+    starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
+    rest = _packed_ipc_chunk({}, [], 8)  # each transfer has 2 chunks
 
     with pytest.raises(RuntimeError, match="outside"):
-        engine.receive_weights(first)  # before start_weight_update
+        engine.receive_weights(starts[0])  # before start_weight_update
     engine.start_weight_update()
-    engine.receive_weights(first)
+    engine.receive_weights(starts[0])
     model.load_weights.assert_not_called()  # the chunk completes no tensor
-    engine.receive_weights(_packed_ipc_chunk({}, [], 8))
+    engine.receive_weights(rest)
+    engine.receive_weights(starts[1])
+    engine.receive_weights(rest)
     engine.finish_weight_update()
-    ((weights,), _) = model.load_weights.call_args
-    [(name, w)] = weights
-    assert name == "w" and w.tolist() == [0, 1, 2, 3] * 2
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
 
     engine.start_weight_update()
-    engine.receive_weights(first)
+    engine.receive_weights(starts[0])
     with pytest.raises(RuntimeError, match="inside a split tensor"):
-        engine.finish_weight_update()
-    assert engine._packed_consumer is None
+        engine.receive_weights(starts[1])
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="inside a split tensor"):
+            engine.finish_weight_update()
 
 
 @pytest.mark.parametrize(

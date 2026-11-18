@@ -9,12 +9,15 @@ These utilities enable efficient batched tensor transfer over NCCL.
 import pytest
 import torch
 
+from vllm.distributed.weight_transfer import packed_tensor
 from vllm.distributed.weight_transfer.packed_tensor import (
     ALIGN,
     DEFAULT_PACKED_NUM_BUFFERS,
     Chunk,
     PackedIpcConsumer,
     Piece,
+    _get_streams,
+    _Unpacker,
     chunks,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
@@ -96,6 +99,32 @@ class TestPackedBroadcastProducer:
         # No broadcasts for empty iterator
         assert mock_group.broadcast_count == 0
 
+    def test_producer_failing_mid_transfer_drains_its_streams(self):
+        """The chunk buffers are freed only after their queued work ends."""
+
+        class FailingGroup:
+            calls = 0
+
+            def broadcast(self, tensor, src):
+                self.calls += 1
+                if self.calls == 2:
+                    raise RuntimeError("broadcast failed")
+                torch.cuda._sleep(SLEEP_CYCLES)
+
+        params = [(f"w{i}", torch.randn(4, device="cuda")) for i in range(3)]
+        with pytest.raises(RuntimeError, match="broadcast failed"):
+            packed_nccl_broadcast_producer(
+                iterator=iter(params),
+                group=FailingGroup(),
+                src=0,
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=16,
+            )
+        streams = _get_streams(
+            torch.accelerator.current_device_index(), DEFAULT_PACKED_NUM_BUFFERS
+        )
+        assert all(stream.query() for stream in streams)
+
 
 # Long enough (~1 s on current GPUs) that the host always gets through the
 # checked window first; the tests assert that it did.
@@ -153,8 +182,8 @@ def roundtrip(
     layout = chunks(((t.shape, t.dtype) for _, t in params), buffer_size_bytes)
     first_load = next(
         k
-        for k, (_, pieces) in enumerate(layout)
-        if any(p.end == params[p.position][1].nbytes for p in pieces)
+        for k, chunk in enumerate(layout)
+        if any(p.end == params[p.position][1].nbytes for p in chunk.pieces)
     )
     fill_pending = consume(sleep=True)
     if first_load < DEFAULT_PACKED_NUM_BUFFERS:
@@ -289,7 +318,7 @@ class TestPackedBroadcastDeferredConsumer:
             group=group,
             src=0,
             post_unpack_func=post_unpack_func,
-            # Exactly one tensor, so each tensor gets its own pack.
+            # Exactly one tensor, so each tensor gets its own chunk.
             buffer_size_bytes=numel * 4,
             num_buffers=2,
         )
@@ -346,7 +375,7 @@ class TestPackedBroadcastDeferredConsumer:
             group=group,
             src=0,
             post_unpack_func=post_unpack_func,
-            # Exactly one tensor, so each tensor gets its own pack.
+            # Exactly one tensor, so each tensor gets its own chunk.
             buffer_size_bytes=numel * 4,
             num_buffers=num_buffers,
         )
@@ -504,17 +533,8 @@ class TestPackedIpcRoundtrip:
         return str(props.uuid)
 
     def _run_roundtrip(self, chunk_iter, device_index, timeout=30):
-        """Stream chunks through a child consumer one at a time.
-
-        `packed_ipc_producer` reuses a single IPC buffer for every
-        chunk, so the producer must not be advanced until the consumer
-        has finished reading the current chunk. We enforce that with an
-        ack queue: the consumer puts `"ack"` after it has copied the
-        chunk to CPU, and only then do we pull the next chunk from the
-        generator.
-
-        Returns `(num_chunks, results)`.
-        """
+        """Stream chunks through a child consumer, advancing the producer only
+        after its ack; returns `(num_chunks, results)`."""
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
@@ -719,6 +739,19 @@ class TestPackedIpcRoundtrip:
             )
 
 
+@pytest.mark.parametrize(
+    "buf",
+    [torch.empty(4, dtype=torch.float32), torch.empty(17, dtype=torch.uint8)],
+    ids=["float32", "unaligned"],
+)
+def test_ipc_consumer_rejects_a_malformed_buffer(monkeypatch, buf):
+    monkeypatch.setattr(packed_tensor, "rebuild_cuda_tensor", lambda *args: buf)
+    with pytest.raises(ValueError, match="must be uint8"):
+        PackedIpcConsumer(0, gpu_uuid="u").receive(
+            {"u": (0,) * 8}, ["w"], [[1]], ["float32"]
+        )
+
+
 # --- Chunk layout ---
 
 
@@ -729,7 +762,7 @@ def _flat(t: torch.Tensor) -> torch.Tensor:
 def _layout_bytes(layout: list[Chunk], tensors: list[torch.Tensor]) -> list[bytes]:
     """Each chunk's bytes when `tensors` are packed with `layout` (CPU)."""
     out = []
-    for nbytes, pieces in layout:
+    for nbytes, pieces, _ in layout:
         buf = torch.zeros(nbytes, dtype=torch.uint8)
         for p in pieces:
             buf[p.offset : p.offset + p.end - p.start] = _flat(tensors[p.position])[
@@ -772,7 +805,7 @@ class TestChunkLayout:
         for b, e in zip(got, expected):
             assert b == e[: len(b)] and len(e) - len(b) < ALIGN
         # a tensor inside one chunk starts aligned, so it views as its dtype
-        for _, pieces in layout:
+        for _, pieces, _ in layout:
             assert all(p.offset % ALIGN == 0 for p in pieces)
 
     def test_a_full_chunk_is_yielded_before_the_next_spec_is_pulled(self):
@@ -786,15 +819,27 @@ class TestChunkLayout:
                 yield spec
 
         layout = chunks(specs(), 32)
-        assert next(layout) == Chunk(28, [Piece(0, 0, 28, 0)])
+        assert next(layout) == Chunk(28, [Piece(0, 0, 28, 0)], full=True)
         assert len(pulled) == 1
-        assert next(layout) == Chunk(8, [Piece(1, 0, 8, 0)])
+        assert next(layout) == Chunk(8, [Piece(1, 0, 8, 0)], full=False)
+
+    def test_specs_fed_per_chunk_give_the_same_layout(self):
+        """As the IPC consumer feeds them; a chunk past the end raises."""
+        specs = [(t.shape, t.dtype) for t in _mixed_tensors()]
+        unpacker = _Unpacker(100, views=False)
+        for chunk in chunks(iter(specs), 100):
+            started = [specs[p.position] for p in chunk.pieces if p.start == 0]
+            unpacker.feed([""] * len(started), started)
+            assert unpacker.next_chunk() == chunk
+        unpacker.feed([""], specs[:1])
+        with pytest.raises(ValueError, match="past the end"):
+            unpacker.next_chunk()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestChunkedRoundtrip:
     def test_roundtrip_with_split_and_odd_sized_tensors(self):
-        """Also parameters requiring grad, split and whole."""
+        """Including parameters requiring grad, split and whole."""
         tensors = [t.cuda() for t in _mixed_tensors(1)]
         tensors.insert(2, torch.nn.Parameter(torch.randn(50, 16, device="cuda")))
         tensors.insert(3, torch.nn.Parameter(torch.randn(5, device="cuda")))

@@ -1822,6 +1822,7 @@ class Worker(WorkerBase):
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
+                self.weight_transfer_engine.abort_weight_update()
                 self._end_weight_update(refresh=False)
                 raise
 
@@ -1852,6 +1853,7 @@ class Worker(WorkerBase):
                 if direct_reload_enabled():
                     # a failed direct finish cannot be retried: end the
                     # session so that a new full update can start
+                    self.weight_transfer_engine.abort_weight_update()
                     self._end_weight_update(refresh=False)
                 raise
             finally:

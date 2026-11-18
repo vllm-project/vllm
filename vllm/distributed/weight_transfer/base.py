@@ -608,6 +608,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
+    def abort_weight_update(self) -> None:
+        """Drop the state of a weight update that failed; must not raise."""
+
     @abstractmethod
     def shutdown(self) -> None:
         """Release transfer resources without shutting down the inference worker."""

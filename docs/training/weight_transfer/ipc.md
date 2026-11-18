@@ -52,12 +52,12 @@ from vllm.distributed.weight_transfer import (
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 engine = WeightTransferTrainerFactory.trainer_init(
-    init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 is the sender
+    init_info=IPCTrainerInitInfo(rank=0, packed=False),   # rank 0 is the sender
     client=HTTPVLLMWeightSyncClient("http://localhost:8000"),
     source=ModuleSource(model),
 )
 
-engine.send_weights()  # once per sync
+engine.send_weights()   # once per sync
 ```
 
 `send_weights()` drives `start_weight_update`, the transfer itself, and
@@ -74,7 +74,7 @@ identical either way.
 | ----- | ------- | ----------- |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `False` | Chunked, bounded-memory transfer (see below) |
-| `packed_buffer_size_bytes` | 1 GiB | Chunk size when `packed=True`, at least 16 bytes |
+| `packed_buffer_size_bytes` | 1 GiB | Chunk size when `packed=True`, rounded down to a multiple of 16 (at least 16 bytes) |
 
 `packed` is a must-agree wire param: `trainer_init` ships it to the worker, which
 records it and decodes accordingly. It is not a `WeightTransferConfig` field and
@@ -91,7 +91,7 @@ GPU memory:
 
 - Weights are laid out as one byte stream, each starting 16-byte aligned, and cut into chunks of `packed_buffer_size_bytes`; a tensor larger than a chunk is split across chunks (the same layout as NCCL packed transfer).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
-- After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
+- One buffer of `packed_buffer_size_bytes` is reused for every chunk of a transfer, bounding its extra GPU memory.
 
 ```python
 engine = WeightTransferTrainerFactory.trainer_init(

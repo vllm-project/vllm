@@ -102,10 +102,8 @@ def send_unpacked(weights: Weights, names: list[str]) -> list[torch.Tensor]:
 
 
 def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tensor]:
-    """One /update_weights call per chunk; the first carries the buffer's
-    {uuid: args} dict, the rest an empty dict.
-
-    Tensors are 16-byte aligned in one byte stream cut at the buffer size."""
+    """One /update_weights call per chunk of the 16-byte aligned byte stream;
+    only the first carries the buffer's handles."""
     cap -= cap % 16  # the server takes the chunk size from the buffer's size
     buffers = {
         u: torch.empty(cap, dtype=torch.uint8, device=w[names[0]].device)

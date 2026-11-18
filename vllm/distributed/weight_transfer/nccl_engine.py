@@ -39,6 +39,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     chunk_capacity,
     chunks,
+    dtype_name,
     fit_buffer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
@@ -142,11 +143,6 @@ def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
     return {m.name: (m.dtype, tuple(m.shape)) for m in metadata}
 
 
-def _dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
-    return str(dtype).split(".")[-1]
-
-
 def _check_manifest(
     manifest: Manifest, sent: Iterable[tuple[str, torch.dtype, Sequence[int]]]
 ) -> None:
@@ -171,7 +167,7 @@ def _check_manifest(
 def _metadata_payload(
     metadata: Iterable[ParamMeta],
 ) -> list[tuple[str, str, list[int]]]:
-    return [(m.name, _dtype_name(m.dtype), list(m.shape)) for m in metadata]
+    return [(m.name, dtype_name(m.dtype), list(m.shape)) for m in metadata]
 
 
 class NCCLWeightTransferEngine(
@@ -589,7 +585,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         else:
             update_info = NCCLWeightTransferUpdateInfo(
                 names=[m.name for m in meta],
-                dtype_names=[_dtype_name(m.dtype) for m in meta],
+                dtype_names=[dtype_name(m.dtype) for m in meta],
                 shapes=[list(m.shape) for m in meta],
                 src=src,
             )
@@ -657,12 +653,11 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             # Nothing is kept: receive every chunk into one reused buffer.
             capacity = chunk_capacity(self.packed_buffer_size_bytes)
             buf: torch.Tensor | None = None
-            for nbytes, _ in chunks(((m.shape, m.dtype) for m in meta), capacity):
-                if not nbytes:  # only empty tensors: not sent
-                    continue
-                buf = fit_buffer(buf, nbytes, capacity, device)
-                # on the current stream
-                self.model_update_group.broadcast(buf[:nbytes], src=src)
+            specs = ((m.shape, m.dtype) for m in meta)
+            for chunk in chunks(specs, self.packed_buffer_size_bytes):
+                if chunk.sent:
+                    buf = fit_buffer(buf, chunk, capacity, device)
+                    self.model_update_group.broadcast(buf[: chunk.nbytes], src=src)
             torch.accelerator.current_stream().synchronize()
         else:
             stream = torch.cuda.current_stream()

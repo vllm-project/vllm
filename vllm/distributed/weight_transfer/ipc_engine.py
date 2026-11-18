@@ -27,8 +27,9 @@ if TYPE_CHECKING:
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedIpcConsumer,
-    _local_rebuild_args,
     chunk_capacity,
+    dtype_name,
+    local_rebuild_args,
     packed_ipc_producer,
 )
 
@@ -172,9 +173,10 @@ class IPCWeightTransferEngine(
         """Finish reloading after all weights have been received."""
         from vllm.model_executor.model_loader.reload import finish_reload
 
-        consumer, self._packed_consumer = self._packed_consumer, None
-        if consumer is not None:
-            consumer.close()  # raises if the transfer was cut short
+        if self._packed_consumer is not None:
+            # raises if the transfer was cut short, again on a retry
+            self._packed_consumer.close()
+            self._packed_consumer = None
         finish_reload(self.model, self.model_config, self.device)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
@@ -210,14 +212,15 @@ class IPCWeightTransferEngine(
             weights = [
                 (
                     name,
-                    rebuild_cuda_tensor(
-                        *_local_rebuild_args(h, gpu_uuid, device_index)
-                    ),
+                    rebuild_cuda_tensor(*local_rebuild_args(h, gpu_uuid, device_index)),
                 )
                 for name, h in zip(update_info.names, update_info.ipc_handles)
             ]
         if weights:
             self.model.load_weights(weights)
+
+    def abort_weight_update(self) -> None:
+        self._packed_consumer = None  # unmaps the trainer's buffer
 
     def shutdown(self) -> None:
         self._packed_consumer = None
@@ -315,20 +318,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         self,
         handles: list[dict[str, tuple]],
     ) -> list[dict[str, tuple]]:
-        """All-gather and merge IPC handle dicts across ranks in one call.
-
-        Each rank contributes a list of {gpu_uuid: ipc_args} dicts (one per
-        parameter, or one for the packed buffer). A single all_gather_object
-        collects every rank's full list, then the sender merges per-index so
-        each dict maps every GPU UUID to its args. Callers make their exported
-        memory ready before the call, so the gather also orders it before the
-        send.
-
-        The all-gather runs over the *default* process group; this assumes the
-        default group is exactly the set of colocated trainer ranks and that the
-        sender is a member. No-op (returns handles unchanged) when no distributed
-        group exists.
-        """
+        """Merge each index's {gpu_uuid: ipc_args} dicts across the trainer
+        ranks (the default group) on the sender; no-op without a group."""
         if (
             not torch.distributed.is_initialized()
             or torch.distributed.get_world_size() == 1
@@ -383,7 +374,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         for name, tensor in source.iter_full():
             # FSDP shards were gathered by the source; ensure contiguity here.
             names.append(name)
-            dtype_names.append(str(tensor.dtype).split(".")[-1])
+            dtype_names.append(dtype_name(tensor.dtype))
             shapes.append(list(tensor.shape))
 
             weight = tensor.detach().contiguous()
@@ -402,12 +393,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         return weight_refs
 
     def _send_packed(self, source: WeightSource) -> None:
-        """Send weights in bounded-memory chunks (packed mode).
-
-        The buffer's handle goes with the first chunk only. Each rank's chunk is
-        written before the send (the handle gather, then a barrier) and is read
-        before any rank refills its buffer (a barrier after the send, since only
-        the sender waits for the workers)."""
+        """Send weights in chunks of one IPC buffer, between barriers so no rank
+        refills its buffer before the workers read it."""
         for chunk in packed_ipc_producer(
             iterator=source.iter_full(),
             gpu_uuid=self.gpu_uuid,

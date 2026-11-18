@@ -42,17 +42,6 @@ def chunk_capacity(buffer_size: int) -> int:
     return capacity
 
 
-def fit_buffer(
-    buf: torch.Tensor | None, nbytes: int, capacity: int, device: torch.device
-) -> torch.Tensor:
-    """`buf`, or a new buffer if it holds fewer than `nbytes`; a full chunk gets
-    `capacity` bytes, so it is reallocated at most once per transfer."""
-    if buf is not None and buf.numel() >= nbytes:
-        return buf
-    size = capacity if nbytes > capacity - ALIGN else nbytes
-    return torch.empty(size, dtype=torch.uint8, device=device)
-
-
 class Piece(NamedTuple):
     """Bytes `[start, end)` of the tensor at `position` in the sent
     sequence, at `offset` in its chunk."""
@@ -70,6 +59,29 @@ def _nbytes(shape: Sequence[int], dtype: torch.dtype) -> int:
 class Chunk(NamedTuple):
     nbytes: int
     pieces: list[Piece]
+    full: bool
+    """At capacity: at most padding fits after its bytes."""
+
+    @property
+    def sent(self) -> bool:
+        """A chunk of only empty tensors has no bytes and is not sent."""
+        return self.nbytes > 0
+
+
+def fit_buffer(
+    buf: torch.Tensor | None, chunk: Chunk, capacity: int, device: torch.device
+) -> torch.Tensor:
+    """`buf`, or a new buffer if it is too small for `chunk`; a full chunk
+    allocates `capacity` bytes, which fits every later chunk."""
+    if buf is not None and buf.numel() >= chunk.nbytes:
+        return buf
+    size = capacity if chunk.full else chunk.nbytes
+    return torch.empty(size, dtype=torch.uint8, device=device)
+
+
+def dtype_name(dtype: torch.dtype) -> str:
+    """The wire name of `dtype`, e.g. "float16" (`getattr(torch, name)`)."""
+    return str(dtype).removeprefix("torch.")
 
 
 def chunks(
@@ -92,12 +104,12 @@ def chunks(
             used += end - start
             start = end
             if round_up(used, ALIGN) == limit:  # full, or only padding fits
-                yield Chunk(used, pieces)
+                yield Chunk(used, pieces, full=True)
                 pieces, used = [], 0
             if start == nbytes:
                 break
     if pieces:
-        yield Chunk(used, pieces)
+        yield Chunk(used, pieces, full=False)
 
 
 def _pack_copies(
@@ -132,10 +144,30 @@ class _Unpacker:
     def __init__(self, buffer_size: int, views: bool) -> None:
         self.names: list[str] = []
         self.specs: list[tuple[Sequence[int], torch.dtype]] = []
-        # A full chunk pulls no spec past it, so specs may arrive per chunk.
-        self.layout = chunks(iter(self.specs), buffer_size)
+        # A full chunk pulls no spec past it, so specs may be fed per chunk.
+        self.layout = chunks(self._fed_specs(), buffer_size)
         self._views = views
         self._partial: dict[int, torch.Tensor] = {}  # split, filled as it arrives
+
+    def feed(
+        self, names: list[str], specs: Iterable[tuple[Sequence[int], torch.dtype]]
+    ) -> None:
+        """Append the tensors that start in the next chunks."""
+        self.names += names
+        self.specs += specs
+
+    def _fed_specs(self) -> Iterator[tuple[Sequence[int], torch.dtype]]:
+        # Ends once every fed spec is pulled, which ends the layout.
+        i = 0
+        while i < len(self.specs):
+            yield self.specs[i]
+            i += 1
+
+    def next_chunk(self) -> Chunk:
+        chunk = next(self.layout, None)
+        if chunk is None:
+            raise ValueError("received a chunk past the end of the packed layout")
+        return chunk
 
     @property
     def incomplete(self) -> bool:
@@ -187,9 +219,9 @@ def packed_nccl_broadcast_producer(
         src: Source rank (0 in current implementation)
         post_iter_func: Function to apply to each (name, tensor) pair before
                        packing, should return a tensor
-        buffer_size_bytes: Chunk size in bytes. Both sides must agree on it and
-                          on `num_buffers`.
-        num_buffers: Number of buffers for double/triple buffering.
+        buffer_size_bytes: Chunk size in bytes; the consumer must use the same.
+        num_buffers: Number of chunks in flight; may differ from the
+                     consumer's.
 
     """
     tensors: dict[int, torch.Tensor] = {}  # each tensor, until all is copied
@@ -205,31 +237,34 @@ def packed_nccl_broadcast_producer(
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
     bufs: list[torch.Tensor | None] = [None] * num_buffers  # sized to the chunks
-    for k, (nbytes, pieces) in enumerate(chunks(specs(), capacity)):
-        slot = k % num_buffers
-        if not nbytes:  # only empty tensors: nothing to send
-            _pack_copies(None, pieces, tensors)
-            continue
-        prev = done[slot]
-        if prev is not None:
-            prev.synchronize()
-        device = tensors[pieces[0].position].device
-        buf = bufs[slot] = fit_buffer(bufs[slot], nbytes, capacity, device)
-        dsts, srcs = _pack_copies(buf, pieces, tensors)
-        # the sources may come from work the caller queued while iterating
-        streams[slot].wait_stream(caller_stream)
-        with torch.cuda.stream(streams[slot]):
-            torch._foreach_copy_(dsts, srcs)
-            # keep dropped sources alive until the copies end
-            for t in srcs:
-                t.record_stream(streams[slot])
-            del dsts, srcs
-            group.broadcast(buf[:nbytes], src=src)
-            event = torch.Event()
-            event.record(streams[slot])
-        done[slot] = event
-    for stream in streams:
-        stream.synchronize()
+    try:
+        for k, chunk in enumerate(chunks(specs(), buffer_size_bytes)):
+            slot = k % num_buffers
+            if not chunk.sent:
+                _pack_copies(None, chunk.pieces, tensors)
+                continue
+            prev = done[slot]
+            if prev is not None:
+                prev.synchronize()
+            device = tensors[chunk.pieces[0].position].device
+            # the sources may come from work the caller queued while iterating
+            streams[slot].wait_stream(caller_stream)
+            with torch.cuda.stream(streams[slot]):
+                buf = bufs[slot] = fit_buffer(bufs[slot], chunk, capacity, device)
+                dsts, srcs = _pack_copies(buf, chunk.pieces, tensors)
+                torch._foreach_copy_(dsts, srcs)
+                # keep dropped sources alive until the copies end
+                for t in srcs:
+                    t.record_stream(streams[slot])
+                del dsts, srcs
+                group.broadcast(buf[: chunk.nbytes], src=src)
+                event = torch.Event()
+                event.record(streams[slot])
+            done[slot] = event
+    finally:
+        # also on failure: the buffers are freed once the queued work ends
+        for stream in streams:
+            stream.synchronize()
 
 
 def packed_nccl_broadcast_consumer(
@@ -243,9 +278,6 @@ def packed_nccl_broadcast_consumer(
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
-    Whole tensors are views of the received buffer; split ones are copied
-    into their own storage.
-
     Args:
         iterator: Iterator of parameter metadata. Returns (name, (shape, dtype))
         group: Process group (PyNcclCommunicator)
@@ -253,14 +285,14 @@ def packed_nccl_broadcast_consumer(
         post_unpack_func: Function to apply to each list of (name, tensor) after
                          unpacking
         buffer_size_bytes: Chunk size in bytes, as on the producer.
-        num_buffers: Number of buffers, as on the producer.
+        num_buffers: Number of chunks in flight; may differ from the
+                     producer's.
         device: Device of the NCCL communicator (the worker's device).
 
     """
     unpacker = _Unpacker(buffer_size_bytes, views=True)
     for name, spec in iterator:
-        unpacker.names.append(name)
-        unpacker.specs.append(spec)
+        unpacker.feed([name], [spec])
     *recv_streams, unpack_stream = _get_streams(
         torch.accelerator.current_device_index(), num_buffers + 1
     )
@@ -270,7 +302,7 @@ def packed_nccl_broadcast_consumer(
     unpack_stream.wait_stream(caller_stream)
     unpacked: list[torch.Event | None] = [None] * num_buffers  # per slot
 
-    for k, (chunk_nbytes, pieces) in enumerate(unpacker.layout):
+    for k, chunk in enumerate(unpacker.layout):
         slot = k % num_buffers
         # Wait for this slot's previous chunk. Not a stream synchronize(): on
         # ROCm, streams can share a hardware queue.
@@ -278,8 +310,8 @@ def packed_nccl_broadcast_consumer(
         if done is not None:
             done.synchronize()
         with torch.cuda.stream(recv_streams[slot]):
-            packed = torch.empty(chunk_nbytes, dtype=torch.uint8, device=device)
-            if chunk_nbytes:  # a chunk of only empty tensors is not sent
+            packed = torch.empty(chunk.nbytes, dtype=torch.uint8, device=device)
+            if chunk.sent:
                 group.broadcast(packed, src=src)
             received = torch.Event()
             received.record()
@@ -288,7 +320,7 @@ def packed_nccl_broadcast_consumer(
         packed.record_stream(caller_stream)
         with torch.cuda.stream(unpack_stream):
             unpack_stream.wait_event(received)
-            out = unpacker.unpack(packed, pieces)
+            out = unpacker.unpack(packed, chunk.pieces)
             for _, t in out:
                 if t._base is None:  # joined from a split, allocated here
                     t.record_stream(caller_stream)
@@ -304,7 +336,7 @@ def packed_nccl_broadcast_consumer(
 # ── IPC packed transfer ────────────────────────────────────────────────
 
 
-def _local_rebuild_args(
+def local_rebuild_args(
     ipc_handle: dict[str, tuple], gpu_uuid: str, device_index: int
 ) -> list:
     """`rebuild_cuda_tensor` args of this GPU's entry, on `device_index`."""
@@ -364,16 +396,16 @@ def packed_ipc_producer(
             started.append((item[0], t))
             yield t.shape, t.dtype
 
-    for _, pieces in chunks(specs(), buffer_size_bytes):
-        dsts, srcs = _pack_copies(buf, pieces, tensors)
-        if dsts:  # else only empty tensors
+    for chunk in chunks(specs(), buffer_size_bytes):
+        dsts, srcs = _pack_copies(buf, chunk.pieces, tensors)
+        if chunk.sent:
             torch._foreach_copy_(dsts, srcs)
         del dsts, srcs
         torch.accelerator.current_stream().synchronize()  # before the consumer reads
         yield PackedIpcChunk(
             names=[name for name, _ in started],
             shapes=[list(t.shape) for _, t in started],
-            dtype_names=[str(t.dtype).removeprefix("torch.") for _, t in started],
+            dtype_names=[dtype_name(t.dtype) for _, t in started],
             ipc_handle=ipc_handle,
         )
         ipc_handle = None
@@ -381,10 +413,10 @@ def packed_ipc_producer(
 
 
 class PackedIpcConsumer:
-    """Receives one packed IPC transfer, a chunk per `receive` call.
+    """Receives packed IPC transfers, a chunk per `receive` call.
 
-    The producer's buffer is mapped at the first chunk and released by
-    `close()`. Tensors are copied out, since the producer reuses the buffer."""
+    A chunk carrying a handle starts a transfer and maps the producer's buffer,
+    which `close()` releases."""
 
     def __init__(self, device_index: int, gpu_uuid: str | None = None) -> None:
         self._device_index = device_index
@@ -401,34 +433,45 @@ class PackedIpcConsumer:
         shapes: list[list[int]],
         dtype_names: list[str],
     ) -> list[tuple[str, torch.Tensor]]:
-        """Unpack the next chunk; returns the tensors it completes.
+        """Unpack the next chunk; returns the tensors it completes, copied out
+        on the current stream. The caller must synchronize it before the
+        producer refills the buffer.
 
         Args:
-            ipc_handle: GPU UUID to `rebuild_cuda_tensor` args; read on the
-                first chunk only.
+            ipc_handle: GPU UUID to `rebuild_cuda_tensor` args; set on the
+                first chunk of a transfer only.
             names: Names of the tensors that start in this chunk
             shapes: Their shapes
-            dtype_names: Their dtype name strings (e.g. "float16")
+            dtype_names: Their dtype names (e.g. "float16")
 
         """
-        if self._buf is None:
-            if not ipc_handle:
-                raise ValueError("the first packed IPC chunk must carry a handle")
-            args = _local_rebuild_args(ipc_handle, self._gpu_uuid, self._device_index)
-            self._buf = rebuild_cuda_tensor(*args)
+        if ipc_handle:
+            if self._unpacker is not None and self._unpacker.incomplete:
+                raise RuntimeError(
+                    "a packed IPC transfer started inside a split tensor of "
+                    "the previous one"
+                )
+            args = local_rebuild_args(ipc_handle, self._gpu_uuid, self._device_index)
+            buf = rebuild_cuda_tensor(*args)
+            if buf.dtype != torch.uint8 or buf.numel() % ALIGN:
+                raise ValueError(
+                    f"the packed IPC buffer must be uint8 with a multiple of "
+                    f"{ALIGN} bytes, got {buf.dtype} with {buf.numel()} elements"
+                )
+            self._buf = buf
             # the producer's buffer is exactly the chunk size
-            self._unpacker = _Unpacker(self._buf.numel(), views=False)
-        assert self._unpacker is not None
-        self._unpacker.names += names
-        for shape, dtype_name in zip(shapes, dtype_names, strict=True):
-            self._unpacker.specs.append((shape, getattr(torch, dtype_name)))
-        chunk = next(self._unpacker.layout, None)
-        if chunk is None:
-            raise ValueError("received a chunk past the end of the packed layout")
-        out = self._unpacker.unpack(self._buf, chunk.pieces)
-        # The producer overwrites the buffer once this call returns.
-        torch.accelerator.current_stream(self._buf.device).synchronize()
-        return out
+            self._unpacker = _Unpacker(buf.numel(), views=False)
+        elif self._buf is None:
+            raise ValueError("the first packed IPC chunk must carry a handle")
+        assert self._unpacker is not None and self._buf is not None
+        self._unpacker.feed(
+            names,
+            [
+                (shape, getattr(torch, name))
+                for shape, name in zip(shapes, dtype_names, strict=True)
+            ],
+        )
+        return self._unpacker.unpack(self._buf, self._unpacker.next_chunk().pieces)
 
     def close(self) -> None:
         """Release the buffer; raises if the transfer stopped inside a tensor."""
