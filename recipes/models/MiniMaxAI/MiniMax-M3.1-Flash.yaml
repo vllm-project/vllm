@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-11-13
+  date_updated: 2026-11-18
   tasks:
     - text
     - multimodal
@@ -1172,14 +1172,14 @@ presets:
     strategy: single_node_tp
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
-    description: "Aggregated TP4 vLLM workers, one per 4-GPU GB200 tray, behind the Dynamo KV router with session affinity. Seven-token DSpark draft on FLASH_ATTN and prefill CUDA graphs up to 8192 tokens. KV stays in HBM, or spills to host DRAM through SimpleCPUOffloadConnector."
-    source: { label: "InferenceX #4632", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4632", key: "minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg", revision: 936213146b79b55e8a11ffbc1d6010145995c6a6 }
-    image:
-      vllm: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134"
-      dynamo: "1.6.0.dev20261023"
-      pip: ["ai-dynamo-runtime==1.6.0.dev20261023", "ai-dynamo==1.6.0.dev20261023"]
+    description: "Aggregated TP4 vLLM workers, one per 4-GPU GB200 tray, behind the Dynamo KV router with session affinity. Seven-token DSpark draft on FLASH_ATTN, NVFP4 KV and prefill CUDA graphs up to 8192 tokens; KV stays in HBM up to 16 sessions per tray and spills to host DRAM through SimpleCPUOffloadConnector at 32-40."
+    source: { label: "InferenceX #5076", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5076", key: "minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg", revision: a6c5adc31e9cdf5af2818c5121de42f74b8c1714 }
+    image: &m31_gb200_dynamo_image
+      vllm: "vllm/vllm-openai:cu135-nightly-60bd6dd2edd175a1c55fd3488f871e4c3d2ef27d@sha256:4c2a5b41718b68d7cd2c8630f878073d2de46f7d5466455d9da7bbf0ebb1e0eb"
+      dynamo: "92b661bdadc8bc168d0f9e0ac80fd41e357c23a7"
     tp: 4
     select:
+      kv_offload: "off"
       features: { text_only: true }
     args:
       - "--enable-prefix-caching"
@@ -1187,7 +1187,14 @@ presets:
       - "1048576"
       - "--max-num-batched-tokens"
       - "32768"
-    env:
+      - "--gpu-memory-utilization"
+      - "0.88"
+      # AgentX requires a stream interval of 20 to 60 tokens; vLLM defaults to 1.
+      - "--stream-interval"
+      - "20"
+      - "--prefill-schedule-interval"
+      - "24"
+    env: &m31_gb200_dynamo_env
       # Pins the prefix-block hashes, so they match across processes and restarts.
       PYTHONHASHSEED: "0"
       # A cold start (JIT builds, graph capture, autotune) takes more than 10 minutes.
@@ -1197,29 +1204,39 @@ presets:
       "--speculative-config": { attention_backend: "FLASH_ATTN" }
     # --max-num-seqs is about twice the sessions a worker serves.
     points:
-      gpu_kv:
-        label: "GPU-resident KV"
-        description: "KV cache in HBM only, for up to about 16 sessions per worker."
-        default: true
-        args: ["--max-num-seqs", "32", "--gpu-memory-utilization", "0.88"]
-        select: { kv_offload: "off" }
-      dram_kv:
-        label: "Host-DRAM KV offload"
-        description: "Adds a host-DRAM KV tier (360 GB per worker) for about 32-40 sessions per worker."
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16"] }
+      c12: { label: "12", concurrency: 12, args: ["--max-num-seqs", "24"] }
+      c16: { label: "16", concurrency: 16, default: true, args: ["--max-num-seqs", "32"] }
+      c32: &m31_gb200_dram_point
+        label: "32 (host-DRAM KV)"
+        concurrency: 32
         args: ["--max-num-seqs", "64", "--gpu-memory-utilization", "0.82", "--kv-cache-metrics"]
         select: { kv_offload: simple }
         json_args:
           "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 360000000000, lazy_offload: true } }
+      c40:
+        <<: *m31_gb200_dram_point
+        label: "40 (host-DRAM KV)"
+        concurrency: 40
     runbook: |
-      The GB200 aggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg`, [SemiAnalysisAI/InferenceX#4632](https://github.com/SemiAnalysisAI/InferenceX/pull/4632)) serves the default checkpoint text-only, with one TP4 `dynamo.vllm` worker per 4-GPU tray behind the Dynamo frontend. Add trays to scale out: the KV router spreads conversations across them. At 16 sessions per tray (GPU-resident KV) the lane measured 29.3k tok/s/GPU at 402 tok/s/user.
+      The stock points of the GB200 aggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg`, [SemiAnalysisAI/InferenceX#5076](https://github.com/SemiAnalysisAI/InferenceX/pull/5076), run [43872879182](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43872879182)) serve the default checkpoint text-only, with one TP4 `dynamo.vllm` worker per 4-GPU tray behind the Dynamo frontend. Add trays to scale out: the KV router spreads conversations across them. Up to 12 sessions per tray, the [specialized decode preset](#preset-gb200_agentx_specialized) is faster.
 
-      **Image and versions.** The lane used an arm64 CUDA 13 build of the `vllm/vllm-openai:minimax-m31-flash` image (tag `minimax-m31-flash-arm64-cu134`); any build of that image family for GB200 will do. Dynamo `1.6.0.dev20261023` was installed on top: `pip install --extra-index-url https://pypi.nvidia.com ai-dynamo-runtime==1.6.0.dev20261023 ai-dynamo==1.6.0.dev20261023`.
+      | Sessions per tray | `--max-num-seqs` | KV | tok/s/GPU | tok/s/user (p50 / p90) | TTFT p90 | E2E latency p90 |
+      |---:|---:|---|---:|---:|---:|---:|
+      | 8 | 16 | HBM | 16.4k | 501 / 406 | 0.4 s | 6.7 s |
+      | 12 | 24 | HBM | 18.4k | 475 / 369 | 0.4 s | 6.5 s |
+      | 16 | 32 | HBM | 29.2k | 441 / 322 | 0.5 s | 6.5 s |
+      | 32 | 64 | + host DRAM | 58.0k | 288 / 171 | 2.5 s | 14.1 s |
+      | 40 | 64 | + host DRAM | 60.4k | 245 / 114 | 4.0 s | 20.4 s |
+
+      **Image and versions.** The public nightly `vllm/vllm-openai:cu135-nightly-60bd6dd2edd175a1c55fd3488f871e4c3d2ef27d` (multi-arch, CUDA 13.5), unpatched. Dynamo is built from source at tag [`v1.6.0-minimax-m3.1-flash-dev.1`](https://github.com/ai-dynamo/dynamo/tree/v1.6.0-minimax-m3.1-flash-dev.1) (`92b661bd`): the `ai-dynamo` 1.6.0 wheels and Dynamo main import `FullAttentionSpec` / `SlidingWindowSpec`, which vLLM main no longer has ([ai-dynamo/dynamo#18841](https://github.com/ai-dynamo/dynamo/issues/18841)). The image's CUDA 13.5 toolkit is newer than Dynamo's `cudarc` crate accepts, so build with `CUDARC_CUDA_VERSION=13030` (cudarc loads `libcuda` at run time).
 
       **Tuning rules.**
 
-      - `--max-num-seqs` is about twice the sessions one worker serves: 32 up to 16 sessions, 64 at 32-40.
-      - **GPU-resident KV** (`--gpu-memory-utilization 0.88`) is enough up to about 16 sessions per tray. Beyond that, multi-turn contexts outgrow HBM and evicted prefixes are recomputed.
-      - **Host-DRAM KV offload** adds `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` is the budget for the whole worker, split across its four ranks: 360 GB pins 90 GB per rank. Size it from the host DRAM that is free after the engine processes are up. Lower `--gpu-memory-utilization` to 0.82 to leave room for the transfer buffers. `--kv-cache-metrics` exports KV residency metrics, which help with that sizing; it can be left out.
+      - `--max-num-seqs` is about twice the sessions one worker serves: 16, 24 and 32 for 8, 12 and 16 sessions, 64 at 32-40.
+      - `--stream-interval 20` sends output in 20-token chunks; AgentX requires 20 to 60, and vLLM's default of 1 sends every token.
+      - `--prefill-schedule-interval 24` admits prefill on one engine step in 24 and lets the other 23 decode alone, which keeps the per-user decode rate up while long agentic prompts arrive.
+      - **Host-DRAM KV offload** (32-40 sessions) adds `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` is the budget for the whole worker, split across its four ranks: 360 GB pins 90 GB per rank. Size it from the host DRAM that is free after the engine processes are up. Lower `--gpu-memory-utilization` to 0.82 to leave room for the transfer buffers. `--kv-cache-metrics` exports KV residency metrics, which help with that sizing; it can be left out.
       - The CUDA graph sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs. `--max-num-batched-tokens 32768` still allows larger mixed steps, which run piecewise.
 
       **Running under Dynamo.** Start etcd and NATS (32 MB max payload) once:
@@ -1249,6 +1266,81 @@ presets:
       The KV router uses the workers' KV events to send each request to the worker that holds its prefix. Session affinity keeps a conversation on that worker for up to four hours; send a stable conversation ID in the `X-Dynamo-Session-ID` request header.
 
       The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
+
+  gb200_agentx_specialized:
+    label: "AgentX TP4 specialized decode (Dynamo)"
+    hardware: gb200
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "The GB200 aggregated Dynamo lane at 1-16 sessions per tray on the latency_specialized decode backend: fused decode kernels for up to 8 requests with the seven-token DSpark draft on FLASHINFER_TS, FP8 KV and indexer K caches, FULL decode CUDA graphs for 8-64 rows; host-DRAM KV offload at 16."
+    source: { label: "InferenceX #5076", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5076", key: "minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg", revision: a6c5adc31e9cdf5af2818c5121de42f74b8c1714 }
+    image: *m31_gb200_dynamo_image
+    tp: 4
+    select:
+      kv_offload: "off"
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      # The backend's request cap.
+      - "--max-num-seqs"
+      - "8"
+      - "--stream-interval"
+      - "20"
+      - "--prefill-schedule-interval"
+      - "24"
+      # The specialized decode reads FP8 KV and indexer K caches; it refuses NVFP4.
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--async-scheduling"
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+    env: *m31_gb200_dynamo_env
+    json_args:
+      "--attention-config": { indexer_kv_dtype: "fp8", use_prefill_query_quantization: null }
+      "--speculative-config": { attention_backend: "FLASHINFER_TS" }
+      # FULL decode graphs at every DSpark step size (1-8 requests x 8 tokens), then
+      # piecewise prefill graphs to 8192 tokens with at most 12.5% padding above 128.
+      "--compilation-config": { cudagraph_mode: "FULL_AND_PIECEWISE", cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192] }
+    points:
+      c1: { label: "1", concurrency: 1, default: true }
+      c4: { label: "4", concurrency: 4 }
+      c8: { label: "8", concurrency: 8 }
+      c12: { label: "12", concurrency: 12 }
+      c16:
+        label: "16 (host-DRAM KV)"
+        concurrency: 16
+        args: ["--kv-cache-metrics"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 640000000000, lazy_offload: true } }
+    runbook: |
+      The specialized points of the GB200 aggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg`, [SemiAnalysisAI/InferenceX#5076](https://github.com/SemiAnalysisAI/InferenceX/pull/5076), run [43872879182](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43872879182)). Workers, frontend, image and Dynamo build are those of the [stock preset](#preset-gb200_agentx_agg); only the engine flags differ.
+
+      | Sessions per tray | KV | tok/s/GPU | tok/s/user (p50 / p90) | TTFT p90 | E2E latency p90 | Stock p90 |
+      |---:|---|---:|---:|---:|---:|---:|
+      | 1 | HBM | 8.0k | 786 / 668 | 0.4 s | 6.9 s | |
+      | 4 | HBM | 10.4k | 809 / 571 | 0.4 s | 5.4 s | |
+      | 8 | HBM | 17.1k | 649 / 461 | 0.4 s | 5.1 s | 406 |
+      | 12 | HBM | 18.7k | 589 / 409 | 0.4 s | 5.6 s | 369 |
+      | 16 | + host DRAM | 29.4k | 511 / 320 | 0.6 s | 6.0 s | 322 |
+
+      **The backend.** `--additional-config '{"decode_backend":"latency_specialized"}'` turns on fused CuTe DSL decode kernels for MiniMax-M3.1-Flash ([vllm-project/vllm#66324](https://github.com/vllm-project/vllm/pull/66324)). They run FULL-graph decode steps of up to 8 requests x 8 rows (DSpark with seven draft tokens); larger steps, prefill and mixed steps run the stock forward. The backend reads FP8 KV and FP8 indexer K caches and refuses NVFP4, so this preset sets both to FP8 and drops `use_prefill_query_quantization`; the FP8 pool holds about 3.8M tokens per tray against about 6.4M for NVFP4. The DSpark draft runs on FLASHINFER_TS, and scheduling is asynchronous.
+
+      **Tuning rules.**
+
+      - `--max-num-seqs 8` at every point: 8 is the backend's request cap, and even at 16 sessions the server ran about 6 requests at once.
+      - The capture list holds every DSpark decode step size (8 to 64 rows) for FULL graphs, then sizes to 8192 tokens spaced so a prefill step pads by at most 12.5% (25% from 64 to 128).
+      - At 16 sessions the FP8 pool runs out: prefixes of waiting sessions are evicted and re-prefilled. A 640 GB `SimpleCPUOffloadConnector` tier (160 GB per rank, about 5.8M FP8 tokens) holds them. With the stock lane's 360 GB tier it still recomputed 20.7M prompt tokens over the hour-long run, against 11.3M on the stock NVFP4 point.
+      - From 16 sessions on, the stock preset matches or beats this one at p90; above 16, use it.
+
+      Requests that need the vision encoder are out of scope: the lane serves text only.
 
   gb200_agentx_pd:
     label: "AgentX PD (Dynamo)"
