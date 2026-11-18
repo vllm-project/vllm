@@ -6,12 +6,14 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 
 import pytest
+import torch
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
@@ -1048,3 +1050,66 @@ def test_zaya_cca_state(
                 name_0="hf",
                 name_1="vllm",
             )
+
+
+@pytest.mark.parametrize(
+    ("mamba_cache_dtype", "mamba_ssm_cache_dtype", "ssm_state_dtype"),
+    [
+        ("auto", "auto", torch.float32),
+        ("auto", "bfloat16", torch.bfloat16),
+        ("float16", "auto", torch.float16),
+    ],
+)
+def test_mamba_ssm_state_dtype(
+    mamba_cache_dtype, mamba_ssm_cache_dtype, ssm_state_dtype
+) -> None:
+    """The ssm state is float32 unless a cache dtype option asks otherwise."""
+    state_dtypes = MambaStateDtypeCalculator.mamba2_state_dtype(
+        torch.bfloat16, mamba_cache_dtype, mamba_ssm_cache_dtype
+    )
+    assert state_dtypes[1] == ssm_state_dtype
+
+
+def test_decode_does_not_drift_from_prefill(vllm_runner) -> None:
+    """Decode must give a token the log-prob prefill gives it, however old the
+    ssm state is, so the gap between the two must not grow along the sequence.
+    Sampled, because greedy output of this length collapses into repetition,
+    which hides a drifting state."""
+    num_tokens, window = 2048, 256
+    sampling_params = SamplingParams(
+        n=8,
+        temperature=1.0,
+        seed=0,
+        max_tokens=num_tokens,
+        min_tokens=num_tokens,
+        logprobs=0,
+    )
+    with vllm_runner(
+        "tiiuae/Falcon-H1-0.5B-Base",
+        max_model_len=num_tokens + 64,
+        max_num_seqs=MAX_NUM_SEQS,
+        # Prefill must recompute the sequence, not resume from a decode state.
+        enable_prefix_caching=False,
+    ) as vllm_model:
+        llm = vllm_model.get_llm()
+        (decoded,) = llm.generate("The history of the Roman aqueducts", sampling_params)
+        prefilled = llm.generate(
+            [
+                {"prompt_token_ids": [*decoded.prompt_token_ids, *out.token_ids]}
+                for out in decoded.outputs
+            ],
+            SamplingParams(max_tokens=1, prompt_logprobs=0),
+        )
+
+    gaps = torch.tensor(
+        [
+            [
+                abs(decode[token].logprob - prefill[token].logprob)
+                for token, decode, prefill in zip(
+                    out.token_ids, out.logprobs, ref.prompt_logprobs[-num_tokens:]
+                )
+            ]
+            for out, ref in zip(decoded.outputs, prefilled)
+        ]
+    )
+    assert gaps[:, -window:].mean() < 2 * gaps[:, :window].mean()

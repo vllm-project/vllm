@@ -307,11 +307,14 @@ class CacheConfig:
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
-    config."""
+    config, except for the ssm state of Mamba layers (see
+    mamba_ssm_cache_dtype)."""
     mamba_ssm_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
-    for the ssm state will be determined by mamba_cache_dtype."""
+    for the ssm state will be determined by mamba_cache_dtype. If that is 'auto'
+    too, Mamba layers use float32: a 16-bit ssm state takes half the memory, but
+    decode then drifts from prefill on long sequences."""
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
 
