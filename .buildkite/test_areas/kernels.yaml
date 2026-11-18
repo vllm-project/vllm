@@ -1336,6 +1336,7 @@ steps:
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
   - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - tests/kernels/attention/test_rocm_aiter_fa_gather_warmup.py
   - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
   - vllm/v1/attention/backends/mla/aiter_triton_mla.py
   - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
@@ -1348,6 +1349,7 @@ steps:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_fa_gather_warmup.py
 
 - label: ":amd: (MI355) Mamba SSM Kernels"
   key: amd-mamba-ssm-kernels-mi355
