@@ -65,7 +65,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return tuple(
             group_id
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
+            if group.prefix_cacheable and group_id not in offloaded
         )
 
     @property
@@ -175,7 +175,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _max_loadable_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> int | None:
-        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+        """How far past `num_computed_tokens` a load may reach, if bounded.
 
         Bounded by the deepest prefix the groups this connector does not
         offload already hold, since nothing refills them beyond it.

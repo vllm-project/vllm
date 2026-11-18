@@ -55,6 +55,20 @@ does not query any secondary tier.
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
 
+## Hybrid attention and recurrent models
+
+With prefix caching enabled and Mamba cache mode `align`, the CPU tier can
+restore retained prompt-tail checkpoints between full-attention block
+boundaries, including with decode context parallelism (DCP). Use
+`blocks_per_chunk: 1` and a `prefix_match_unit` supported by the model's KV
+cache groups. Under DCP, each recurrent block must divide the full-attention
+block, and the hash unit must be divisible by the DCP size.
+
+Partial-tail reuse follows the hit alignment resolved by the core prefix
+cache. EAGLE/MTP groups also require their draft-attention proof tokens to be
+available before a checkpoint can be reused, and are not yet supported with
+DCP.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash
@@ -109,6 +123,8 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
+| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
+| `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
@@ -301,6 +317,19 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters, passed through as strings (booleans become `true`/`false`). Use it for options such as `use_virtual_addressing`, `req_checksum`, `resp_checksum`, `accelerated` and `type`; see the [NIXL OBJ plugin README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md). The connection fields above and `num_threads` cannot be overridden here. |
+
+For example, to enable the accelerated (S3-over-RDMA) object-store engine of a specific vendor:
+
+```json
+{
+  "bucket": "kv",
+  "endpoint_override": "s3.example:9000",
+  "backend_params": {"accelerated": true, "type": "dell"}
+}
+```
+
+`type` selects the vendor-specific accelerated engine registered in the NIXL OBJ plugin; which values are available depends on the installed NIXL release (`dell` is the engine shipped in NIXL 1.5.2). `accelerated` without a `type` initializes an accelerated client that still transfers over plain S3 on that release.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
@@ -320,6 +349,10 @@ Block content hashes must match across instances for peers to exchange blocks (s
 | `unbound_store_timeout_s` | no | `60` | Seconds a producer holds stored blocks for a consumer that has not fetched them yet. Raise it for deployments whose prefills outlast the default; the blocks keep primary-tier CPU slots pinned for the whole window. Once it expires a late fetch is rejected in a single round trip, so the consumer falls back to local prefill immediately. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+Fetches queued while the peer handshake is pending fail locally if the request
+finishes or its load deadline expires. They do not wait for an abort
+acknowledgement, and a delayed handshake cannot send these retired fetches.
 
 A producer parks a request's blocks until the consumer's `FetchMsg` arrives; if none arrives
 within `unbound_store_timeout_s` the blocks are released so they stop pinning primary-tier
@@ -412,7 +445,11 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
-In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+A transfer completion or abort acknowledgement already received when the
+connection closes still settles its load. Disconnect suppresses messages that
+would start new work; it does not discard these buffered terminal confirmations.
+
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so before the initial nonempty fetch is submitted, every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. After that submission, subsequent PD-tier lookups return MISS. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
 
@@ -465,6 +502,32 @@ Example (OpenAI-compatible completions request):
 }
 ```
 
+## Huge pages for `SimpleCPUOffloadConnector`
+
+With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
+`"1GB"` in `kv_connector_extra_config` to back the CPU KV caches with Linux
+HugeTLB pages (Linux 5.14 or newer):
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 137438953472,
+    "cpu_hugepage_block_size": "1GB"
+  }
+}
+```
+
+Reserve enough pages on the host for every rank, rounding each rank's cache
+size up to a whole page. Containers also need a matching hugetlb allowance, for
+example Kubernetes `hugepages-1Gi`. If the pool or the limit is too small,
+startup fails; there is no fallback to ordinary pages.
+
+Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
+requests transparent huge pages. In both cases, the memory follows the worker's
+NUMA policy, for example from `--numa-bind`.
+
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 
 `SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
@@ -500,6 +563,14 @@ For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
 end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
+
+## Core dumps
+
+On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
+KV caches out of core dumps (`MADV_DONTDUMP`). A crashing worker still writes a
+core file, but it no longer grows with `cpu_bytes_to_use`. The exception is the
+single-tier `OffloadingConnector` on platforms other than CUDA and XPU, where
+the CPU tier is a plain pinned tensor.
 
 ## Further Reading
 

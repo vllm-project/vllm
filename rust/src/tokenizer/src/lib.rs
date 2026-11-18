@@ -14,12 +14,14 @@ mod tekken;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 mod tiktoken;
+mod unavailable;
 
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
 pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribution};
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
+pub use unavailable::UnavailableTokenizer;
 
 pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
@@ -31,6 +33,16 @@ pub trait Tokenizer: Send + Sync {
 
     /// Decode one token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
+
+    /// Decode one token ID for per-token metadata, such as logprob token
+    /// strings.
+    ///
+    /// Unlike sequence decoding, this preserves boundary whitespace encoded in
+    /// token pieces when a backend strips it from an isolated token. Special
+    /// tokens keep their spelling.
+    fn decode_token(&self, token_id: u32) -> Result<String> {
+        self.decode(&[token_id], false)
+    }
 
     /// Convert one token string into a token ID, returning `None` if the token
     /// is not in the tokenizer vocabulary.

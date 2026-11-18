@@ -6,14 +6,14 @@ Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_M:  dense GEMM on a cached dequantized copy, when
-      ``KernelConfig.rdna_hybrid_w4a16_prefill_dequant`` is "enable"
+      `KernelConfig.rdna_hybrid_w4a16_prefill_dequant` is "enable"
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
 the triton kernel reinterprets it as int32 [N, K//8] via a view (and
 transposes tiles in-register). No dual weight storage unless
-``rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
+`rdna_hybrid_w4a16_prefill_dequant` caches the dense prefill copy.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -30,11 +30,10 @@ from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -76,28 +75,6 @@ def _on_gfx115x() -> bool:
     return on_gfx115x()
 
 
-def _fits_in_memory_budget(nbytes: int, device: torch.device) -> bool:
-    # Same budget the KV cache is later sized from. Keep room for the
-    # activation peak and for KV of one max_model_len request (the floor the
-    # engine enforces), else startup fails later with a generic KV-cache error.
-    from vllm.v1.core.kv_cache_planning import max_memory_usage_bytes
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
-
-    vllm_config = get_current_vllm_config()
-    util = vllm_config.cache_config.gpu_memory_utilization
-    min_kv_bytes = max_memory_usage_bytes(
-        vllm_config, get_kv_cache_spec(vllm_config).values()
-    )
-    # Peak activation + CUDA graph pool measured on gfx1151 at max_model_len
-    # 4096: 0.85 GiB (Qwen3-4B) to 3.27 GiB (Gemma-4-31B, MTP-3).
-    activation_headroom_bytes = 4 * GiB_bytes
-    snapshot = MemorySnapshot(device=device)
-    reserved = (
-        snapshot.total_memory * (1.0 - util) + activation_headroom_bytes + min_kv_bytes
-    )
-    return snapshot.free_memory - reserved >= nbytes
-
-
 def _profile_scope(name: str) -> AbstractContextManager:
     # record_function is not torch.compile-safe.
     if torch.compiler.is_compiling():
@@ -131,8 +108,8 @@ MIN_DENSE_M = 256
 @triton.jit
 def _int4_pair_to_fp16x2(x):
     """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes,
-    each equal to 1024 + nibble, with one ``v_and_or_b32``
-    (``(x & 0x000F000F) | 0x64006400``).
+    each equal to 1024 + nibble, with one `v_and_or_b32`
+    (`(x & 0x000F000F) | 0x64006400`).
 
     OR-ing a 4-bit nibble into the low mantissa of fp16 1024.0 (0x6400)
     bitcasts to exactly 1024+n. Doing it on a full 32-bit lane dequants two
@@ -157,6 +134,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
     scales_ptr,  # [N, K//G]  fp16/bf16 scales (skinny layout)
     zp_ptr,  # [N//8, K//G]  int32 zero-points (when HAS_ZP=True)
+    scale_zp_carrier_ptr,  # [N, K//G]  int32 fp16 scale/bias carrier
     c_ptr,  # [M, N]  fp16/bf16 output
     # Dimensions
     M,
@@ -172,6 +150,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     ZP_BIAS: tl.constexpr,
     HAS_ZP: tl.constexpr,
     PACKED_DEQUANT: tl.constexpr,
+    HAS_SCALE_ZP_CARRIER: tl.constexpr,
     # Block sizes
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -189,8 +168,12 @@ def _triton_w4a16_skinny_fmt_kernel(
     zero-point at word[n//8] bits 4*(n%8), and dequant is
     (nibble - zp_raw) * scale.
     When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
+    With HAS_SCALE_ZP_CARRIER (asymmetric, PACKED_DEQUANT only), scale and
+    bias_eff = -zp * scale come from one int32 per (n, group) in
+    scale_zp_carrier_ptr instead (see `pack_scale_zp_carrier`), and scales_ptr
+    and zp_ptr are not read.
 
-    With PACKED_DEQUANT the nibble arrives as ``b_raw`` = 1024 + nibble (the
+    With PACKED_DEQUANT the nibble arrives as `b_raw` = 1024 + nibble (the
     magic-constant unpack), so the subtrahend absorbs the 1024: the arithmetic
     is unchanged and every intermediate stays exact, since fp16 represents every
     integer below 2048.
@@ -198,7 +181,8 @@ def _triton_w4a16_skinny_fmt_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    # int64 rows: offs_m * stride_am and offs_m * N pass 2**31 for large M
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # ExLlama unshuffle shifts: shift[j] = (j//2)*4 + (j%2)*16
@@ -254,19 +238,36 @@ def _triton_w4a16_skinny_fmt_kernel(
             b = (b >> shifts_full) & 0xF
 
         group_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * stride_sn + group_idx
         scale_mask = offs_n < N
-        scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
-        if HAS_ZP:
-            zp_ptrs = zp_ptr + (offs_n // 8) * stride_sn + group_idx
-            zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
-            zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
+        if HAS_SCALE_ZP_CARRIER:
+            # low16 = fp16 scale bits; high16 = fp16 bias_eff bits.
+            scale_zp_carrier = tl.load(
+                scale_zp_carrier_ptr + offs_n * num_groups + group_idx,
+                mask=scale_mask,
+                other=0,
+            )
+            scales = (
+                (scale_zp_carrier & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
+            )
+            bias_eff = ((scale_zp_carrier >> 16) & 0xFFFF).to(tl.uint16)
+            bias_eff = bias_eff.to(tl.float16, bitcast=True)
+        else:
+            scale_ptrs = scales_ptr + offs_n * stride_sn + group_idx
+            scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
+
+            if HAS_ZP:
+                zp_ptrs = zp_ptr + (offs_n // 8) * stride_sn + group_idx
+                zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
+                zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
 
         if PACKED_DEQUANT:
             # b_raw is 1024 + nibble, so subtract 1024 along with the zero point.
             c1024 = tl.full((), 1024.0, tl.float16)
-            if HAS_ZP:
+            if HAS_SCALE_ZP_CARRIER:
+                # bias_eff = -zp * scale, so the affine is one v_pk_fma_f16.
+                b_fp = (b_raw - c1024) * scales[:, None] + bias_eff[:, None]
+            elif HAS_ZP:
                 # 1024 + zp is one fp16 per row, not per element.
                 zp_off = (c1024 + zp_raw.to(tl.float16))[:, None]
                 # b_raw - (1024 + zp) == nibble - zp exactly: every value is an
@@ -323,6 +324,7 @@ def _select_skinny_gfx1151_config(
     group_size: int,
     dtype: torch.dtype,
     has_zp: bool = False,
+    has_scale_zp_carrier: bool = False,
 ) -> tuple[int, int, int, int, int | None, bool]:
     """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages,
     packed_dequant) for gfx1151.
@@ -334,10 +336,19 @@ def _select_skinny_gfx1151_config(
     Re-run benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py after edits.
     """
     num_stages: int | None = None
-    # Up to this M the packed fp16 path is slower. Asymmetric weights were
-    # measured to break even at a larger M.
-    min_m = 256 if has_zp else 128
-    if dtype == torch.float16 and min_m < M:
+    if dtype != torch.float16:
+        use_packed_ladder = False
+    elif has_scale_zp_carrier:
+        # Below M = 192 the carrier pays off only for very wide N, where the
+        # scalar ladder also uses BLOCK_M = 128.
+        use_packed_ladder = M > 192 or (M > 128 and N >= 4 * K)
+    elif has_zp:
+        # The zero-point gather breaks even at a larger M.
+        use_packed_ladder = M > 256
+    else:
+        # Up to M = 128 the packed fp16 path is slower.
+        use_packed_ladder = M > 128
+    if use_packed_ladder:
         # Tuned together with these tiles
         num_stages = 1
         packed_dequant = True
@@ -393,6 +404,7 @@ def triton_w4a16_skinny_fmt_gemm(
     group_size: int,
     zp_bias: int = 8,
     zp: torch.Tensor | None = None,  # [N//8, K//G] int32 zero-points
+    scale_zp_carrier: torch.Tensor | None = None,  # [N, K//G] int32 fp16 carrier
 ) -> torch.Tensor:
     """Fused W4A16 GEMM reading from skinny weight format [N, K//8].
 
@@ -405,6 +417,10 @@ def triton_w4a16_skinny_fmt_gemm(
         zp:         Raw per-group zero-points [N//8, K//G] int32, row n at
                     word[n//8] bits 4*(n%8) (asymmetric). When provided,
                     dequant is (nibble - zp_raw) * scale.
+        scale_zp_carrier: fp16 scale/bias carrier from
+                    `pack_scale_zp_carrier` (asymmetric only). Read by the
+                    packed fp16 dequant in place of scales and zp, and lets it
+                    be selected at a smaller M. Ignored otherwise.
 
     Returns:
         Output matrix [M, N], same dtype as a.
@@ -436,6 +452,16 @@ def triton_w4a16_skinny_fmt_gemm(
             f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
         )
     has_zp = zp is not None
+    if scale_zp_carrier is not None:
+        assert has_zp, "scale_zp_carrier is only built for asymmetric layers"
+        assert a.dtype == torch.float16, "scale_zp_carrier is only built for fp16"
+        assert (
+            scale_zp_carrier.dtype == torch.int32 and scale_zp_carrier.is_contiguous()
+        )
+        assert scale_zp_carrier.shape == (N, num_groups), (
+            f"scale_zp_carrier shape mismatch: "
+            f"{scale_zp_carrier.shape} vs ({N}, {num_groups})"
+        )
 
     c = torch.empty((M, N), dtype=a.dtype, device=a.device)
 
@@ -478,7 +504,9 @@ def triton_w4a16_skinny_fmt_gemm(
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
     elif _on_gfx1151():
         BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, packed_dequant = (
-            _select_skinny_gfx1151_config(M, N, K, group_size, a.dtype, has_zp)
+            _select_skinny_gfx1151_config(
+                M, N, K, group_size, a.dtype, has_zp, scale_zp_carrier is not None
+            )
         )
     else:
         num_warps = 4
@@ -502,6 +530,9 @@ def triton_w4a16_skinny_fmt_gemm(
         b_q,
         scales,
         zp if has_zp else scales,  # dummy pointer when no zp (unused)
+        scale_zp_carrier
+        if scale_zp_carrier is not None
+        else scales,  # dummy when unused
         c,
         M,
         N,
@@ -515,6 +546,7 @@ def triton_w4a16_skinny_fmt_gemm(
         ZP_BIAS=zp_bias,
         HAS_ZP=has_zp,
         PACKED_DEQUANT=packed_dequant,
+        HAS_SCALE_ZP_CARRIER=packed_dequant and scale_zp_carrier is not None,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
@@ -559,7 +591,7 @@ _STRIDE_PAD_BYTES = 128  # one cache line
 def _weight_pad_bytes(row_bytes: int) -> int:
     """Bytes to add to a packed weight row stride to move it off the cliff.
 
-    Only strides that are a multiple of ``_WEIGHT_CLIFF_BYTES`` are moved, and
+    Only strides that are a multiple of `_WEIGHT_CLIFF_BYTES` are moved, and
     only by one cache line; padding a stride that is already off the cliff
     costs memory and measures slower.
     """
@@ -579,7 +611,7 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
 
     ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
-    the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
+    the row stride is nudged off the cliff (see `_weight_pad_bytes`).
     """
     shuffled = pack_int4_exllama_shuffle(unpacked)
     n_rows, k8 = shuffled.shape
@@ -605,8 +637,8 @@ def dequantize_w4a16(
 ) -> torch.Tensor:
     """Dequantize [N, K] int32 uint4 values (natural K order) to [N, K] dtype.
 
-    ``scales`` and ``zp`` are [N, K//G]; without ``zp`` the constant
-    ``zp_bias`` is subtracted.
+    `scales` and `zp` are [N, K//G]; without `zp` the constant
+    `zp_bias` is subtracted.
     """
     N_dim, K_dim = unpacked.shape
     w = unpacked.view(N_dim, K_dim // group_size, group_size).to(dtype)
@@ -616,13 +648,41 @@ def dequantize_w4a16(
     return w.view(N_dim, K_dim)
 
 
+def pack_scale_zp_carrier(scales: torch.Tensor, zp: torch.Tensor) -> torch.Tensor:
+    """Fold fp16 per-group scales and packed zero-points into one int32 each.
+
+    Lets the packed fp16 Triton prefill dequant replace its scale and
+    zero-point loads with one. The low 16 bits hold the scale and the high 16
+    bits `bias_eff = -zp * scale`, so dequant is a single FMA on the
+    magic-constant unpack.
+
+    Args:
+        scales: [N, K//G] fp16 per-group scales.
+        zp: [N//8, K//G] int32 zero-points, row n at word[n//8] bits 4*(n%8).
+
+    Returns:
+        [N, K//G] int32 carrier.
+
+    """
+    assert scales.dtype == torch.float16, "the carrier is fp16 only"
+    n_rows, num_groups = scales.shape
+    shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=zp.device)
+    zp_raw = ((zp[:, None, :] >> shifts[None, :, None]) & 0xF).reshape(
+        n_rows, num_groups
+    )
+    bias_eff = -(zp_raw.to(torch.float32) * scales.to(torch.float32))
+    hi = bias_eff.to(torch.float16).view(torch.int16).to(torch.int32)
+    lo = scales.contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
+    return ((hi << 16) | lo).contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
 
 
 def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
-    """Copy ``x_2d`` into a row-padded buffer when its row stride is on the cliff.
+    """Copy `x_2d` into a row-padded buffer when its row stride is on the cliff.
 
     The packed weight is padded once at load time, but activations are produced
     fresh every step, so this materialises a padded copy.
@@ -650,11 +710,14 @@ def _rdna_hybrid_w4a16_apply_impl(
     cu_count: int,
     group_size: int,
     w_dequant: torch.Tensor | None = None,
+    w_scale_zp_carrier: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM and Triton based on batch size M.
 
-    ``w_zp`` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
-    ``w_dequant`` is the optional dense [N, K] copy used for prefill.
+    `w_zp` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
+    `w_dequant` is the optional dense [N, K] copy used for prefill.
+    `w_scale_zp_carrier` is the optional `pack_scale_zp_carrier` output for
+    the packed fp16 Triton path.
     """
     import vllm._custom_ops as ops
 
@@ -679,6 +742,7 @@ def _rdna_hybrid_w4a16_apply_impl(
             scales=w_s,
             group_size=group_size,
             zp=w_zp,
+            scale_zp_carrier=w_scale_zp_carrier,
         )
         if bias is not None:
             output.add_(bias)
@@ -694,6 +758,7 @@ def _rdna_hybrid_w4a16_apply_fake(
     cu_count: int,
     group_size: int,
     w_dequant: torch.Tensor | None = None,
+    w_scale_zp_carrier: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M = x_2d.size(0)
     N = w_q.size(0)
@@ -714,7 +779,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
-    storage unless ``rdna_hybrid_w4a16_prefill_dequant`` caches a dense prefill
+    storage unless `rdna_hybrid_w4a16_prefill_dequant` caches a dense prefill
     copy.
     """
 
@@ -741,8 +806,10 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type {c.weight_type} not supported; "
-                f"supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type {c.weight_type} not supported; "
+                    f"supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.act_type not in (torch.float16, torch.bfloat16):
@@ -775,19 +842,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         w_zp: torch.Tensor | None,
     ) -> None:
         c = self.config
-        N, K = unpacked.shape
-        nbytes = N * K * c.act_type.itemsize
-        # All-or-nothing: the compile cache key does not record which layers
-        # hold a copy, so a partial cache can crash or silently skip copies.
-        if not _fits_in_memory_budget(nbytes, unpacked.device):
-            raise ValueError(
-                "Not enough room in the gpu_memory_utilization budget to cache "
-                "a dequantized W4A16 prefill weight "
-                "(kernel_config.rdna_hybrid_w4a16_prefill_dequant) while "
-                "keeping KV cache for one max_model_len request. Increase "
-                "`gpu_memory_utilization`, lower `max_model_len`, or disable it."
-            )
-
         logger.info_once(
             "Caching dense %s copies of W4A16 weights for prefill "
             "(kernel_config.rdna_hybrid_w4a16_prefill_dequant). Each copy "
@@ -857,6 +911,23 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
                 layer, unpacked, w_s.data, w_zp.data if w_zp is not None else None
             )
 
+        # Only the packed fp16 dequant, gfx1151-only, reads the carrier. At g32
+        # it is no faster than the zero-point gather from M = 257 and costs 25%
+        # of the weight bytes.
+        w_s = getattr(layer, self.w_s_name).data
+        if (
+            c.zero_points
+            and c.group_size >= 64
+            and w_s.dtype == torch.float16
+            and _on_gfx1151()
+        ):
+            assert self.w_zp_name is not None
+            replace_parameter(
+                layer,
+                "_hybrid_w_scale_zp_carrier",
+                pack_scale_zp_carrier(w_s, getattr(layer, self.w_zp_name).data),
+            )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -882,5 +953,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             cu_count,
             c.group_size,
             getattr(layer, self.DEQUANT_WEIGHT_NAME, None),
+            getattr(layer, "_hybrid_w_scale_zp_carrier", None),
         )
         return output.reshape(out_shape)

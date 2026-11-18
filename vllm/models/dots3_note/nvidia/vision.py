@@ -13,6 +13,7 @@ from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .vision_attention import (
     VisionRMSNorm,
@@ -230,9 +231,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
-            return
-
+        # Reruns after every reload: rebuild the fused FP8 experts from the
+        # checkpoint experts, refilling the fused buffers in place.
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -246,27 +246,18 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        self.register_buffer(
-            "_fused_w13_fp8",
-            torch.stack(w13_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w13_scale",
-            torch.stack(w13_scales).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_fp8",
-            torch.stack(w2_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_scale",
-            torch.stack(w2_scales).contiguous(),
-            persistent=False,
-        )
-        del self.experts
+        # The checkpoint experts stay registered: a reload writes into them.
+        for name, parts in (
+            ("_fused_w13_fp8", w13_weights),
+            ("_fused_w13_scale", w13_scales),
+            ("_fused_w2_fp8", w2_weights),
+            ("_fused_w2_scale", w2_scales),
+        ):
+            fused = torch.stack(parts).contiguous()
+            if name in self._buffers:
+                self._buffers[name].copy_(fused)
+            else:
+                self.register_buffer(name, fused, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -405,8 +396,8 @@ def _pixel_shuffle(x, scale_factor=0.5):
 class PixelShuffleAdapter(nn.Module):
     """Legacy adapter: NHWC pixel-shuffle spatial merge + LayerNorm + 2-layer MLP.
 
-    Mirrors ``cybertron`` ``FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')``.
-    State-dict keys: ``proj.0`` (LayerNorm of in_dim*merge**2), ``proj.1`` / ``proj.3`` (Linear).
+    Mirrors `cybertron` `FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')`.
+    State-dict keys: `proj.0` (LayerNorm of in_dim*merge**2), `proj.1` / `proj.3` (Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -448,12 +439,12 @@ class PixelShuffleAdapter(nn.Module):
 
 
 class PatchMergerAdapter(nn.Module):
-    """Cybertron ``PatchMerger`` (``pool_kind='patch_merger', proj_kind='identity'``).
+    """Cybertron `PatchMerger` (`pool_kind='patch_merger', proj_kind='identity'`).
 
-    Assumes the encoder output is already laid out in ``merge_size``x``merge_size`` groups
-    (qwen ``pre_pixel_shuffle`` preprocessor + RoPE grouped accordingly), so merging is a
-    simple ``view(-1, merge**2 * in_dim)`` of consecutive tokens. State-dict layout matches
-    cybertron's ``PatchMerger`` (``ln_q`` over the per-token dim, ``mlp.0`` / ``mlp.2`` Linear).
+    Assumes the encoder output is already laid out in `merge_size`x`merge_size` groups
+    (qwen `pre_pixel_shuffle` preprocessor + RoPE grouped accordingly), so merging is a
+    simple `view(-1, merge**2 * in_dim)` of consecutive tokens. State-dict layout matches
+    cybertron's `PatchMerger` (`ln_q` over the per-token dim, `mlp.0` / `mlp.2` Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -488,7 +479,7 @@ _ADAPTER_CLASSES: dict[str, type[nn.Module]] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VitForwardMeta:
     cu_seqlens: torch.Tensor
     max_seqlen: int
@@ -547,9 +538,6 @@ class DotsMoEVitModel(PreTrainedModel):
         return self.patch_embed.proj.weight.device
 
     def process_weights_after_loading(self) -> None:
-        for block in self.blocks:
-            if isinstance(block.mlp, MoESwiGLUFFNFP8):
-                block.mlp.process_weights_after_loading()
         if self.config.enable_torch_compile:
             self.compile_block_modules()
 
@@ -597,7 +585,9 @@ class DotsMoEVitModel(PreTrainedModel):
 
     def rot_pos_emb(self, grid_thw_cpu: torch.Tensor):
         pos_ids = torch.cat(self.get_pos_ids_by_grid(grid_thw_cpu), dim=0)
-        pos_ids = pos_ids.to(self.device, non_blocking=True)
+        # pos_ids is built on the host; stage it through pinned memory so the
+        # H2D copy stays asynchronous instead of stalling every vision step.
+        pos_ids = async_tensor_h2d(pos_ids, device=self.device)
         max_grid_size = int(grid_thw_cpu[:, 1:].max())
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
         return rotary_pos_emb_full[pos_ids].flatten(1)
@@ -615,7 +605,7 @@ class DotsMoEVitModel(PreTrainedModel):
             self.config.attn_implementation, eager_fallback="eager_v2"
         )
         return VitForwardMeta(
-            cu_seqlens=cu_seqlens_cpu.to(self.device, non_blocking=True),
+            cu_seqlens=async_tensor_h2d(cu_seqlens_cpu, device=self.device),
             max_seqlen=int(seq_per_frame.max()),
             rotary_pos_emb=prepare_rotary_pos_emb_vision(
                 self.rot_pos_emb(grid_thw_cpu)

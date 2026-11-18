@@ -12,13 +12,16 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
+    LinearKernel,
+    LinearKernelOracle,
     MMLinearKernel,
     MMLinearLayerConfig,
 )
@@ -109,6 +112,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
@@ -164,6 +170,7 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferTrtllmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.humming import (
+    HummingHadamardNvFp4LinearKernel,
     HummingNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
@@ -171,6 +178,14 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.pytorch import (
     TorchNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.requantization_source import (
+    FakeFp8LinearKernel,
+    FakeInt8LinearKernel,
+    FakeMxFp4LinearKernel,
+    FakeMxFp6LinearKernel,
+    FakeMxFp8LinearKernel,
+    FakeNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
@@ -186,6 +201,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterTritonPerTensorFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
@@ -246,7 +262,15 @@ from vllm.model_executor.layers.quantization.utils.humming import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    check_activation_quant_fallback,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -283,7 +307,7 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
 
 
 # Kernel classes covered by each --linear-backend value.
-_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
+_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     "b12x": {
         B12xFp8BlockScaledMMKernel,
         B12xMxFp4LinearKernel,
@@ -360,6 +384,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
     },
     "machete": {
@@ -469,6 +494,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterTritonPerTensorFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -577,6 +603,11 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes
+        # AITER has tuned, the rest fall through to the next kernel. Kept out
+        # of the "aiter" --linear-backend set, which would leave those shapes
+        # without a kernel.
+        AiterFlyDSLMxfp8LinearKernel,
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
         RocmDotScaledMxfp8LinearKernel,
@@ -641,10 +672,74 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
 }
 
-# TODO make all kernels inherit from MMLinearKernel
-# then bound _KernelT only to MMLinearKernel
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
+
+
+def _check_activation_fallback(
+    kernel: type[LinearKernel], activation_quant_key: QuantKey | None
+) -> str | None:
+    return check_activation_quant_fallback(
+        kernel.__name__,
+        activation_quant_key,
+        kernel.executed_activation_key(activation_quant_key),
+    )
+
+
+def _quant_scheme_check(
+    weight_key: QuantKey, activation_key: QuantKey | None
+) -> Callable[[type[MxFp4LinearKernel | Mxfp8LinearKernel]], str | None]:
+    def check(kernel_cls: type[MxFp4LinearKernel | Mxfp8LinearKernel]) -> str | None:
+        if kernel_cls._supports_quant_scheme(weight_key, activation_key):
+            return None
+        return f"quantization scheme {weight_key}x{activation_key} not supported"
+
+    return check
+
+
+def _first_usable_kernel(
+    kernels: list[type[_LinearKernelT]],
+    config: Any,
+    activation_quant_key: QuantKey | None,
+    extra_check: Callable[[type[_LinearKernelT]], str | None] | None = None,
+) -> tuple[type[_LinearKernelT] | None, list[str]]:
+    """The first kernel in priority order that is enabled, supported, implements
+    `config` and may run `activation_quant_key`, plus why earlier ones were skipped."""
+    failure_reasons = []
+    for kernel_cls in kernels:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if extra_check is not None and (reason := extra_check(kernel_cls)):
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
+            failure_reasons.append(reason)
+            continue
+
+        return kernel_cls, failure_reasons
+    return None, failure_reasons
+
+
+def _int8_activation_quant_key(config: Int8ScaledMMLinearLayerConfig) -> QuantKey:
+    if config.is_static_input_scheme:
+        return kInt8StaticTensorSym if config.input_symmetric else kInt8StaticTensorAsym
+    return kInt8DynamicTokenSym if config.input_symmetric else kInt8DynamicTokenAsym
 
 
 def is_supported_and_can_implement_kernel(
@@ -679,6 +774,7 @@ def choose_scaled_mm_linear_kernel(
     force_kernel: type[_KernelT] | None = None,
     *,
     quantization: str,
+    activation_quant_key: QuantKey | None = None,
 ) -> type[_KernelT]:
     """Choose a _KernelT that can implement the given config for the
     given compute capability. Attempts to choose the best kernel in terms of
@@ -696,6 +792,7 @@ def choose_scaled_mm_linear_kernel(
             the possible_kernels if it can be implemented. If None, it will only try the
             possible kernels.
         quantization: Quantization scheme used to select a backend override.
+        activation_quant_key: Activation quantization the layer requests.
 
     Raises:
         ValueError: If no kernel can implement the given config.
@@ -711,11 +808,16 @@ def choose_scaled_mm_linear_kernel(
             force_kernel, config, compute_capability
         )
         if can_implement:
-            return force_kernel
+            failure_reason = (
+                _check_activation_fallback(force_kernel, activation_quant_key) or ""
+            )
+            if not failure_reason:
+                return force_kernel
 
         logger.info_once(
-            "Tried to force %s, but the kernel couldn't be implemented",
+            "Tried to force %s, but the kernel couldn't be implemented: %s",
             force_kernel.__name__,
+            failure_reason,
             scope="global",
         )
 
@@ -734,7 +836,10 @@ def choose_scaled_mm_linear_kernel(
             is_supported_and_can_implement_kernel(kernel, config, compute_capability)
         )
         if is_supported_and_can_implement:
-            return kernel
+            fallback_reason = _check_activation_fallback(kernel, activation_quant_key)
+            if fallback_reason is None:
+                return kernel
+            failure_reason = fallback_reason
         failure_reason_list.append(failure_reason)
 
     raise ValueError(
@@ -752,6 +857,10 @@ def init_fp8_linear_kernel(
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeFp8LinearKernel()
+
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -773,9 +882,10 @@ def init_fp8_linear_kernel(
             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
             quantization="fp8_block_w8a8",
             force_kernel=force_kernel,
+            activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -812,9 +922,10 @@ def init_fp8_linear_kernel(
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
             quantization="fp8_w8a8",
             force_kernel=force_kernel,
+            activation_quant_key=activation_quant_key,
         )
         if module_name:
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 kernel_type.__name__,
                 module_name,
@@ -855,6 +966,10 @@ def init_int8_linear_kernel(
     module_name: str,
     is_fused_module: bool = False,
 ) -> Int8ScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeInt8LinearKernel()
+
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
@@ -866,9 +981,10 @@ def init_int8_linear_kernel(
         config,
         _POSSIBLE_INT8_KERNELS,
         quantization="int8_w8a8",
+        activation_quant_key=_int8_activation_quant_key(config),
     )
 
-    logger.info_once(
+    logger.debug_once(
         "Selected %s for %s",
         kernel_type.__name__,
         module_name,
@@ -908,6 +1024,10 @@ def choose_mp_linear_kernel(
         type[MPLinearKernel]: Chosen kernel.
 
     """
+    # NOTE: not skipped for requantization sources (unlike the `init_*` selectors):
+    # this returns a kernel class that callers use (`__name__`) and instantiate, so
+    # a placeholder would be required, while no scheme using it implements
+    # `dequantize_weight` and can be a requantization source yet.
     if compute_capability is None:
         if current_platform is None:
             raise ValueError("Cannot determine compute capability")
@@ -932,20 +1052,14 @@ def choose_mp_linear_kernel(
                 f" {kernel.__name__} disabled by environment variable"
             )
             continue
-        if (
-            compute_capability is not None
-            and kernel.get_min_capability() > compute_capability
-        ):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute "
-                f" capability is {compute_capability}"
-            )
+        is_supported, failure_reason = kernel.is_supported(compute_capability)
+        if not is_supported:
+            failure_reasons.append(f"{kernel.__name__} {failure_reason}")
             continue
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
-            logger.info_once("Using %s for mixed-precision linear", kernel.__name__)
+            logger.debug_once("Using %s for mixed-precision linear", kernel.__name__)
             return kernel
         else:
             failure_reasons.append(
@@ -959,13 +1073,27 @@ def choose_mp_linear_kernel(
 
 
 def init_mxfp8_linear_kernel(
-    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
+    *,
+    weight_shape: tuple[int, int],
+    bmm_batch_size: int | None = None,
+    activation_quant_key: QuantKey | None = kMxfp8Dynamic,
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform and `(N, K)` weight shape."""
+    current platform and `(N, K)` weight shape.
+
+    Omitted activation keys preserve the existing W8A8 selection and A16
+    fallback. Explicit None requests weight-only execution.
+    Returns a placeholder for requantization sources, which have no kernel.
+    """
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp8LinearKernel()
+
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,
+        activation_quant_key=activation_quant_key,
     )
 
     platform = current_platform._enum
@@ -979,6 +1107,14 @@ def init_mxfp8_linear_kernel(
     else:
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and platform is PlatformEnum.CUDA
+        and bmm_batch_size is None
+    ):
+        possible = prioritize_humming(possible)
+        possible = [k for k in possible if k.supports_batch_invariance()]
+
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
         possible,
@@ -986,25 +1122,14 @@ def init_mxfp8_linear_kernel(
         quantization="mxfp8",
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible,
+        config,
+        activation_quant_key,
+        _quant_scheme_check(kMxfp8Static, activation_quant_key),
+    )
+    if kernel_cls is not None:
+        logger.debug_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1016,25 +1141,30 @@ def init_mxfp8_linear_kernel(
 def _user_linear_activation_override() -> QuantKey | None:
     """User's linear activation override from quantization_config, or None."""
     from vllm.config import get_current_vllm_config_or_none
-    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.config.quantization import user_activation_override
 
-    config = get_current_vllm_config_or_none()
-    if config is None or config.model_config is None:
-        return None
-    args = config.model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.linear is None:
-        return None
-    return args.linear.activation
+    return user_activation_override("linear", get_current_vllm_config_or_none())[0]
+
+
+def _user_linear_activation_override_is_set() -> bool:
+    """Whether the user set the linear activation, explicit `null` included."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.config.quantization import user_activation_override
+
+    return user_activation_override("linear", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_linear_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply ``--quantization-config.linear.activation`` to the checkpoint's
+    """Apply `--quantization-config.linear.activation` to the checkpoint's
     activation key. The override wins: it may replace a checkpoint's MXFP4
-    activations with a format a kernel computes directly (e.g. int8)."""
+    activations with a format a kernel computes directly (e.g. int8), or with
+    `null` to run the layer weight-only."""
     user_override = _user_linear_activation_override()
-    if user_override is None or user_override == model_activation_key:
+    if (
+        user_override is None and not _user_linear_activation_override_is_set()
+    ) or user_override == model_activation_key:
         return model_activation_key
     if model_activation_key is not None:
         logger.warning_once(
@@ -1050,7 +1180,13 @@ def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
-    current platform."""
+    current platform.
+
+    Returns a placeholder for requantization sources, which have no kernel."""
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp4LinearKernel()
+
     activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
@@ -1066,32 +1202,14 @@ def init_mxfp4_linear_kernel(
         quantization="mxfp4",
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if not kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
-            failure_reasons.append(
-                f"{kernel_cls.__name__}: quantization scheme "
-                f"{kMxfp4Static}x{activation_quant_key} not supported"
-            )
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible,
+        config,
+        activation_quant_key,
+        _quant_scheme_check(kMxfp4Static, activation_quant_key),
+    )
+    if kernel_cls is not None:
+        logger.debug_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1105,7 +1223,13 @@ def init_mxfp6_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
-    current platform."""
+    current platform.
+
+    Returns a placeholder for requantization sources, which have no kernel."""
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeMxFp6LinearKernel()
+
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1126,25 +1250,11 @@ def init_mxfp6_linear_kernel(
             )
         possible = filtered
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        logger.info_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, activation_quant_key
+    )
+    if kernel_cls is not None:
+        logger.debug_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1162,6 +1272,10 @@ def init_wfp8_a16_linear_kernel(
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeFp8LinearKernel()
+
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1178,7 +1292,7 @@ def init_wfp8_a16_linear_kernel(
     )
 
     if module_name:
-        logger.info_once(
+        logger.debug_once(
             "Selected %s for %s",
             kernel_type.__name__,
             module_name,
@@ -1191,10 +1305,27 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
-def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(
+    use_a16: bool = False, act_dtype: torch.dtype | None = None
+) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
-    config = NvFp4LinearLayerConfig()
+    current platform.
+
+    Args:
+        use_a16: Weight-only (W4A16) instead of W4A4.
+        act_dtype: Activation dtype of a W4A16 layer, so that BF16-only
+            kernels are skipped for FP16 models. None if unknown.
+
+    Returns:
+        The kernel, or a placeholder for requantization sources, which have
+        no kernel.
+
+    """
+    # TODO: migrate to oracle base method.
+    if LinearKernelOracle.maybe_skip_for_requantization_source():
+        return FakeNvFp4LinearKernel()
+
+    config = NvFp4LinearLayerConfig(act_dtype=act_dtype)
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1202,49 +1333,34 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         HummingNvFp4LinearKernel,
     )
 
-    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
-    # batch-invariant CUTLASS implementation when available, otherwise fall
-    # back to emulation. It overrides --linear-backend.
+    # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
+    # otherwise CUTLASS, or emulation where CUTLASS is unsupported. It
+    # overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
-    if envs.VLLM_BATCH_INVARIANT and use_a16:
-        if linear_backend not in ("auto", "humming"):
-            logger.warning_once(
-                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
-                "Humming backend for deterministic W4A16 execution.",
-                linear_backend,
-            )
-        force_kernel = HummingNvFp4LinearKernel
-    elif envs.VLLM_BATCH_INVARIANT:
-        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
-        if bi_supported:
-            if linear_backend not in ("auto", "cutlass"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the CUTLASS backend for deterministic execution.",
-                    linear_backend,
-                )
+    if envs.VLLM_BATCH_INVARIANT:
+        if use_a16:
+            force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        else:
+            cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+            if cutlass_supported:
+                force_kernel, bi_backend = CutlassNvFp4LinearKernel, "cutlass"
             else:
                 logger.info_once(
-                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                    "CUTLASS backend for deterministic execution."
+                    "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                    "kernel is not supported on this platform; falling back to "
+                    "emulation for deterministic execution. Reason: %s",
+                    reason,
                 )
-            force_kernel = CutlassNvFp4LinearKernel
-        else:
-            if linear_backend not in ("auto", "emulation"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the emulation backend for deterministic execution.",
-                    linear_backend,
-                )
-            logger.info_once(
-                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
-                "kernel is not supported on this platform; falling back to "
-                "emulation for deterministic execution. Reason: %s",
-                reason,
+                force_kernel, bi_backend = EmulationNvFp4LinearKernel, "emulation"
+        if linear_backend not in ("auto", bi_backend):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "%s backend for deterministic execution.",
+                linear_backend,
+                bi_backend,
             )
-            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
@@ -1252,6 +1368,10 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         # Humming then Marlin where Humming is preferred, and Marlin elsewhere.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
+        )
+        cutedsl_ok = (
+            cutedsl_ok
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.can_implement(config)[0]
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
@@ -1262,12 +1382,14 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         if use_a16 and force_kernel not in a16_kernels:
             raise ValueError(f"{force_kernel.__name__} does not support W4A16")
         is_supported, reason = force_kernel.is_supported()
+        if is_supported:
+            is_supported, reason = force_kernel.can_implement(config)
         if not is_supported:
             raise ValueError(
                 f"Forced NVFP4 kernel {force_kernel.__name__} is not "
                 f"supported: {reason}"
             )
-        logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
         return force_kernel(config)
 
     # Auto-select from registry (or --linear-backend filtered).
@@ -1283,24 +1405,10 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         quantization=quantization,
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, None if use_a16 else kNvfp4Dynamic
+    )
+    if kernel_cls is not None:
         if kernel_cls is EmulationNvFp4LinearKernel and failure_reasons:
             logger.warning_once(
                 "NVFP4 linear falling back to the slow and unoptimized "
@@ -1311,7 +1419,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 "\n - ".join(failure_reasons),
             )
 
-        logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
+        logger.debug_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
     raise ValueError(
@@ -1374,6 +1482,8 @@ def register_linear_kernel(
 
 
 __all__ = [
+    "LinearKernel",
+    "HummingHadamardNvFp4LinearKernel",
     "fp8_scaled_mm_is_batch_invariant",
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
@@ -1390,6 +1500,7 @@ __all__ = [
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
+    "AiterTritonPerTensorFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",

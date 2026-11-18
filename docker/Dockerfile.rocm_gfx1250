@@ -605,11 +605,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /tmp/rocm-test-reqs.txt | head -1)" \
-    && test -n "${FASTSAFETENSORS_REQ}" \
-    && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}" \
-    && rm /tmp/rocm-test-reqs.txt
+    awk '/^fastsafetensors(==| @ )/ {keep=1} \
+         keep {print; if ($0 !~ /\\$/) exit}' \
+        /tmp/rocm-test-reqs.txt > /tmp/fastsafetensors-req.txt \
+    && test -s /tmp/fastsafetensors-req.txt \
+    && python3 -m pip install --force-reinstall --no-deps --require-hashes \
+        --no-binary fastsafetensors -r /tmp/fastsafetensors-req.txt \
+    && rm /tmp/rocm-test-reqs.txt /tmp/fastsafetensors-req.txt
 
 # Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel.
 # See: https://github.com/pytorch/pytorch/issues/169857
