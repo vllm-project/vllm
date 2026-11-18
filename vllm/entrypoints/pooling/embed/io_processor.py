@@ -33,7 +33,7 @@ from ..token_embed.late_chunking import (
     build_late_chunking_metadata,
     prepare_late_chunking_input,
 )
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     ChunkedEmbeddingMetadata,
@@ -62,7 +62,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ChunkedPromptAggregator:
     weighted_sum: torch.Tensor | None = None
     total_weight: int = 0

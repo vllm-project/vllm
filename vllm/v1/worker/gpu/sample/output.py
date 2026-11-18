@@ -13,7 +13,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
