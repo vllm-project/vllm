@@ -5,7 +5,6 @@
 import ctypes
 import mmap
 import os
-import platform
 import weakref
 from types import SimpleNamespace
 
@@ -13,48 +12,31 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.host_memory import pin_tensor
 from vllm.utils.math_utils import round_up
+from vllm.utils.numa_utils import get_libnuma
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
-_MPOL_PREFERRED = 1
 
-
-def gpu_numa_node(device: int | None = None) -> int:
-    """The host NUMA node nearest a GPU (current by default), or -1."""
-    from cuda.bindings import driver as cu
-
-    if device is None:
-        device = torch.accelerator.current_device_index()
-    error, node = cu.cuDeviceGetAttribute(
-        cu.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device
-    )
-    return node if error == cu.CUresult.CUDA_SUCCESS else -1
-
-
-def _prefer_numa_node(address: int, num_bytes: int, node: int) -> None:
-    sys_mbind = {"aarch64": 235, "x86_64": 237}.get(platform.machine())
-    if sys_mbind is None or node < 0:
+def _prefer_numa_node(address: int, num_bytes: int, node: int | None) -> None:
+    libnuma = get_libnuma()
+    if libnuma is None or node is None:
+        logger.warning_once("Engram pool host shards may land off the GPU's NUMA node")
         return
     mask = ctypes.c_ulong(1 << node)
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.syscall.restype = ctypes.c_long
-    if libc.syscall(
-        ctypes.c_long(sys_mbind),
+    # mbind(..., MPOL_PREFERRED = 1, nodemask, maxnode, flags)
+    if libnuma.mbind(
         ctypes.c_void_p(address),
         ctypes.c_ulong(num_bytes),
-        ctypes.c_int(_MPOL_PREFERRED),
+        1,
         ctypes.byref(mask),
         ctypes.c_ulong(node + 2),
-        ctypes.c_uint(0),
+        0,
     ):
-        logger.warning_once(
-            "Engram pool mbind to NUMA node %d failed: %s",
-            node,
-            os.strerror(ctypes.get_errno()),
-        )
+        logger.warning_once("Engram pool mbind to NUMA node %d failed", node)
 
 
 def _unregister(mapping: mmap.mmap, pointer: int) -> None:
@@ -75,7 +57,9 @@ class SharedHost:
         mapping = mmap.mmap(self.fd, self.nbytes, flags=mmap.MAP_SHARED)
         owner = np.frombuffer(mapping, dtype=np.uint8)
         pointer = owner.ctypes.data
-        _prefer_numa_node(pointer, self.nbytes, gpu_numa_node())
+        device = torch.accelerator.current_device_index()
+        node = current_platform.get_device_numa_node(device)
+        _prefer_numa_node(pointer, self.nbytes, node)
         owner[:: mmap.PAGESIZE] = 0
         self.cpu = torch.from_numpy(owner)
         pin_tensor(self.cpu)

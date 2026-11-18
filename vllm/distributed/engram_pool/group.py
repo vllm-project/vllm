@@ -8,19 +8,19 @@ from functools import cache
 
 import torch
 
+import vllm.envs as envs
+
 
 class PeerGroup:
     """GPUs of several engines that split each table over their memory. They
     meet only at startup (a file store), making the same exchanges in order."""
 
-    # Engines load their weights at their own pace before the group can serve.
-    TIMEOUT = timedelta(minutes=30)
-
     def __init__(self, size: int, path: str) -> None:
         self.world_size = size
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         self.store = torch.distributed.FileStore(path, size)
-        self.store.set_timeout(self.TIMEOUT)
+        # Peers load weights at their own pace; their engines wait as long.
+        self.store.set_timeout(timedelta(seconds=envs.VLLM_ENGINE_READY_TIMEOUT_S))
         # Any assignment works: a rank only decides which rows a GPU holds.
         self.rank_in_group = self.store.add("next_rank", 1) - 1
         if self.rank_in_group >= size:
@@ -31,24 +31,20 @@ class PeerGroup:
         self._step = 0
 
     def all_gather(self, value: bytes) -> list[bytes]:
-        """Every GPU's value for the next exchange in rank order, once all have
-        set theirs."""
+        """Every GPU's `value`, in rank order. Collective."""
         self._step += 1
-        key = f"step{self._step}"
-        self.store.set(f"{key}/{self.rank_in_group}", value)
-        keys = [f"{key}/{rank}" for rank in range(self.world_size)]
+        keys = [f"{self._step}/{rank}" for rank in range(self.world_size)]
+        self.store.set(keys[self.rank_in_group], value)
         try:
             self.store.wait(keys)
-        except RuntimeError as exc:
-            missing = [
-                rank for rank, name in enumerate(keys) if not self.store.check([name])
-            ]
+        except RuntimeError as e:
+            missing = [r for r, key in enumerate(keys) if not self.store.check([key])]
             raise TimeoutError(
                 f"Engram peer GPUs {missing} did not reach startup step "
-                f"{self._step} within {self.TIMEOUT}; every engine of the group "
-                "must start, and none may restart alone"
-            ) from exc
-        return [self.store.get(name) for name in keys]
+                f"{self._step}; every engine of the group must start (see "
+                "VLLM_ENGINE_READY_TIMEOUT_S), and none may restart alone"
+            ) from e
+        return self.store.multi_get(keys)
 
     def barrier(self) -> None:
         self.all_gather(b"")

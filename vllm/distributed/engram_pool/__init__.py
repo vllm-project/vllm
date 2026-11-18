@@ -47,7 +47,7 @@ __all__ = [
     "landed_row",
 ]
 
-# Rows move 8 bytes at a time.
+# Transports copy rows in 8-byte words.
 _ROW_ALIGN = 8
 
 
@@ -183,7 +183,7 @@ class EngramPool:
         rows_per_shard = cdiv(num_rows, world)
         row_start = min(rank * rows_per_shard, num_rows)
         shard_rows = min(rows_per_shard, num_rows - row_start)
-        num_bytes = max(rows_per_shard * row_stride, _ROW_ALIGN)
+        num_bytes = rows_per_shard * row_stride
         local, arrays, keep = self.transport.shard(num_bytes, name)
         meta = torch.tensor([rows_per_shard, num_rows, *arrays], dtype=torch.int64)
         shard = local[: shard_rows * row_stride].view(shard_rows, row_stride)

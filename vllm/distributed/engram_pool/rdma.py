@@ -41,7 +41,6 @@ from vllm.distributed.engram_pool.memory import (
     CuMem,
     SharedHost,
     device_view,
-    gpu_numa_node,
 )
 from vllm.distributed.engram_pool.rows import (
     GATHERERS,
@@ -59,6 +58,7 @@ from vllm.distributed.engram_pool.rows import (
     wait_landed,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
@@ -130,13 +130,14 @@ def pick_device() -> str:
     devices = verbs.active_devices()
     if not devices:
         raise RuntimeError("Engram pool RDMA transport found no active RDMA device")
-    gpu = torch.accelerator.current_device_index()
-    node = gpu_numa_node(gpu)
-    near = [d for d in devices if verbs.device_numa_node(d) == node] or devices
-    peers = [
-        i for i in range(torch.accelerator.device_count()) if gpu_numa_node(i) == node
+    nodes = [
+        current_platform.get_device_numa_node(i)
+        for i in range(torch.accelerator.device_count())
     ]
-    return near[peers.index(gpu) % len(near) if gpu in peers else 0]
+    gpu = torch.accelerator.current_device_index()
+    near = [d for d in devices if verbs.device_numa_node(d) == nodes[gpu]] or devices
+    peers = [i for i, node in enumerate(nodes) if node == nodes[gpu]]
+    return near[peers.index(gpu) % len(near)]
 
 
 @triton.jit

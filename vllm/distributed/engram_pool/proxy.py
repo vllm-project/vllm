@@ -56,7 +56,6 @@ CHAINS_PER_TURN = 8
 # Requests of more WRs (prefill) keep one chain queued per QP, so the NIC
 # serves small ones (decode) without a queue of theirs ahead.
 SMALL_WRS = 512
-_PR_SET_PDEATHSIG = 1
 
 
 def chain_length(num_wrs: int, qps: int) -> int:
@@ -324,7 +323,7 @@ class _Request:
 def main() -> None:
     parent = os.getppid()
     libc = ctypes.CDLL(None, use_errno=True)
-    libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+    libc.prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
     if os.getppid() != parent:
         return
     # Native crashes (ctypes into verbs) print where it was.
