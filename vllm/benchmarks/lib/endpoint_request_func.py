@@ -125,6 +125,12 @@ def _update_server_metrics(
     output.server_ttft = to_seconds(metrics.get("time_to_first_token_ms"))
 
 
+def _has_aborted_choice(choices: Any) -> bool:
+    return isinstance(choices, list) and any(
+        isinstance(c, dict) and c.get("finish_reason") == "abort" for c in choices
+    )
+
+
 class RequestFunc(Protocol):
     def __call__(
         self,
@@ -277,7 +283,7 @@ async def async_request_openai_completions(
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
                             choices = data.get("choices")
-                            if choices and choices[0].get("finish_reason") == "abort":
+                            if _has_aborted_choice(choices):
                                 server_aborted = True
 
                             # NOTE: Some completion API might have a last
@@ -497,7 +503,7 @@ async def async_request_openai_chat_completions(
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
                             choices = data.get("choices")
-                            if choices and choices[0].get("finish_reason") == "abort":
+                            if _has_aborted_choice(choices):
                                 server_aborted = True
 
                             if (error := data.get("error")) or data.get(

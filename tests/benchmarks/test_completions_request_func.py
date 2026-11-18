@@ -135,6 +135,23 @@ def test_server_abort_is_not_a_success(backend: str, combined_terminal: bool):
 
 
 @pytest.mark.parametrize("backend", ["openai", "openai-chat"])
+def test_server_abort_in_secondary_choice_is_not_a_success(backend: str):
+    choice0_payload = {"text": ""} if backend == "openai" else {"delta": {}}
+    stream = _choice(backend) + _sse(
+        {
+            "choices": [
+                {"index": 0, **choice0_payload, "finish_reason": "stop"},
+                {"index": 1, "finish_reason": "abort"},
+            ]
+        }
+    )
+    output = asyncio.run(_request(backend, stream + DONE))
+    assert not output.success
+    assert "abort" in output.error.lower()
+    assert output.generated_text == "Hello 世界"
+
+
+@pytest.mark.parametrize("backend", ["openai", "openai-chat"])
 def test_server_abort_preserves_stream_error(backend: str):
     stream = (
         _choice(backend)
