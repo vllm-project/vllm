@@ -74,9 +74,10 @@ class DummyTokenizer:
         return {"input_ids": self.encode(text, **kwargs)}
 
 
-def _build_renderer() -> HfRenderer:
+def _build_renderer(renderer_num_workers: int = 1) -> HfRenderer:
+    model_config = MockModelConfig(renderer_num_workers=renderer_num_workers)
     return HfRenderer(
-        MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer=DummyTokenizer(),
     )
 
@@ -169,6 +170,36 @@ def test_slow_render_still_times_out_and_replaces_pool(monkeypatch):
         with pytest.raises(TimeoutError, match="timed out"):
             await renderer._render_with_timeout(None, None, [])
         assert renderer._executor._inner is not old_inner
+
+    try:
+        asyncio.run(_run())
+    finally:
+        renderer.shutdown()
+
+
+def test_two_timed_out_renders_replace_the_pool_once(monkeypatch):
+    """Two renders that time out in the same pool replace it once: the second
+    timeout must not replace the fresh pool."""
+    timeout_s, stagger_s = 0.6, 0.3
+
+    def slow(*args, **kwargs):
+        time.sleep(1.5)
+        return "late"
+
+    _patch_render(monkeypatch, timeout_s, slow)
+    renderer = _build_renderer(renderer_num_workers=2)
+    executor = renderer._executor
+
+    async def _run():
+        first = asyncio.ensure_future(renderer._render_with_timeout(None, None, []))
+        await asyncio.sleep(stagger_s)
+        second = asyncio.ensure_future(renderer._render_with_timeout(None, None, []))
+        with pytest.raises(TimeoutError, match="timed out"):
+            await first
+        fresh_inner = executor._inner
+        with pytest.raises(TimeoutError, match="timed out"):
+            await second
+        assert executor._inner is fresh_inner
 
     try:
         asyncio.run(_run())

@@ -1168,7 +1168,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             keep_timeout(job, pool_replaced, deadline - loop.time())
             raise
         except TimeoutError:
-            self._replace_executor()
+            # Another render that timed out in the same pool replaced it.
+            if not pool_replaced.is_set():
+                self._replace_executor()
             raise TimeoutError(
                 f"Chat template rendering timed out after "
                 f"{timeout}s. This may indicate a malicious or "
