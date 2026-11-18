@@ -560,3 +560,119 @@ def test_other_draft_steps_run_stock(tiny_draft, query_lens, mode) -> None:
     kernel, mono = _run_drafter(tiny_draft, step, mode=mode)
     assert kernel.calls == []
     _assert_same_step(stock, mono)
+
+
+def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
+    a, b = a.double(), b.double()
+    return float((a - b).norm() / b.norm())
+
+
+def _norm_fp64(norm, x: torch.Tensor) -> torch.Tensor:
+    x = x.double()
+    w = None
+    if norm.has_weight:
+        w = norm.weight.double()
+        if norm.zero_centered_gamma:
+            w = w + norm.gain_center
+    if norm.applies_weight_before_norm and w is not None:
+        x, w = x * w, None
+    x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + norm.variance_epsilon)
+    return x if w is None else x * w
+
+
+@requires_gfx950
+def test_fused_boundary_is_closer_to_fp64_than_stock(tiny_draft) -> None:
+    """VLLM_MUSE_DSPARK_FUSED_BOUNDARY on one residual boundary of the draft's
+    layer 0 (its norms and gates, identical random inputs) against fp64: the
+    fused fp32 stream is exact up to fp32 sums, and both the stream and the
+    next normed input are at least as close as the stock draft ops, which round
+    the post-norm and the stream to bf16 (MI355X: stream 4e-8 vs 9.5e-4, next
+    input 1.7e-3 vs 2.5e-3)."""
+    from vllm.models.muse_spark.amd.model import norm_residual_then_norm
+    from vllm.models.muse_spark.common.layers import (
+        MuseSparkResidualStream,
+        norm_then_gated_residual,
+    )
+
+    model = tiny_draft.model
+    layer = model.layers[0]
+    bf16 = torch.bfloat16
+    g = torch.Generator(device="cuda").manual_seed(7)
+    D = layer.post_attn_norm.hidden_size
+    stream = torch.randn(QUERY_ROWS * 2, D, generator=g, device="cuda")
+    branch = (torch.randn(QUERY_ROWS * 2, D, generator=g, device="cuda") * 3).to(bf16)
+    boundaries = [
+        (layer.post_attn_norm, layer.add_attn, layer.pre_ffn_norm),
+        (
+            layer.post_ffn_norm,
+            layer.add_ffn,
+            model.layers[1].self_attn.pre_qkv_proj_norm,
+        ),
+    ]
+    for post_norm, conn, pre_norm in boundaries:
+        alpha = conn.alpha
+        alpha = alpha.double() if isinstance(alpha, torch.Tensor) else alpha
+        ref_stream = alpha * stream.double() + conn.beta.double() * _norm_fp64(
+            post_norm, branch
+        )
+        ref_next = _norm_fp64(pre_norm, ref_stream)
+        stock_stream = conn(stream=stream, branch=post_norm(branch))
+        stock_next = pre_norm(stock_stream.to(bf16))
+        x = MuseSparkResidualStream(stream, branch, post_norm, conn)
+        fused_next, fused_stream = norm_residual_then_norm(x, pre_norm, out_dtype=bf16)
+        blended = norm_then_gated_residual(x)
+
+        stock_err = _rel_l2(stock_stream, ref_stream)
+        for fused in (fused_stream, blended):
+            assert _rel_l2(fused, ref_stream) < 1e-5
+            assert _rel_l2(fused, ref_stream) <= stock_err
+        assert _rel_l2(fused_next, ref_next) <= _rel_l2(stock_next, ref_next)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("layer_entry", [False, True], ids=["boundary", "entry"])
+def test_fused_boundaries_engage_on_the_draft_step(
+    tiny_draft, monkeypatch, layer_entry
+) -> None:
+    """VLLM_MUSE_DSPARK_FUSED_BOUNDARY (and _LAYER_ENTRY) send every residual
+    boundary of a draft step through `norm_residual_then_norm`; layer 0's KV
+    insert reads the same input norm in both paths, so its cache is unchanged,
+    and layer 0's stream moves only by the stock path's bf16 roundings (5.3e-3
+    measured on MI355X). Later layers are not compared: the random tiny draft
+    amplifies that rounding about 2.5x a layer."""
+    from vllm.models.muse_spark.amd import dspark
+
+    calls = []
+    fused = dspark.norm_residual_then_norm
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return fused(*args, **kwargs)
+
+    model = tiny_draft.model
+    layer0 = model.layers[0]
+    streams: list[torch.Tensor] = []
+
+    def recording(method):
+        def run(*args, **kwargs):
+            out = method(*args, **kwargs)
+            streams.append(out[0].clone())
+            return out
+
+        return run
+
+    monkeypatch.setattr(dspark, "norm_residual_then_norm", counting)
+    monkeypatch.setattr(layer0, "forward", recording(layer0.forward))
+    monkeypatch.setattr(layer0, "forward_entry", recording(layer0.forward_entry))
+    step = DraftStep(tiny_draft, [QUERY_ROWS] * 2, seed=21)
+    _, kv_s = step.run(tiny_draft)
+    for layer in model.layers:
+        monkeypatch.setattr(layer, "fused_boundary", True)
+    monkeypatch.setattr(model, "_fused_layer_entry", layer_entry)
+    _, kv_f = step.run(tiny_draft)
+
+    assert len(calls) == (2 if layer_entry else 1) * len(model.layers)
+    first = tiny_draft.names[0]
+    torch.testing.assert_close(kv_f[first], kv_s[first], rtol=0, atol=0)
+    stock_stream, fused_stream = streams
+    assert 0 < _rel_l2(fused_stream, stock_stream) < 1e-2

@@ -8,10 +8,11 @@ from copy import copy
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -30,12 +31,17 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import refill_derived
-from vllm.models.muse_spark.amd.model import MuseSparkDecoderLayer
+from vllm.models.muse_spark.amd.model import (
+    MuseSparkDecoderLayer,
+    norm_residual_then_norm,
+)
 from vllm.models.muse_spark.amd.mono.drafter import maybe_attach_drafter
 from vllm.models.muse_spark.amd.ops import fused_markov
 from vllm.models.muse_spark.common.layers import (
+    MuseSparkResidualStream,
     MuseSparkRMSNorm,
     materialize_residual_path_constants,
+    norm_then_gated_residual,
 )
 from vllm.transformers_utils.configs.muse_spark import MuseSparkDSparkConfig
 
@@ -59,6 +65,7 @@ class MuseSparkDSparkDecoderLayer(MuseSparkDecoderLayer):
             raise ValueError(
                 "Muse Spark DSpark layers must share their positional mode"
             )
+        self.fused_boundary = envs.VLLM_MUSE_DSPARK_FUSED_BOUNDARY
 
     def forward(  # type: ignore[override]
         self,
@@ -74,10 +81,54 @@ class MuseSparkDSparkDecoderLayer(MuseSparkDecoderLayer):
                 stream.to(self.default_dtype), out_dtype=self.default_dtype
             ),
         )
+        if self.fused_boundary:
+            # The fp32 post-norm result is blended without a bf16 round.
+            ffn_in, stream = norm_residual_then_norm(
+                MuseSparkResidualStream(
+                    stream, attn_out, self.post_attn_norm, self.add_attn
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+            )
+            ffn_out = self.feed_forward(ffn_in)
+            stream = norm_then_gated_residual(
+                MuseSparkResidualStream(
+                    stream, ffn_out, self.post_ffn_norm, self.add_ffn
+                )
+            )
+            return stream, None
         stream = self.add_attn(stream=stream, branch=self.post_attn_norm(attn_out))
         ffn_out = self.feed_forward(self.pre_ffn_norm(stream.to(self.default_dtype)))
         stream = self.add_ffn(stream=stream, branch=self.post_ffn_norm(ffn_out))
         return stream, None
+
+    def forward_entry(
+        self,
+        positions: torch.Tensor,
+        stream: torch.Tensor,
+        attn_in: torch.Tensor,
+        next_pre_norm: MuseSparkRMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`forward` with both boundaries fused, the second one with
+        `next_pre_norm` (the next layer's pre-QKV norm or the final norm).
+
+        Takes and returns `(fp32 stream, normed bf16 input)`.
+        """
+        attn_out = self.self_attn(positions=positions, hidden_states=attn_in)
+        ffn_in, stream = norm_residual_then_norm(
+            MuseSparkResidualStream(
+                stream, attn_out, self.post_attn_norm, self.add_attn
+            ),
+            self.pre_ffn_norm,
+            out_dtype=self.default_dtype,
+        )
+        ffn_out = self.feed_forward(ffn_in)
+        next_in, stream = norm_residual_then_norm(
+            MuseSparkResidualStream(stream, ffn_out, self.post_ffn_norm, self.add_ffn),
+            next_pre_norm,
+            out_dtype=self.default_dtype,
+        )
+        return stream, next_in
 
 
 @support_torch_compile
@@ -135,15 +186,31 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             persistent=False,
         )
         self.has_separate_mask_embedding = False
-        self.fc = ReplicatedLinear(
-            input_size=config.target_hidden_size * len(self.target_layer_ids),
-            output_size=config.hidden_size,
-            bias=False,
-            params_dtype=vllm_config.model_config.dtype,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "fc"),
-            return_bias=False,
-        )
+        fc_input_size = config.target_hidden_size * len(self.target_layer_ids)
+        self.fc: ReplicatedLinear | ColumnParallelLinear
+        if envs.VLLM_MUSE_DSPARK_SHARDED_FC:
+            # Each rank reads 1/tp of the weight; the output is all-gathered.
+            logger.info_once("The DSpark draft fc is column-sharded over TP.")
+            self.fc = ColumnParallelLinear(
+                input_size=fc_input_size,
+                output_size=config.hidden_size,
+                bias=False,
+                gather_output=True,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
+        else:
+            self.fc = ReplicatedLinear(
+                input_size=fc_input_size,
+                output_size=config.hidden_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
         self.hidden_norm = MuseSparkRMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -180,6 +247,21 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
                 prefix=maybe_prefix(prefix, "confidence_head"),
                 bias=True,
                 with_markov=config.confidence_head_with_markov,
+            )
+        self._fused_layer_entry = False
+        if envs.VLLM_MUSE_DSPARK_FUSED_BOUNDARY:
+            logger.info_once("The DSpark draft layers fuse their residual boundaries.")
+            if envs.VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY:
+                self._fused_layer_entry = config.residual_dtype == torch.float32
+                if not self._fused_layer_entry:
+                    logger.warning_once(
+                        "VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY=1 ignored: the draft "
+                        "residual is not fp32."
+                    )
+        elif envs.VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY:
+            logger.warning_once(
+                "VLLM_MUSE_DSPARK_FUSED_LAYER_ENTRY=1 ignored: it needs "
+                "VLLM_MUSE_DSPARK_FUSED_BOUNDARY=1."
             )
 
     def _build_fused_kv_buffers(self) -> None:
@@ -282,10 +364,29 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         hidden_states = (
             self.embed_input_ids(input_ids) if input_embeds is None else input_embeds
         )
+        if self._fused_layer_entry:
+            return self._forward_fused_entry(positions, hidden_states)
         hidden_states = hidden_states.to(self.config.residual_dtype)
         for layer in self.layers:
             hidden_states, _ = layer(positions, hidden_states, None)
         return self.norm(hidden_states.to(self.default_dtype))
+
+    def _forward_fused_entry(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        stream = hidden_states.to(self.config.residual_dtype)
+        # fp32 holds the input exactly: this is `forward`'s first input norm.
+        attn_in = self.layers[0].self_attn.pre_qkv_proj_norm(
+            hidden_states.to(self.default_dtype), out_dtype=self.default_dtype
+        )
+        for i, layer in enumerate(self.layers):
+            next_norm = (
+                self.layers[i + 1].self_attn.pre_qkv_proj_norm
+                if i + 1 < len(self.layers)
+                else self.norm
+            )
+            stream, attn_in = layer.forward_entry(positions, stream, attn_in, next_norm)
+        return attn_in
 
 
 class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
