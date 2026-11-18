@@ -3,7 +3,7 @@
 
 
 import itertools
-from collections.abc import Hashable, Sequence
+from collections.abc import Container, Hashable, Sequence
 
 import torch
 from torch import nn
@@ -24,6 +24,7 @@ from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -280,15 +281,20 @@ def mamba2_in_proj_group_name(group: Sequence[str]) -> str:
 
 
 def mamba2_in_proj_groups(
-    quant_config: QuantizationConfig | None, prefix: str
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    low_rank: Container[str] = (),
 ) -> list[tuple[str, ...]]:
     """Groups the in_proj slices by weight format, so each format runs as one
     GEMM. Slices only differ in checkpoints that store them as separate tensors
-    (`z_proj`, `x_proj`, ...); otherwise there is one group, the usual in_proj."""
+    (`z_proj`, `x_proj`, ...); otherwise there is one group, the usual in_proj.
+    A low-rank slice is a group of its own."""
     groups: dict[Hashable, list[str]] = {}
     for name in MAMBA2_IN_PROJ_SLICES:
-        key = None
-        if quant_config is not None:
+        key: Hashable = None
+        if name in low_rank:
+            key = ("low_rank", name)
+        elif quant_config is not None:
             key = quant_config.get_linear_format(f"{prefix}.{name}_proj")
         groups.setdefault(key, []).append(name)
     return [tuple(group) for group in groups.values()]
@@ -343,7 +349,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        low_rank: dict[str, int] | None = None,
     ):
+        """`low_rank` maps a slice (z, x, B, C, dt, or out for out_proj) to a rank:
+        the slice is stored as `<slice>_a_proj` (input -> rank) and `<slice>_b_proj`
+        (rank -> output), like DeepSeek's `q_a_proj`/`q_b_proj`."""
         super().__init__()
 
         # For TP, the sharding plan is as follows:
@@ -396,7 +406,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
 
-        self.in_proj_groups = mamba2_in_proj_groups(quant_config, prefix)
+        self.low_rank = low_rank or {}
+        self.in_proj_groups = mamba2_in_proj_groups(quant_config, prefix, self.low_rank)
         if len(self.in_proj_groups) > 1 and n_groups % self.tp_size != 0:
             raise ValueError(
                 "Mamba2 in_proj slices with different weight formats require the "
@@ -566,14 +577,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.out_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=use_bias,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
+        if "out" in self.low_rank:
+            self.out_a_proj = RowParallelLinear(
+                intermediate_size,
+                self.low_rank["out"],
+                bias=False,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_a_proj",
+            )
+            self.out_b_proj = ReplicatedLinear(
+                self.low_rank["out"],
+                hidden_size,
+                bias=use_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_b_proj",
+            )
+        else:
+            self.out_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=use_bias,
+                input_is_parallel=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.out_proj",
+            )
 
         self.norm = Mixer2RMSNormGated(
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
@@ -668,6 +696,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
     def _make_group(self, group, input_size, output_sizes, bias, quant_config, prefix):
         name = mamba2_in_proj_group_name(group)
+        if group[0] in self.low_rank:
+            rank = self.low_rank[group[0]]
+            a_proj = ReplicatedLinear(
+                input_size,
+                rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{group[0]}_a_proj",
+            )
+            b_proj = ColumnParallelLinear(
+                rank,
+                output_sizes[0],
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{group[0]}_b_proj",
+            )
+            setattr(self, f"{group[0]}_a_proj", a_proj)
+            setattr(self, f"{group[0]}_b_proj", b_proj)
+            return
         if len(group) == 1:
             layer = ColumnParallelLinear(
                 input_size,
@@ -698,10 +745,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Cut each group's output into its slices and restore row order.
         slices: dict[str, torch.Tensor] = {}
         for group in self.in_proj_groups:
-            output, _ = getattr(self, mamba2_in_proj_group_name(group))(hidden_states)
+            if group[0] in self.low_rank:
+                latent, _ = getattr(self, f"{group[0]}_a_proj")(hidden_states)
+                output, _ = getattr(self, f"{group[0]}_b_proj")(latent)
+            else:
+                output, _ = getattr(self, mamba2_in_proj_group_name(group))(
+                    hidden_states
+                )
             sizes = [self._in_proj_local_sizes[name] for name in group]
             slices.update(zip(group, output.split(sizes, dim=-1)))
         return torch.cat([slices[name] for name in MAMBA2_IN_PROJ_SLICES], dim=-1)
+
+    def _project_out(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if "out" not in self.low_rank:
+            return self.out_proj(hidden_states)[0]
+        latent, _ = self.out_a_proj(hidden_states)
+        return self.out_b_proj(latent)[0]
 
     def forward(
         self,
@@ -740,9 +799,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
-        output, _ = self.out_proj(hidden_states)
-
-        return output
+        return self._project_out(hidden_states)
 
     def D_bf16(self) -> torch.Tensor:
         """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the

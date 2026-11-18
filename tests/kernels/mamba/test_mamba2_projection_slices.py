@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba2 in_proj slices grouped by weight format: per-slice tensors loaded into the
-groups, adjacent or not, give the same math as the fused in_proj."""
+"""Mamba2 in_proj slices grouped by weight format, and low-rank slices: per-slice
+tensors loaded into the groups, adjacent or not, give the same math as the fused
+in_proj, and low-rank slices give the dense product of their factors."""
 
 import itertools
 
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MAMBA2_IN_PROJ_SLICES,
     MambaMixer2,
     mamba2_in_proj_group_name,
+    mamba2_in_proj_groups,
     mamba2_in_proj_stacked_mapping,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -201,3 +203,66 @@ def test_modelopt_wildcard_exclusions_cover_fused_groups(bf16_cuda):
     assert mixer.in_proj_groups == [("z", "x"), ("B", "C", "dt")]
     assert isinstance(mixer.z_x_proj.quant_method, UnquantizedLinearMethod)
     assert not isinstance(mixer.B_C_dt_proj.quant_method, UnquantizedLinearMethod)
+
+
+@pytest.mark.parametrize(
+    ("groups", "low_rank"),
+    [
+        (GROUPINGS[0], {"x": 8}),
+        (GROUPINGS[-1], {"z": 8, "dt": 2, "out": 16}),
+        (GROUPINGS[1], {"x": 8, "out": 16}),
+        (GROUPINGS[3], {"x": 8}),
+    ],
+    ids=str,
+)
+def test_low_rank_slices_match_the_dense_product(bf16_cuda, groups, low_rank):
+    config = FormatConfig(groups)
+    mixer = make_mixer(config, low_rank=low_rank)
+    fill(mixer)
+    prefix = mixer.prefix
+    # Every group and factor resolves its own quantization method by name.
+    expected = []
+    for group in mixer.in_proj_groups:
+        if group[0] in low_rank:
+            expected += [f"{prefix}.{group[0]}_a_proj", f"{prefix}.{group[0]}_b_proj"]
+        else:
+            expected.append(f"{prefix}.{mamba2_in_proj_group_name(group)}")
+    expected += (
+        [f"{prefix}.out_a_proj", f"{prefix}.out_b_proj"]
+        if "out" in low_rank
+        else [f"{prefix}.out_proj"]
+    )
+    assert config.prefixes == expected
+
+    # Reference: one dense in_proj weight with the slices stacked in row order.
+    def weight(group):
+        if group[0] in low_rank:
+            return (
+                getattr(mixer, f"{group[0]}_b_proj").weight.float()
+                @ getattr(mixer, f"{group[0]}_a_proj").weight.float()
+            )
+        return getattr(mixer, mamba2_in_proj_group_name(group)).weight.float()
+
+    rows: dict[str, torch.Tensor] = {}
+    for group in mixer.in_proj_groups:
+        rows.update(zip(group, weight(group).split([SIZES[n] for n in group])))
+    fused = torch.cat([rows[name] for name in MAMBA2_IN_PROJ_SLICES])
+    x = torch.randn(5, HIDDEN)
+    torch.testing.assert_close(
+        mixer._project_in(x).float(), x.float() @ fused.T, rtol=0.03, atol=0.03
+    )
+    h = torch.randn(5, HEADS * HEAD_DIM)
+    out = (
+        mixer.out_b_proj.weight.float() @ mixer.out_a_proj.weight.float()
+        if "out" in low_rank
+        else mixer.out_proj.weight.float()
+    )
+    torch.testing.assert_close(
+        mixer._project_out(h).float(), h.float() @ out.T, rtol=0.03, atol=0.03
+    )
+
+
+def test_low_rank_slices_are_their_own_format_group():
+    config = FormatConfig([MAMBA2_IN_PROJ_SLICES])
+    groups = mamba2_in_proj_groups(config, "model.layers.0.mixer", {"x": 8})
+    assert groups == [("z", "B", "C", "dt"), ("x",)]

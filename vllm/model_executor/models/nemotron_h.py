@@ -55,6 +55,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    MAMBA2_IN_PROJ_SLICES,
     MambaMixer2,
     mamba2_in_proj_stacked_mapping,
 )
@@ -409,6 +410,11 @@ class NemotronHMambaDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
+            low_rank={
+                name: rank
+                for name in (*MAMBA2_IN_PROJ_SLICES, "out")
+                if (rank := getattr(config, f"mamba_{name}_rank", None)) is not None
+            },
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
