@@ -1,16 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import jinja2
 import pytest
 import torch
 
+from tests.transformers_utils.processors.test_hy_v4 import (
+    hy_v4_processor_dir,  # noqa: F401
+)
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TextPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
-from vllm.renderers.chat_utils import ConversationMessage, load_chat_template
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ConversationMessage,
+    load_chat_template,
+)
 from vllm.renderers.hf import (
     HfRenderer,
     _build_prompt_embeds_updates,
@@ -500,6 +510,139 @@ def test_resolve_chat_template_kwargs_with_template_name():
 def test_detect_content_format(chat_template, expected_format):
     """Detect content format when content is passed through a macro."""
     assert _detect_content_format(chat_template, default="string") == expected_format
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "multimodal,tokenizer_mode,custom_template,given_format,expected_format",
+    [
+        (True, "auto", False, "auto", "string"),
+        (True, "hy_v4", False, "auto", "string"),
+        (True, "hf", False, "auto", "openai"),
+        (False, "auto", False, "auto", "openai"),
+        (True, "auto", False, "string", "string"),
+        (True, "auto", False, "openai", "openai"),
+        (True, "auto", True, "auto", "openai"),
+        (True, "auto", True, "string", "string"),
+    ],
+)
+def test_hy_v4_renderer_content_format(
+    request,
+    monkeypatch,
+    asynchronous,
+    multimodal,
+    tokenizer_mode,
+    custom_template,
+    given_format,
+    expected_format,
+):
+    """Renderer selection preserves format overrides and multimodal payloads."""
+    import asyncio
+
+    from PIL import Image
+
+    from vllm.config import VllmConfig
+    from vllm.renderers import ChatParams, hf
+    from vllm.renderers.hy_v4 import HYV4Renderer
+    from vllm.renderers.registry import renderer_from_config
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config
+
+    path = request.getfixturevalue("hy_v4_processor_dir")
+    if not multimodal:
+        HYV4Config(architectures=["HYV4ForCausalLM"]).save_pretrained(path)
+    config = ModelConfig(str(path), tokenizer_mode=tokenizer_mode, max_model_len=256)
+    renderer = renderer_from_config(VllmConfig(model_config=config))
+    try:
+        expected_cls = (
+            HYV4Renderer if multimodal and tokenizer_mode != "hf" else hf.HfRenderer
+        )
+        assert type(renderer) is expected_cls
+        template = """
+            {% macro render_content(content) %}
+              {% if content is string %}{{ content }}
+              {% elif content is iterable and content is not mapping %}
+                {% for item in content %}{{ item['text'] }}{% endfor %}
+              {% endif %}
+            {% endmacro %}
+            {% for message in messages %}
+              {{ render_content(message['content']) }}
+            {% endfor %}
+        """
+        tokenizer = renderer.get_tokenizer()
+        tokenizer.chat_template = template
+        monkeypatch.setattr(
+            hf, "_try_get_processor_chat_template", lambda *a, **kw: None
+        )
+        monkeypatch.setattr(hf, "_CONTENT_FORMATS", {})
+        assert (
+            resolve_chat_template_content_format(
+                None, None, "auto", tokenizer, model_config=config
+            )
+            == "openai"
+        )
+        params = ChatParams(
+            chat_template=template if custom_template else None,
+            chat_template_content_format=given_format,
+            chat_template_kwargs={"tokenize": False},
+        )
+        content = [{"type": "text", "text": "describe"}]
+        if multimodal:
+            image = Image.new("RGB", (64, 64))
+            content.append({"image_pil": image, "uuid": "test-image"})
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "user", "content": content}
+        ]
+        if asynchronous:
+            conversation, prompt = asyncio.run(
+                renderer.render_messages_async(messages, params)
+            )
+        else:
+            conversation, prompt = renderer.render_messages(messages, params)
+        # HY-V4 is decoder-only and tokenize=False yields a TextPrompt
+        prompt = cast(TextPrompt, prompt)
+        rendered_content = conversation[0]["content"]
+        if expected_format == "string":
+            assert isinstance(rendered_content, str)
+            assert prompt["prompt"].strip() == rendered_content
+            if multimodal:
+                assert "<image>" in rendered_content
+        else:
+            assert isinstance(rendered_content, list)
+            assert prompt["prompt"].strip() == "describe"
+        if multimodal:
+            mm_data = prompt["multi_modal_data"]
+            assert mm_data is not None
+            mm_images = mm_data["image"]
+            assert isinstance(mm_images, list)
+            assert mm_images[0] is image
+            assert prompt["multi_modal_uuids"] == {"image": ["test-image"]}
+            if expected_format == "string":
+                previous = None
+                for tokenize in (False, True):
+                    chat_params = ChatParams(
+                        chat_template=params.chat_template,
+                        chat_template_content_format=given_format,
+                        chat_template_kwargs={"tokenize": tokenize},
+                    )
+                    if asynchronous:
+                        _, (engine_input,) = asyncio.run(
+                            renderer.render_chat_async([messages], chat_params)
+                        )
+                    else:
+                        _, (engine_input,) = renderer.render_chat(
+                            [messages], chat_params
+                        )
+                    placeholders = engine_input["mm_placeholders"]["image"]
+                    assert len(placeholders) == 1
+                    assert placeholders[0].get_num_embeds() == 6
+                    token_ids = engine_input["prompt_token_ids"]
+                    assert token_ids.count(config.hf_config.image_token_id) == 6
+                    if previous is not None:
+                        assert token_ids == previous
+                    previous = token_ids
+        assert params.chat_template_content_format == given_format
+    finally:
+        renderer.shutdown()
 
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside

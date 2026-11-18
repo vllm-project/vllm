@@ -491,3 +491,36 @@ def test_mtp_draft_architecture_follows_target_model_impl(
     draft = speculative_config.draft_model_config
     assert draft.architecture == architecture
     assert draft.hf_config.n_predict == 1
+
+
+@pytest.mark.cpu_test
+def test_hy4_dfly_derives_draft_without_mutating_target(tmp_path):
+    """A combined checkpoint must retain target layers while deriving its draft."""
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config
+
+    config = HYV4Config(
+        architectures=["HYV4ForCausalLM"],
+        dfly_num_hidden_layers=1,
+        dfly_block_size=7,
+        dfly_mask_token_id=1,
+        dfly_target_index_layer=[1],
+        dfly_target_kv_layers=[2],
+    )
+    config.save_pretrained(tmp_path)
+    target = ModelConfig(
+        model=str(tmp_path),
+        dtype="bfloat16",
+        max_model_len=1024,
+        skip_tokenizer_init=True,
+    )
+    spec = SpeculativeConfig(
+        method="dfly",
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    assert spec.num_speculative_tokens == 6
+    assert spec.speculator_config.parallel_drafting
+    assert spec.draft_model_config.hf_config.num_hidden_layers == 1
+    assert spec.draft_model_config.architectures == ["HYV4DFlyModel"]
+    assert target.hf_config.num_hidden_layers == config.num_hidden_layers
+    assert target.architectures == ["HYV4ForCausalLM"]

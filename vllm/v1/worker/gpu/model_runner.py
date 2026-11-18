@@ -1329,6 +1329,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
+            mrope_position_delta = self.model_state.get_mrope_position_delta(req_index)
+            if mrope_position_delta is not None:
+                self.kv_connector.record_mrope_position_delta(
+                    req_id, mrope_position_delta
+                )
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )

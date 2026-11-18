@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -597,6 +598,16 @@ class HYV4Model(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                if (
+                    isinstance(self.quant_config, Fp8Config)
+                    and self.quant_config.weight_block_size is not None
+                    and name.endswith(".scale")
+                ):
+                    name = name.removesuffix(".scale") + ".weight_scale_inv"
+                    if loaded_weight.dtype == torch.uint8:
+                        # UINT8 stores UE8M0 exponents, not numeric scales.
+                        loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+
                 if name not in params_dict:
                     if _should_skip_missing_param(name):
                         continue
@@ -709,7 +720,10 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         # MTP layers are loaded by the MTP head, not by the target model. They
         # appear as model.mtp_layers.<i>.* and as the layer ids past the backbone.
         mtp_start = self.config.num_hidden_layers
-        drop_prefixes: dict[str, str | None] = {"model.mtp_layers.": None}
+        drop_prefixes: dict[str, str | None] = {
+            "model.mtp_layers.": None,
+            "model.dfly_layers.": None,
+        }
         for i in range(getattr(self.config, "num_nextn_predict_layers", 0)):
             drop_prefixes[f"model.layers.{mtp_start + i}."] = None
         if self.config.tie_word_embeddings:

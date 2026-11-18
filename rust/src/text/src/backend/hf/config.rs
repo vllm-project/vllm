@@ -166,6 +166,7 @@ pub struct ModelConfig {
     torch_dtype: Option<ModelDtype>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
+    vision_config: Option<serde::de::IgnoredAny>,
 }
 
 /// Minimal subset of `generation_config.json`.
@@ -266,6 +267,11 @@ impl ModelConfig {
     /// may provide the value.
     pub fn model_type(&self) -> Option<&str> {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
+    }
+
+    /// Whether the top-level config declares a `vision_config`.
+    pub fn has_vision_config(&self) -> bool {
+        self.vision_config.is_some()
     }
 
     /// Return the checkpoint dtype, following the same text-config selection

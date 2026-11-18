@@ -957,6 +957,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
     ),
+    "HYV4VLForConditionalGeneration": _HfExamplesInfo(
+        "tencent/Hy4",
+        trust_remote_code=True,
+        min_transformers_version="5.17.0",
+    ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
         extras={"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},

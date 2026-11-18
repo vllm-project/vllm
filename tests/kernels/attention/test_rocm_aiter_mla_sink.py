@@ -521,3 +521,70 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         dtype,
         native=dtype == torch.bfloat16,
     )
+
+
+@pytest.mark.parametrize("heads,fp8", [(16, False), (32, False), (16, True)])
+@torch.inference_mode()
+def test_sparse_mla_lse_graph_survives_metadata_cache_eviction(heads, fp8) -> None:
+    """Captured split indices must outlive AITER's bounded metadata cache."""
+    _require_aiter()
+    from aiter.mla import get_meta_param
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    set_random_seed(19)
+    device = "cuda"
+    batch_size, topk = 16, 2048
+    q = torch.randn(batch_size, heads, Q_HEAD_DIM, device=device).bfloat16() * 0.2
+    kv = torch.randn(8192, 1, Q_HEAD_DIM, device=device).bfloat16() * 0.2
+    if fp8:
+        q = q.to(current_platform.fp8_dtype())
+        kv = kv.to(current_platform.fp8_dtype())
+    indices = torch.randint(
+        0, kv.shape[0], (batch_size * topk,), device=device, dtype=torch.int32
+    )
+    qo = torch.arange(batch_size + 1, device=device, dtype=torch.int32)
+    indptr = qo * topk
+    last = torch.ones(batch_size, device=device, dtype=torch.int32)
+    output = torch.empty(
+        batch_size, heads, V_HEAD_DIM, device=device, dtype=torch.bfloat16
+    )
+
+    scale = torch.ones(1, device=device) if fp8 else None
+
+    def forward():
+        return rocm_aiter_ops.mla_decode_fwd_lse(
+            q,
+            kv,
+            output,
+            SM_SCALE,
+            qo,
+            1,
+            indptr,
+            indices,
+            last,
+            q_scale=scale,
+            kv_scale=scale,
+        )
+
+    for _ in range(3):
+        forward()
+    expected_lse = forward().clone()
+    expected = output.clone()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        lse = forward()
+    graph.replay()
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    torch.testing.assert_close(lse, expected_lse, atol=0, rtol=0)
+
+    capacity = get_meta_param.cache_info().maxsize
+    assert capacity is not None
+    for rows in range(200, 201 + capacity):
+        get_meta_param(None, rows, rows * topk, heads, 1, q.dtype)
+    # Reuse freed small allocations while the graph remains alive.
+    recycled = [torch.zeros_like(qo) for _ in range(4096)]
+    graph.replay()
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    torch.testing.assert_close(lse, expected_lse, atol=0, rtol=0)
+    del recycled

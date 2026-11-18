@@ -499,7 +499,7 @@ steps:
         --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
         kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
 
-- label: ":nvidia: (H100) Attention DiffKV Kernels"
+- label: ":nvidia: (H100) Attention DiffKV and FA4 Kernels"
   key: kernels-attention-diffkv-test-h100
   automatic_shard: true
   timeout_in_minutes: 20
@@ -510,8 +510,11 @@ steps:
   - vllm/v1/attention/backends/triton_attn_diffkv.py
   - vllm/v1/attention/backends/flash_attn_diffkv.py
   - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  - vllm/vllm_flash_attn/
+  - tests/kernels/attention/test_flash_attn.py
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+    - pytest -v -s kernels/attention/test_flash_attn.py::test_fa4_varlen_forward_outputs
   mirror:
     amd:
       automatic_shard: true
@@ -531,6 +534,19 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+
+- label: ":nvidia: (B200) Sparse MLA Extensible KV Cache"
+  key: kernels-flashmla-extensible-kv-test-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/v1/worker/extensible_kv_cache.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/utils/extensible_tensor.py
+  - cmake/external_projects/flashmla.cmake
+  - tests/kernels/attention/test_flashmla_sparse.py
+  commands:
+    - pytest -v -s kernels/attention/test_flashmla_sparse.py::test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation
 
 - label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100

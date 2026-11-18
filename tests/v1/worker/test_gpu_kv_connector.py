@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 def _make_connector(
     monkeypatch: pytest.MonkeyPatch,
     events: list[str],
+    kv_role: str = "kv_consumer",
 ) -> ActiveKVConnector:
     backend = Mock()
     backend.handle_preemptions.side_effect = lambda _: events.append("handle")
@@ -41,7 +42,7 @@ def _make_connector(
 
     kv_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_consumer",
+        kv_role=kv_role,
         kv_buffer_device="cpu",
     )
     connector = ActiveKVConnector(SimpleNamespace(kv_transfer_config=kv_config), {})
@@ -119,3 +120,24 @@ def test_deferred_finalize_collects_results_before_saving(
 
     connector.finalize_step()
     assert events == ["handle", "bind", "start", "results", "wait", "clear"]
+
+
+@pytest.mark.parametrize(
+    "kv_role, reports",
+    [("kv_producer", True), ("kv_both", True), ("kv_consumer", False)],
+)
+def test_post_forward_reports_mrope_position_deltas_once(
+    monkeypatch: pytest.MonkeyPatch, kv_role: str, reports: bool
+):
+    connector = _make_connector(monkeypatch, [], kv_role=kv_role)
+
+    connector.record_mrope_position_delta("req1", -3)
+    connector.record_mrope_position_delta("req2", 0)
+    output = connector.post_forward(set())
+    assert output is not None
+    expected = {"req1": -3, "req2": 0} if reports else None
+    assert output.mrope_position_deltas == expected
+
+    output = connector.post_forward(set())
+    assert output is not None
+    assert output.mrope_position_deltas is None

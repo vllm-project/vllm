@@ -70,6 +70,127 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
         assert set(config.rope_parameters) == set(per_layer)
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_hy_v4_vl_config_round_trip(tmp_path, nested, caplog):
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config, HYV4VLConfig
+
+    caplog.set_level("WARNING", logger="transformers.modeling_rope_utils")
+    text = {
+        "hidden_size": 6144,
+        "num_hidden_layers": 2,
+        "layer_types": ["deepseek_sparse_attention"] * 2,
+        "mlp_layer_types": ["dense", "sparse"],
+        "indexer_types": ["full", "shared"],
+        "rope_parameters": {
+            "rope_type": "default",
+            "rope_theta": 10000000,
+            "mrope_section": [12, 10, 10],
+            "mrope_interleaved": True,
+        },
+    }
+    config = HYV4VLConfig(
+        vision_config={"hidden_size": 1536, "num_hidden_layers": 40},
+        **({"text_config": text} if nested else text),
+    )
+    config.save_pretrained(tmp_path)
+    loaded = config_module.get_config(str(tmp_path), trust_remote_code=False)
+    assert isinstance(loaded, HYV4VLConfig)
+    assert isinstance(loaded.get_text_config(), HYV4Config)
+    assert loaded.get_text_config().model_type == "hy_v4"
+    # Transformers canonicalizes legacy DSA layer names when loading configs.
+    expected = {**text, "layer_types": ["indexed_attention"] * 2}
+    for key, value in expected.items():
+        assert getattr(loaded.get_text_config(), key) == value
+    assert loaded.vision_config.hidden_size == 1536
+    assert loaded.vision_config.num_hidden_layers == 40
+    assert loaded.vision_config.out_hidden_size == 6144
+    assert not any(
+        record.name == "transformers.modeling_rope_utils"
+        and "Unrecognized keys" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_hy_v4_rope_validation_still_warns_for_unknown_keys(multimodal, caplog):
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config, HYV4VLConfig
+
+    caplog.set_level("WARNING", logger="transformers.modeling_rope_utils")
+    config_cls = HYV4VLConfig if multimodal else HYV4Config
+    config_cls(
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000000,
+            "mrope_section": [12, 10, 10],
+            "mrope_interleaved": True,
+            "unexpected_rope_key": True,
+        },
+    )
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "transformers.modeling_rope_utils"
+        and "Unrecognized keys" in record.getMessage()
+    ]
+    assert messages
+    assert all(
+        "unexpected_rope_key" in message
+        and "mrope_section" not in message
+        and "mrope_interleaved" not in message
+        for message in messages
+    )
+
+
+def test_hy_v4_vl_rope_parameters_override_legacy_scaling():
+    from vllm.transformers_utils.configs.hy_v4 import HYV4VLConfig
+
+    config = HYV4VLConfig(
+        rope_scaling={"rope_theta": 10000, "mrope_section": [21, 21, 22]},
+        rope_parameters={"rope_theta": 10000000, "mrope_section": [12, 10, 10]},
+    )
+    rope_parameters = config.text_config.rope_parameters
+    assert isinstance(rope_parameters, dict)
+    assert rope_parameters["mrope_section"] == [12, 10, 10]
+    assert rope_parameters["rope_theta"] == 10000000
+
+
+def test_hy_v4_vl_preserves_existing_text_config():
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config, HYV4VLConfig
+
+    text = HYV4Config()
+    before = text.to_dict()
+    assert HYV4VLConfig(text_config=text).get_text_config() is text
+    assert text.to_dict() == before
+    assert "mrope_section" not in (text.rope_parameters or {})
+
+
+@pytest.mark.parametrize("nested", [{}, {"max_position_embeddings": 4096}])
+def test_hy_v4_vl_shared_text_fields_survive_round_trip(nested):
+    import torch
+
+    from vllm.transformers_utils.configs.hy_v4 import HYV4VLConfig
+
+    config = HYV4VLConfig(
+        text_config=nested,
+        dtype="bfloat16",
+        head_dtype="model",
+        max_position_embeddings=8192,
+    )
+    for current in (config, HYV4VLConfig.from_dict(config.to_dict())):
+        assert current.dtype == current.text_config.dtype == torch.bfloat16
+        assert current.head_dtype == current.text_config.head_dtype == "model"
+        assert current.text_config.max_position_embeddings == nested.get(
+            "max_position_embeddings", 8192
+        )
+
+
+def test_hy_v4_vl_rejects_projector_dimension_mismatch():
+    from vllm.transformers_utils.configs.hy_v4 import HYV4VLConfig
+
+    with pytest.raises(ValueError, match="projector output"):
+        HYV4VLConfig(hidden_size=6144, vision_config={"out_hidden_size": 4096})
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {
