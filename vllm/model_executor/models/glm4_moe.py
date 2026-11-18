@@ -44,6 +44,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -195,7 +196,9 @@ class Glm4MoE(nn.Module):
             scoring_func="sigmoid",
             # aiter applies routed_scaling_factor internally; see deepseek_v2.py.
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.is_rocm_aiter_moe_enabled
+            else RoutedScaleMode.OUTPUT,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,

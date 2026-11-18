@@ -211,7 +211,7 @@ class BailingMoeV3VLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
                 width=target_width,
                 height=target_height,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
@@ -220,9 +220,6 @@ class BailingMoeV3VLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
 
 
 class BailingMoeV3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -234,15 +231,26 @@ class BailingMoeV3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessin
         if not hf_data:
             return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        videos = hf_data.pop("videos", [])
-        result = self._call_hf_processor(hf_data, hf_kwargs)
-        if not videos:
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        image_processor = processor.image_processor
+
+        # Call the image processor directly because the remote processor's
+        # `__call__` is incompatible with Transformers v5.23.
+        result = BatchFeature()
+        if images := hf_data.get("images"):
+            merged_kwargs = self.info._merge_and_resolve_mm_processor_kwargs(hf_kwargs)
+            images_kwargs = merged_kwargs.get("images_kwargs", {})
+            result.update(
+                image_processor(
+                    images=images, videos=None, return_tensors="pt", **images_kwargs
+                )
+            )
+
+        if not (videos := hf_data.pop("videos", [])):
             return self._finalize_hf_mm_data(
                 hf_data, hf_kwargs, passthrough_data, result
             )
 
-        processor = self.info.get_hf_processor(**hf_kwargs)
-        image_processor = processor.image_processor
         if not getattr(image_processor, "use_interleaved_frame_timestamp", False):
             raise ValueError(
                 "Bailing video inputs require interleaved frame timestamps"

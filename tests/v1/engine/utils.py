@@ -295,7 +295,7 @@ def generate_dummy_prompt_logprobs_tensors(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests."""
 
