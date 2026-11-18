@@ -4,6 +4,7 @@
 import itertools
 import math
 from collections.abc import Generator
+from functools import partial
 from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
@@ -1740,3 +1741,101 @@ def test_trace_replay_with_spec_decode():
                 rel_tol=5e-2,
                 abs_tol=2.5e-1,
             )
+
+
+@pytest.mark.parametrize("device_type", sorted({"cpu", current_platform.device_type}))
+@pytest.mark.parametrize("logits_mode", [False, True])
+def test_logprob_token_mask_preserves_scores_and_request_mapping(
+    device_type: str, logits_mode: bool
+) -> None:
+    from vllm.v1.worker.cpu import logprob as cpu_logprob
+    from vllm.v1.worker.gpu.sample import logprob as gpu_logprob
+
+    device = torch.device(device_type)
+    state: cpu_logprob.LogprobTokenMaskState | gpu_logprob.LogprobTokenMaskState
+    token_ids_state: cpu_logprob.LogprobTokenIdsState | gpu_logprob.LogprobTokenIdsState
+    if device_type == "cpu":
+        state = cpu_logprob.LogprobTokenMaskState(3, 65, device)
+        token_ids_state = cpu_logprob.LogprobTokenIdsState(3, device)
+        compute_topk_scores = partial(
+            cpu_logprob.compute_topk_scores,
+            num_per_req_token_ids=token_ids_state.num_token_ids,
+            per_req_token_ids=token_ids_state.token_ids,
+        )
+    else:
+        state = gpu_logprob.LogprobTokenMaskState(3, 65, device)
+        token_ids_state = gpu_logprob.LogprobTokenIdsState(3, device)
+        compute_topk_scores = partial(
+            gpu_logprob.compute_topk_scores, logprob_token_ids_state=token_ids_state
+        )
+    state.add_request(
+        2, SamplingParams(logprobs=4, _logprob_token_mask=[-(1 << 31), 1, 1])
+    )
+    if isinstance(state, gpu_logprob.LogprobTokenMaskState):
+        state.apply_staged_writes()
+    # Reordered slots and repeated rows also occur during speculative verification.
+    mapping = torch.tensor([2, 0, 2], dtype=torch.int32, device=device)
+    indices = np.array([2, 0], dtype=np.int32)
+    logits = torch.arange(3 * 67, device=device, dtype=torch.float32).reshape(3, 67)[
+        :, :65
+    ]
+    original = logits.clone()
+    masked_logits = state.apply(logits, mapping, indices)
+    assert masked_logits is not None
+    sampled = torch.tensor([64, 5, 5], device=device)
+    # Force a duplicate sampled token in the padded top-k columns.
+    sampled[2] = masked_logits[2].topk(4).indices[-1]
+    output = compute_topk_scores(
+        logits,
+        4,
+        sampled,
+        logits_mode=logits_mode,
+        logits_for_topk=masked_logits,
+    )
+    expected = logits if logits_mode else logits.log_softmax(-1)
+    for row in (0, 2):
+        assert output.logprob_token_ids[row, 1:4].tolist() == [64, 32, 31]
+        torch.testing.assert_close(
+            output.logprobs[row, 1:4], expected[row, [64, 32, 31]]
+        )
+    assert output.logprobs[0, 4].isneginf()
+    torch.testing.assert_close(output.logprobs[2, 4], expected[2, sampled[2]])
+    assert output.logprob_token_ids[1, 1:].tolist() == [64, 63, 62, 61]
+    torch.testing.assert_close(
+        output.logprobs[:, 0], expected.gather(1, sampled[:, None]).flatten()
+    )
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+
+    # Exact-ID requests in the same batch must keep their requested scores.
+    token_ids_state.add_request(0, SamplingParams(logprob_token_ids=[4, 60]))
+    if isinstance(token_ids_state, gpu_logprob.LogprobTokenIdsState):
+        token_ids_state.apply_staged_writes()
+    mixed = compute_topk_scores(
+        logits,
+        4,
+        sampled,
+        expanded_idx_mapping=mapping,
+        max_per_req_token_ids=2,
+        logits_mode=logits_mode,
+        logits_for_topk=masked_logits,
+    )
+    assert mixed.logprob_token_ids[1, 1:3].tolist() == [4, 60]
+    torch.testing.assert_close(mixed.logprobs[1, 1:3], expected[1, [4, 60]])
+    assert mixed.logprobs[1, 3:].isneginf().all()
+    torch.testing.assert_close(mixed.logprobs[:, 0], output.logprobs[:, 0])
+    torch.testing.assert_close(
+        mixed.logprobs[[0, 2]], output.logprobs[[0, 2]], rtol=0, atol=0
+    )
+    assert torch.equal(
+        mixed.logprob_token_ids[[0, 2]], output.logprob_token_ids[[0, 2]]
+    )
+
+    # Reusing a masked slot must also clear its mask in a mixed batch.
+    state.add_request(2, SamplingParams(logprobs=4))
+    state.add_request(0, SamplingParams(logprobs=4, _logprob_token_mask=[2, 0, 0]))
+    if isinstance(state, gpu_logprob.LogprobTokenMaskState):
+        state.apply_staged_writes()
+    masked = state.apply(logits, mapping, indices)
+    assert masked is not None
+    torch.testing.assert_close(masked[[0, 2]], logits[[0, 2]], rtol=0, atol=0)
+    assert masked[1].isfinite().nonzero().flatten().tolist() == [1]

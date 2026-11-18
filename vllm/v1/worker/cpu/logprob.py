@@ -55,6 +55,57 @@ class LogprobTokenIdsState:
 
 
 @torch.compile(
+    dynamic=True, fullgraph=True, backend=current_platform.simple_compile_backend
+)
+def _mask_logprob_logits(
+    logits: torch.Tensor, masks: torch.Tensor, idx_mapping: torch.Tensor
+) -> torch.Tensor:
+    tokens = torch.arange(logits.shape[1], device=logits.device)
+    words = masks[idx_mapping.to(torch.int64)[:, None], tokens[None, :] // 32]
+    allowed = ((words >> (tokens % 32)) & 1) != 0
+    return logits.masked_fill(~allowed, float("-inf"))
+
+
+class LogprobTokenMaskState:
+    """Per-request top-k candidate masks, independent of sampling logits."""
+
+    def __init__(self, max_num_reqs: int, vocab_size: int, device: torch.device):
+        self.enabled = np.zeros(max_num_reqs, dtype=bool)
+        self.num_words = (vocab_size + 31) // 32
+        self.device = device
+        self.masks: torch.Tensor | None = None
+
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+        mask = sampling_params._logprob_token_mask
+        if mask is not None:
+            if self.masks is None:
+                self.masks = torch.full(
+                    (len(self.enabled), self.num_words),
+                    -1,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+            self.masks[req_idx] = torch.tensor(
+                mask, dtype=torch.int32, device=self.device
+            )
+        elif self.enabled[req_idx]:
+            assert self.masks is not None
+            self.masks[req_idx].fill_(-1)
+        self.enabled[req_idx] = mask is not None
+
+    def apply(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> torch.Tensor | None:
+        if not np.any(self.enabled[idx_mapping_np]):
+            return None
+        assert self.masks is not None
+        return _mask_logprob_logits(logits, self.masks, expanded_idx_mapping)
+
+
+@torch.compile(
     dynamic=True,
     fullgraph=True,
     backend=current_platform.simple_compile_backend,
@@ -90,14 +141,16 @@ def compute_topk_scores(
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
     logits_mode: bool = False,
+    logits_for_topk: torch.Tensor | None = None,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
+    topk_logits = logits if logits_for_topk is None else logits_for_topk
     sampled_token_ids = sampled_token_ids.to(torch.int64)
 
     if max_per_req_token_ids == 0:
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
         if num_logprobs > 0:
-            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = torch.topk(topk_logits, num_logprobs, dim=-1).indices
             logprob_token_ids = torch.cat((logprob_token_ids, topk_token_ids), dim=1)
         valid_mask = None
     else:
@@ -110,7 +163,7 @@ def compute_topk_scores(
         valid_mask = torch.zeros_like(selected_token_ids, dtype=torch.bool)
 
         if num_logprobs > 0:
-            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = torch.topk(topk_logits, num_logprobs, dim=-1).indices
             selected_token_ids[:, :num_logprobs] = topk_token_ids
         valid_mask[:, :num_logprobs] = True
 
@@ -146,6 +199,12 @@ def compute_topk_scores(
         logprobs = compute_token_logprobs(logits, logprob_token_ids)
     if valid_mask is not None:
         logprobs.masked_fill_(~valid_mask, float("-inf"))
+
+    if logits_for_topk is not None:
+        masked = logits_for_topk.gather(-1, logprob_token_ids).isneginf()
+        # Padding may repeat the sampled token; retain its score in every column.
+        masked &= logprob_token_ids != sampled_token_ids.unsqueeze(-1)
+        logprobs.masked_fill_(masked, float("-inf"))
 
     sampled_ranks = _compute_token_ranks(logits, sampled_token_ids)
 
