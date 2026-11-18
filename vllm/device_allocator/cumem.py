@@ -11,7 +11,7 @@
 import atexit
 import gc
 import mmap
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -165,7 +165,7 @@ class CuMemAllocator:
     @contextmanager
     def _use_memory_pool_with_allocator(
         self,
-    ) -> Iterator[
+    ) -> Generator[
         tuple[torch.cuda.memory.MemPool, torch.cuda.memory.CUDAPluggableAllocator]
     ]:
         new_alloc = self._get_pluggable_allocator()
@@ -462,7 +462,7 @@ class CuMemAllocator:
                 )
 
     @contextmanager
-    def cudagraph_pool(self) -> Iterator[tuple[int, int]]:
+    def cudagraph_pool(self) -> Generator[tuple[int, int]]:
         """Tag CUDA graph capture allocations and yield the graph pool id."""
         if "cudagraph" not in self.allocator_and_pools:
             allocator = self._get_pluggable_allocator()

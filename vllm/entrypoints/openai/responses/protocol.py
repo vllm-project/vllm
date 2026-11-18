@@ -62,6 +62,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     MMPayload,
     PerRequestMetrics,
     StopParam,
@@ -384,8 +386,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -522,6 +524,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

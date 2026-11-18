@@ -17,6 +17,7 @@ from vllm.model_executor.models.mistral_eagle import EagleMistralForCausalLM
 from vllm.model_executor.models.mistral_large_3_eagle import (
     EagleMistralLarge3ForCausalLM,
 )
+from vllm.model_executor.models.nemotron_h_mtp import NemotronHMTP
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -105,13 +106,13 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         slot_mappings=torch.tensor([[10, 20, -1, -1]]),
     )
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    builder = SimpleNamespace(build=build, supports_update_block_table=False)
     speculator.attn_groups = [
         [
-            # Stand-in group: build_attn_metadata only reads these two members.
+            # Stand-in group: build_attn_metadata only reads these members.
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
-                get_metadata_builder=lambda _: SimpleNamespace(
-                    build=build, supports_update_block_table=False
-                ),
+                metadata_builders=[builder],
+                get_metadata_builder=lambda _: builder,
                 build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
                 layer_names=["draft"],
             )
@@ -348,6 +349,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
         (EagleMistralForCausalLM, True),
         (EagleMistralLarge3ForCausalLM, True),
         (Exaone4_5_MTP, True),
+        (NemotronHMTP, True),
         (Eagle3LlamaForCausalLM, False),
     ],
 )
@@ -377,6 +379,33 @@ def test_mm_capable_drafter_merges_multimodal_embeddings(model_cls):
     )
     assert torch.equal(merged[[0, 3]], table[[1, 2]])
     assert torch.equal(merged[[1, 2]], mm_embeds[0])
+
+
+def test_nemotron_h_mtp_merges_multimodal_embeddings():
+    """NemotronH MTP is trained on the target input stream, so image and audio
+    embeddings must replace placeholder token embeddings."""
+    table = torch.arange(8, dtype=torch.float32).repeat(3, 1).T  # [8, 3]
+
+    class _EmbeddingStub(NemotronHMTP):
+        def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return table[input_ids]
+
+    drafter = object.__new__(_EmbeddingStub)
+    input_ids = torch.tensor([1, 5, 6, 2])
+
+    text_only = NemotronHMTP.embed_input_ids(drafter, input_ids)
+    assert torch.equal(text_only, table[input_ids])
+
+    mm_embeds = [torch.full((2, 3), -1.0)]
+    is_multimodal = torch.tensor([False, True, True, False])
+    merged = NemotronHMTP.embed_input_ids(
+        drafter, input_ids, mm_embeds, is_multimodal=is_multimodal
+    )
+    assert torch.equal(merged[[0, 3]], table[[1, 2]])
+    assert torch.equal(merged[[1, 2]], mm_embeds[0])
+
+    with pytest.raises(ValueError, match="is_multimodal"):
+        NemotronHMTP.embed_input_ids(drafter, input_ids, mm_embeds)
 
 
 def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
@@ -672,6 +701,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.attn_groups = [
         [
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
+                metadata_builders=[object()],
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )

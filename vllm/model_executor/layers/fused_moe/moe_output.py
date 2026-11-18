@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
+@dataclass(slots=True)
 class UnfinalizedMoEOutput:
     """Unfinalized output of a MoE kernel.
 
@@ -148,7 +148,7 @@ def convert_flashinfer_moe_output(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class MoEOutput:
     """A MoE layer's output with its final reduction still open.
 

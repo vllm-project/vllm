@@ -19,6 +19,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
@@ -343,8 +345,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=-(2**63),
-        le=2**63 - 1,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -373,6 +375,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -595,6 +598,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -638,6 +645,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(

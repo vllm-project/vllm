@@ -248,7 +248,7 @@ TmaMI = MixedInputKernelScheduleType.TmaWarpSpecializedCooperative
 TmaCoop = EpilogueScheduleType.TmaWarpSpecializedCooperative
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScheduleConfig:
     tile_shape_mn: tuple[int, int]
     cluster_shape_mnk: tuple[int, int, int]
@@ -257,7 +257,7 @@ class ScheduleConfig:
     tile_scheduler: TileSchedulerType
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TypeConfig:
     a: DataType
     b: DataType | VLLMDataType
@@ -269,7 +269,7 @@ class TypeConfig:
     accumulator: DataType
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PrepackTypeConfig:
     a: DataType
     b_num_bits: int
@@ -277,7 +277,7 @@ class PrepackTypeConfig:
     accumulator: DataType
 
 
-@dataclass
+@dataclass(slots=True)
 class ImplConfig:
     types: TypeConfig
     schedules: list[ScheduleConfig]
