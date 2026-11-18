@@ -19,6 +19,33 @@ if TYPE_CHECKING:
     from benchmark_tiering import Scenario
 
 
+class _SignalHandlers:
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.previous_handlers: dict[int, object] = {}
+
+    def install(self) -> None:
+        assert not self.previous_handlers, "signal handlers are already installed"
+        self.previous_handlers = {
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+        }
+        signal.signal(signal.SIGINT, self.handler)
+        signal.signal(signal.SIGTERM, self.handler)
+
+    def restore(self) -> None:
+        for signum, previous_handler in self.previous_handlers.items():
+            signal.signal(signum, previous_handler)
+        self.previous_handlers = {}
+
+    def __enter__(self) -> _SignalHandlers:
+        self.install()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.restore()
+
+
 class KVCacheCalibration:
     """Calibrate the benchmark's per-attention-group block size."""
 
@@ -67,6 +94,31 @@ class KVCacheCalibration:
             else:
                 os.environ[setting] = previous_value
 
+    @contextlib.contextmanager
+    def _engine_with_cleanup(self):
+        from vllm import LLM
+
+        def handle_termination(signum: int, _frame: object) -> None:
+            raise SystemExit(128 + signum)
+
+        llm = None
+        try:
+            with _SignalHandlers(handle_termination):
+                llm = LLM(
+                    model=self.model,
+                    tensor_parallel_size=self.tensor_parallel_size,
+                    load_format="dummy",
+                    max_model_len=8192,
+                    disable_log_stats=True,
+                    numa_bind=False,
+                    enforce_eager=True,
+                    block_size=self.block_size,
+                )
+                yield llm
+        finally:
+            if llm is not None:
+                llm.llm_engine.engine_core.shutdown()
+
     @staticmethod
     def _worker_kv_group_info(worker) -> tuple[tuple[str, int], ...]:
         """Return each KV group's kind and rank-local page size."""
@@ -94,19 +146,8 @@ class KVCacheCalibration:
             log.open("w") as f,
             self._redirect_process_output(f),
             self._engine_core_in_process(),
+            self._engine_with_cleanup() as llm,
         ):
-            from vllm import LLM
-
-            llm = LLM(
-                model=self.model,
-                tensor_parallel_size=self.tensor_parallel_size,
-                load_format="dummy",
-                max_model_len=8192,
-                disable_log_stats=True,
-                numa_bind=False,
-                enforce_eager=True,
-                block_size=self.block_size,
-            )
             rank_group_info = llm.collective_rpc(
                 self._worker_kv_group_info, timeout=120
             )
@@ -126,7 +167,6 @@ class KVCacheCalibration:
             assert len(rank_local_page_sizes) == 1, (
                 f"attention groups disagree on block size: {first_rank_group_info}"
             )
-            del llm
         return sum(group_info[0][1] for group_info in rank_group_info)
 
     def resolve(self) -> float:
@@ -156,17 +196,12 @@ class VLLMServer:
         self.port = port
         self.log_path = log_path
         self.proc: subprocess.Popen | None = None
-        self._previous_signal_handlers: dict[int, object] = {}
+        self.signal_handlers = _SignalHandlers(self._handle_termination)
 
     def _handle_termination(self, signum: int, _frame: object) -> None:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.send_signal(signum)
         raise SystemExit(128 + signum)
-
-    def _restore_signal_handlers(self) -> None:
-        for signum, handler in self._previous_signal_handlers.items():
-            signal.signal(signum, handler)
-        self._previous_signal_handlers = {}
 
     def start(self) -> None:
         env = dict(os.environ, PYTHONHASHSEED="0")
@@ -187,19 +222,14 @@ class VLLMServer:
             "--port",
             str(self.port),
         ]
+        self.signal_handlers.install()
         try:
-            self._previous_signal_handlers = {
-                signal.SIGINT: signal.getsignal(signal.SIGINT),
-                signal.SIGTERM: signal.getsignal(signal.SIGTERM),
-            }
-            signal.signal(signal.SIGINT, self._handle_termination)
-            signal.signal(signal.SIGTERM, self._handle_termination)
             with self.log_path.open("w") as log:
                 self.proc = subprocess.Popen(
                     cmd, stdout=log, stderr=subprocess.STDOUT, env=env
                 )
         except BaseException:
-            self._restore_signal_handlers()
+            self.signal_handlers.restore()
             raise
 
     def wait_ready(self, timeout: int = 1800) -> None:
@@ -223,8 +253,8 @@ class VLLMServer:
     def stop(self) -> None:
         """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
         assert self.proc is not None
-        self._restore_signal_handlers()
         proc = self.proc
+        self.signal_handlers.restore()
         for attempt in range(1, 6):
             if proc.poll() is not None:
                 print(f"      vLLM process ({proc.pid}) has exited gracefully.")

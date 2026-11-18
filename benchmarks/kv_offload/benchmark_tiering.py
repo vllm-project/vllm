@@ -41,7 +41,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -398,8 +397,6 @@ class BenchmarkRun:
                 "status": "ok",
                 **guidellm_result,
             }
-        print("  [5/5] Teardown: vLLM stopped.")
-        time.sleep(5)
         return result
 
     def _cleanup(self) -> None:
@@ -650,10 +647,9 @@ def _main() -> None:
         return
 
     if args.command == "calibrate":
-        calibration = KVCacheCalibration(
+        per_group_block_bytes = KVCacheCalibration(
             MODEL, TP_SIZE, BLOCK_SIZE, PER_GROUP_BLOCK_BYTES
-        )
-        per_group_block_bytes = calibration.from_engine()
+        ).from_engine()
         print(f"PER_GROUP_BLOCK_BYTES={per_group_block_bytes}")
         return
 
@@ -689,8 +685,9 @@ def _main() -> None:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
 
-    calibration = KVCacheCalibration(MODEL, TP_SIZE, BLOCK_SIZE, PER_GROUP_BLOCK_BYTES)
-    per_group_block_bytes = calibration.resolve()
+    per_group_block_bytes = KVCacheCalibration(
+        MODEL, TP_SIZE, BLOCK_SIZE, PER_GROUP_BLOCK_BYTES
+    ).resolve()
     print(f" ===== Using GPU per-group block bytes: {per_group_block_bytes} =====")
     for spec in specs:
         spec.materialize(per_group_block_bytes)
