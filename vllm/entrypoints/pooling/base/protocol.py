@@ -147,23 +147,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
 
 class PoolingTokenizeParamsMixin:
-    add_special_tokens: bool | None
-
-    def _resolve_add_special_tokens(
-        self,
-        default_add_special_tokens: bool | None,
-    ) -> bool:
-        """Resolve the tri-state `add_special_tokens` request field.
-
-        The request field is tri-state: explicit ``True`` / ``False`` always
-        win; ``None`` means "use the per-path default", which is supplied by
-        the caller because it differs between chat and completion paths.
-        """
-        if self.add_special_tokens is not None:
-            return self.add_special_tokens
-        if default_add_special_tokens is not None:
-            return default_add_special_tokens
-        return True
+    add_special_tokens: bool
 
     def _build_pooling_tok_params(
         self,
@@ -177,27 +161,12 @@ class PoolingTokenizeParamsMixin:
     ) -> TokenizeParams:
         raise NotImplementedError
 
-    def build_tok_params(
-        self,
-        model_config: ModelConfig,
-        *,
-        default_add_special_tokens: bool | None,
-    ) -> TokenizeParams:
-        raise NotImplementedError
-
 
 class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
-    def build_tok_params(
-        self,
-        model_config: ModelConfig,
-        *,
-        default_add_special_tokens: bool | None,
-    ) -> TokenizeParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=self._resolve_add_special_tokens(
-                default_add_special_tokens
-            ),
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
         )
@@ -206,12 +175,7 @@ class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
     padding: Literal["max_length", "do_not_pad"] | None
 
-    def build_tok_params(
-        self,
-        model_config: ModelConfig,
-        *,
-        default_add_special_tokens: bool | None,
-    ) -> TokenizeParams:
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         default_max_total_tokens = model_config.max_model_len
         max_total_tokens: int | None = default_max_total_tokens
         max_output_tokens = 0
@@ -227,9 +191,7 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 
         tok_params = self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=self._resolve_add_special_tokens(
-                default_add_special_tokens
-            ),
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
         )
@@ -255,12 +217,11 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]
-    add_special_tokens: bool | None = Field(
-        default=None,
+    add_special_tokens: bool = Field(
+        default=True,
         description=(
-            "If true, special tokens (e.g. BOS) will be added to the prompt. "
-            "If unset (`None`), the model/tokenizer default is used, which for "
-            "some multimodal models is `False` to avoid a duplicate BOS."
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."
         ),
     )
     # --8<-- [end:completion-extra-params]
@@ -287,15 +248,14 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
             "If unset (`None`), the chat template's own default is used."
         ),
     )
-    add_special_tokens: bool | None = Field(
-        default=None,
+    add_special_tokens: bool = Field(
+        default=False,
         description=(
             "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to false. "
-            "If unset (`None`), the per-path default is used: `False` for the "
-            "chat path, and the model/tokenizer default for the completion path."
+            "special tokens so this should be set to false (as is the "
+            "default)."
         ),
     )
     chat_template: str | None = Field(

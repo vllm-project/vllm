@@ -599,10 +599,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
 
         extra_kwargs: dict[str, Any] = dict(ctx.pooling_params.extra_kwargs or {})
 
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
         prompt_extras_dict = dict(ctx.build_prompt_extras() or {})
         for key in ("mm_processor_kwargs", "cache_salt"):
             if key not in prompt_extras_dict and extra_kwargs.get(key) is not None:

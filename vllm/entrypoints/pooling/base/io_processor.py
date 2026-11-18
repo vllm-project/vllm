@@ -195,7 +195,10 @@ class PoolingIOProcessor:
             )
             for prompt in prompts_seq
         ]
-        tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
+
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
             pooling_params = PoolingParams()

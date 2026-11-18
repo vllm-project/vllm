@@ -151,20 +151,24 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 @dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
-    tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: int | Sequence[int] | None
     late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
+    # tok_params:
+    tokenization_kwargs: dict[str, Any] | None
+    # add_special_tokens: bool | None = None
+
+    # chat_template_kwargs
     # Tri-state: `None` means "not specified" and falls back to the per-path default
     add_generation_prompt: bool | None = None
     continue_final_message: bool | None = None
-    add_special_tokens: bool | None = None
 
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
 
+    # mm_kwargs:
     mm_processor_kwargs: dict[str, Any] | None = None
     cache_salt: str | None = None
 
@@ -184,19 +188,6 @@ class OfflineInputsContext:
             extras["cache_salt"] = self.cache_salt
         return extras or None
 
-    def build_tok_params(
-        self,
-        default_tok_params: TokenizeParams,
-    ) -> TokenizeParams:
-        # User-provided `tokenization_kwargs` still wins over the default.
-        tok_kwargs: dict[str, Any] = {}
-        if self.add_special_tokens is not None:
-            tok_kwargs["add_special_tokens"] = self.add_special_tokens
-        tok_kwargs.update(self.tokenization_kwargs or {})
-        if not tok_kwargs:
-            return default_tok_params
-        return default_tok_params.with_kwargs(**tok_kwargs)
-
     def to_encode_context(
         self,
         *,
@@ -212,7 +203,6 @@ class OfflineInputsContext:
             priorities=self.priorities,
             add_generation_prompt=self.add_generation_prompt,
             continue_final_message=self.continue_final_message,
-            add_special_tokens=self.add_special_tokens,
             chat_template=self.chat_template,
             chat_template_kwargs=self.chat_template_kwargs,
             chat_template_content_format=self.chat_template_content_format,

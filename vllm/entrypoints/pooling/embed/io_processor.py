@@ -700,7 +700,6 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
     ) -> tuple[RequestFactory, int]:
         factory, num_requests = super().get_request_factory_offline(ctx)
         assert isinstance(ctx, OfflineEncodeInputsContext)
-
         if ctx.pooling_params is None:
             return factory, num_requests
 
