@@ -104,26 +104,31 @@ class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     sync it names."""
 
 
-@dataclass(frozen=True, slots=True)
-class _Segment:
-    """Rows `start:stop` of fallback `name` (full shape `shape`), one of
-    `count` segments: a fallback over `buffer_bytes` is sent in segments and
-    joined before it is loaded."""
+@dataclass(eq=False, slots=True)
+class _Staging:
+    """A fallback's destination: the whole tensor `name` (box `box`), loaded
+    through `load_weights` once its `count` pieces have landed in it. It is
+    allocated when the first lands and freed once loaded, so the caching
+    allocator reuses it (e.g. for post-load processing); a fallback sent in
+    one piece loads straight from the receive slot."""
 
     name: str
-    start: int
-    stop: int
-    shape: tuple[int, ...]
-    count: int
+    box: Box
+    count: int = 0
+    landed: int = 0
+    tensor: torch.Tensor | None = None
+
+
+# A piece: (name, box, sent dtype, destinations), a destination being a
+# model tensor shaped like the box or the staging of a fallback.
+_Piece = tuple[str, Box, torch.dtype, list[Any]]
 
 
 @dataclass(slots=True)
 class _Bucket:
     """One pull: the pieces one producer serves to this worker, and where
     they go. It lands as one flat byte tensor (pieces at `flat_layout`) in a
-    slot of the receive arena; per piece, `copies` are the model tensors it
-    is copied into and `loads` what to load it as (a fallback, sent in full,
-    or one segment of one)."""
+    slot of the receive arena; per piece, `copies` are its destinations."""
 
     producer: int
     seq: int
@@ -131,18 +136,17 @@ class _Bucket:
     pieces: list[tuple[str, Box]]
     dtypes: list[torch.dtype]
     nbytes: int
-    copies: list[list[torch.Tensor]] = field(default_factory=list)
-    loads: list[str | _Segment | None] = field(default_factory=list)
+    copies: list[list[Any]] = field(default_factory=list)
     # Built once by `prepare`, used every sync: where each piece sits in the
     # bucket; contiguous destinations of the sent dtype as bytes, runs of
     # pieces adjacent in both the bucket and memory merged into one, with
     # the (offset, nbytes) of the bucket each copies; the other
-    # destinations; the fallbacks.
+    # destinations; the stagings, with the slices of each the piece fills.
     layout: list[FlatPiece] = field(default_factory=list)
     byte_dsts: list[torch.Tensor] = field(default_factory=list)
     byte_srcs: list[tuple[int, int]] = field(default_factory=list)
     typed: list[tuple[int, torch.Tensor]] = field(default_factory=list)
-    fallbacks: list[tuple[int, str | _Segment]] = field(default_factory=list)
+    staged: list[tuple[int, _Staging, tuple[slice, ...]]] = field(default_factory=list)
     # Per receive slot, built when the arena is: where the bucket lands, and
     # the source views of its copy-out.
     targets: list[torch.Tensor] = field(default_factory=list)
@@ -171,16 +175,19 @@ class _Bucket:
 
     def prepare(self) -> None:
         self.layout = flat_layout([box for _, box in self.pieces], self.dtypes)
-        for i, (dests, name, dtype) in enumerate(
-            zip(self.copies, self.loads, self.dtypes, strict=True)
+        for i, ((_, box), dests, dtype) in enumerate(
+            zip(self.pieces, self.copies, self.dtypes, strict=True)
         ):
             for dest in dests:
-                if dest.is_contiguous() and dest.dtype == dtype:
+                if isinstance(dest, _Staging):
+                    rows = tuple(
+                        slice(a - o, b - o) for (a, b), (o, _) in zip(box, dest.box)
+                    )
+                    self.staged.append((i, dest, rows))
+                elif dest.is_contiguous() and dest.dtype == dtype:
                     self._add_byte_copy(self.layout[i][:2], dest)
                 else:
                     self.typed.append((i, dest))
-            if name is not None:
-                self.fallbacks.append((i, name))
 
 
 @dataclass(slots=True)
@@ -251,10 +258,6 @@ class ShardedRDTWeightTransferEngine(
         # dropped.
         self._arena: torch.Tensor | None = None
         self._slot_bytes = 0
-        # fallback name -> its whole tensor and segments landed, while some
-        # of its segments are still in flight. Freed once loaded, so the
-        # caching allocator reuses it (e.g. for post-load processing).
-        self._joins: dict[str, tuple[torch.Tensor, int]] = {}
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Check the configuration and bind the producers. Touches no model
@@ -365,7 +368,7 @@ class ShardedRDTWeightTransferEngine(
             "%.1f MiB, receive arena %.1f MiB, in %.2f s",
             len(buckets),
             sum(len(b.pieces) for b in buckets),
-            sum(name is not None for b in buckets for name in b.loads),
+            sum(len(b.staged) for b in buckets),
             sum(b.nbytes for b in buckets) / (1 << 20),
             self._arena.numel() / (1 << 20) if self._arena is not None else 0.0,
             time.perf_counter() - t0,
@@ -378,8 +381,7 @@ class ShardedRDTWeightTransferEngine(
         assert isinstance(plan, LoadPlan) and self._metas is not None
         router = self._router
         assert router is not None
-        # (producer, unit) -> pieces as (name, box, dtype, copies, load name)
-        groups: dict[tuple[int, int], list[tuple]] = defaultdict(list)
+        groups: dict[tuple[int, int], list[_Piece]] = defaultdict(list)
         for meta in self._metas:
             boxes = plan.get_boxes(meta.name)
             if boxes is None:
@@ -389,7 +391,8 @@ class ShardedRDTWeightTransferEngine(
             dest = plan.get_dest(meta.name)
             if dest is None:
                 (box,) = boxes
-                groups[key].append((meta.name, box, meta.dtype, [], meta.name))
+                staging = _Staging(meta.name, box)
+                groups[key].append((meta.name, box, meta.dtype, [staging]))
                 continue
             by_box: dict[Box, list[torch.Tensor]] = defaultdict(list)
             for box, tensor in dest:
@@ -400,7 +403,7 @@ class ShardedRDTWeightTransferEngine(
                     )
                 by_box[box].append(tensor)
             for box in boxes:
-                groups[key].append((meta.name, box, meta.dtype, by_box[box], None))
+                groups[key].append((meta.name, box, meta.dtype, by_box[box]))
 
         components = router.components()
         unit_rank = _component_unit_rank(self._metas, self._units, router, components)
@@ -438,10 +441,9 @@ class ShardedRDTWeightTransferEngine(
                         seq=-1,
                         unit=unit,
                         pieces=[(name, box) for name, box, *_ in chunk],
-                        dtypes=[dt for _, _, dt, *_ in chunk],
-                        nbytes=sum(piece_nbytes(box, dt) for _, box, dt, *_ in chunk),
-                        copies=[copies for *_, copies, _ in chunk],
-                        loads=[load for *_, load in chunk],
+                        dtypes=[dt for _, _, dt, _ in chunk],
+                        nbytes=sum(piece_nbytes(box, dt) for _, box, dt, _ in chunk),
+                        copies=[dests for *_, dests in chunk],
                     )
                 )
 
@@ -452,6 +454,8 @@ class ShardedRDTWeightTransferEngine(
         buckets.sort(key=order)
         for b in buckets:
             b.prepare()
+            for _, staging, _ in b.staged:
+                staging.count += 1
         seqs: dict[int, int] = defaultdict(int)
         for b in buckets:
             b.seq = seqs[b.producer]
@@ -567,27 +571,25 @@ class ShardedRDTWeightTransferEngine(
         """Copy a bucket landed in receive slot `slot` into its destinations,
         the contiguous ones with one fused byte copy, and load its
         fallbacks."""
-        byte_srcs, typed_srcs, fallback_srcs = bucket.srcs[slot]
+        byte_srcs, typed_srcs, staged_srcs = bucket.srcs[slot]
         if byte_srcs:
             torch._foreach_copy_(bucket.byte_dsts, byte_srcs)
         if typed_srcs:
             torch._foreach_copy_([dest for _, dest in bucket.typed], typed_srcs)
         loads = []
-        for load, src in fallback_srcs:
-            if isinstance(load, str):
-                loads.append((load, src))
+        for (_, staging, rows), src in zip(bucket.staged, staged_srcs):
+            if staging.count == 1:
+                loads.append((staging.name, src))
                 continue
-            # a segment: join it into the whole fallback, and load that
-            # once its last segment is in
-            joined, landed = self._joins.get(load.name, (None, 0))
-            if joined is None:
-                joined = torch.empty(load.shape, dtype=src.dtype, device=src.device)
-            joined[load.start : load.stop].copy_(src)
-            if landed + 1 == load.count:
-                self._joins.pop(load.name, None)
-                loads.append((load.name, joined))
-            else:
-                self._joins[load.name] = (joined, landed + 1)
+            if staging.tensor is None:
+                staging.tensor = torch.empty(
+                    box_shape(staging.box), dtype=src.dtype, device=src.device
+                )
+            staging.tensor[rows].copy_(src)
+            staging.landed += 1
+            if staging.landed == staging.count:
+                loads.append((staging.name, staging.tensor))
+                staging.tensor, staging.landed = None, 0
         if loads:
             self.model.load_weights(loads)
 
@@ -601,7 +603,7 @@ class ShardedRDTWeightTransferEngine(
                 flat_view(flat, layout[i]).reshape(dest.shape)
                 for i, dest in bucket.typed
             ],
-            [(load, flat_view(flat, layout[i])) for i, load in bucket.fallbacks],
+            [flat_view(flat, layout[i]) for i, *_ in bucket.staged],
         )
 
     def finish_weight_update(self) -> None:
@@ -655,7 +657,6 @@ class ShardedRDTWeightTransferEngine(
     def _drop_plan(self) -> None:
         self._plan = None
         self._buckets = []
-        self._joins = {}
         if self._arena is not None:
             deregister_nixl_memory(self._arena)
             self._arena = None
@@ -711,23 +712,27 @@ def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]
     return actors
 
 
-def _by_destination(piece: tuple) -> tuple[int, int]:
+def _by_destination(piece: _Piece) -> tuple[int, int]:
     """Sort key: a piece with one contiguous destination of its dtype by that
     destination's address; every other piece after them, in plan order."""
-    _, _, dtype, copies, load = piece
-    if load is None and len(copies) == 1:
-        (dest,) = copies
-        if dest.is_contiguous() and dest.dtype == dtype:
+    _, _, dtype, dests = piece
+    if len(dests) == 1:
+        (dest,) = dests
+        if (
+            isinstance(dest, torch.Tensor)
+            and dest.is_contiguous()
+            and dest.dtype == dtype
+        ):
             return (0, dest.data_ptr())
     return (1, 0)
 
 
-def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
+def _rows(piece: _Piece, budget: int, limit: int | None = None) -> list[_Piece]:
     """A piece over `budget` cut along dim 0 of its box into segments of
     whole rows, each at most `budget` (with its alignment), or `limit` if one
     row does not fit `budget`: ordinary pieces, whose destinations are the
-    same rows of the piece's, so every segment is a view on both sides. A
-    fallback's segments are joined on landing.
+    same rows of the piece's, so every segment is a view on both sides (a
+    staging is indexed by the segment's box).
 
     Raises:
         RuntimeError: one row is over `limit`, or a destination's rows are
@@ -735,7 +740,7 @@ def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
 
     """
     limit = budget if limit is None else limit
-    name, box, dtype, copies, load = piece
+    name, box, dtype, dests = piece
     if piece_nbytes(box, dtype) <= budget:
         return [piece]
     shape = box_shape(box)
@@ -751,9 +756,9 @@ def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
             f"Sharded RDT: one row of {name!r} (box {box}) is {row} B, over "
             f"buffer_bytes={limit}; raise buffer_bytes"
         )
-    dests = []
-    for dest in copies:
-        if tuple(dest.shape) != shape:
+    by_rows = []
+    for dest in dests:
+        if isinstance(dest, torch.Tensor) and tuple(dest.shape) != shape:
             if not dest.is_contiguous():
                 raise RuntimeError(
                     f"Sharded RDT: {name!r} (box {box}) is over "
@@ -761,24 +766,20 @@ def _rows(piece: tuple, budget: int, limit: int | None = None) -> list[tuple]:
                     "out by rows of it; raise buffer_bytes"
                 )
             dest = dest.view(shape)
-        dests.append(dest)
+        by_rows.append(dest)
     (start, stop), rest = box[0], box[1:]
-    starts = range(0, stop - start, rows)
     return [
         (
             name,
-            ((start + r, start + min(r + rows, stop - start)), *rest),
+            ((start + r, min(start + r + rows, stop)), *rest),
             dtype,
-            [dest[r : r + rows] for dest in dests],
-            None
-            if load is None
-            else _Segment(load, r, min(r + rows, stop - start), shape, len(starts)),
+            [d[r : r + rows] if isinstance(d, torch.Tensor) else d for d in by_rows],
         )
-        for r in starts
+        for r in range(0, stop - start, rows)
     ]
 
 
-def _cut(pieces: list[tuple], budget: int) -> list[list[tuple]]:
+def _cut(pieces: list[_Piece], budget: int) -> list[list[_Piece]]:
     """Consecutive runs of at most `budget` bytes; a larger piece goes alone."""
     units = gather_units([piece_nbytes(p[1], p[2]) for p in pieces], budget)
     return [

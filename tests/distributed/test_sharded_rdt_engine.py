@@ -259,21 +259,23 @@ def test_toy_loaders_equal_cold_start(monkeypatch, buffer_bytes):
     (router,) = [
         b for b in fleet.engine._buckets if ("router.bias", ((0, 5),)) in b.pieces
     ]
-    assert router.producer == 1 and "router.bias" in router.loads
+    assert router.producer == 1 and "router.bias" in _staged(router)
     pieces = {
         name: (b, i)
         for b in fleet.engine._buckets
         for i, (name, _) in enumerate(b.pieces)
     }
     b, i = pieces["proj.weight"]
-    assert b.loads[i] is None and b.copies[i][0].stride() == (1, 4)  # strided
-    assert [j for j, _ in b.typed] == [i]
+    assert "proj.weight" not in _staged(b)
+    ((j, dest),) = b.typed
+    assert j == i and dest.stride() == (1, 4)  # strided
     start, end = b.layout[i][0], b.layout[i][0] + b.layout[i][1]
     assert all(o + n <= start or o >= end for o, n in b.byte_srcs)
 
 
-def _dests(fleet):
-    return [d for b in fleet.engine._buckets for ds in b.copies for d in ds]
+def _staged(bucket):
+    """Names of the fallbacks whose pieces `bucket` carries."""
+    return {staging.name for _, staging, _ in bucket.staged}
 
 
 def test_a_pull_that_misses_its_slot_fails_the_sync(monkeypatch):
@@ -301,17 +303,13 @@ def test_pieces_over_buffer_bytes_go_in_row_segments(monkeypatch):
     _check_equals_cold_start(fleet, _toy_model, _TOY_SHAPES)
     pieces = [(n, box) for b in fleet.engine._buckets for n, box in b.pieces]
     split = {n for n, _ in pieces if sum(m == n for m, _ in pieces) > 1}
-    loads = {
-        n for b in fleet.engine._buckets for n in b.loads if isinstance(n, str)
-    } | {
-        s.name
-        for b in fleet.engine._buckets
-        for s in b.loads
-        if isinstance(s, engine_mod._Segment)
-    }
+    loads = set().union(*map(_staged, fleet.engine._buckets))
     assert split - loads and split & loads  # a direct and a fallback split
     assert all(b.nbytes <= 24 for b in fleet.engine._buckets)
-    assert fleet.engine._joins == {}  # joined and loaded
+    # every staging was loaded and freed
+    assert all(
+        st.tensor is None for b in fleet.engine._buckets for _, st, _ in b.staged
+    )
     # segments are no larger than the buckets the other pieces make, so the
     # receive slot does not grow
     regular = [
@@ -331,7 +329,7 @@ def test_a_row_over_buffer_bytes_is_refused_at_plan_time(monkeypatch):
 
 def test_rows_round_down_to_whole_rows_within_the_budget():
     t = torch.zeros(10, 3, dtype=torch.bfloat16)  # rows of 6 B
-    piece = ("w", ((0, 10), (0, 3)), torch.bfloat16, [t], None)
+    piece = ("w", ((0, 10), (0, 3)), torch.bfloat16, [t])
     segs = engine_mod._rows(piece, 32)  # 5 rows = 30 B, with alignment 32
     assert [seg[1][0] for seg in segs] == [(0, 5), (5, 10)]
     assert [seg[3][0].data_ptr() for seg in segs] == [t.data_ptr(), t[5].data_ptr()]
@@ -369,12 +367,12 @@ def test_qkv_and_merged_column_under_tp(
     fleet = _Fleet(monkeypatch, model, _LINEAR_SHAPES, buffer_bytes=buffer_bytes)
     _check_equals_cold_start(fleet, make, _LINEAR_SHAPES)
     # every destination is contiguous: one fused byte copy per pull
-    assert all(not b.typed and not b.fallbacks for b in fleet.engine._buckets)
+    assert all(not b.typed and not b.staged for b in fleet.engine._buckets)
     if buffer_bytes > 32:
         # q, k, v (and gate, up) fill adjacent rows of one fused weight, so
         # a pull lands each fused weight's pieces from it with one copy
-        fused = {d.untyped_storage().data_ptr() for d in _dests(fleet)}
-        assert sum(len(b.byte_dsts) for b in fleet.engine._buckets) == len(fused)
+        copies = [d for b in fleet.engine._buckets for d in b.byte_dsts]
+        assert len({d.untyped_storage().data_ptr() for d in copies}) == len(copies)
 
 
 @pytest.mark.parametrize("ep_rank", [0, 1])
