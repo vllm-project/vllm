@@ -1,7 +1,7 @@
 # Last-layer FFN row pruning (prototype)
 
 `VLLM_ENABLE_LAST_LAYER_FFN_PRUNING=1` enables an experimental optimization for
-native dense Qwen3 models and dense Qwen2/Qwen2.5 through the Transformers
+native dense Qwen3 and Llama models, and dense Qwen2/Qwen2.5 through the Transformers
 modeling backend. It is disabled by default.
 
 During a complete prefill, ordinary next-token generation consumes only the last

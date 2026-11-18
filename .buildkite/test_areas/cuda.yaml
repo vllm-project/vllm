@@ -77,6 +77,7 @@ steps:
   - tests/v1/cudagraph/test_last_layer_ffn.py
   - vllm/envs.py
   - vllm/model_executor/models/qwen3.py
+  - vllm/model_executor/models/llama.py
   - vllm/model_executor/models/transformers/
   - vllm/v1/worker/gpu/last_layer_ffn.py
   - vllm/v1/worker/gpu/model_runner.py
