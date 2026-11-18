@@ -3,9 +3,12 @@
 """Custom Sparse Attention Indexer layers."""
 
 import math
+from functools import partial
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _cpu_ops as cpu_ops
@@ -43,9 +46,17 @@ from vllm.model_executor.layers.indexer_topk import (
     get_indexer_topk,
     is_deep_select_supported,
 )
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     get_fp8_min_max,
 )
+from vllm.model_executor.utils import storage_view
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -71,9 +82,15 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        DirectDCPTopKWorkspace,
+    )
 
 logger = init_logger(__name__)
 
@@ -107,6 +124,23 @@ def _assert_cutedsl_dcp_merge_supported(
         )
 
 
+def _get_direct_dcp_topk_workspace(
+    device: torch.device, max_rows: int, topk_tokens: int
+) -> "DirectDCPTopKWorkspace | None":
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_direct import (
+        get_direct_dcp_topk_workspace,
+    )
+
+    # Follows the direct A2A combine it is paired with.
+    return get_direct_dcp_topk_workspace(
+        get_dcp_group(),
+        device,
+        max_rows,
+        topk_tokens,
+        envs.VLLM_USE_DIRECT_DCP_A2A,
+    )
+
+
 def _merge_dcp_topk_global(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -117,6 +151,7 @@ def _merge_dcp_topk_global(
     row_starts: torch.Tensor | None = None,
     logits_dtype: torch.dtype = torch.float32,
     num_positions: int | None = None,
+    direct_max_rows: int = 0,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -132,6 +167,10 @@ def _merge_dcp_topk_global(
     The selector keys only the score bits that `logits_dtype` (the dtype the
     MQA logits were computed in, before the FP32 upcast) carries and the id
     bits that positions below `num_positions` use.
+
+    Batches of at most `direct_max_rows` rows exchange the candidates over
+    symmetric memory instead of an NCCL all-gather (the workspace was created
+    by `SparseAttnIndexer`).
     """
     if dcp_world_size <= 1:
         return
@@ -160,6 +199,18 @@ def _merge_dcp_topk_global(
         stable_topk_from_gathered_candidates_cutedsl,
     )
 
+    score_bits = dcp_topk_score_bits(logits_dtype)
+    id_bits = 32 if num_positions is None else dcp_topk_id_bits(num_positions)
+    if 0 < topk_indices.shape[0] <= direct_max_rows:
+        workspace = _get_direct_dcp_topk_workspace(
+            topk_indices.device, direct_max_rows, topk_tokens
+        )
+        assert workspace is not None
+        workspace.merge(
+            logits, topk_indices, cp_interleave, row_starts, score_bits, id_bits
+        )
+        return
+
     packed = torch.empty(
         (*topk_indices.shape, 2),
         dtype=torch.float32,
@@ -182,8 +233,8 @@ def _merge_dcp_topk_global(
         gathered.view(dcp_world_size, *packed.shape),
         topk_tokens,
         out=topk_indices,
-        score_bits=dcp_topk_score_bits(logits_dtype),
-        id_bits=32 if num_positions is None else dcp_topk_id_bits(num_positions),
+        score_bits=score_bits,
+        id_bits=id_bits,
     )
 
 
@@ -523,7 +574,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )
@@ -559,6 +610,7 @@ def sparse_attn_indexer(
     candidate_write: bool = False,
     topk_backend: str = "auto",
     logits_dtype: torch.dtype = torch.float32,
+    dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -979,6 +1031,7 @@ def sparse_attn_indexer(
                     row_starts=row_starts,
                     logits_dtype=logits_dtype,
                     num_positions=max_model_len,
+                    direct_max_rows=dcp_direct_topk_max_rows,
                 )
             # Free this chunk's logits before the next chunk allocates its own.
             del logits
@@ -1186,6 +1239,7 @@ def sparse_attn_indexer(
                 cp_kv_cache_interleave_size,
                 logits_dtype=logits_dtype,
                 num_positions=max_model_len,
+                direct_max_rows=dcp_direct_topk_max_rows,
             )
 
         if needs_padded_path:
@@ -1231,6 +1285,7 @@ def sparse_attn_indexer_fake(
     candidate_write: bool = False,
     topk_backend: str = "auto",
     logits_dtype: torch.dtype = torch.float32,
+    dcp_direct_topk_max_rows: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1274,6 +1329,7 @@ class SparseAttnIndexer(CustomOp):
         candidate_block_size: int = 0,
         candidate_write: bool = False,
         cache_layout: str | None = None,
+        skip_topk_buffer_clear: bool = False,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -1285,6 +1341,9 @@ class SparseAttnIndexer(CustomOp):
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
+        # Set when the caller already filled topk_indices_buffer[:num_tokens]
+        # with -1 earlier in the forward.
+        self.skip_topk_buffer_clear = skip_topk_buffer_clear
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
         # Physical layout override for the insert/gather kernels ("NORMAL" =
@@ -1313,6 +1372,24 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
+        self.dcp_direct_topk_max_rows = 0
+        if (
+            self.dcp_world_size > 1
+            and not self.use_pcp
+            and parallel_config.dcp_comm_backend == "a2a"
+            and not parallel_config.use_ubatching
+            and current_platform.is_cuda()
+            and has_cutedsl()
+        ):
+            from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
+
+            # Rendezvous now, while every rank is constructing the model.
+            max_rows = get_dcp_workspace_max_num_tokens(vllm_config)
+            workspace = _get_direct_dcp_topk_workspace(
+                topk_indices_buffer.device, max_rows, topk_tokens
+            )
+            if workspace is not None:
+                self.dcp_direct_topk_max_rows = max_rows
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1400,12 +1477,13 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self._parallel_config.cp_kv_cache_interleave_size,
-            False,
+            self.skip_topk_buffer_clear,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
             logits_dtype=self.logits_dtype,
+            dcp_direct_topk_max_rows=self.dcp_direct_topk_max_rows,
         )
 
     def forward_xpu(
@@ -1661,3 +1739,75 @@ class SparseAttnIndexer(CustomOp):
                 )
 
         return topk_indices_buffer
+
+
+def init_indexer_wk_weights_proj(
+    indexer: nn.Module,
+    hidden_size: int,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> None:
+    """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
+    checkpoint stores it and run in BF16: `bf16_linear`) and
+    `weights_proj` (BF16), and `wk_weights_proj`, the BF16 linear that runs
+    both as one GEMM. Its weight is not a parameter: it holds `wk` and
+    `weights_proj`'s rows and is refilled after every load and every in-place
+    reload of the runtime weights (`fuse_indexer_wk_weights_proj` from the
+    indexer's post-load hook)."""
+    # wk stays exact (e.g. under online quantization): the fused GEMM is BF16
+    indexer.wk = bf16_linear(
+        partial(
+            ReplicatedLinear,
+            hidden_size,
+            indexer.head_dim,
+            bias=False,
+            prefix=f"{prefix}.wk",
+        ),
+        quant_config,
+    )
+    indexer.refresh_derived_weights = indexer.process_weights_after_loading
+    indexer.weights_proj = ReplicatedLinear(
+        hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
+    )
+    fused = MergedColumnParallelLinear(
+        hidden_size,
+        [indexer.head_dim, indexer.n_head],
+        bias=False,
+        disable_tp=True,
+        prefix=f"{prefix}.wk_weights_proj",
+    )
+    weight = fused.weight.data
+    del fused.weight
+    fused.weight = weight  # a plain attribute: loaders and reloads skip it
+    indexer.wk_weights_proj = fused
+    # wk and weights_proj own no storage: their weights are views of the fused
+    # one. weights_proj's is its rows after wk's. wk's starts at offset 0 in
+    # the dtype it loads: FP8 bytes occupy the first half of wk's rows until
+    # post-load processing dequantizes them (through a temporary) into those
+    # rows; a direct reload views them back to FP8 at the same address.
+    indexer.weights_proj.weight.data = weight[indexer.head_dim :]
+    wk_weight = indexer.wk.weight
+    indexer.wk.weight.data = storage_view(
+        weight.untyped_storage(),
+        0,
+        wk_weight.shape,
+        wk_weight.stride(),
+        wk_weight.dtype,
+    )
+
+
+def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
+    """Fill the fused BF16 `wk_weights_proj` weight in place (captured CUDA
+    graphs keep its address) from `wk` and `weights_proj`, copying only a
+    part that is not already a view of its rows (e.g. dots3's own
+    `weights_proj`)."""
+    proj = indexer.wk_weights_proj
+    if proj.weight.is_meta:  # weight cache IPC load: only parameters arrive
+        proj.weight = torch.empty_like(proj.weight, device=indexer.wk.weight.device)
+    row = 0
+    for layer in (indexer.wk, indexer.weights_proj):
+        part = get_and_maybe_dequant_weights(layer, out_dtype=proj.weight.dtype)
+        rows = proj.weight[row : row + part.shape[0]]
+        row += part.shape[0]
+        if part.data_ptr() != rows.data_ptr() or part.stride() != rows.stride():
+            rows.copy_(part)

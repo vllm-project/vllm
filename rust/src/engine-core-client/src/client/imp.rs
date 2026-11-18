@@ -27,23 +27,13 @@ use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_outpu
 use crate::metrics::{
     EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
 };
-use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
+use crate::protocol::{encode_msgpack, msgpack_zero_copy_threshold};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
-
-const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
-const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
-
-fn msgpack_zero_copy_threshold() -> usize {
-    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
-}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,

@@ -34,8 +34,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -129,6 +129,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
@@ -201,32 +202,15 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
-            .with_profiler(config.profiler.clone()),
+            .with_profiler(config.profiler.clone())
+            .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing
     // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules).await?;
+    lora::load_static_loras(&state, &config.lora_modules, &config.default_mm_loras).await?;
 
     Ok(state)
-}
-
-async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
-    for module in modules {
-        let request = state.load_static_lora(module).await.with_context(|| {
-            format!(
-                "failed to load LoRA adapter `{}` from --lora-modules",
-                module.name
-            )
-        })?;
-        info!(
-            lora_name = %request.lora_name,
-            lora_int_id = request.lora_int_id,
-            lora_path = %request.lora_path,
-            "loaded static LoRA adapter"
-        );
-    }
-    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -306,13 +290,17 @@ where
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let render_service =
+            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
             .add_service(control_service)
-            .add_service(inference_service);
+            .add_service(inference_service)
+            .add_service(render_service);
         Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
         None

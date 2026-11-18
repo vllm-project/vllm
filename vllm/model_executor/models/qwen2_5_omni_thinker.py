@@ -29,6 +29,8 @@ from typing import Annotated, Any, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
@@ -151,6 +153,17 @@ def unpad_and_flat_audio_features(
         for audio_feature, length in zip(input_audio_features, audio_feature_lengths)
     ]
     return torch.cat(unpadded_features, dim=-1)
+
+
+def may_interleave_audio_video(multimodal_embeddings: Sequence[torch.Tensor]) -> bool:
+    """Whether the batch may hold interleaved audio-in-video tokens.
+
+    Judged from the modality the encoder gather sets on each embedding, so it
+    needs no host read of `input_ids`. Untagged embeddings count as possibly
+    interleaved.
+    """
+    modalities = {getattr(embed, "modality", None) for embed in multimodal_embeddings}
+    return None in modalities or {"audio", "video"} <= modalities
 
 
 def check_interleaved_audio_video(
@@ -632,6 +645,12 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         return mm_data
 
 
+# Transformers 5.23 validates audio counts unless video audio slots are marked.
+_PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
+    "5.23.0.dev0"
+)
+
+
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -655,6 +674,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 standalone_mm_counts = dict(mm_counts)
                 standalone_mm_counts["audio"] -= num_videos
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
+                if _PASS_AUDIO_FROM_VIDEO_INDICES:
+                    num_standalone = standalone_mm_counts["audio"]
+                    hf_inputs.hf_data["audio_from_video_indices"] = [
+                        *range(num_videos),
+                        *[None] * num_standalone,
+                    ]
 
         hf_data = hf_inputs.hf_data
         normalized_kwargs = hf_inputs.hf_kwargs
@@ -992,8 +1017,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         input_features = processed_data.pop("input_features", None)
@@ -1014,7 +1039,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
         processed_data.pop("input_ids", None)
 
@@ -1115,24 +1140,26 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # audio_feature_lengths is keep_on_cpu: take the split sizes from the
+        # host copy, and move it for the audio tower, which derives device
+        # placement from feature_lens.
+        audio_feature_lengths_cpu = audio_input["audio_feature_lengths"]
         audio_feat_lengths, audio_output_lengths = (
-            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
+            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths_cpu)
         )
+        audio_feature_lengths = async_tensor_h2d(
+            audio_feature_lengths_cpu, input_features.device
+        )
+        audio_feat_lengths = async_tensor_h2d(audio_feat_lengths, input_features.device)
 
+        # The transformers audio encoder reads its lengths back internally.
         with gpu_sync_allowed():
             audio_outputs = self.audio_tower(
                 input_features.to(self.audio_tower.dtype),
                 feature_lens=audio_feature_lengths,
                 aftercnn_lens=audio_feat_lengths,
             )
-            split_sizes = audio_output_lengths.tolist()
-        return audio_outputs.last_hidden_state.split(split_sizes)
+        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
@@ -1628,6 +1655,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         # needed; otherwise fall back to the default parent implementation.
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
+
+        if not may_interleave_audio_video(multimodal_embeddings):
+            return super().embed_input_ids(
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
 
         with gpu_sync_allowed():
             input_ids_cpu = input_ids.cpu()
