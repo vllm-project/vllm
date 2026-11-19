@@ -309,23 +309,6 @@ pub mod kv_connector {
     #[serde(transparent)]
     pub struct MooncakeStats(pub BTreeMap<String, Vec<MooncakeRecord>>);
 
-    /// UMBP store connector transfer operation name.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum UmbpOperation {
-        Load,
-        Store,
-    }
-
-    impl UmbpOperation {
-        pub(crate) const fn as_str(self) -> &'static str {
-            match self {
-                Self::Load => "load",
-                Self::Store => "store",
-            }
-        }
-    }
-
     /// Interval counters of one UMBP store transfer operation.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
     pub struct UmbpOperationCounts {
@@ -339,13 +322,18 @@ pub mod kv_connector {
         pub num_bytes: u64,
     }
 
-    /// UMBP store connector telemetry grouped by operation.
+    /// UMBP store connector telemetry grouped by operation name.
+    ///
+    /// Python records any operation name and exports it as a label, so names
+    /// stay strings here, as in [`MooncakeStats`]. The values must still be
+    /// operation counters, which keeps other connectors' payloads from
+    /// decoding as UMBP.
     ///
     /// Original Python definition: `UMBPStoreConnectorStats` in
     /// `vllm/distributed/kv_transfer/kv_connector/v1/umbp/stats.py`.
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
     #[serde(transparent)]
-    pub struct UmbpStats(pub BTreeMap<UmbpOperation, UmbpOperationCounts>);
+    pub struct UmbpStats(pub BTreeMap<String, UmbpOperationCounts>);
 
     /// SimpleCPUOffload connector telemetry.
     ///
@@ -485,7 +473,7 @@ pub struct SchedulerStats {
 mod tests {
     use super::{
         CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
-        SchedulerStats, UmbpOperation,
+        SchedulerStats,
     };
 
     #[test]
@@ -579,12 +567,14 @@ mod tests {
         ));
         let umbp = serde_json::json!({
             "load": {"submitted": 2, "completed": 1, "failed": 1, "num_bytes": 4096,
-                     "future_counter": 1}
+                     "future_counter": 1},
+            "future_operation": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 0}
         });
         assert!(matches!(
             decode(umbp.clone()),
             KvConnectorStats::Umbp(stats)
-                if stats.0[&UmbpOperation::Load].num_bytes == 4096
+                if stats.0["load"].num_bytes == 4096
+                    && stats.0.contains_key("future_operation")
         ));
         // A newer child payload must not drop its siblings.
         assert!(matches!(

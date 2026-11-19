@@ -561,7 +561,7 @@ fn record_umbp_stats(handles: &SchedulerStatsHandles, stats: &UmbpStats) {
         let labels = UmbpOperationLabels {
             model_name: handles.labels.model_name.clone(),
             engine: handles.labels.engine,
-            operation: operation.as_str(),
+            operation: operation.clone(),
         };
         handles
             .umbp_transfer_submitted_total
