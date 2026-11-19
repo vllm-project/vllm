@@ -46,13 +46,6 @@ class FlashSWABackend(FlashSparseBackend):
     def supports_sliding_window(cls):
         return True
 
-    @classmethod
-    def supports_fp8_ds_mla_sliding_window(cls) -> bool:
-        # Same latent512 + rotary64 rows as DSA. The metadata builder forces
-        # the paged FP8 mixed-batch kernel, which attends through indices and
-        # does not gather evicted sliding-window pages.
-        return True
-
 
 def window_indices(positions: torch.Tensor, window: int, width: int) -> torch.Tensor:
     if window < 1 or width < window:
