@@ -1586,7 +1586,7 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
-            if "mlp.experts." in name and name not in params_dict:
+            if "mlp.experts." in name:
                 # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue

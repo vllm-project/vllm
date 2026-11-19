@@ -369,7 +369,7 @@ class Glm4MoeLiteModel(nn.Module):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            if "mlp.experts." in name and name not in params_dict:
+            if "mlp.experts." in name:
                 # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue
