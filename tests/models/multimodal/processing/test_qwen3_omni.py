@@ -6,8 +6,10 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import batched_tensors_equal
 
 from ...utils import build_model_context
 
@@ -303,3 +305,65 @@ def test_image_budget_is_unchanged() -> None:
     budget = processor.info.get_mm_max_tokens_per_item(4096, {"image": 1})
     assert budget is not None
     assert budget["image"] == 12544
+
+
+@pytest.mark.parametrize("hop_length", [80, 320])
+def test_request_audio_hop_length_matches_engine(hop_length: int) -> None:
+    """Request padding must use the feature extractor's effective hop length."""
+    kwargs = {"hop_length": hop_length}
+    audio = np.random.RandomState(0).randn(16001).astype(np.float32)
+    results = []
+    for on_init in (True, False):
+        ctx = build_model_context(
+            "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            mm_processor_kwargs=kwargs if on_init else None,
+            limit_mm_per_prompt={"audio": 1, "image": 0, "video": 0},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        results.append(
+            processor(
+                "<|audio_start|><|audio_pad|><|audio_end|>",
+                mm_items=processor.info.parse_mm_data({"audio": [(audio, 16000)]}),
+                hf_processor_mm_kwargs={} if on_init else kwargs,
+            )
+        )
+    assert results[0]["prompt_token_ids"] == results[1]["prompt_token_ids"]
+    assert results[0]["mm_placeholders"] == results[1]["mm_placeholders"]
+    assert batched_tensors_equal(
+        results[0]["mm_kwargs"].get_data(), results[1]["mm_kwargs"].get_data()
+    )
+
+
+@pytest.mark.parametrize("max_length", [16000, 32000])
+@pytest.mark.parametrize("num_audios", [1, 2])
+def test_truncated_audio_lengths_match_features(
+    max_length: int, num_audios: int
+) -> None:
+    """Truncation must update audio lengths and placeholders with the features."""
+    ctx = build_model_context(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        limit_mm_per_prompt={"audio": 2, "image": 0, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    rng = np.random.RandomState(0)
+    audios = [
+        rng.randn(48000 + i * 16000).astype(np.float32) for i in range(num_audios)
+    ]
+    prompt = "<|audio_start|><|audio_pad|><|audio_end|>" * num_audios
+    kwargs = {"truncation": True, "max_length": max_length}
+    actual = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs=kwargs,
+    )
+    expected = processor.info.get_hf_processor()(
+        text=prompt, audio=audios, return_tensors="pt", **kwargs
+    )
+    assert actual["prompt_token_ids"] == expected["input_ids"][0].tolist()
+    data = actual["mm_kwargs"].get_data()
+    lengths = data["audio_feature_lengths"]
+    features = data["input_audio_features"]
+    assert isinstance(lengths, torch.Tensor)
+    assert isinstance(features, torch.Tensor)
+    assert int(lengths.sum()) == features.shape[-1]
+    torch.testing.assert_close(lengths, expected["feature_attention_mask"].sum(-1))
