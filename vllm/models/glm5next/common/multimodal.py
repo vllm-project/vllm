@@ -23,7 +23,10 @@ from vllm.inputs import MultiModalInput, mm_input
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
-from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -823,6 +826,9 @@ class Glm5NextProfilingProcessor(BaseMultiModalProcessor[Glm5NextProcessingInfo]
         patch_size = vision_config.patch_size
         temporal_patch_size = vision_config.temporal_patch_size
         patch_dim = vision_config.in_channels * temporal_patch_size * patch_size**2
+        patch_dtype = (
+            build_mm_input_norm(info.ctx.model_config).input_dtype or torch.float32
+        )
         data = {}
         placeholders = {}
         hashes = {}
@@ -856,7 +862,7 @@ class Glm5NextProfilingProcessor(BaseMultiModalProcessor[Glm5NextProcessingInfo]
                 [grid] * count, dtype=torch.long, device="cpu"
             )
             data[pixel_key] = torch.zeros(
-                (math.prod(grid) * count, patch_dim), dtype=torch.float32, device="cpu"
+                (math.prod(grid) * count, patch_dim), dtype=patch_dtype, device="cpu"
             )
             placeholders[modality] = [
                 PlaceholderRange(

@@ -41,6 +41,34 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     assert ctx.model_config.supports_multimodal_inputs is expected
 
 
+@pytest.mark.parametrize("rust_frontend", ["0", "1"])
+@pytest.mark.parametrize(
+    ("model_id", "requested", "expected"),
+    [
+        ("zai-org/GLM-5.3-Flash", None, True),
+        ("zai-org/GLM-5.3-Flash", True, True),
+        ("zai-org/GLM-5.3-Flash", False, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", None, True),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", True, True),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", False, False),
+        ("llava-hf/llava-1.5-7b-hf", None, False),
+        ("llava-hf/llava-1.5-7b-hf", True, False),
+        ("llava-hf/llava-1.5-7b-hf", False, False),
+    ],
+)
+def test_mm_device_do_normalize(
+    monkeypatch, model_id, rust_frontend, requested, expected
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", rust_frontend)
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"mm_device_do_normalize": requested},
+    )
+
+    assert ctx.model_config.multimodal_config is not None
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize is expected
+
+
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "TORCH_SDPA"])
 def test_mm_encoder_attn_backend_str_conversion(backend):
     config = MultiModalConfig(mm_encoder_attn_backend=backend)

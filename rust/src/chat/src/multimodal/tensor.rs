@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs};
+use llm_multimodal::{EncoderDtype, EncoderInput, ModelSpecificValue, PreprocessedEncoderInputs};
 use ndarray::ArrayD;
 use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
@@ -39,7 +39,14 @@ pub(super) fn collect_tensors(
         ..
     } = preprocessed;
 
-    let primary_value = KwargValue::from_f32_array(encoder_input.into_f32(), float_dtype)?;
+    let identity_pixel_norm = encoder_input.pixel_norm().is_some_and(|norm| {
+        norm.scale == 1.0 && norm.offset == [0.0; 3] && norm.divisor == [1.0; 3]
+    });
+    let primary_value = if identity_pixel_norm {
+        KwargValue::from_u8_encoder_input(encoder_input)?
+    } else {
+        KwargValue::from_f32_array(encoder_input.into_f32(), float_dtype)?
+    };
 
     let mut tensors = HashMap::new();
     tensors.insert(primary_key.to_string(), primary_value);
@@ -50,6 +57,14 @@ pub(super) fn collect_tensors(
 }
 
 impl KwargValue {
+    fn from_u8_encoder_input(input: EncoderInput) -> Result<Self> {
+        let shape = input.shape().to_vec();
+        let data = input.into_wire_bytes_as(EncoderDtype::Uint8).map_err(Error::Multimodal)?;
+        Ok(Self::Tensor {
+            wire: WireTensor::from_raw_bytes(TensorDtype::U8, shape, data.into_payload()),
+        })
+    }
+
     fn from_model_specific(value: ModelSpecificValue, float_dtype: ModelDtype) -> Result<Self> {
         use ProtocolKwargValue::*;
 
@@ -287,6 +302,7 @@ fn raw_tensor_bytes(tensor: &WireTensor) -> Result<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_multimodal::PixelNorm;
     use ndarray::{Array2, s};
 
     #[test]
@@ -332,6 +348,34 @@ mod tests {
                 "{name} layout data"
             );
         }
+    }
+
+    #[test]
+    fn identity_pixel_norm_ships_original_u8_tensor() {
+        let encoder_input = EncoderInput::bytes(
+            Array2::from_shape_vec((1, 3), vec![0_u8, 128, 255]).unwrap(),
+            PixelNorm {
+                scale: 1.0,
+                offset: [0.0; 3],
+                divisor: [1.0; 3],
+                channel_block: 1,
+            },
+        );
+        let preprocessed = PreprocessedEncoderInputs::new(encoder_input, vec![1], vec![(1, 3)]);
+
+        let tensors = collect_tensors(preprocessed, "pixel_values", ModelDtype::Float32).unwrap();
+        let ProtocolKwargValue::Tensor(tensor) =
+            ProtocolKwargValue::try_from(&tensors["pixel_values"]).unwrap()
+        else {
+            panic!("expected tensor");
+        };
+
+        assert_eq!(tensor.dtype, TensorDtype::U8);
+        assert_eq!(tensor.shape, [1, 3]);
+        assert_eq!(
+            tensor.data.into_raw_view().unwrap().as_ref(),
+            &[0, 128, 255]
+        );
     }
 
     #[test]

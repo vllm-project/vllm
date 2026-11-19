@@ -3593,6 +3593,51 @@ async fn cache_config_info_exports_each_engine_cache_config() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_rejects_inconsistent_mm_device_do_normalize() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2_u16 {
+        let ready_response = EngineCoreReadyResponse {
+            mm_device_do_normalize: engine_index == 1,
+            ..default_ready_response()
+        };
+        engines.push(spawn_mock_engine_task_with_ready(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            ready_response,
+            |_dealer, _push| Box::pin(async {}),
+        ));
+    }
+
+    let result = EngineCoreClient::connect(handshake_test_config(
+        handshake_address,
+        2,
+        "test-model",
+        Duration::from_secs(2),
+        0,
+        None,
+    ))
+    .await;
+    let error = result.err().expect("inconsistent engine settings should fail");
+    assert!(
+        matches!(
+            &error,
+            Error::UnexpectedHandshakeMessage { message }
+                if message.contains("mm_device_do_normalize=")
+                    && message.contains("inconsistent with engine")
+        ),
+        "unexpected error: {error}"
+    );
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -4338,12 +4383,16 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
-    legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
-    legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
+    let legacy_ready_object = legacy_ready.as_object_mut().unwrap();
+    legacy_ready_object.remove("effective_attention_block_size");
+    legacy_ready_object.remove("mm_device_do_normalize");
+    legacy_ready_object.remove("supports_prompt_logprobs");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
+    assert!(!legacy_ready.mm_device_do_normalize);
     assert!(legacy_ready.supports_prompt_logprobs);
+    assert!(ready_response.mm_device_do_normalize);
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(

@@ -412,3 +412,56 @@ mod tests {
         .assert_eq(&fallback_text);
     }
 }
+
+#[cfg(test)]
+mod device_normalization_tests {
+    use image::{DynamicImage, Rgb, RgbImage};
+    use llm_multimodal::VideoSource;
+    use vllm_engine_core_client::protocol::dtype::TensorDtype;
+    use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+    use super::super::tests::{glm53_flash_info, glm53_flash_video_config};
+    use super::*;
+
+    #[tokio::test]
+    async fn glm_videos_ship_raw_u8_and_keep_model_specific_float_tensors() {
+        let mut info = glm53_flash_info(glm53_flash_video_config());
+        info.set_mm_device_do_normalize(true).unwrap();
+        let frames = (0..2)
+            .map(|_| DynamicImage::ImageRgb8(RgbImage::from_pixel(28, 28, Rgb([9, 18, 27]))))
+            .collect();
+        let clip = Arc::new(VideoClip::new(
+            frames,
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "video".to_string(),
+        ));
+        let prepared =
+            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+
+        let Some(MmKwargValue::Tensor(primary)) =
+            prepared.items[0].data[VIDEO_PRIMARY_KEY].data.as_ref()
+        else {
+            panic!("GLM video primary input should be a tensor");
+        };
+        assert_eq!(primary.dtype, TensorDtype::U8);
+        assert_eq!(primary.shape, [64, 3 * 2 * 14 * 14]);
+        let row = [
+            vec![9; 2 * 14 * 14],
+            vec![18; 2 * 14 * 14],
+            vec![27; 2 * 14 * 14],
+        ]
+        .concat();
+        assert_eq!(
+            primary.data.as_raw_view().unwrap().as_ref(),
+            row.repeat(64).as_slice()
+        );
+
+        let Some(MmKwargValue::Tensor(seconds_per_grid)) =
+            prepared.items[0].data["video_second_per_grid"].data.as_ref()
+        else {
+            panic!("video_second_per_grid should be a tensor");
+        };
+        assert_eq!(seconds_per_grid.dtype, TensorDtype::F32);
+    }
+}

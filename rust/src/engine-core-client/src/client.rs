@@ -423,6 +423,7 @@ impl EngineCoreClient {
         runtime: BackgroundShutdownRuntime,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
+        validate_mm_device_do_normalize(&connected.engines)?;
         let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
@@ -588,6 +589,11 @@ impl EngineCoreClient {
             .ready_response
     }
 
+    /// Return whether engines normalize multimodal encoder inputs on device.
+    pub fn mm_device_do_normalize(&self) -> bool {
+        self.ready_response().mm_device_do_normalize
+    }
+
     /// Whether every engine computes prompt logprobs. A request may go to any
     /// engine, so one engine without them (e.g. under
     /// `--kv-sharing-fast-prefill`) disables them for all.
@@ -701,6 +707,23 @@ fn prompt_block_hasher(engines: &[ConnectedEngine]) -> Option<PromptBlockHasher>
         );
     }
     hasher
+}
+
+fn validate_mm_device_do_normalize(engines: &[ConnectedEngine]) -> Result<()> {
+    let first = engines.first().expect("engine core client requires at least one engine");
+    let expected = first.ready_response.mm_device_do_normalize;
+    for engine in engines.iter().skip(1) {
+        let actual = engine.ready_response.mm_device_do_normalize;
+        if actual != expected {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: format!(
+                    "engine {:?} reported mm_device_do_normalize={actual}, inconsistent with engine {:?} reporting {expected}",
+                    engine.engine_id, first.engine_id
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {

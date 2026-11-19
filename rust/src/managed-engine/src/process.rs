@@ -64,9 +64,11 @@ impl ManagedEngineConfig {
     }
 
     /// Env vars every managed engine needs when serving the Rust frontend:
-    /// `VLLM_USE_RUST_FRONTEND=1` tells Python vLLM to keep frontend-side
-    /// multimodal normalization (`mm_device_do_normalize = False`,
-    /// vllm/config/model.py) instead of expecting raw uint8 pixels.
+    /// `VLLM_USE_RUST_FRONTEND=1` tells Python vLLM that Rust owns frontend
+    /// preprocessing. The Python engine reports the effective
+    /// `mm_device_do_normalize` value in the `EngineCoreReadyResponse` handshake:
+    /// Rust sends raw uint8 patches for device normalization when it is true and
+    /// performs frontend float normalization when it is false.
     pub fn rust_frontend_envs() -> Vec<(String, String)> {
         vec![("VLLM_USE_RUST_FRONTEND".to_string(), "1".to_string())]
     }

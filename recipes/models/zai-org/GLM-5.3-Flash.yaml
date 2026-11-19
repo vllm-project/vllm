@@ -198,13 +198,20 @@ guide: |
 
   The command builder defaults to **Rust** and adds `--tokenizer-mode glm5_next`.
   With `VLLM_USE_RUST_FRONTEND=1`, this selects native GLM5Next chat rendering for
-  the GLM-5.3-Flash template, including tool calls and reasoning options. Image and
-  video inputs are not yet supported on the Rust frontend; use the Python frontend
-  for multimodal requests.
+  the GLM-5.3-Flash template, including tool calls and reasoning options. The
+  Python engine reports the effective `mm_device_do_normalize` value in the
+  `EngineCoreReadyResponse` ready handshake. When it is `True`, Rust preprocesses
+  image and video inputs into raw `uint8` patches for device normalization with
+  `FusedMMInputNorm`. When it is `False`, including when explicitly configured,
+  Rust performs frontend floating-point normalization instead of rejecting the
+  configuration. Rust follows the handshake value rather than inferring the path
+  from the model type or architecture.
 
   Select **Python** in the command builder, or set `VLLM_USE_RUST_FRONTEND=0`,
-  to use the Hugging Face renderer and processor on the same build. On older builds
-  that do not recognize `glm5_next`, also replace `--tokenizer-mode glm5_next` with
+  only for text-only inference. Python multimodal preprocessing remains deprecated
+  and rejects image/video inputs; disable both modalities with
+  `--limit-mm-per-prompt '{"image": 0, "video": 0}'`. On older builds that do not
+  recognize `glm5_next`, also replace `--tokenizer-mode glm5_next` with
   `--tokenizer-mode auto`.
 
   ## Launching the server
