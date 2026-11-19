@@ -886,7 +886,8 @@ def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
 
 def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
     """Waiting requests count their uncached tokens (never below 0), each looked
-    up in the prefix cache once while its num_tokens is unchanged."""
+    up in the prefix cache again only if its num_tokens changes or more of its
+    prefix has been cached."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
     scheduler.pp_microbatch_min_tokens = 16
     ids = [f"r{i}" for i in range(6)]
@@ -911,6 +912,17 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
     scheduler.requests["r2"].append_output_token_ids(0)
     scheduler._pp_microbatch_cap(512)
     assert looked_up == ids + ["r2"]
+
+    # More of r3's prefix is cached since its lookup.
+    kv_cache_manager = scheduler.kv_cache_manager
+    extend = kv_cache_manager.extend_cached_prefix
+    monkeypatch.setattr(
+        kv_cache_manager,
+        "extend_cached_prefix",
+        lambda request, n: extend(request, n) + 16 * (request.request_id == "r3"),
+    )
+    scheduler._pp_microbatch_cap(512)
+    assert looked_up == ids + ["r2", "r3"]
 
 
 def test_pp_microbatch_cap_skips_decode_only_steps():

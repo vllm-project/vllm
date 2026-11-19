@@ -439,8 +439,11 @@ class Scheduler(SchedulerInterface):
             and not self.need_mamba_block_aligned_split
             else 0
         )
-        # (num_tokens, prefix-cache hit) of waiting requests, for the cap.
-        self._pp_cached_tokens = weakref.WeakKeyDictionary[Request, tuple[int, int]]()
+        # (num_tokens, prefix-cache hit, probed cached prefix) of waiting requests,
+        # for the cap.
+        self._pp_cached_tokens = weakref.WeakKeyDictionary[
+            Request, tuple[int, int, int]
+        ]()
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -753,12 +756,18 @@ class Scheduler(SchedulerInterface):
         return min(budget, cap + decode)
 
     def _pp_num_cached_tokens(self, request: Request) -> int:
-        """`get_num_cached_tokens`, kept until num_tokens changes (preemption)."""
+        """`get_num_cached_tokens`, redone only when num_tokens changes
+        (preemption) or more of the request's prefix has been cached since."""
+        kv_cache_manager = self.kv_cache_manager
         cached = self._pp_cached_tokens.get(request)
-        if cached is None or cached[0] != request.num_tokens:
-            num_cached = self.kv_cache_manager.get_num_cached_tokens(request)
-            cached = self._pp_cached_tokens[request] = (request.num_tokens, num_cached)
-        return cached[1]
+        if cached is not None and cached[0] == request.num_tokens:
+            _, num_cached, prefix = cached
+            if kv_cache_manager.extend_cached_prefix(request, prefix) == prefix:
+                return num_cached
+        num_cached = kv_cache_manager.get_num_cached_tokens(request)
+        prefix = kv_cache_manager.extend_cached_prefix(request, num_cached)
+        self._pp_cached_tokens[request] = (request.num_tokens, num_cached, prefix)
+        return num_cached
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
