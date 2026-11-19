@@ -111,6 +111,9 @@ class ChatParams:
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
+    parallel_tool_calls: bool = True
+    """Request-level `parallel_tool_calls` for renderers that need API metadata."""
+
     response_format: Any | None = None
     """Request-level response format for renderers that need API metadata."""
 
@@ -143,6 +146,7 @@ class ChatParams:
                 self.mm_processor_kwargs,
             ),
             tool_choice=self.tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
             response_format=self.response_format,
         )
 

@@ -486,7 +486,7 @@ class CudaPlatformBase(Platform):
                     f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
-                logger.info("Using %s backend.", selected_backend)
+                logger.debug("Using %s backend.", selected_backend)
                 return _backend_cls_path(backend_class)
 
         # No selected backend or the selected backend is invalid,
@@ -546,7 +546,7 @@ class CudaPlatformBase(Platform):
                     selected_backend.name,
                 )
 
-        logger.info_once(
+        logger.debug_once(
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
             "["
@@ -587,7 +587,7 @@ class CudaPlatformBase(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
         cc = cls.get_device_capability()
@@ -605,7 +605,7 @@ class CudaPlatformBase(Platform):
                         and backend_class.supports_compute_capability(cc)
                     )
                 if is_backend_supported:
-                    logger.info_once(
+                    logger.debug_once(
                         f"Using backend {vit_attn_backend} for vit attention",
                     )
                     return vit_attn_backend
@@ -767,11 +767,17 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
+        rotary_embedding = default
+        if cc.uses_rope_kernel():
+            rotary_embedding = ["vllm_c", *(p for p in default if p != "vllm_c")]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["triton", "native"],
+            rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=rotary_embedding,
         )
 
     @classmethod

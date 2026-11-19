@@ -44,7 +44,7 @@ def predictable_llama_config_path(tmp_path_factory):
 
     # Create a minimal Llama config with small dimensions
     config = LlamaConfig(
-        vocab_size=1000,
+        vocab_size=32000,  # Covers the TinyLlama tokenizer below.
         hidden_size=256,
         intermediate_size=512,
         num_hidden_layers=24,  # Enough layers to test various layer_ids

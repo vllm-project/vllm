@@ -15,6 +15,13 @@ from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
+    kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
@@ -284,6 +291,17 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             "The shared Kimi GDN layer only supports the Triton KDA "
             f"prefill backend, got {backend!r}."
         )
+        self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+            state_len=self.conv_size - 1
+        )
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
+        if vllm_config.cache_config.mamba_cache_mode == "align":
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
         if not self.use_full_rank_gate:
             self.g_a_proj = ReplicatedLinear(
                 self.hidden_size,
@@ -321,6 +339,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             indices_dtype=torch.int32,
             max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
         )
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment("triton")
 
     def rearrange_mixed_qkv(
         self, mixed_qkv: torch.Tensor
@@ -579,6 +600,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     has_initial_state,
                 )
+                checkpoint = m.checkpoint
+                checkpoint_state, checkpoint_offsets = get_triton_kda_checkpoint_buffer(
+                    checkpoint, self._triton_checkpoint_spec, initial_state.shape[0]
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -595,7 +620,18 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
                 )
+                if checkpoint is not None:
+                    self._checkpoint_exporter.export(
+                        checkpoint,
+                        raw_qkv=mixed_qkv_ns,
+                        conv_state=conv_state,
+                        recurrent_checkpoint=checkpoint_state,
+                        recurrent_state=recurrent_state,
+                        cu_seqlens=non_spec_query_start_loc,
+                    )
                 # Init cache
                 scatter_states(
                     recurrent_state, last_recurrent_state, non_spec_state_indices_tensor

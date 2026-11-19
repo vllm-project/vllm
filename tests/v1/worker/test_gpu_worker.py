@@ -61,9 +61,9 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
         total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
     )
     with worker._external_weight_charges.track():
-        record_external_weight_charge("weights.sock", False, 20)
+        record_external_weight_charge("weights.sock", 20)
         if fallback:
-            record_external_weight_fallback("weights.sock", False)
+            record_external_weight_fallback("weights.sock")
     worker.disable_extensible_kv_cache()
     assert worker.requested_memory == requested
 
@@ -610,6 +610,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         ),
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
+        iteration_timer=None,
         _pp_send_work=[previous_tensor_send],
         _pp_transport=None,
     )

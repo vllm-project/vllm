@@ -43,6 +43,17 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "chat_template_kwargs={'instruction': ...}."
         ),
     )
+    add_special_tokens: bool | None = Field(
+        default=None,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false. "
+            "If unset (`None`), the per-path default is used: `False` for the "
+            "chat path, and the model/tokenizer default for the completion path."
+        ),
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -66,10 +77,13 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             self.chat_template_kwargs = merged
         return self
 
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+    def build_tok_params(
+        self, model_config: ModelConfig, default_tok_params: TokenizeParams
+    ) -> TokenizeParams:
         return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=True,
+            default_tok_params,
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
         )

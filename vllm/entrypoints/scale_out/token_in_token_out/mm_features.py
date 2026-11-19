@@ -163,6 +163,17 @@ def placeholder_ranges_from_engine_input(
     }
 
 
+def mm_hashes_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[str]] | None:
+    """Return per-modality processor cache keys, or `None` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_hashes: MultiModalHashes = cast(MultiModalInput, engine_input)["mm_hashes"]
+    return {modality: list(hashes) for modality, hashes in mm_hashes.items()}
+
+
 def extract_mm_features(
     engine_input: EngineInput,
     *,

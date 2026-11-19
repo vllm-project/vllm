@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, SerializeDisplay};
 use validator::Validate;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
@@ -18,10 +19,10 @@ use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, FunctionCallResponse, Normalizable, PromptLogprobs, ReasoningEffort,
-    StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall, ToolCallDelta,
-    ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages, validate_stop,
-    validate_top_p_value,
+    ChatLogProbs, ChatMessage, ContentPart, FunctionCallResponse, Normalizable, PromptLogprobs,
+    ReasoningEffort, StreamOptions, StreamResponseEnvelope, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k, validate_messages,
+    validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -159,9 +160,9 @@ pub struct ChatCompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
     /// Add spaces between special tokens during detokenization. Accepted as a
     /// no-op: the detokenizers of the served tokenizers already emit adjacent
@@ -333,7 +334,7 @@ impl Default for ChatCompletionRequest {
             include_stop_str_in_output: false,
             ignore_eos: false,
             min_tokens: None,
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
             truncation_side: None,
@@ -368,6 +369,17 @@ impl Default for ChatCompletionRequest {
             return_mm_kwargs: None,
             stream_interval: None,
         }
+    }
+}
+
+impl ChatCompletionRequest {
+    /// The modality of each media part in the request's messages, in any
+    /// role.
+    pub fn media_modalities(&self) -> impl Iterator<Item = MmModality> + '_ {
+        self.messages
+            .iter()
+            .flat_map(ChatMessage::content_parts)
+            .filter_map(ContentPart::modality)
     }
 }
 
@@ -502,6 +514,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
     pub logprobs: Option<ChatLogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,

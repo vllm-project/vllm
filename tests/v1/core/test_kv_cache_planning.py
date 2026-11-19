@@ -47,6 +47,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
@@ -1544,6 +1545,60 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     }
 
 
+def test_draft_only_bucket_does_not_set_the_group_size():
+    """Muse Spark shape: 46 sliding-window + 16 full-attention target layers and a
+    5-layer DSpark drafter whose tail-only manager gets its own bucket. Groups are
+    sized from the target's buckets (16), so the full-attention layers fill one
+    unpadded group; sizing from the draft bucket (5) would pad them to 20."""
+    spec = new_kv_cache_spec()
+    specs = {}
+    for i in range(62):
+        specs[f"target.{i}.attn"] = (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+    for i in range(5):
+        specs[f"draft.{i}.attn"] = replace(
+            DFlashSlidingWindowManager.layer_config(
+                spec,
+                sliding_window=128,
+                num_speculative_tokens=3,
+                num_lookahead_tokens=3,
+            ),
+            is_draft=True,
+        )
+    assert sum(lc.manager_cls is FullAttentionManager for lc in specs.values()) == 16
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    full_groups = [g for g in groups if g.manager_cls is FullAttentionManager]
+    assert [len(g.layer_names) for g in full_groups] == [16]
+    sw_groups = [g for g in groups if g.manager_cls is SlidingWindowManager]
+    assert sorted(len(g.layer_names) for g in sw_groups) == [15, 15, 16]
+    draft_groups = [g for g in groups if g.manager_cls is DFlashSlidingWindowManager]
+    assert [len(g.layer_names) for g in draft_groups] == [5]
+    assert len(groups) == 5
+
+
+def test_full_attention_draft_only_bucket_still_sets_the_group_size():
+    """A draft-only full-attention bucket (here split off by its DCP layout) is
+    unbounded, so it still sizes the groups instead of being padded per token."""
+    spec = new_kv_cache_spec()
+    specs = {
+        f"target.{i}.attn": (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+        for i in range(62)
+    }
+    specs["draft.0.attn"] = replace(
+        full_layer(replace(spec, dcp_sharded=False)), is_draft=True
+    )
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert {len(g.layer_names) for g in groups} == {1}
+    assert len(groups) == 63
+
+
 @pytest.mark.parametrize("draft_dcp_sharded", [True, False])
 def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
     """A windowed DSpark draft next to a sparse MLA target gets its own group,
@@ -2178,6 +2233,83 @@ def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vl
     _spec_decode_kv_cache_groups([make_specs()])
     warned = "could be identified as the draft model's" in caplog_vllm.text
     assert warned == warns
+
+
+@pytest.mark.parametrize(
+    ("method", "num_lookahead_tokens"),
+    [("dflash", 4), ("dspark", 3), ("eagle", None)],
+)
+def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
+    method, num_lookahead_tokens
+):
+    """Only a DFlash-family drafter's own sliding-window layers get the
+    tail-only manager."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = fake_speculative_config(
+        method=method,
+        num_speculative_tokens=3,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(), architectures=[]
+        ),
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: method == "eagle",
+        use_dflash=lambda: method == "dflash",
+        use_dspark=lambda: method == "dspark",
+        use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
+        prefill_context_kv_only=False,
+    )
+    with set_current_vllm_config(config):
+        target = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="layers.1",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="draft.0",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft.is_draft_layer = True
+        target_layer = target.get_kv_cache_config(config)
+        draft_layer = draft.get_kv_cache_config(config)
+    assert target_layer is not None and draft_layer is not None
+    layers = {
+        "layers.0": full_layer(new_kv_cache_spec()),
+        "layers.1": target_layer,
+        "draft.0": _as_draft(draft_layer),
+    }
+    configs = get_kv_cache_configs(config, [layers], [2**30])
+    manager_config_by_layer = {
+        name: group.manager_config
+        for group in generate_scheduler_kv_cache_config(configs).kv_cache_groups
+        for name in group.layer_names
+    }
+
+    assert manager_config_by_layer["layers.1"].manager_cls is SlidingWindowManager
+    draft_config = manager_config_by_layer["draft.0"]
+    if num_lookahead_tokens is None:
+        assert draft_config.manager_cls is SlidingWindowManager
+        return
+    assert draft_config.manager_cls is DFlashSlidingWindowManager
+    params = draft_config.params
+    assert isinstance(params, DFlashSlidingWindowManager.Params)
+    assert params.num_speculative_tokens == 3
+    assert params.max_in_flight_steps == config.max_concurrent_batches
+    assert params.num_lookahead_tokens == num_lookahead_tokens
 
 
 _GQA_SPEC = AttentionSpec(

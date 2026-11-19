@@ -524,6 +524,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:

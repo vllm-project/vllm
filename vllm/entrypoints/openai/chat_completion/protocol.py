@@ -682,6 +682,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # model-visible tool-choice instruction only for requests with a
             # tools block.
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
             response_format=self.response_format,
         )
 

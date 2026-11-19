@@ -47,10 +47,12 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
 
     @override
     def first_live_chunk_idx(
-        self, req_status: RequestOffloadState, config_idx: int
+        self, req_status: RequestOffloadState, config_group_idx: int
     ) -> int | None:
-        # The source blocks come from the scheduler output, not from the
-        # request's block list.
+        # The aligned boundary and CoW sources come from the scheduler output.
+        # The partial tail reads the request's block ids only of full-attention
+        # groups: supports_partial_tail excludes sliding-window groups that are
+        # not CoW sources, and the scheduler zeroes only sliding-window groups.
         return None
 
     @override
@@ -77,9 +79,9 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
         sink: StoreJobSink,
     ) -> None:
         num_groups = len(self._config.kv_group_configs)
-        config_idx_by_group = {
-            config.group_idx: idx
-            for idx, config in enumerate(self._config.kv_group_configs)
+        config_group_idx_by_group = {
+            config.group_idx: config_group_idx
+            for config_group_idx, config in enumerate(self._config.kv_group_configs)
         }
         for req_id, entries in handoffs.items():
             req_status = req_states.get(req_id)
@@ -88,10 +90,10 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             req = req_status.req
             max_boundary = req_status.num_offloadable_tokens(req.num_tokens)
             for group_idx, block_id, boundary in entries:
-                config_idx = config_idx_by_group.get(group_idx)
-                if config_idx is None:
+                config_group_idx = config_group_idx_by_group.get(group_idx)
+                if config_group_idx is None:
                     continue
-                group_config = self._config.kv_group_configs[config_idx]
+                group_config = self._config.kv_group_configs[config_group_idx]
                 if (
                     block_id == 0
                     or boundary > max_boundary
@@ -107,9 +109,9 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                     continue
 
                 group_sizes = [0] * num_groups
-                group_sizes[config_idx] = 1
+                group_sizes[config_group_idx] = 1
                 block_indices = [0] * num_groups
-                block_indices[config_idx] = (
+                block_indices[config_group_idx] = (
                     boundary // group_config.tokens_per_block - 1
                 )
                 sink.add_job(
@@ -201,14 +203,14 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             ]
             if any(
                 group.group_idx not in self._cow_source_groups
-                and group_block_idx[config_idx]
+                and group_block_idx[config_group_idx]
                 >= len(group_states[group.group_idx].block_ids)
-                for config_idx, group in enumerate(self._config.kv_group_configs)
+                for config_group_idx, group in enumerate(self._config.kv_group_configs)
             ):
                 continue
             key_tokens = [
-                self._config.partial_tail_key_tokens(config_idx, boundary)
-                for config_idx in range(len(self._config.kv_group_configs))
+                self._config.partial_tail_key_tokens(config_group_idx, boundary)
+                for config_group_idx in range(len(self._config.kv_group_configs))
             ]
             keys = [
                 req_status.register_boundary_key(group.group_idx, tokens)
@@ -218,9 +220,9 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
                 else group_states[group.group_idx].block_ids[
-                    group_block_idx[config_idx]
+                    group_block_idx[config_group_idx]
                 ]
-                for config_idx, group in enumerate(self._config.kv_group_configs)
+                for config_group_idx, group in enumerate(self._config.kv_group_configs)
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
@@ -238,14 +240,18 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                         req, group_config, tokens, key
                     )
 
-            group_by_key = {key: idx for idx, key in enumerate(keys)}
+            group_by_key = {
+                key: config_group_idx for config_group_idx, key in enumerate(keys)
+            }
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self._config.kv_group_configs)
             block_indices = [0] * len(self._config.kv_group_configs)
-            for config_idx in accepted_groups:
-                group_sizes[config_idx] = 1
-                block_indices[config_idx] = group_block_idx[config_idx]
-            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
+            for config_group_idx in accepted_groups:
+                group_sizes[config_group_idx] = 1
+                block_indices[config_group_idx] = group_block_idx[config_group_idx]
+            source_blocks = [
+                block_ids[config_group_idx] for config_group_idx in accepted_groups
+            ]
 
             sink.add_job(
                 req_id,
