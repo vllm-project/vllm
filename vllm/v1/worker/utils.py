@@ -18,7 +18,6 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -432,15 +431,19 @@ class AttentionGroup:
     def map_kv_cache_to_manager_blocks(
         self, kv_cache: torch.Tensor, num_blocks: int
     ) -> torch.Tensor:
-        """Views a packed cache in kernel blocks as manager blocks."""
+        """Views a packed cache in kernel blocks as manager blocks of
+        `[..., kernel_blocks, kernel_rows, C]`."""
         assert self.kernel_block_stride
-        spec = self.kv_cache_spec
-        rows = cdiv(
-            spec.page_size_bytes, spec.num_heads * spec.state_content_size_bytes
-        )
+        assert self.kernel_block_size is not None
+        kernel_blocks = self.kv_cache_spec.block_size // self.kernel_block_size
         return kv_cache.as_strided(
-            (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
-            (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
+            (num_blocks, *kv_cache.shape[1:-2], kernel_blocks, *kv_cache.shape[-2:]),
+            (
+                kv_cache.stride(0) * self.kernel_block_stride,
+                *kv_cache.stride()[1:-2],
+                kv_cache.stride(0),
+                *kv_cache.stride()[-2:],
+            ),
         )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:

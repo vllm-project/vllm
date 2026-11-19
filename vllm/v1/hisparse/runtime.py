@@ -108,6 +108,19 @@ class PagedCacheView:
         )
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
+    def pages(self, page_size: int) -> tuple[torch.Tensor, int]:
+        """The cache as `page_size`-row pages, and the rows a block spans in
+        their row numbering: row `block * stride + offset` holds the block's
+        `offset`-th row."""
+        if page_size == self.block_size:
+            return self.cache, self.block_size
+        row_width = self.cache.shape[-1]
+        num_rows = (
+            self.cache.shape[0] - 1
+        ) * self.attention_block_stride + self.block_size
+        rows = self.cache.as_strided((num_rows, row_width), (row_width, 1))
+        return rows.view(-1, page_size, row_width), self.attention_block_stride
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedHiSparseConfig:
@@ -444,13 +457,14 @@ class HiSparsePrefillStagingPlan:
     # Host rows with a GPU-resident copy (adopted shadow pages): the flat
     # resident-cache row to read instead of DMAing from host, -1 for misses.
     gpu_row_ids: torch.Tensor | None = None
-    gpu_source_key: tuple[int, int] | None = None
+    gpu_source_key: tuple[int, int, int] | None = None
 
     def ensure_gpu_sources(
         self,
         resident_state_rows: torch.Tensor,
         state_indices: torch.Tensor,
         resident_block_size: int,
+        resident_block_stride: int,
     ) -> None:
         """Resolve which staged rows can be served from the resident cache.
 
@@ -459,12 +473,18 @@ class HiSparsePrefillStagingPlan:
         state row. Computed once per plan and resident group (every layer in
         the group shares the table); non-null resident pages become
         miss_mask=0 rows gathered device-to-device by `gather_prefill_cache`.
+        Rows are numbered as in `PagedCacheView.pages`, with
+        `resident_block_stride` rows per block.
         """
-        source_key = (resident_state_rows.data_ptr(), resident_block_size)
+        source_key = (
+            resident_state_rows.data_ptr(),
+            resident_block_size,
+            resident_block_stride,
+        )
         if self.gpu_source_key == source_key:
             return
         block_size = self.block_size
-        if resident_block_size <= 0 or block_size % resident_block_size != 0:
+        if resident_block_size <= 0:
             return
         device = self.row_ids.device
         num_unique = self.row_ids.shape[1] // block_size
@@ -487,12 +507,10 @@ class HiSparsePrefillStagingPlan:
         )
         rep_row = (rep // num_cols).clamp(max=resident_block_table.shape[0] - 1)
         rep_col = rep % num_cols
-        pages_per_block = block_size // resident_block_size
-        res_pos = rep_col[:, None] * pages_per_block + torch.arange(
-            pages_per_block, device=device
-        )
+        tokens = rep_col[:, None] * block_size + torch.arange(block_size, device=device)
+        res_pos = tokens // resident_block_size
         res_cols = resident_block_table.shape[1]
-        res_blocks = torch.where(
+        per_off_block = torch.where(
             res_pos < res_cols,
             torch.gather(
                 resident_block_table.to(torch.int64)[rep_row],
@@ -501,12 +519,7 @@ class HiSparsePrefillStagingPlan:
             ),
             torch.zeros_like(res_pos),
         )
-        offsets = torch.arange(block_size, device=device)
-        per_off_block = res_blocks[:, offsets // resident_block_size]
-        gpu_rows = (
-            per_off_block * resident_block_size
-            + (offsets % resident_block_size)[None, :]
-        )
+        gpu_rows = per_off_block * resident_block_stride + tokens % resident_block_size
         # Block id 0 is the null block in both id spaces.
         valid_rows = self.row_ids.view(num_unique, block_size) >= 0
         hit = (per_off_block > 0) & (host_ids[:, None] > 0) & valid_rows
@@ -878,7 +891,6 @@ class HiSparseRuntime:
         num_tokens = topk_indices.shape[0]
         hot = self.hot
         host_cache = self.host_cache
-        assert hot.block_size == block_size
         request_state_indices = self.request_state_indices
         assert request_state_indices is not None
         group = self.index_group
@@ -1020,7 +1032,6 @@ class HiSparseRuntime:
         shared_rows = self._step_rows(num_tokens)
         group = self.index_group
         hot = self.hot
-        assert hot.block_size == block_size
         assert hot.attention_block_stride == group.leader.hot.attention_block_stride
 
         if self.is_group_leader:
@@ -1103,20 +1114,20 @@ def update_hisparse_residency(
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
     num_groups = residency.shape[0]
     rows: list[int] = []
-    pages: list[int] = []
+    block_indices: list[int] = []
     block_ids: list[list[int]] = [[] for _ in range(num_groups)]
     for request_id, update in updates.items():
         rows.append(batch_rows[request_id])
-        pages.extend(update.pages)
+        block_indices.extend(update.block_indices)
         for group_block_ids, update_block_ids in zip(
             block_ids, update.block_ids, strict=True
         ):
             group_block_ids.extend(update_block_ids)
-    host_values = np.empty((len(pages), 2 + num_groups), dtype=np.int32)
+    host_values = np.empty((len(block_indices), 2 + num_groups), dtype=np.int32)
     host_values[:, 0] = np.repeat(
-        rows, [len(update.pages) for update in updates.values()]
+        rows, [len(update.block_indices) for update in updates.values()]
     )
-    host_values[:, 1] = pages
+    host_values[:, 1] = block_indices
     host_values[:, 2:] = np.asarray(block_ids, dtype=np.int32).T
     values = async_tensor_h2d(
         host_values, device=request_state_indices.device, dtype=torch.int32

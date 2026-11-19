@@ -16,6 +16,7 @@ from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
+from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -490,9 +491,11 @@ def test_compressed_slot_mapping_inherits_padded_token_slots():
 
 
 @requires_accelerator
-def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
+@pytest.mark.parametrize("self_addressed", [False, True])
+def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions(self_addressed):
     """Under DCP each rank writes only the states it owns, at the state's
-    rank-local position."""
+    rank-local position, whether ownership comes from the tokens' slots or,
+    for a self-addressed cache, from the rank."""
     device = torch.device(DEVICE_TYPE)
     dcp, interleave, ratio, block_size = 2, 4, 2, 4
     num_tokens = 32
@@ -505,7 +508,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
         slot_mapping = torch.where(owned, 0, -1).to(torch.int64).to(device)
         compressed = get_compressed_slot_mapping(
             num_tokens,
-            slot_mapping,
+            None if self_addressed else slot_mapping,
             query_start_loc,
             seq_lens,
             block_table,
@@ -513,6 +516,7 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
             compress_ratio=ratio,
             dcp_world_size=dcp,
             cp_interleave=interleave,
+            dcp_rank=rank,
         )
         local_pos = pos // (interleave * dcp) * interleave + pos % interleave
         state = local_pos // ratio
@@ -522,6 +526,70 @@ def test_compressed_slot_mapping_dcp_uses_rank_local_state_positions():
             -1,
         )
         assert compressed.tolist() == expected.tolist()
+
+
+@requires_accelerator
+def test_kimi_k3_indexer_writes_block_table_slots_without_group_slot_mapping(
+    monkeypatch,
+):
+    """K3.1's self-addressed indexer writes at block-table slots even when its
+    group's slot mapping is all padding, as in a group of its own."""
+    device = torch.device(DEVICE_TYPE)
+    builder = object.__new__(KimiK3IndexerMetadataBuilder)
+    builder.kv_cache_spec = SimpleNamespace(block_size=4)
+    builder.slot_mapping_buffer = torch.zeros(16, dtype=torch.int64, device=device)
+    builder.dcp_world_size = 1
+    builder.dcp_rank = 0
+    builder.cp_kv_cache_interleave_size = 1
+    builder.indexer_uses_fp4 = False
+    built = []
+    monkeypatch.setattr(
+        DeepseekV32IndexerMetadataBuilder,
+        "build",
+        lambda self, common_prefix_len, common, fast_build=False: built.append(common),
+    )
+    query_start_loc = torch.tensor([0, 6], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([10], dtype=torch.int32, device=device)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        num_reqs=1,
+        num_actual_tokens=6,
+        max_query_len=6,
+        max_seq_len=10,
+        block_table_tensor=torch.tensor([[5, 7, 9]], dtype=torch.int32, device=device),
+        slot_mapping=torch.full((6,), -1, dtype=torch.int64, device=device),
+        causal=True,
+    )
+
+    builder.build(0, common)
+
+    (written,) = built
+    assert written.slot_mapping[:6].tolist() == [28, 29, 30, 31, 36, 37]
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_compressed_slot_mapping_warmup_covers_self_addressed_cache(dcp_world_size):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_world_size,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+    kernel = CompressedSlotMappingKernel()
+
+    warmup_keys = kernel.get_warmup_keys(config, self_addressed_block_size=2304)
+
+    runtime_key = kernel.dispatch(
+        compress_ratio=1,
+        block_size=2304,
+        dcp_world_size=dcp_world_size,
+        cp_interleave=1,
+        HAS_SLOT_MAPPING=False,
+    )
+    assert warmup_keys == [runtime_key]
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():

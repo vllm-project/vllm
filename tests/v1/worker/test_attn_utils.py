@@ -75,25 +75,44 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
+    (
+        "enabled",
+        "block_size",
+        "main_sizes",
+        "indexer_sizes",
+        "self_addressed",
+        "expected",
+        "indexer",
+    ),
     [
-        (True, 256, [64], [64], 64, 64),
-        (True, 64, [32, 64], [16, 32], 32, 32),
-        (True, 64, [MultipleOf(16)], [32], 32, 32),
-        (True, 64, [64], [32], None, None),
-        (False, 256, [64], [64], 256, 256),
-        (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
+        (True, 256, [64], [64], False, 64, 64),
+        (True, 64, [32, 64], [16, 32], False, 32, 32),
+        (True, 64, [MultipleOf(16)], [32], False, 32, 32),
+        (True, 64, [64], [32], False, None, None),
+        (False, 256, [64], [64], False, 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], False, 128, 256),
+        (True, 256, [MultipleOf(64)], [64], True, 256, 256),
+        (True, 256, [64], [64], True, 64, 64),
     ],
 )
 def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
+    monkeypatch,
+    enabled,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    self_addressed,
+    expected,
+    indexer,
 ):
-    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    """HiSparse keeps the scheduler block only for a self-addressed indexer
+    whose sparse attention backends support it; other specs are left alone."""
+    indexer_cls = SelfAddressedMLASpec if self_addressed else MLAAttentionSpec
     specs = {
         "main": MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
         ),
-        "indexer": MLAAttentionSpec(
+        "indexer": indexer_cls(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
@@ -155,7 +174,8 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
 def test_resolve_hisparse_specs_before_kv_cache_layout():
     """Workers derive HiSparse's resident/hot specs before the engine core
     resolves the KV cache layout, even when the other layers have mixed page
-    sizes, and derive the specs the engine core lays out."""
+    sizes, and derive the layers the engine core lays out. Their block sizes
+    depend on the pool row the engine core picks."""
     specs: dict[str, KVCacheLayerConfig] = {}
     for i in range(2):
         specs[f"layers.{i}.attn"] = full_layer(
@@ -207,14 +227,14 @@ def test_resolve_hisparse_specs_before_kv_cache_layout():
 
     vllm_config.cache_config.kv_cache_layout = KVCacheLayout.BLHNC.name
     planned = {
-        name: KVCacheLayerConfig(group.manager_config, spec)
+        name: group.manager_cls
         for group in get_kv_cache_groups(vllm_config, resolved)
         for name, spec in group.kv_cache_specs.items()
         if isinstance(spec, HiSparsePageSpec)
     }
     assert len(planned) == 4
     assert {
-        name: lc
+        name: lc.manager_cls
         for name, lc in resolved.items()
         if isinstance(lc.spec, HiSparsePageSpec)
     } == planned

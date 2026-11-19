@@ -234,6 +234,7 @@ class HiSparseConnectorWorker:
         )
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
+        (host_group_id,) = self.kv_cache_config.host_group_ids
         try:
             self.initialize(
                 cache_handles,
@@ -242,6 +243,9 @@ class HiSparseConnectorWorker:
                 host_num_blocks,
                 hot_backing.device,
                 pinned_host_pools,
+                host_block_size=self.kv_cache_config.kv_cache_groups[
+                    host_group_id
+                ].block_size,
                 shared_host_region=shared_host_region,
                 is_host_writer=is_host_writer,
             )
@@ -264,6 +268,7 @@ class HiSparseConnectorWorker:
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
         *,
+        host_block_size: int,
         shared_host_region: SharedOffloadRegion | None = None,
         is_host_writer: bool = True,
     ) -> None:
@@ -271,9 +276,12 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse connector worker is already initialized.")
         resident = cache_handles[0].view
         assert resident is not None
-        self.kernel_block_size = resident.block_size
+        if resident.block_size % host_block_size:
+            raise RuntimeError("HiSparse resident blocks must hold whole host pages.")
+        self.resident_block_size = resident.block_size
+        self.host_block_size = host_block_size
         self._block_row_offsets = torch.arange(
-            self.kernel_block_size, dtype=torch.int32, device=device
+            host_block_size, dtype=torch.int32, device=device
         )
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
@@ -393,7 +401,7 @@ class HiSparseConnectorWorker:
             row_bytes = resident_cache.shape[-1] * resident_cache.element_size()
             if (
                 resident_cache.ndim != 3
-                or resident_cache.shape[1] != self.kernel_block_size
+                or resident_cache.shape[1] != self.resident_block_size
                 or resident_cache.stride(1) * resident_cache.element_size() != row_bytes
             ):
                 raise RuntimeError("HiSparse DMA requires contiguous resident rows.")
@@ -544,7 +552,7 @@ class HiSparseConnectorWorker:
         staging = torch.tensor(block_ids, dtype=torch.int32, pin_memory=True)
         blocks = staging.to(device, dtype=torch.int32, non_blocking=True)
         slots = (
-            blocks[:, None] * self.kernel_block_size + self._block_row_offsets
+            blocks[:, None] * self.host_block_size + self._block_row_offsets
         ).flatten()
         sorted_slots = torch.sort(slots).values
         state_indices = request_state_indices.to(device=device, dtype=torch.long)
@@ -672,12 +680,12 @@ class HiSparseConnectorWorker:
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
             source_blocks, source_row_offsets = np.divmod(
-                source_rows, self.kernel_block_size
+                source_rows, self.resident_block_size
             )
             source_out_of_range = (
                 np.any(source_blocks < 0)
                 or np.any(source_blocks >= source.shape[0])
-                or np.any(source_row_offsets + row_counts > self.kernel_block_size)
+                or np.any(source_row_offsets + row_counts > self.resident_block_size)
             )
             if source_out_of_range:
                 raise RuntimeError("HiSparse row DMA source is out of range.")
@@ -751,6 +759,19 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
 
+    def _resident_page_rows(self, transfers: list[SparseKVPageTransfer]) -> np.ndarray:
+        """Each transferred page's first row within its resident blocks."""
+        rows = np.fromiter(
+            (transfer.resident_page * self.host_block_size for transfer in transfers),
+            dtype=np.int64,
+            count=len(transfers),
+        )
+        if np.any(rows < 0) or np.any(
+            rows + self.host_block_size > self.resident_block_size
+        ):
+            raise RuntimeError("HiSparse page is outside its resident block.")
+        return rows
+
     def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
         """Copy host pages into resident pages on every rank before its forward.
 
@@ -764,10 +785,11 @@ class HiSparseConnectorWorker:
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         host_rows = np.fromiter(
-            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
+            (transfer.host_block_id * self.host_block_size for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
+        resident_rows = self._resident_page_rows(transfers)
         resident_blocks_by_transfer = np.asarray(
             [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
         )
@@ -782,7 +804,7 @@ class HiSparseConnectorWorker:
             ):
                 raise RuntimeError("HiSparse restore destination is out of range.")
             if np.any(host_rows < 0) or np.any(
-                host_rows + self.kernel_block_size > source.shape[0]
+                host_rows + self.host_block_size > source.shape[0]
             ):
                 raise RuntimeError("HiSparse restore source is out of range.")
             row_bytes = destination.shape[-1] * destination.element_size()
@@ -793,8 +815,9 @@ class HiSparseConnectorWorker:
             descriptors.dst_np[descriptor_slice] = (
                 destination.data_ptr()
                 + resident_blocks * destination.stride(0) * destination.element_size()
+                + resident_rows * row_bytes
             )
-            descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
+            descriptors.sizes_np[descriptor_slice] = self.host_block_size * row_bytes
         stream = torch.accelerator.current_stream()
         self.backend.swap_blocks_batch(
             descriptors.src[:descriptor_count],
@@ -819,10 +842,11 @@ class HiSparseConnectorWorker:
         descriptor_count = len(transfers) * num_layers
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_rows = np.fromiter(
-            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
+            (transfer.host_block_id * self.host_block_size for transfer in transfers),
             dtype=np.int64,
             count=len(transfers),
         )
+        resident_rows = self._resident_page_rows(transfers)
         source_blocks_by_transfer = np.asarray(
             [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
         )
@@ -840,7 +864,7 @@ class HiSparseConnectorWorker:
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
                 raise RuntimeError("HiSparse spill DMA source is out of range.")
             if np.any(destination_rows < 0) or np.any(
-                destination_rows + self.kernel_block_size > destination.shape[0]
+                destination_rows + self.host_block_size > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse spill DMA destination is out of range.")
             row_bytes = source.shape[-1] * source.element_size()
@@ -848,11 +872,12 @@ class HiSparseConnectorWorker:
             descriptors.src_np[descriptor_slice] = (
                 source.data_ptr()
                 + source_blocks * source.stride(0) * source.element_size()
+                + resident_rows * row_bytes
             )
             descriptors.dst_np[descriptor_slice] = (
                 destination.data_ptr() + destination_rows * row_bytes
             )
-            descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
+            descriptors.sizes_np[descriptor_slice] = self.host_block_size * row_bytes
         self._submit_dma_descriptors(
             descriptors,
             descriptor_count,
