@@ -199,6 +199,42 @@ def test_additional_tools_items_merged_without_top_level_tools() -> None:
 
     assert len(request.input) == 1
     assert [tool.name for tool in request.tools] == ["clock", "timer"]
+    # Tool-choice validation must see the hoisted tools, or "auto" becomes "none".
+    assert request.tool_choice == "auto"
+
+
+@pytest.mark.parametrize(
+    "tool_choice,expected",
+    [
+        ("required", "required"),
+        ({"type": "function", "name": "sleep"}, "clock__sleep"),
+    ],
+)
+def test_additional_tools_satisfy_tool_choice(tool_choice, expected) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [
+                _codex_additional_tools_item(),
+                {"role": "user", "content": "hi"},
+            ],
+            "tool_choice": tool_choice,
+        }
+    )
+
+    resolved = request.tool_choice
+    assert (resolved if isinstance(resolved, str) else resolved.name) == expected
+
+
+def test_additional_tools_custom_grammar_rejected() -> None:
+    grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
+    item = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "emit", "format": grammar}],
+    }
+    with pytest.raises(VLLMValidationError) as exc_info:
+        ResponsesRequest.model_validate({"input": [item]})
+    assert exc_info.value.parameter == "tools"
 
 
 def test_additional_tools_item_without_tools_list_rejected() -> None:

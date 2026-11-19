@@ -704,42 +704,6 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def hoist_additional_tools_items(cls, data):
-        """Move tools declared by `additional_tools` input items into `tools`.
-
-        Clients such as Codex declare tools through an input item
-        (`{"type": "additional_tools", "role": "developer", "tools": [...]}`)
-        rather than the top-level `tools` field. Everything downstream reads
-        `request.tools`, so merge them there and drop the item from `input`.
-        """
-        if not isinstance(data, dict):
-            return data
-        input_data = data.get("input")
-        if not isinstance(input_data, list):
-            return data
-
-        remaining_input = []
-        additional_tools = []
-        for item in input_data:
-            if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
-                remaining_input.append(item)
-                continue
-            item_tools = item.get("tools")
-            if not isinstance(item_tools, list):
-                raise VLLMValidationError(
-                    "`additional_tools` input items must contain a `tools` list.",
-                    parameter="input",
-                )
-            additional_tools.extend(item_tools)
-
-        if len(remaining_input) == len(input_data):
-            return data
-        data["input"] = remaining_input
-        data["tools"] = [*(data.get("tools") or []), *additional_tools]
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def input_item_parsing(cls, data):
         """Parse input items that are missing required fields or that Pydantic
         cannot disambiguate in a Union of TypedDict / BaseModel types.
@@ -935,6 +899,45 @@ class ResponsesRequest(OpenAIBaseModel):
             if resolved != tool_name:
                 data["tool_choice"] = {**tool_choice, "name": resolved}
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_additional_tools_items(cls, data):
+        """Move tools declared by `additional_tools` input items into `tools`.
+
+        Clients such as Codex declare tools through an input item
+        (`{"type": "additional_tools", "role": "developer", "tools": [...]}`)
+        rather than the top-level `tools` field. Everything downstream reads
+        `request.tools`, so merge them there and drop the item from `input`.
+
+        Defined last on purpose: Pydantic runs `before` validators in reverse
+        definition order, so this runs before the validators that read `tools`.
+        """
+        if not isinstance(data, dict):
+            return data
+        input_data = data.get("input")
+        if not isinstance(input_data, list):
+            return data
+
+        remaining_input = []
+        additional_tools = []
+        for item in input_data:
+            if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
+                remaining_input.append(item)
+                continue
+            item_tools = item.get("tools")
+            if not isinstance(item_tools, list):
+                raise VLLMValidationError(
+                    "`additional_tools` input items must contain a `tools` list.",
+                    parameter="input",
+                )
+            additional_tools.extend(item_tools)
+
+        if len(remaining_input) == len(input_data):
+            return data
+        data["input"] = remaining_input
+        data["tools"] = [*(data.get("tools") or []), *additional_tools]
         return data
 
 
