@@ -2090,10 +2090,8 @@ class VllmConfig:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.kv_sharing_fast_prefill:
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.uses_target_hidden_states
-            ):
+            spec = self.runner_speculative_config
+            if spec is not None and spec.uses_target_hidden_states:
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
                     "compatible with EAGLE as EAGLE requires correct logits "

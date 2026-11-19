@@ -605,6 +605,25 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_grammar_bitmask_sizes_for_local_decode_width(
+    monkeypatch, tokenizer, backend: StructuredOutputsBackend
+):
+    manager, request = _build_harness(tokenizer, backend)
+    # A prefill instance that skips its drafter still carries K speculative
+    # tokens in its config, but schedules a single token per request.
+    monkeypatch.setattr(
+        VllmConfig, "runner_speculative_config", property(lambda self: None)
+    )
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={},
+    )
+    assert bitmask is not None
+    assert bitmask.shape[0] == 1
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     ("use_reasoner", "reasoning_ended", "enable_in_reasoning"),
     [

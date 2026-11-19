@@ -382,7 +382,15 @@ class StructuredOutputManager:
             return None
 
         # Covers both speculative decoding and diffusion LLMs (canvas_length).
-        max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        # A prefill instance that skips its drafter schedules one token per
+        # request, so size the mask for the locally executed speculator.
+        runner_speculative_config = self.vllm_config.runner_speculative_config
+        if runner_speculative_config is not None:
+            max_num_spec_tokens = runner_speculative_config.num_speculative_tokens or 0
+        elif self.vllm_config.speculative_config is not None:
+            max_num_spec_tokens = 0
+        else:
+            max_num_spec_tokens = self.vllm_config.num_speculative_tokens
         is_diffusion = self.vllm_config.model_config.is_diffusion
         mask_stride = max_num_spec_tokens + (0 if is_diffusion else 1)
 

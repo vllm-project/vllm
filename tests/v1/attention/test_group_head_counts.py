@@ -349,6 +349,7 @@ def _triton_builder(
     vllm_config.model_config.get_head_size.return_value = 128
     vllm_config.model_config.rswa_window = None
     vllm_config.speculative_config = None
+    vllm_config.runner_speculative_config = None
     vllm_config.scheduler_config.max_num_seqs = max_num_seqs
     if capture_sizes is None:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
