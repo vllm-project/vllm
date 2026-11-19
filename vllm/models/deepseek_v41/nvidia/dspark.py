@@ -378,13 +378,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
         self.logits_processor = logits_processor_cls(self.config.vocab_size)
         # decode_backend=latency_specialized: a decode executor over self.model, built
         # by the target model's state on the target's executor.
-        specialized_decode_requested = (
-            decode_backend(vllm_config) == "latency_specialized"
-        )
+        backend = decode_backend(vllm_config)
         self.specialized_decode: DraftDecode | DEP2Decode | None = None
-        if specialized_decode_requested or (
-            decode_backend(vllm_config) == "latency_specialized_dep2"
-        ):
+        if backend != "auto":
             register_draft(self)
         # additional_config={"dspark_fused_markov": true}, implied by the
         # specialized decode, replaces the speculator's loop when it would
@@ -396,7 +392,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
             extra = {}
         if (
             (
-                specialized_decode_requested
+                backend == "latency_specialized"
                 or extra.get("dspark_fused_markov", is_ampere() or is_hopper())
             )
             and spec_config.draft_sample_method == "probabilistic"

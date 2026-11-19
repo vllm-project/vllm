@@ -152,6 +152,39 @@ def test_cuda_graph_replay_matches_eager(heads: int) -> None:
     assert torch.equal(graphed, eager)
 
 
+@pytest.mark.parametrize("with_sinks", [True, False])
+def test_wide_c8_replay_preserves_masks_and_updates(with_sinks: bool) -> None:
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.sparse_mla_wide import (  # noqa: E501
+        WideWorkspace,
+        sparse_mla_wide,
+    )
+
+    c = make_case(48, 640, seed=41, heads=64)
+    workspace = WideWorkspace(48, 5, c["q"].device)
+    args = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"])
+    sinks = c["sinks"] if with_sinks else None
+    eager = torch.empty(c["q"].shape, device=DEVICE, dtype=torch.bfloat16)
+    graphed = torch.empty_like(eager)
+    scales = (D**-0.5 * 1.25, 0.75)
+    sparse_mla_wide(*args, eager, *scales, sinks, workspace)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        sparse_mla_wide(*args, graphed, *scales, sinks, workspace)
+
+    for seed in (42, 43):
+        changed = make_case(48, 640, seed=seed, heads=64)
+        for key, value in c.items():
+            value.copy_(changed[key])
+        graph.replay()
+        sparse_mla_wide(*args, eager, *scales, sinks, workspace)
+        torch.accelerator.synchronize()
+        assert torch.equal(graphed, eager)
+        torch.testing.assert_close(
+            graphed.float(), reference(c, *scales, sinks), atol=0.03, rtol=0.05
+        )
+        assert bool((graphed[2] == 0).all())
+
+
 def test_declines_unsupported() -> None:
     c = make_case(4, 640, seed=3)
     out = torch.empty((4, H, D), dtype=torch.bfloat16, device=DEVICE)

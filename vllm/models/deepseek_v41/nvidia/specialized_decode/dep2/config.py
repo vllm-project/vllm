@@ -8,8 +8,9 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.distributed import get_dp_group
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.models.deepseek_v41.nvidia.specialized_decode import DecodeConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -20,22 +21,29 @@ class DEP2Config(DecodeConfig):
     dep2: bool = True
     # Larger captures keep the stock layer loop; the full-model sweep regressed.
     max_rows: int = 128
+    wide_c8_attention: bool = False
 
 
-def requirements(config):
+def supports_layout(p: ParallelConfig, dp_size: int) -> bool:
+    # At TP1/PP1/CP1 the EP and DP groups contain the same ranks.
+    return (
+        p.tensor_parallel_size == p.pipeline_parallel_size == 1
+        and p.prefill_context_parallel_size == p.decode_context_parallel_size == 1
+        and p.data_parallel_size == dp_size
+        and p.enable_expert_parallel
+        and not p.use_ubatching
+        and not p.enable_eplb
+    )
+
+
+def requirements(config: VllmConfig, dp_size: int):
     p, a, s = config.parallel_config, config.attention_config, config.speculative_config
     c = config.compilation_config
     graph = c.cudagraph_mode
     return {
         "SM103": current_platform.is_device_capability(103),
-        "TP1/DP2/EP2, CP1/PP1, no microbatch/EPLB": (
-            p.tensor_parallel_size == 1
-            and p.data_parallel_size == 2
-            and p.enable_expert_parallel
-            and p.pipeline_parallel_size == 1
-            and p.prefill_context_parallel_size == p.decode_context_parallel_size == 1
-            and not p.use_ubatching
-            and not p.enable_eplb
+        f"TP1/DP{dp_size}/EP{dp_size}, CP1/PP1, no microbatch/EPLB": supports_layout(
+            p, dp_size
         ),
         "allgather_reducescatter": p.all2all_backend == "allgather_reducescatter",
         "DSpark5 without AV": (
@@ -66,17 +74,30 @@ def requirements(config):
     }
 
 
-def dep2_config(config):
-    missing = [key for key, ok in requirements(config).items() if not ok]
+def dep_config(config: VllmConfig, dp_size: int) -> DEP2Config:
+    dp_group = get_dp_group()
+    missing = [key for key, ok in requirements(config, dp_size).items() if not ok]
+    if dp_group.world_size != dp_size:
+        missing.append(f"a DP group of {dp_size} ranks (got {dp_group.world_size})")
+    if not all(in_the_same_node_as(dp_group.cpu_group, source_rank=0)):
+        missing.append("all DEP ranks on one NVLink-connected node")
     # Startup only. All DP ranks reject a partially supported deployment.
-    supported = torch.tensor([not missing], dtype=torch.int32)
-    dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=get_dp_group().cpu_group)
+    supported = torch.tensor([not missing], dtype=torch.int32, device="cpu")
+    dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=dp_group.cpu_group)
     if not supported.item():
         raise ValueError(
-            "latency_specialized_dep2 requires "
-            + ("; ".join(missing) or "support on the other DP rank")
+            f"latency_specialized_dep{dp_size} requires "
+            + ("; ".join(missing) or "support on all DP ranks")
         )
     k = config.kernel_config
+    extra = config.additional_config
+    wide_c8 = (
+        extra.get("dep_wide_c8_attention", False) if isinstance(extra, dict) else False
+    )
+    if not isinstance(wide_c8, bool):
+        raise ValueError("dep_wide_c8_attention must be a boolean")
     return DEP2Config(
-        k.enable_flashinfer_autotune is not False, bool(k.enable_jit_warmup)
+        k.enable_flashinfer_autotune is not False,
+        bool(k.enable_jit_warmup),
+        wide_c8_attention=wide_c8,
     )

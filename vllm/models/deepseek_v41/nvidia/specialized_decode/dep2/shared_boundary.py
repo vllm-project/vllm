@@ -60,6 +60,26 @@ class _FusedMHCDeviceKernel(_LamportMHCDeviceKernel):
         self.add_shared = add_shared
 
     @cute.jit
+    def begin_collect(self, peer):
+        return Uint32(0)
+
+    @cute.jit
+    def load_contribution(self, x, peer, offset, stage):
+        value = packed_u32x4_to_bf16x8(load_global_u32x4(x.iterator + offset)).to(
+            Float32
+        )
+        if cutlass.const_expr(self.reduce_peer):
+            remote = packed_u32x4_to_bf16x8(
+                load_global_u32x4(peer.iterator + offset)
+            ).to(Float32)
+            value = (value + remote).to(BFloat16).to(Float32)
+        return value
+
+    @cute.jit
+    def end_collect(self, peer, stage):
+        pass
+
+    @cute.jit
     def __call__(
         self,
         x,
@@ -176,19 +196,13 @@ class _FusedMHCDeviceKernel(_LamportMHCDeviceKernel):
                     (comb.iterator + offset_c).llvm_ptr, Float32
                 )
         cute.arch.griddepcontrol_wait()
+        stage = self.begin_collect(peer)
         for trip in cutlass.range_constexpr(self.trips):
             fragment = base_fragment + trip * self.fragment_stride
             if fragment < self.fragments:
                 offset = Int64(token) * self.hidden + Int64(fragment) * VEC_BF16
                 input_offset = offset + Int64(row_start) * self.hidden
-                value = packed_u32x4_to_bf16x8(
-                    load_global_u32x4(x.iterator + input_offset)
-                ).to(Float32)
-                if cutlass.const_expr(self.reduce_peer):
-                    remote = packed_u32x4_to_bf16x8(
-                        load_global_u32x4(peer.iterator + input_offset)
-                    ).to(Float32)
-                    value = (value + remote).to(BFloat16).to(Float32)
+                value = self.load_contribution(x, peer, input_offset, stage)
                 if cutlass.const_expr(self.add_shared):
                     shared_value = packed_u32x4_to_bf16x8(
                         load_global_u32x4(shared.iterator + offset)
@@ -228,6 +242,7 @@ class _FusedMHCDeviceKernel(_LamportMHCDeviceKernel):
                             (mean.load() / Float32(hc)).to(BFloat16)
                         ),
                     )
+        self.end_collect(peer, stage)
         cute.arch.griddepcontrol_launch_dependents()
         thread_sum = Float32(0.0)
         for trip in cutlass.range_constexpr(self.trips):

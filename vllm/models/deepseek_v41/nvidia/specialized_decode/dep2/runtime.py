@@ -25,6 +25,7 @@ from ..attention.sparse_mla import SparseIndexTables, SparseMlaDecode
 from ..attention.step import AttentionStep
 from .attention.projections import ProjectionBank
 from .boundary import LocalBoundaries
+from .communication import DEPCommunication
 from .moe import DEP2MoEStep
 from .workspace import ExpertWorkspace
 
@@ -55,7 +56,9 @@ class DEP2Decode:
         self.projections = ProjectionBank(config.max_rows, forward_only=True)
         self.tables = SparseIndexTables(attns)
         self.mla = SparseMlaDecode(
-            self.tables, config.max_rows * max(a.padded_heads for a in attns)
+            self.tables,
+            config.max_rows * max(a.padded_heads for a in attns),
+            wide_c8=config.wide_c8_attention and not self.is_draft,
         )
         self.workspace = (
             ExpertWorkspace(attns[0].fused_wqa_wkv.weight.device)
@@ -110,6 +113,9 @@ class DEP2Decode:
         ]
         self._swa_prefixes = sorted({a.swa_cache_layer.prefix for a in attns})
         self._prepared_rows = set()
+        self.communication = DEPCommunication(
+            self.plans, config, None if target is None else target.communication
+        )
 
     @classmethod
     def for_target(cls, backbone, config, lm_head):
@@ -126,6 +132,7 @@ class DEP2Decode:
         from .warmup import prepare_rows
 
         prepare_rows(self, rows)
+        self.communication.prepare_rows(rows)
         self._prepared_rows.add(rows)
 
     def plan(self, positions, intermediate_tensors=None):

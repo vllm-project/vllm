@@ -120,7 +120,7 @@ class DEP2Front:
             return False
         return width(rows) in self._compiled
 
-    def __call__(self, x, logits, input_ids=None, is_padding=None):
+    def __call__(self, x, logits, input_ids=None, is_padding=None, *, output=None):
         if not self.accepts(x, logits, input_ids, is_padding):
             raise ValueError("unsupported or unwarmed front; retain the original path")
         rows = x.size(0)
@@ -133,14 +133,20 @@ class DEP2Front:
             ("front_ids", (rows, TOP_K), torch.int32),
             ("front_weights", (rows, TOP_K), torch.float32),
         )
-        output = FrontOutput(
-            *(
-                torch.empty(shape, dtype=dtype, device=self.device)
-                if self.workspace is None
-                else self.workspace.view(name, shape, dtype)
-                for name, shape, dtype in specs
+        if output is None:
+            output = FrontOutput(
+                *(
+                    torch.empty(shape, dtype=dtype, device=self.device)
+                    if self.workspace is None
+                    else self.workspace.view(name, shape, dtype)
+                    for name, shape, dtype in specs
+                )
             )
-        )
+        elif not isinstance(output, FrontOutput) or not all(
+            _tensor(tensor, shape, dtype, self.device)
+            for tensor, (_, shape, dtype) in zip(output, specs)
+        ):
+            raise ValueError("front output must match the contiguous local row layout")
         self._compiled[width(rows)](
             _pointer(cutlass.Float32, logits, 16),
             _pointer(cutlass.Float32, config.bias, 16),

@@ -13,6 +13,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.boundary.boundary import
 )
 
 from .local_boundary import LocalPostPre
+from .owner import OwnerOutput
 from .shared_boundary import FusedPostPre, LocalMoEOutput
 
 
@@ -62,6 +63,24 @@ class LocalBoundaries(Boundaries):
         return BoundaryState(residual, post, comb, next_pre), layer_input, quant, aux
 
     def _reduce_local(self, state, pre, norm, mxfp8_out, capture_aux):
+        pending = state.pending
+        if isinstance(pending, OwnerOutput):
+            if not torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("deferred DEP output escaped FULL graph capture")
+            return pending.collective.prepare(
+                pending.partials,
+                state.residual,
+                state.post,
+                state.comb,
+                pre,
+                norm,
+                None
+                if mxfp8_out is None
+                else (mxfp8_out[0].view(torch.uint8), mxfp8_out[1]),
+                capture_aux,
+                shared=pending.shared,
+                publish_override=pending.publish,
+            )()
         if isinstance(state.pending, LocalMoEOutput):
             return self.shared_reduce(
                 state.pending.routed,

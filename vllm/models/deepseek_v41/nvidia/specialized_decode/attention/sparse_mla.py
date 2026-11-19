@@ -330,9 +330,17 @@ class SparseMlaDecode:
     """`forward_mqa` of a pure-decode step on the shared tables and the
     persistent KV counters."""
 
-    def __init__(self, tables: SparseIndexTables, max_rows: int) -> None:
+    def __init__(
+        self, tables: SparseIndexTables, max_rows: int, *, wide_c8=False
+    ) -> None:
         self.tables = tables
         self.kv_counters = kv_counter_buffer(max_rows)
+        self.wide_workspace = None
+        if wide_c8:
+            from .sparse_mla_wide import WideWorkspace, warmup_sparse_mla_wide
+
+            self.wide_workspace = WideWorkspace(48, 5, "cuda")
+            warmup_sparse_mla_wide(self.wide_workspace)
 
     def run(
         self, attn: DeepseekV4FlashInferMLAAttention, q: torch.Tensor, out: torch.Tensor
@@ -435,6 +443,40 @@ class SparseMlaDecode:
                 attn.attn_sink,
             )
             return
+        if (
+            self.wide_workspace is not None
+            and attn.window_size == SWA_COLUMNS
+            and swa_metadata.decode_swa_width == SWA_COLUMNS
+            and query.ndim == 3
+            and query.shape[0] == 48
+            and decode_indices.shape[1] == 640
+        ):
+            from .sparse_mla_wide import sparse_mla_wide, supports_sparse_mla_wide
+
+            if supports_sparse_mla_wide(
+                query,
+                swa_k_cache,
+                compressed_kv_cache,
+                decode_indices,
+                decode_topk_lens,
+                output,
+                bmm1_scale,
+                bmm2_scale,
+                attn.attn_sink,
+            ):
+                sparse_mla_wide(
+                    query,
+                    swa_k_cache,
+                    compressed_kv_cache,
+                    decode_indices,
+                    decode_topk_lens,
+                    output,
+                    bmm1_scale,
+                    bmm2_scale,
+                    attn.attn_sink,
+                    self.wide_workspace,
+                )
+                return
         trtllm_decode_sparse_mla_dsv4(
             query=query,
             swa_kv_cache=swa_k_cache,
