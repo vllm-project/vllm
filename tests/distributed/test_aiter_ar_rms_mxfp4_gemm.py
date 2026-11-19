@@ -24,23 +24,28 @@ def _inputs(m: int):
     return inp, residual, norm_weight, weight, weight_scale
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = False):
-    calls: dict[str, list] = {"stage": [], "fused_quant": [], "gemm": [], "ar_rms": []}
+def _patch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stage,
+    batch_invariant: bool = False,
+    declined: bool = False,
+):
+    calls: dict[str, list] = {"fused_quant": [], "gemm": [], "ar_rms": []}
 
     class FakeAiterCA:
-        def fused_ar_rms_mxfp4_quant(self, inp, residual, **kwargs):
-            calls["fused_quant"].append(kwargs)
+        def custom_fused_ar_rms_mxfp4_quant(self, inp, residual, weight, eps, **kwargs):
+            calls["fused_quant"].append(dict(kwargs, weight=weight))
+            if declined:
+                return None
             m, k = inp.shape
             x_q = torch.empty(m, k // 2, dtype=torch.uint8)
             x_s = torch.empty(m, k // 32, dtype=torch.uint8)
             return x_q, residual + 1, x_s, inp + 1
 
-    class FakeAiterAllReduce:
-        aiter_ca = FakeAiterCA()
-
-        def mxfp4_fused_ar_rms_stage(self, inp):
-            calls["stage"].append(inp)
-            return stage
+    aiter_ar = AiterCustomAllreduce.__new__(AiterCustomAllreduce)
+    aiter_ar._impl = FakeAiterCA()
+    monkeypatch.setattr(aiter_ar, "mxfp4_fused_ar_rms_stage", lambda inp: stage)
 
     def fake_ar_rms(input_, residual, weight, epsilon, gemma_norm):
         calls["ar_rms"].append(gemma_norm)
@@ -51,7 +56,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, stage, batch_invariant: bool = Fa
         return torch.empty(x.shape[0], weight.shape[0], dtype=torch.bfloat16)
 
     monkeypatch.setattr(
-        aiter_ops.rocm_aiter_ops, "get_aiter_allreduce", lambda: FakeAiterAllReduce()
+        aiter_ops.rocm_aiter_ops, "get_aiter_allreduce", lambda: aiter_ar
     )
     monkeypatch.setattr(aiter_ops.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
     monkeypatch.setattr(
@@ -90,7 +95,7 @@ def test_decode_quantizes_in_the_allreduce_kernel(
     assert kwargs["use_1stage"] is True
     assert kwargs["emit_bf16"] is True
     assert kwargs["gemma_norm"] is gemma_norm
-    assert kwargs["w"] is norm_weight
+    assert kwargs["weight"] is norm_weight
     (x, _, gemm_kwargs) = calls["gemm"][0]
     assert x.dtype == torch.uint8
     assert gemm_kwargs["x_scales"] is not None
@@ -100,21 +105,29 @@ def test_decode_quantizes_in_the_allreduce_kernel(
 
 
 @pytest.mark.parametrize(
-    ("m", "stage", "batch_invariant"),
+    ("m", "stage", "batch_invariant", "declined"),
     [
         # From M=32 the preshuffled GEMM takes shuffled scales, which the
         # fused epilogue does not write.
-        (32, True, False),
+        (32, True, False, False),
         # Batch-invariant mode skips the preshuffled GEMM.
-        (4, True, True),
+        (4, True, True, False),
         # Neither fused AR+RMSNorm+MXFP4 launcher accepts the shape.
-        (16, None, False),
+        (16, None, False, False),
+        # Custom all-reduce is disabled or declines the input.
+        (4, True, False, True),
     ],
 )
 def test_falls_back_to_the_unfused_sequence(
-    monkeypatch: pytest.MonkeyPatch, m: int, stage, batch_invariant: bool
+    monkeypatch: pytest.MonkeyPatch,
+    m: int,
+    stage,
+    batch_invariant: bool,
+    declined: bool,
 ):
-    calls = _patch(monkeypatch, stage=stage, batch_invariant=batch_invariant)
+    calls = _patch(
+        monkeypatch, stage=stage, batch_invariant=batch_invariant, declined=declined
+    )
     inp, residual, norm_weight, weight, weight_scale = _inputs(m)
 
     out, norm_out, residual_out = (
@@ -130,7 +143,6 @@ def test_falls_back_to_the_unfused_sequence(
         )
     )
 
-    assert calls["fused_quant"] == []
     assert calls["ar_rms"] == [True]
     (x, _, gemm_kwargs) = calls["gemm"][0]
     assert x.dtype == torch.bfloat16

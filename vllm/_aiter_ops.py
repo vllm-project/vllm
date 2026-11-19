@@ -1453,12 +1453,14 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
     """
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
-    stage = (
-        aiter_ar.mxfp4_fused_ar_rms_stage(input_)
+    fused = (
+        aiter_ar.fused_ar_rms_mxfp4_quant(
+            input_, residual, norm_weight, epsilon, gemma_norm
+        )
         if input_.shape[0] < 32 and not envs.VLLM_BATCH_INVARIANT
         else None
     )
-    if stage is None:
+    if fused is None:
         norm_out, residual_out = _rocm_aiter_fused_allreduce_rmsnorm_impl(
             input_, residual, norm_weight, epsilon, gemma_norm
         )
@@ -1467,16 +1469,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_gemm_impl(
         )
         return out, norm_out, residual_out
 
-    x_q, residual_out, x_s, norm_out = aiter_ar.aiter_ca.fused_ar_rms_mxfp4_quant(
-        input_,
-        residual,
-        w=norm_weight,
-        eps=epsilon,
-        registered=torch.cuda.is_current_stream_capturing(),
-        use_1stage=stage,
-        emit_bf16=True,
-        gemma_norm=gemma_norm,
-    )
+    x_q, residual_out, x_s, norm_out = fused
     out = torch.ops.vllm.gemm_with_dynamic_quant(
         x_q,
         weight,

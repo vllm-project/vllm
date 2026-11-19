@@ -198,3 +198,33 @@ class AiterCustomAllreduce:
         if can_2stage:
             return False
         return None
+
+    def fused_ar_rms_mxfp4_quant(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        gemma_norm: bool,
+    ) -> tuple[torch.Tensor, ...] | None:
+        """AITER's fused AR+RMSNorm+MXFP4 quant with a bf16 side output:
+        (quantized activation, residual, per-1x32 scales, normed activation),
+        or None when neither kernel accepts the shape or custom all-reduce
+        declines the input.
+
+        Goes through `custom_fused_ar_rms_mxfp4_quant`, which decides whether
+        a captured input may be registered in place, as `custom_fused_ar_rms`
+        does for the AR+RMSNorm op.
+        """
+        stage = self.mxfp4_fused_ar_rms_stage(inp)
+        if stage is None:
+            return None
+        return self._impl.custom_fused_ar_rms_mxfp4_quant(
+            inp,
+            residual,
+            weight,
+            eps,
+            use_1stage=stage,
+            emit_bf16=True,
+            gemma_norm=gemma_norm,
+        )
