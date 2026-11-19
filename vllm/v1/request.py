@@ -24,6 +24,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
+from vllm.v1.streaming.retention import HistorySegment, StreamingRetentionParams
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.utils import ConstantList
@@ -107,6 +108,7 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.streaming_retention: StreamingRetentionParams | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
         # P/D: M-RoPE position delta the KV producer's worker computed for the
@@ -124,6 +126,17 @@ class Request:
                 self.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
             if sampling_params.extra_args is not None:
+                retention = (
+                    sampling_params.extra_args.get("streaming_retention")
+                    if resumable
+                    else None
+                )
+                if isinstance(retention, dict):
+                    retention = StreamingRetentionParams(**retention)
+                if retention is not None:
+                    if not isinstance(retention, StreamingRetentionParams):
+                        raise ValueError("Invalid streaming_retention parameters")
+                    self.streaming_retention = retention
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
@@ -238,6 +251,11 @@ class Request:
         # Prompt block hashes precomputed by the frontend; the hasher continues
         # from the first block they don't cover. Hidden from the cyclic GC: it
         # only holds bytes, one per block.
+        # Compacted session KV depends on evicted history and original positions.
+        # It must never be published or matched as an ordinary prefix.
+        if self.streaming_retention is not None:
+            block_hasher = None
+            block_hashes = None
         self.block_hashes: list[BlockHash] = gc_untrack(block_hashes or [])
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
@@ -251,6 +269,16 @@ class Request:
         self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
+        self.session_history: list[HistorySegment] = []
+        self.streaming_frame_scaffold: (
+            tuple[tuple[int, ...], tuple[int, ...]] | None
+        ) = None
+        self.streaming_frames_uniform = False
+        self.pending_evicted_token_ranges: list[tuple[int, int]] = []
+        self.position_offset = 0
+        self.max_cached_position = -1
+        self.pending_reprefill = False
+        self.reprefill_count = 0
 
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
@@ -369,6 +397,8 @@ class Request:
         0 when the request skips cache reads, the first scored prompt row for
         prompt scoring, or None when unbounded.
         See docs/training/prompt_token_id_logprobs.md."""
+        if self.streaming_retention is not None:
+            return 0
         params = self.sampling_params or self.pooling_params
         if params is not None and params.skip_reading_prefix_cache:
             return 0

@@ -85,6 +85,11 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.streaming.session import (
+    admit_streaming_request,
+    reset_streaming_positions,
+    update_streaming_session,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.token_buffer import extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
@@ -1871,6 +1876,8 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
+        if request.streaming_retention is not None:
+            reset_streaming_positions(request)
         if self.log_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1922,7 +1929,9 @@ class Scheduler(SchedulerInterface):
         Returns False if the update was dropped for exceeding max_model_len.
         """
         new_num_tokens = session.num_tokens - 1 + len(update.prompt_token_ids or ())
-        if new_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len:
+        if session.streaming_retention is None and (
+            new_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len
+        ):
             logger.warning(
                 "Dropping streaming update for request %s: session would "
                 "exceed max_model_len=%d.",
@@ -1932,6 +1941,8 @@ class Scheduler(SchedulerInterface):
             self.dropped_streaming_updates.append(session)
             return False
 
+        prior_prompt_tokens = session.num_prompt_tokens
+        prior_sampling_params = session.sampling_params
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
@@ -1946,6 +1957,7 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens,
             keep_end,
         )
+        chunk_start = session.num_tokens
 
         if update.mm_features:
             base = session.num_tokens
@@ -1964,6 +1976,17 @@ class Scheduler(SchedulerInterface):
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
+        if session.streaming_retention is not None and not update_streaming_session(
+            self,
+            session,
+            update,
+            prior_prompt_tokens,
+            chunk_start,
+            prior_sampling_params,
+        ):
+            session.resumable = False
+            self.dropped_streaming_updates.append(session)
+            return False
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
@@ -1978,7 +2001,21 @@ class Scheduler(SchedulerInterface):
         # End the reply to each dropped update with an empty turn.
         for req in self.dropped_streaming_updates:
             outputs[req.client_index].append(
-                EngineCoreOutput(req.request_id, [], finish_reason=FinishReason.LENGTH)
+                EngineCoreOutput(
+                    req.request_id,
+                    [],
+                    finish_reason=(
+                        FinishReason.LENGTH if req.resumable else FinishReason.ERROR
+                    ),
+                    error=(
+                        RequestError(
+                            code="validation_error",
+                            message=str(req.stop_reason or "Bounded session rejected"),
+                        )
+                        if not req.resumable
+                        else None
+                    ),
+                )
             )
         self.dropped_streaming_updates.clear()
 
@@ -2299,6 +2336,10 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        for req_id, position in model_runner_output.max_cached_positions.items():
+            request = self.requests.get(req_id)
+            if request is not None:
+                request.max_cached_position = max(request.max_cached_position, position)
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         prompt_token_id_logprobs_dict = (
@@ -2881,6 +2922,9 @@ class Scheduler(SchedulerInterface):
                 return True
             if self._update_request_as_session(request, update):
                 return False
+            if not request.resumable:
+                request.status = RequestStatus.FINISHED_ERROR
+                return True
 
         request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         self.num_waiting_for_streaming_input += 1
@@ -3076,10 +3120,18 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
+                if not existing.resumable:
+                    self.finish_requests(
+                        existing.request_id, RequestStatus.FINISHED_ERROR
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.streaming_retention is not None and not admit_streaming_request(
+                self, request
+            ):
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             if self.connector is not None:

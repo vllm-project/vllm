@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -10,9 +10,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_transferred_mrope_position_delta,
 )
+from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.streaming.mrope import StreamingMropeState
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -82,7 +84,16 @@ class DefaultModelState(ModelState):
         ):
             self.mm_prefix_ranges = {}
 
+        self.streaming_mrope: dict[str, StreamingMropeState] = {}
+        self.streaming_position_offsets: dict[str, int] = {}
+        self.streaming_positions: torch.Tensor | None = None
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        bounded_session = new_req_data.is_bounded_session
+        if bounded_session:
+            self.streaming_position_offsets[new_req_data.req_id] = (
+                new_req_data.position_offset
+            )
         if self.mm_prefix_ranges is not None:
             hf_text_config = self.model_config.hf_text_config
             self.mm_prefix_ranges[new_req_data.req_id] = compute_mm_prefix_ranges(
@@ -100,18 +111,37 @@ class DefaultModelState(ModelState):
             mm_features = [
                 f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
             ]
-            position_delta = None
-            if not mm_features:
-                position_delta = get_transferred_mrope_position_delta(
-                    self.vllm_config, new_req_data.sampling_params
+            if bounded_session:
+                state = self.streaming_mrope.get(new_req_data.req_id)
+                model = cast(SupportsMRoPE, self.model)
+                if state is None or new_req_data.is_reprefill:
+                    state = StreamingMropeState.from_prompt(
+                        model, new_req_data.prefill_token_ids, mm_features
+                    )
+                    self.streaming_mrope[new_req_data.req_id] = state
+                else:
+                    state.update(
+                        model,
+                        new_req_data.prefill_token_ids,
+                        mm_features,
+                        new_req_data.evicted_token_ranges or [],
+                    )
+                self.rope_state.stage_prefill_positions(
+                    req_index, state.positions, state.delta
                 )
-            self.rope_state.init_prefill_positions(
-                req_index,
-                self.model,
-                new_req_data.prefill_token_ids,
-                mm_features=mm_features,
-                position_delta=position_delta,
-            )
+            else:
+                position_delta = None
+                if not mm_features:
+                    position_delta = get_transferred_mrope_position_delta(
+                        self.vllm_config, new_req_data.sampling_params
+                    )
+                self.rope_state.init_prefill_positions(
+                    req_index,
+                    self.model,
+                    new_req_data.prefill_token_ids,
+                    mm_features=mm_features,
+                    position_delta=position_delta,
+                )
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
@@ -121,10 +151,42 @@ class DefaultModelState(ModelState):
         return self.rope_state.get_prefill_delta(req_index)
 
     def remove_request(self, req_id: str) -> None:
+        self.streaming_mrope.pop(req_id, None)
+        self.streaming_position_offsets.pop(req_id, None)
         if self.mm_prefix_ranges is not None:
             self.mm_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
+
+    def remove_request_for_update(self, req_id: str) -> None:
+        state = self.streaming_mrope.get(req_id)
+        offset = self.streaming_position_offsets.get(req_id)
+        self.remove_request(req_id)
+        if state is not None:
+            self.streaming_mrope[req_id] = state
+        if offset is not None:
+            self.streaming_position_offsets[req_id] = offset
+
+    def get_max_cached_positions(self, input_batch: InputBatch) -> dict[str, int]:
+        if not self.streaming_position_offsets:
+            return {}
+        positions = {}
+        for i, req_id in enumerate(input_batch.req_ids):
+            if req_id not in self.streaming_position_offsets:
+                continue
+            computed_end = int(
+                input_batch.num_computed_tokens_np[i]
+                + input_batch.num_scheduled_tokens[i]
+            )
+            state = self.streaming_mrope.get(req_id)
+            if state is not None:
+                state.record_computed_tokens(computed_end)
+                positions[req_id] = state.computed_watermark(computed_end)
+            else:
+                positions[req_id] = (
+                    computed_end - 1 + self.streaming_position_offsets[req_id]
+                )
+        return positions
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
@@ -198,7 +260,29 @@ class DefaultModelState(ModelState):
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         if self.rope_state is None:
-            return {}  # Common case (1D positions).
+            if not self.streaming_position_offsets:
+                return {}
+            positions = None
+            start = 0
+            for i, req_id in enumerate(input_batch.req_ids):
+                end = start + int(input_batch.num_scheduled_tokens[i])
+                offset = self.streaming_position_offsets.get(req_id, 0)
+                if offset:
+                    if positions is None:
+                        if self.streaming_positions is None:
+                            self.streaming_positions = torch.empty(
+                                self.max_num_tokens,
+                                dtype=torch.int64,
+                                device=self.device,
+                            )
+                        positions = self.streaming_positions[
+                            : input_batch.num_tokens_after_padding
+                        ]
+                        positions.copy_(input_batch.positions)
+                    # Slot mappings and attention masks keep compact indices.
+                    positions[start:end].add_(offset)
+                start = end
+            return {"positions": positions} if positions is not None else {}
 
         self.rope_state.prepare_positions(
             input_batch.idx_mapping[: input_batch.num_reqs],

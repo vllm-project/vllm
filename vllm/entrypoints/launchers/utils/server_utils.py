@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            streaming = getattr(app.state, "openai_serving_streaming", None)
+            if streaming is not None:
+                await streaming.shutdown()
             for attr_name in (
                 "openai_serving_transcription",
                 "openai_serving_translation",

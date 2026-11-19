@@ -677,7 +677,18 @@ class OutputProcessor:
             self._update_streaming_request_state(req_state, request, prompt)
             return
 
-        req_state = RequestState.from_new_request(
+        state_type = RequestState
+        params = request.sampling_params
+        if (
+            request.resumable
+            and params is not None
+            and params.extra_args
+            and params.extra_args.get("streaming_retention") is not None
+        ):
+            from vllm.v1.streaming.output import BoundedRequestState
+
+            state_type = BoundedRequestState
+        req_state = state_type.from_new_request(
             tokenizer=self.tokenizer,
             request=request,
             prompt=prompt,

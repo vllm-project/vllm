@@ -1255,10 +1255,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_run(**batch, skip_eplb=True)
         self.adaptive_verification.set_initial_cost_curves(timings)
 
-    def _remove_request(self, req_id: str) -> bool:
+    def _remove_request(
+        self, req_id: str, *, is_streaming_update: bool = False
+    ) -> bool:
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
-        self.model_state.remove_request(req_id)
+        if is_streaming_update:
+            self.model_state.remove_request_for_update(req_id)
+        else:
+            self.model_state.remove_request(req_id)
         self.draft_tokens_handler.discard(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
@@ -1310,7 +1315,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Streaming input update: request already exists from a prior
             # chunk. Remove old state so it can be cleanly re-added below
             # with the updated prompt_token_ids and mm_features.
-            self._remove_request(req_id)
+            if new_req_data.is_bounded_session:
+                self._remove_request(req_id, is_streaming_update=True)
+            else:
+                self._remove_request(req_id)
 
             prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
@@ -2353,6 +2361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            max_cached_positions=self.model_state.get_max_cached_positions(input_batch),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:

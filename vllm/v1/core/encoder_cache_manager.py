@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from bisect import bisect_left
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -308,6 +309,19 @@ class EncoderCacheManager:
         """
         for input_id in list(self.get_cached_input_ids(request)):
             self.free_encoder_input(request, input_id)
+
+    def remove_input_ids(self, request: Request, input_ids: list[int]) -> None:
+        """Release removed features and compact cached IDs before list mutation."""
+        if not input_ids:
+            return
+        removed = sorted(set(input_ids))
+        for input_id in removed:
+            self.free_encoder_input(request, input_id)
+        cached_ids = self.request_cached_ids.get(request.request_id)
+        if cached_ids:
+            self.request_cached_ids[request.request_id] = {
+                i - bisect_left(removed, i) for i in cached_ids
+            }
 
     def get_freed_mm_hashes(self) -> list[str]:
         """Get and clear the list of recently freed encoder cache entries.

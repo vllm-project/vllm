@@ -294,6 +294,10 @@ class FrontendArgs(BaseFrontendArgs):
 
     host: str | None = None
     """Host name."""
+    enable_streaming: bool = False
+    """Enable the experimental /v1/streaming session API. Disabled by default.
+    Requires a generate-capable image model, --enforce-eager, synchronous
+    scheduling, and one API server. See docs/features/streaming_sessions.md."""
     port: int = 8000
     """Port number."""
     grpc_port: int | None = None

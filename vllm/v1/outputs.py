@@ -326,6 +326,9 @@ class ModelRunnerOutput:
     # Iterations whose GPU timing has completed; see IterationTimer.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
+    # Bounded streaming sessions report their actual RoPE position watermark.
+    max_cached_positions: dict[str, int] = field(default_factory=dict)
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

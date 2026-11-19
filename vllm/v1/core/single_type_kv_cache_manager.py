@@ -755,6 +755,49 @@ class SingleTypeKVCacheManager(ABC):
         """Cache blocks that are only retained once the request is freed."""
         return None
 
+    def evict_blocks_for_request(self, request_id: str, block_ids: list[int]) -> int:
+        """Compact a live block table and return the number of reclaimed blocks.
+
+        The caller must keep its token arrays in lockstep and ensure no work
+        is in flight for the request. Shared blocks are dereferenced, and all
+        removed blocks are unlinked from prefix caching before reuse.
+        """
+        if type(self) is not FullAttentionManager:
+            raise ValueError("Live block eviction requires full attention")
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks or not block_ids:
+            return 0
+        selected = set(block_ids)
+        removed_indices = [
+            i
+            for i, block in enumerate(blocks)
+            if not block.is_null and block.block_id in selected
+        ]
+        if not removed_indices:
+            return 0
+        removed_set = set(removed_indices)
+        removed = [blocks[i] for i in removed_indices]
+        blocks[:] = [block for i, block in enumerate(blocks) if i not in removed_set]
+        cached = self.num_cached_block.get(request_id, 0)
+        if request_id in self.num_cached_block:
+            self.num_cached_block[request_id] = cached - sum(
+                i < cached for i in removed_indices
+            )
+        partial = self._partial_hit_reqs.get(request_id)
+        if partial is not None:
+            index, block = partial
+            if index in removed_set:
+                del self._partial_hit_reqs[request_id]
+            else:
+                self._partial_hit_reqs[request_id] = (
+                    index - sum(i < index for i in removed_indices),
+                    block,
+                )
+        if self.enable_caching:
+            self.block_pool.evict_blocks({block.block_id for block in removed})
+        self.block_pool.free_blocks(reversed(removed))
+        return len({block.block_id for block in removed if block.ref_cnt == 0})
+
     @classmethod
     @abstractmethod
     def find_longest_cache_hit(

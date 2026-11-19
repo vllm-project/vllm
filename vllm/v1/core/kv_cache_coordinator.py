@@ -445,6 +445,14 @@ class KVCacheCoordinator(ABC):
             blocks.extend(manager.pop_blocks_for_free(request.request_id))
         return blocks
 
+    def evict_blocks_for_request(self, request_id: str, block_ids: list[int]) -> int:
+        """Free blocks from a live request with a single KV cache group."""
+        if len(self.single_type_managers) != 1:
+            raise ValueError("Live block eviction requires exactly one KV cache group")
+        return self.single_type_managers[0].evict_blocks_for_request(
+            request_id, block_ids
+        )
+
     def remove_skipped_blocks(
         self,
         request_id: str,

@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    FullAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -700,6 +701,38 @@ class KVCacheManager:
 
         """
         self.block_pool.evict_blocks(block_ids)
+
+    def evict_token_range_for_request(
+        self, request_id: str, token_start: int, token_end: int
+    ) -> tuple[int, int, int]:
+        """Remove whole blocks inside a live request's token range.
+
+        Returns the actual half-open token span and number of physical blocks
+        reclaimed. The caller must compact its token arrays by that span and
+        replace the worker's block table before scheduling the request again.
+        The range must contain only computed tokens, with no work in flight.
+        Compacted requests must not publish or reuse ordinary prefix hashes.
+        Only a single full-attention group is supported.
+        """
+        managers = self.coordinator.single_type_managers
+        if len(managers) != 1 or type(managers[0]) is not FullAttentionManager:
+            raise ValueError("Live range eviction requires one full-attention group")
+        if token_start < 0:
+            raise ValueError("token_start must be nonnegative")
+        manager = managers[0]
+        blocks = manager.req_to_blocks.get(request_id, ())
+        block_size = manager.block_size
+        first = (token_start + block_size - 1) // block_size
+        last = min(token_end // block_size, len(blocks))
+        if first >= last:
+            return token_start, token_start, 0
+        selected = blocks[first:last]
+        if any(block.is_null for block in selected):
+            raise ValueError("Cannot compact a range containing null blocks")
+        freed = self.coordinator.evict_blocks_for_request(
+            request_id, [block.block_id for block in selected]
+        )
+        return first * block_size, last * block_size, freed
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
