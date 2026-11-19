@@ -187,14 +187,10 @@ class InputProcessor:
             if (
                 sampling_mask_enabled
                 and params.return_sampling_mask is False
-                and (
-                    self.speculative_config is not None
-                    or not current_platform.is_cuda_alike()
-                )
+                and self.speculative_config is not None
             ):
                 raise VLLMValidationError(
-                    "Sampling-mask opt-out requires a CUDA or ROCm model runner "
-                    "without speculative decoding",
+                    "Sampling-mask opt-out requires disabling speculative decoding",
                     parameter="return_sampling_mask",
                 )
             if sampling_mask_enabled and params.return_sampling_mask is not False:
