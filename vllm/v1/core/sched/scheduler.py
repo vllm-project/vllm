@@ -1904,16 +1904,14 @@ class Scheduler(SchedulerInterface):
 
     def _prompt_embeds_fit(self, request: Request) -> bool:
         """Check if the request's prompt embeds fit within the current capacity."""
-        if request.prompt_embeds is None:
-            return True
+        assert request.prompt_embeds is not None
         num_rows = request.prompt_embeds.shape[0]
-        num_held = self.prompt_embeds_rows.get(request.request_id, 0)
-        num_used = self.num_prompt_embeds_rows - num_held
-        return num_used + num_rows <= self.max_num_prompt_embeds_tokens
+        return (
+            self.num_prompt_embeds_rows + num_rows <= self.max_num_prompt_embeds_tokens
+        )
 
     def _reserve_prompt_embeds(self, request: Request) -> None:
         """Reserve GPU memory for the request's prompt embeds."""
-        self._release_prompt_embeds(request.request_id)
         if request.prompt_embeds is None:
             return
         num_rows = request.prompt_embeds.shape[0]

@@ -23,7 +23,10 @@ def prompt_embeds_budget_rows(
 
 
 def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
-    """GPU memory of one `prompt_embeds` row, or 0 without prompt embeds."""
+    """GPU memory of one `prompt_embeds` row, or 0 without prompt embeds.
+
+    Leaves out the 1-byte `prompt_is_token_ids` flag the workers also hold per
+    row of a mixed prompt."""
     model_config = vllm_config.model_config
     if not model_config.enable_prompt_embeds:
         return 0
