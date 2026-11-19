@@ -185,6 +185,10 @@ class AsmDecode:
         self.tk_src: tuple | None = None
         # scratch shared by the layers (their uses don't overlap)
         self.bufs: dict = {}
+        # the streams AITER's Mega-MHC scratch is grown on (warm_mega_mhc), and
+        # the forward that last checked
+        self.mhc_streams: set[int] = set()
+        self.mhc_fc: Any = None
         # the row counts each part ran at, the messages logged once
         self.seen: dict[str, set[int]] = {"K1": set(), "K2": set(), "Engram": set()}
         self.logged: set = set()
@@ -202,6 +206,24 @@ class AsmDecode:
             # gfx950 at TP4 expects it: say so louder there
             log = logger.warning_once if "needs gfx950" not in why else logger.info_once
             log("DeepSeek-V4.1 asm decode off: %s", why, scope="global")
+
+    def warm_mega_mhc(self, layer: "DeepseekV4DecoderLayer", device) -> None:
+        """Grow AITER's Mega-MHC scratch for MAX_M rows on the current stream.
+
+        Our seams replace vLLM's `mhc_pre_delayed`, the eager call that grows
+        that per-stream scratch (capture cannot). The warm-up before a
+        PIECEWISE capture runs ours, then the capture runs vLLM's (our seams
+        decline there), which would need the scratch for the batch.
+        """
+        if not layer.use_mega_mhc or torch.cuda.is_current_stream_capturing():
+            return
+        stream = torch.cuda.current_stream().cuda_stream
+        if stream in self.mhc_streams:
+            return
+        self.mhc_streams.add(stream)
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.mega_mhc_prepare_stream(MAX_M, layer.hidden_size, device)
 
     def ran(self, part: str, m: int) -> None:
         if m not in self.seen[part]:
@@ -395,6 +417,12 @@ class AsmDecodeLayer:
             return None
         if residual is None and x.dim() != 2:
             return None
+        fc = get_forward_context()
+        if fc is not self.st.mhc_fc:
+            # once a forward (the decoder replay's start at its first layer):
+            # vLLM's Mega-MHC seams may run after ours
+            self.st.mhc_fc = fc
+            self.st.warm_mega_mhc(layer, x.device)
         attn_args = (
             layer.hc_attn_fn,
             layer.hc_attn_scale,
