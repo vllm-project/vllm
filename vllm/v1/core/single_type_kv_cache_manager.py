@@ -1066,6 +1066,11 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    # Fine-grained hits may end inside a physical SWA block. The full blocks
+    # in the retained window use their block hashes, while the tail uses the
+    # hash registered at the exact boundary.
+    supports_fine_grained_hash_lookup: ClassVar[bool] = True
+
     @dataclass(frozen=True, slots=True)
     class Params(SingleTypeKVCacheManager.Params):
         sliding_window: int
@@ -1147,6 +1152,133 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         self.num_retained_tokens = self.sliding_window_reach(self.manager_config)
 
     @classmethod
+    def _fine_grained(cls, block_size: int, alignment_tokens: int | None) -> bool:
+        return (
+            cls.supports_fine_grained_hash_lookup
+            and alignment_tokens is not None
+            and alignment_tokens < block_size
+            and block_size % alignment_tokens == 0
+        )
+
+    @classmethod
+    def _find_fine_grained_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        block_size: int,
+        manager_config: ManagerConfig,
+        unit: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Find the longest unit-aligned hit with a complete SWA window."""
+        params = manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        assert isinstance(block_hashes, Sequence)
+        scale = block_size // unit
+        window_reach = cls.sliding_window_reach(manager_config)
+        num_units = len(block_hashes)
+        full_hits: dict[int, list[KVCacheBlock] | None] = {}
+
+        def full_block(index: int) -> list[KVCacheBlock] | None:
+            if index not in full_hits:
+                hash_index = (index + 1) * scale - 1
+                full_hits[index] = (
+                    block_pool.get_cached_block(
+                        block_hashes[hash_index], kv_cache_group_ids
+                    )
+                    if hash_index < num_units
+                    else None
+                )
+            return full_hits[index]
+
+        empty: tuple[list[KVCacheBlock], ...] = tuple([] for _ in kv_cache_group_ids)
+        for unit_index in range(min(max_length // unit, num_units), 0, -1):
+            end = unit_index * unit
+            hit_length = end
+            if hit_length <= 0:
+                break
+            last = (end - 1) // block_size
+            tail = None
+            if end % block_size:
+                tail = block_pool.get_cached_block(
+                    block_hashes[unit_index - 1], kv_cache_group_ids
+                )
+            if not tail:
+                tail = full_block(last)
+            if not tail:
+                continue
+            first = max(0, hit_length - window_reach) // block_size
+            window_blocks = []
+            for index in range(first, last):
+                blocks = full_block(index)
+                if not blocks:
+                    break
+                window_blocks.append(blocks)
+            else:
+                window_blocks.append(tail)
+                num_blocks = cdiv(hit_length, block_size)
+                computed_blocks = tuple(
+                    (
+                        [block_pool.null_block] * first
+                        + [blocks[group] for blocks in window_blocks]
+                    )[:num_blocks]
+                    for group in range(len(kv_cache_group_ids))
+                )
+                return computed_blocks, hit_length
+        return empty, 0
+
+    @classmethod
+    def _fine_grained_block_mask(
+        cls,
+        start_block: int,
+        end_block: int,
+        unit: int,
+        block_size: int,
+        manager_config: ManagerConfig,
+        retention_interval: int | None,
+        reachable_boundaries: Sequence[int],
+    ) -> list[bool] | None:
+        params = manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        if retention_interval is None:
+            return None
+        window_reach = cls.sliding_window_reach(manager_config)
+        ends = [boundary // unit * unit for boundary in reachable_boundaries]
+        if retention_interval > 0:
+            lo = start_block * block_size // retention_interval
+            hi = (end_block * block_size + window_reach + 1) // retention_interval + 1
+            ends.extend(
+                index * retention_interval for index in range(max(lo, 1), hi + 1)
+            )
+        mask = [False] * (end_block - start_block)
+        for hit_length in ends:
+            if hit_length <= 0:
+                continue
+            first = max(0, hit_length - window_reach) // block_size
+            last = (hit_length - 1) // block_size
+            for index in range(max(first, start_block), min(last + 1, end_block)):
+                mask[index - start_block] = True
+        return mask
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
+        if self._fine_grained(self.block_size, self.cache_hit_alignment_tokens):
+            FullAttentionManager._cache_partial_tail_block(self, request, num_tokens)
+
+    @classmethod
     def find_longest_cache_hit(
         cls,
         block_hashes: BlockHashList,
@@ -1165,6 +1297,20 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        if (
+            cls._fine_grained(block_size, alignment_tokens)
+            and block_pool.hash_block_size == alignment_tokens
+            and isinstance(block_hashes, Sequence)
+        ):
+            return cls._find_fine_grained_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                block_size,
+                manager_config,
+                alignment_tokens,
+            )
         # Sliding-window cache hits must stay at the group's physical block
         # granularity. resolve_block_hashes() converts finer-grained hashes to
         # that view when the hybrid-cache alignment is smaller than block_size.
@@ -1252,6 +1398,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
         block_size = block_size * dcp_world_size
+        if cls._fine_grained(block_size, alignment_tokens):
+            return cls._fine_grained_block_mask(
+                start_block,
+                end_block,
+                alignment_tokens,
+                block_size,
+                manager_config,
+                retention_interval,
+                reachable_boundaries,
+            )
         if alignment_tokens % block_size != 0:
             # The mask is block-granular, so a sub-block alignment cannot be
             # represented exactly. This happens for hybrid offloading, where

@@ -840,8 +840,9 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
-    """A hash-only tail survives request cleanup, then restores byte for byte."""
+@pytest.mark.parametrize("request_state", ["running", "finished"])
+def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
+    """A boundary restores target, state, and draft SWA bytes exactly."""
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -851,6 +852,15 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             )
         )
     config = _hybrid_kv_cache_config()
+    config.kv_cache_groups.append(
+        new_kv_cache_group(
+            ["draft"],
+            SlidingWindowManager.layer_config(
+                uniform_spec(config.kv_cache_groups[0]), sliding_window=32
+            ),
+            is_eagle_group=True,
+        )
+    )
     groups = config.kv_cache_groups
     config = replace(
         config,
@@ -906,21 +916,32 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
         num_computed_tokens=12,
         block_hashes=[b"a", b"b", b"c"],
     )
-    source_ids = ([1], [2])
+    source_ids = tuple([block_id] for block_id in range(1, len(groups) + 1))
     scheduler.update_state_after_alloc(
         request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
     )
-    sources = [pool.blocks[1], pool.blocks[2]]
-    pool.touch(sources)
-    assert not scheduler.register_finished_partial_tail(
-        request, source_ids, [(1, 2, 12)]
-    )
-    assert scheduler.request_finished(request, source_ids) == (False, None)
-    pool.free_blocks(sources)
-    output = make_scheduler_output(finished={"tail"})
+    sources = [pool.blocks[block_ids[0]] for block_ids in source_ids]
+    if request_state == "finished":
+        pool.touch(sources)
+        assert not scheduler.register_finished_partial_tail(
+            request, source_ids, [(1, 2, 12)]
+        )
+        assert scheduler.request_finished(request, source_ids) == (False, None)
+        pool.free_blocks(sources)
+        output = make_scheduler_output(finished={"tail"})
+    else:
+        output = make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="tail", num_computed_tokens=0, block_ids=source_ids
+                )
+            ],
+            scheduled_tokens={"tail": 12},
+            block_state=SimpleNamespace(boundary_state_offloads={"tail": [(1, 2, 12)]}),
+        )
     try:
         metadata = scheduler.build_connector_meta(output)
-        assert len(metadata.store_plans) == 2
+        assert len(metadata.store_plans) == len(groups)
         worker.enqueue_stores(metadata)
         worker.wait_for_save()
         deadline = time.monotonic() + 10
@@ -933,14 +954,19 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
                 )
             )
             time.sleep(0.001)
-        assert [block.ref_cnt for block in sources] == [0, 0]
+        assert [block.ref_cnt for block in sources] == [0] * len(groups)
         for cache in caches.values():
             cache.zero_()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
+        destination_ids = tuple(
+            [block_id] for block_id in range(len(groups) + 1, 2 * len(groups) + 1)
+        )
         scheduler.update_state_after_alloc(
-            request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
+            request,
+            SimpleNamespace(get_block_ids=lambda group_ids: destination_ids),
+            12,
         )
         output.finished_req_ids = set()
         worker.start_load_kv(None, scheduler.build_connector_meta(output))
@@ -950,9 +976,11 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             time.sleep(0.001)
         assert finished == (None, {"replay"})
         assert worker.get_failed_recving() == set()
-        for block_id, (name, cache) in enumerate(caches.items(), 3):
+        for block_ids, (name, cache) in zip(
+            destination_ids, caches.items(), strict=True
+        ):
             expected = torch.zeros_like(cache)
-            expected[block_id] = pages[name]
+            expected[block_ids[0]] = pages[name]
             assert torch.equal(cache, expected), name
         counters = worker.get_kv_connector_stats().reduce()
         page_bytes = sum(group.page_size_bytes for group in groups)
