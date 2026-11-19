@@ -932,8 +932,8 @@ def sparse_attn_indexer(
                     ).squeeze(-1)
                 # Chunks planned for fused_mqa_topk are not bounded by the logits
                 # budget: split their rows (budget-planned chunks, the only ones
-                # under DCP, are one window, so the merge below sees all the
-                # rows).
+                # under pure DCP, are one window, so the merge below sees all
+                # the rows).
                 for sub in range(0, q_slice.shape[0], dense_rows):
                     if sub:
                         # Startup reserves logits for one window at a time.
