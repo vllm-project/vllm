@@ -11,6 +11,7 @@ from transformers import TokenizersBackend
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
@@ -22,6 +23,59 @@ logger = init_logger(__name__)
 
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
+
+# A UTF-8 character spans at most 4 bytes and byte-level / byte-fallback tokens
+# carry at least one byte each, so a window starting inside a character reaches
+# the character's first byte within 3 more tokens.
+_MAX_UTF8_SEED_EXTENSION = 3
+# Bounds the walk over prompt tokens that decode to no text (e.g. long runs of
+# skipped special tokens); such prompts are seeded with the full prompt.
+_MAX_SEED_WINDOW = 256
+
+
+def get_decode_stream_seed(
+    tokenizer: Tokenizer,
+    prompt_token_ids: list[int] | None,
+    skip_special_tokens: bool,
+) -> list[int] | None:
+    """Return the prompt suffix used to prime a `DecodeStream`.
+
+    `DecodeStream` decodes all of its seed ids on the first `step()`, so
+    seeding it with the whole prompt costs O(prompt) time. Once it has emitted
+    text it keeps only the ids that follow, so the seed only shapes the first
+    delta, and a tail reproduces that delta exactly if:
+
+    - It holds `INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET` tokens that decode
+      to text on their own. Metaspace, WordPiece and leading-`Strip` decoders
+      treat the start of the decoded text specially (e.g. drop a leading
+      space), so tokens that decode to nothing, such as skipped special
+      tokens or whitespace that such a decoder strips, must not count.
+    - Its text does not end in U+FFFD, i.e. it does not start inside the
+      multi-byte character or byte-fallback run that the prompt ends with;
+      such a window is extended to the start of the character. If the prompt
+      itself ends in U+FFFD, `DecodeStream` streams its whole seed text in
+      the first delta, so the full prompt is used to keep that output.
+    """
+    if not prompt_token_ids:
+        return prompt_token_ids
+    start = len(prompt_token_ids)
+    min_start = max(0, start - _MAX_SEED_WINDOW)
+    needed = INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET
+    for _ in range(_MAX_UTF8_SEED_EXTENSION + 1):
+        while start > min_start and needed > 0:
+            start -= 1
+            if tokenizer.decode(
+                [prompt_token_ids[start]], skip_special_tokens=skip_special_tokens
+            ):
+                needed -= 1
+        if needed > 0:
+            break
+        window = prompt_token_ids[start:]
+        text = tokenizer.decode(window, skip_special_tokens=skip_special_tokens)
+        if not text.endswith("\ufffd"):
+            return window
+        needed = 1
+    return prompt_token_ids
 
 
 def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
@@ -190,12 +244,14 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
-        # Use native prefill to prime the decode stream with prompt tokens.
+        # Use native prefill to prime the decode stream with the prompt tail.
         # Look up DecodeStream on the module so backend patches (e.g. the
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
         self.stream = tokenizers.decoders.DecodeStream(
-            ids=request.prompt_token_ids,
+            ids=get_decode_stream_seed(
+                self.tokenizer, request.prompt_token_ids, self.skip_special_tokens
+            ),
             skip_special_tokens=self.skip_special_tokens,
         )
 
