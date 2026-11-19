@@ -287,6 +287,39 @@ def test_flat_logprobs_reads_like_list_across_storage_changes() -> None:
     check()
 
 
+@pytest.mark.parametrize("variant", ["engine", "decoded", "ranks", "wide"])
+def test_flat_logprobs_uniform_slices(variant: str) -> None:
+    """Contiguous slices of same-width positions read back like the list,
+    for each optional column, and own their columns."""
+    rng = np.random.default_rng(1)
+    flat = FlatLogprobs()
+    expected: list[LogprobsOnePosition] = []
+    for i in range(40):
+        ids = rng.choice(1000, 3, replace=False).tolist()
+        if variant == "wide" and i == 7:
+            ids[1] = 2**40
+        ranks: list[int | None] = [int(rng.integers(0, 50)), 1, 2]
+        if variant == "ranks" and i == 7:
+            ranks = [None, 5, 1]
+        entry = {
+            t: Logprob(
+                float(np.float32(-rng.random())),
+                r,
+                "t" if variant == "decoded" else None,
+            )
+            for t, r in zip(ids, ranks)
+        }
+        flat.append(entry)
+        expected.append(entry)
+    for index in (slice(-1, None), slice(3, 10), slice(5, 5), slice(-30, None)):
+        sliced = flat[index]
+        assert isinstance(sliced, FlatLogprobs)
+        assert list(sliced) == expected[index]
+        sliced.append(expected[0])
+        assert list(sliced) == [*expected[index], expected[0]]
+    assert list(flat) == expected
+
+
 def test_flat_logprobs_column_views() -> None:
     """The column attributes are read-only views: every index, slice and
     iteration reads the same values as the eager lists, across each storage

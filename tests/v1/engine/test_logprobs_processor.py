@@ -16,7 +16,11 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.logprobs import FlatLogprobs, create_sample_logprobs
+from vllm.logprobs import (
+    FlatLogprobs,
+    create_prompt_logprobs,
+    create_sample_logprobs,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -201,3 +205,69 @@ def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
     assert not any(prompt_logprobs[i] for i in range(3))
     assert prompt_logprobs[3][7].logprob == -0.5
     assert prompt_logprobs[4][8].logprob == -1.5
+
+
+class _ByteFallbackTokenizer:
+    """Ids 11 then 12 are the two bytes of "é", each alone U+FFFD; any other
+    id is one letter."""
+
+    def decode(self, ids):
+        text, i = [], 0
+        while i < len(ids):
+            if ids[i : i + 2] == [11, 12]:
+                text.append("é")
+                i += 2
+            else:
+                text.append("\ufffd" if ids[i] in (11, 12) else chr(97 + ids[i] % 26))
+                i += 1
+        return "".join(text)
+
+
+@pytest.mark.parametrize("prompt", [False, True])
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("splits", [(6,), (1, 1, 1, 1, 1, 1), (2, 4), (3, 3)])
+def test_byte_fallback_context_spans_rows_and_batches(prompt, flat_logprobs, splits):
+    """A byte-fallback token is corrected from the tokens before it, whether
+    they came in the same batch of rows or an earlier one; the top-k
+    candidates use the same context."""
+    sampled = [10, 11, 13, 11, 12, 13]
+    token_ids = np.array([[t, 20, 12] for t in sampled], dtype=np.int32)
+    logprobs = -np.arange(18, dtype=np.float32).reshape(6, 3)
+    ranks = np.arange(1, 7)
+    processor = LogprobsProcessor(
+        tokenizer=_ByteFallbackTokenizer(),
+        logprobs=None if prompt else create_sample_logprobs(flat_logprobs),
+        prompt_logprobs=create_prompt_logprobs(flat_logprobs) if prompt else None,
+        cumulative_logprob=None if prompt else 0.0,
+        num_logprobs=None if prompt else 2,
+        num_prompt_logprobs=2 if prompt else None,
+    )
+    start = 0
+    for size in splits:
+        rows = slice(start, start + size)
+        if prompt:
+            processor._update_prompt_logprobs(
+                LogprobsTensors(
+                    torch.from_numpy(token_ids[rows]),
+                    torch.from_numpy(logprobs[rows]),
+                    torch.from_numpy(ranks[rows]),
+                )
+            )
+        else:
+            processor._update_sample_logprobs(
+                LogprobsLists(token_ids[rows], logprobs[rows], ranks[rows])
+            )
+        start += size
+
+    stored = processor.prompt_logprobs[1:] if prompt else processor.logprobs
+    decoded = [[lp.decoded_token for lp in position.values()] for position in stored]
+    # 12 completes "é" only right after a sampled 11 (a row's own sampled
+    # token is not its context); row 4 samples 12, also a candidate.
+    assert decoded == [
+        ["k", "u", ""],
+        ["", "u", ""],
+        ["n", "u", "é"],
+        ["", "u", ""],
+        ["é", "u"],
+        ["n", "u", ""],
+    ]

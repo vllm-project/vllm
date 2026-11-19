@@ -86,6 +86,14 @@ class _Column:
     def read(self, start: int, stop: int) -> list:
         return self._buf[start:stop].tolist()
 
+    def copy_range(self, start: int, stop: int) -> "_Column":
+        """A new column holding a copy of elements `[start, stop)`."""
+        column = _Column.__new__(_Column)
+        column.dtype, column.wide = self.dtype, self.wide
+        column._buf = self._buf[start:stop].copy()
+        column._len = len(column._buf)
+        return column
+
 
 class _ColumnView(Sequence[Any]):
     """A read-only view of one `FlatLogprobs` column that converts only the
@@ -484,6 +492,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         """Extracts logprobs of a given position or slice."""
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
+            if step == 1 and self._ends is None:
+                return self._uniform_slice(start, max(start, stop))
             sliced = FlatLogprobs()
             if step == 1:
                 sliced._extend_from(self, start, stop)
@@ -495,6 +505,23 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             raise TypeError(f"Invalid index type: {type(index)}")
         position = range(len(self))[index]
         return self._position(position, self._start(position), self._end(position))
+
+    def _uniform_slice(self, start: int, stop: int) -> "FlatLogprobs":
+        """Positions `[start, stop)` while all positions have the same
+        width: each column is copied as is, without going through `_append`
+        (e.g. the per-step `[-n:]` of DELTA outputs)."""
+        begin, end = start * self._width, stop * self._width
+        sliced = FlatLogprobs()
+        sliced._num_positions = stop - start
+        sliced._width = self._width
+        sliced._token_ids = self._token_ids.copy_range(begin, end)
+        sliced._logprobs = self._logprobs.copy_range(begin, end)
+        sliced._first_ranks = self._first_ranks.copy_range(start, stop)
+        if self._ranks is not None:
+            sliced._ranks = self._ranks.copy_range(begin, end)
+        if self._decoded is not None:
+            sliced._decoded = self._decoded[begin:end]
+        return sliced
 
     def _position(self, position: int, begin: int, end: int) -> LogprobsOnePosition:
         """Position `position`, whose entries are `[begin, end)`."""
