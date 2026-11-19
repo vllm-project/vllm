@@ -84,6 +84,14 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
+
+            # A sort fixes the order of the selected indices, not which ties
+            # the atomic top-k keeps: replicated ranks need the canonical set.
+            from vllm.model_executor.layers.canonical_topk import (
+                require_deterministic_sparse_topk,
+            )
+
+            require_deterministic_sparse_topk("VLLM_DSA_REPLICATE_ATTN")
         if self.replicate_attn and (
             parallel_config.use_sequence_parallel_moe
             or parallel_config.enable_expert_parallel
