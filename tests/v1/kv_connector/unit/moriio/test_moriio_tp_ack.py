@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import threading
 from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConnectorMetadata,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
@@ -727,7 +730,59 @@ def test_write_mode_read_blocks_posts_no_read():
     assert worker.moriio_wrapper.sent == []
 
 
-def test_producer_start_load_kv_posts_no_read():
+class _RecordingStream:
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    def synchronize(self):
+        self.events.append("sync")
+
+
+@pytest.fixture
+def stream_events(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: _RecordingStream(events))
+    return events
+
+
+def _read_step_metadata(
+    order_reads_after_compute_stream: bool, *req_ids: str
+) -> MoRIIOConnectorMetadata:
+    metadata = MoRIIOConnectorMetadata()
+    for req_id in req_ids:
+        metadata.add_new_req(
+            request_id=req_id,
+            local_block_ids=[[1, 2]],
+            kv_transfer_params={
+                "transfer_id": f"tx-{req_id}",
+                "remote_engine_id": "prefill",
+                "remote_block_ids": [[10, 11]],
+                "remote_host": "127.0.0.1",
+                "remote_handshake_port": 6000,
+                "remote_notify_port": 6001,
+            },
+        )
+    metadata.order_reads_after_compute_stream = order_reads_after_compute_stream
+    return metadata
+
+
+def _consumer_worker(events: list[str], mode: MoRIIOMode) -> MoRIIOConnectorWorker:
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = False
+    worker.mode = mode
+    worker.moriio_config = SimpleNamespace(transfer_timeout=30.0)
+    worker._eager_handshaked_engines = {"127.0.0.1:6000"}
+    worker._remote_agents = {}
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {}
+    worker._reqs_to_send = {}
+    worker._eager_handshake_all_dp_ranks = lambda metadata: None
+    worker._read_blocks_for_req = lambda req_id, meta: events.append(f"read:{req_id}")
+    worker._await_reads_issued_this_step = lambda: None
+    return worker
+
+
+def test_producer_start_load_kv_posts_no_read(stream_events):
     class RecordingWrapper:
         def __init__(self):
             self.waited = False
@@ -749,11 +804,44 @@ def test_producer_start_load_kv_posts_no_read():
     worker._completed_consumer_notifications = set()
     worker.moriio_wrapper = RecordingWrapper()
 
-    worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
+    worker.start_load_kv(
+        SimpleNamespace(
+            transfer_id_to_request_id={}, order_reads_after_compute_stream=True
+        )
+    )
 
     assert worker._reads_issued_this_step == []
     assert worker.moriio_wrapper.async_waited is True
     assert worker.moriio_wrapper.waited is False
+    assert stream_events == []
+
+
+def test_read_step_waits_for_compute_stream_before_first_read(stream_events):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+
+    worker.start_load_kv(_read_step_metadata(True, "a", "b"))
+
+    assert stream_events == ["sync", "read:a", "read:b"]
+
+
+def test_read_step_without_stream_work_does_not_wait_for_compute_stream(
+    stream_events,
+):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+
+    worker.start_load_kv(_read_step_metadata(False, "a"))
+
+    assert stream_events == ["read:a"]
+
+
+def test_write_consumer_start_load_kv_does_not_wait_for_compute_stream(
+    stream_events,
+):
+    worker = _consumer_worker(stream_events, MoRIIOMode.WRITE)
+
+    worker.start_load_kv(_read_step_metadata(True, "a"))
+
+    assert stream_events == []
 
 
 def test_requested_cudagraph_mode_is_never_overridden():

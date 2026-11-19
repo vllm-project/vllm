@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     KVCacheBlock,
+    KVCacheBlockCopy,
     get_request_block_hasher,
     init_none_hash,
 )
@@ -370,6 +371,32 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
         layers[f"layers.{i}.tail"] = CircularBufferManager.layer_config(
             _tail_spec(block_size=2 * kpool)
         )
+    return _group_kv_cache_layers(layers)
+
+
+def _mixed_precision_mla_kv_cache_config(block_size: int) -> KVCacheConfig:
+    layers: dict[str, KVCacheLayerConfig] = {}
+    for i in range(2):
+        layers[f"layers.{i}.attn"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            )
+        )
+        layers[f"layers.{i}.indexer"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+            )
+        )
+    return _group_kv_cache_layers(layers)
+
+
+def _group_kv_cache_layers(layers: dict[str, KVCacheLayerConfig]) -> KVCacheConfig:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
@@ -1139,6 +1166,51 @@ def test_update_state_drops_decode_recompute_tail_block(
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
     assert output.new_block_ids_to_zero == [100, 101, 102]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("hybrid", "num_external_tokens", "zero_ids", "copies", "expected"),
+    [
+        pytest.param(False, 127, [100, 101, 102], None, True, id="zeroed-dst"),
+        pytest.param(
+            False, 127, None, [KVCacheBlockCopy(7, 101)], True, id="copied-dst"
+        ),
+        pytest.param(True, 1500, None, None, True, id="hybrid-state"),
+        pytest.param(True, 0, None, None, False, id="hybrid-load-after-forward"),
+        pytest.param(False, 127, [102], None, False, id="zeroed-elsewhere"),
+        pytest.param(False, 127, None, None, False, id="no-stream-work"),
+        pytest.param(False, 0, [100, 101, 102], None, False, id="release-only"),
+    ],
+)
+def test_read_meta_orders_reads_after_stream_work(
+    hybrid, num_external_tokens, zero_ids, copies, expected
+):
+    if hybrid:
+        scheduler = _glm5_next_mtp_scheduler()
+        remote_blocks = [[10, 11], [50], [90]]
+        local_blocks = ([200, 201], [100, 101, 102], [300])
+    else:
+        scheduler = moriio_connector.MoRIIOConnectorScheduler(
+            _gate_vllm_config(block_size=64),
+            "engine",
+            _mixed_precision_mla_kv_cache_config(block_size=64),
+        )
+        remote_blocks = [[10, 11]]
+        local_blocks = ([100, 101, 102],)
+    scheduler.update_state_after_alloc(
+        _make_read_request(remote_blocks),
+        _FakeBlocks(local_blocks),
+        num_external_tokens=num_external_tokens,
+    )
+    output = SchedulerOutput.make_empty()
+    output.has_sync_kv_loads = num_external_tokens > 0
+    output.new_block_ids_to_zero = zero_ids
+    output.kv_cache_block_copies = copies
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.order_reads_after_compute_stream is expected
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
