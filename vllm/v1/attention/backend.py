@@ -1096,6 +1096,14 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         forward_mqa needs the unpadded query."""
         return None
 
+    def prepare_mqa_query(
+        self, q: tuple[torch.Tensor, torch.Tensor], layer: AttentionLayer
+    ) -> torch.Tensor:
+        """Build the single query tensor forward_mqa would build from the
+        `(ql_nope, q_pe)` pair, ahead of forward_mqa (possibly concurrently
+        with other streams, so it must not write shared workspace)."""
+        return torch.cat(q, dim=-1)
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),
