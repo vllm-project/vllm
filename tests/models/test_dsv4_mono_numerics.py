@@ -472,7 +472,6 @@ def _check_layer(rank: int, tp: int, device) -> None:
         moe_backend="aiter",
         load_format="dummy",
         max_model_len=65536,
-        trust_remote_code=True,
     ).create_engine_config()
     cfg = vc.model_config.hf_config
     eps = cfg.rms_norm_eps

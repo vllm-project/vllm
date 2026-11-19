@@ -347,6 +347,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # download. The test only validates that encoder CG capture/
         # replay functions correctly, not output quality.
         vllm_runner_kwargs={
+            "trust_remote_code": True,
             "load_format": "dummy",
             "hf_overrides": partial(
                 dummy_hf_overrides,
