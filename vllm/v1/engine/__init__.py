@@ -232,6 +232,11 @@ class EngineCoreRequest(
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
 
+    # Bidirectional attention spans, validated by InputProcessor. None when the
+    # request sets none; an empty list on a checkpoint that declares spans
+    # makes the request causal.
+    bidirectional_spans: list[tuple[int, int]] | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

@@ -283,6 +283,12 @@ class ServingRender(BaseServing):
             return self.create_error_response(
                 "Beam search is not supported by the render endpoint"
             )
+        if request.bidirectional_spans is not None:
+            # A generate request does not carry them.
+            return self.create_error_response(
+                "bidirectional_spans is not supported by the render endpoint",
+                param="bidirectional_spans",
+            )
 
         result = await self.online_renderer.render_completion(
             request, skip_mm_cache=True

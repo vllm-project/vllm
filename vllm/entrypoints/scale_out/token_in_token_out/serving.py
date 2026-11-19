@@ -233,6 +233,9 @@ class ServingTokens(GenerateBaseServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        # A generate request has no field to carry bidirectional spans.
+        if (error := self._check_bidirectional_spans_set(None)) is not None:
+            return error
 
         self._preflight()
 

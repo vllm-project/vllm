@@ -328,6 +328,9 @@ class OpenAIServingChat(GenerateBaseServing):
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
+        # Rendering alone, as for /tokenize and token counting, still works.
+        if (error := self._check_bidirectional_spans_set(None)) is not None:
+            return error
 
         conversation, engine_inputs = result
 

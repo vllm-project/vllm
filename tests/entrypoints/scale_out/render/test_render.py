@@ -219,6 +219,26 @@ async def test_render_completion_rejects_beam_search():
     serving.online_renderer.render_completion.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_completion_rejects_bidirectional_spans():
+    # A generate request has no field to carry them.
+    serving = _build_serving_render()
+    serving.online_renderer.render_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [7, 8, 9]}]
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME, prompt=[7, 8, 9], bidirectional_spans=[[0, 3]]
+    )
+
+    response = await serving.render_completion_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert response.error.param == "bidirectional_spans"
+    serving.online_renderer.render_completion.assert_not_awaited()
+
+
 @pytest.mark.skip_global_cleanup
 def test_responses_render_route_is_registered():
     assert any(route.path == "/v1/responses/render" for route in router.routes)

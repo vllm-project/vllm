@@ -244,6 +244,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return True
 
     @classmethod
+    def supports_bidirectional_spans(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_bidirectional_spans(c)
+            for c in children
+        )
+
+    @classmethod
     def kv_cache_access(cls, kv_transfer_config: "KVTransferConfig") -> KVCacheAccess:
         access = KVCacheAccess.IN_PROCESS
         for conn_config in kv_transfer_config.kv_connector_extra_config.get(

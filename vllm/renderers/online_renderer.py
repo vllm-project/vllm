@@ -67,6 +67,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
+    pair_bidirectional_spans,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -693,6 +694,16 @@ class OnlineRenderer:
 
         if request.echo and request.prompt_embeds is not None:
             return self.create_error_response("Echo is unsupported with prompt embeds.")
+
+        if request.bidirectional_spans is not None:
+            if request.prompt_embeds is not None:
+                return self.create_error_response(
+                    "bidirectional_spans is not supported with prompt_embeds.",
+                    param="bidirectional_spans",
+                )
+            prompt_input = cast(
+                Any, pair_bidirectional_spans(prompt_input, request.bidirectional_spans)
+            )
 
         if request.prompt_logprobs is not None and request.prompt_embeds is not None:
             return self.create_error_response(

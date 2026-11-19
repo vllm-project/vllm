@@ -14,7 +14,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.renderers.inputs.preprocess import (
+    pair_bidirectional_spans,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -136,6 +140,10 @@ class PoolingIOProcessor:
         elif isinstance(request, PoolingCompletionLikeRequest):
             model_config = self.model_config
             prompts_seq = prompt_to_seq(request.input)
+            if request.bidirectional_spans is not None:
+                prompts_seq = pair_bidirectional_spans(
+                    request.input, request.bidirectional_spans
+                )
             num_requests = len(prompts_seq)
 
             parsed_prompts = [

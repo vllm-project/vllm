@@ -1324,6 +1324,48 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
+    def _verify_bidirectional_spans(self) -> None:
+        """Refuse settings that cannot serve a checkpoint that declares
+        bidirectional attention spans correctly."""
+        model_config = self.model_config
+        if model_config is None or not model_config.declares_bidirectional_spans:
+            return
+        unsupported = []
+        parallel_config = self.parallel_config
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            unsupported.append("context parallelism")
+        if parallel_config.use_ubatching:
+            unsupported.append("micro-batching (--enable-dbo, --ubatch-size)")
+        if self.cache_config.kv_sharing_fast_prefill:
+            unsupported.append("--kv-sharing-fast-prefill")
+        if self.compilation_config.cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL:
+            # A captured prefill step would replay without the spans.
+            unsupported.append(
+                f"cudagraph_mode={self.compilation_config.cudagraph_mode.name}"
+            )
+        if self.num_prefill_lookahead_tokens > 1:
+            unsupported.append("multi-module MTP speculative decoding")
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            if not connector_cls.supports_bidirectional_spans(kv_transfer_config):
+                unsupported.append(
+                    f"{kv_transfer_config.kv_connector}, which does not declare "
+                    "supports_bidirectional_spans"
+                )
+        if unsupported:
+            raise ValueError(
+                "This checkpoint declares bidirectional attention spans, which "
+                f"are not supported with {', '.join(unsupported)}."
+            )
+
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
@@ -2328,6 +2370,7 @@ class VllmConfig:
                 "kv_transfer_config that produces KV (kv_producer or kv_both)."
             )
         self._verify_aux_output_compatibility()
+        self._verify_bidirectional_spans()
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--enable-hybrid-kv-cache-manager): error if runtime

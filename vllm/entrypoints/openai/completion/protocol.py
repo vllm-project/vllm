@@ -14,6 +14,7 @@ from vllm.entrypoints.generate.base.protocol import (
     PRIORITY_MAX,
     PRIORITY_MIN,
     AnyResponseFormat,
+    BidirectionalSpansParam,
     MMPayload,
     PerRequestMetrics,
     StopParam,
@@ -236,6 +237,15 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    bidirectional_spans: BidirectionalSpansParam = Field(
+        default=None,
+        description=(
+            "Half-open [start, end) ranges of a token-id prompt whose tokens "
+            "attend to each other in both directions, for a model whose "
+            "checkpoint declares bidirectional attention spans. For a list "
+            "of token-id prompts, one list of spans per prompt."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,

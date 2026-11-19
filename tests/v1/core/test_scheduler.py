@@ -2063,6 +2063,443 @@ def test_no_mm_input_chunking_after_prefix_cache_hit_inside_item():
     assert step() == {"primer": 1, "text": 1, "hit": 78}
 
 
+@pytest.mark.parametrize(
+    ("num_computed", "num_new", "expected"),
+    [
+        (0, 100, 100),  # past every span
+        (0, 64, 30),  # would end inside [30, 90): stop at its start
+        (0, 30, 30),  # ends at a span start
+        (30, 40, 0),  # starts at [30, 90) but cannot finish it: wait
+        (40, 50, 50),  # starts inside it (after a cache hit) and finishes it
+        (40, 30, 0),  # starts inside it and cannot finish it
+        (90, 5, 5),  # after the spans
+    ],
+)
+def test_prefill_chunks_never_end_inside_a_bidirectional_span(
+    num_computed, num_new, expected
+):
+    (request,) = create_requests(
+        num_requests=1, num_tokens=100, bidirectional_spans=[(30, 90)]
+    )
+    assert (
+        request.align_prefill_to_bidirectional_spans(num_computed, num_new) == expected
+    )
+
+
+def span_step_output(scheduler: Scheduler) -> ModelRunnerOutput:
+    """Model output that samples no token for requests still in prefill."""
+    running = scheduler.running
+    return ModelRunnerOutput(
+        req_ids=[req.request_id for req in running],
+        sampled_token_ids=[
+            [] if req.num_computed_tokens < req.num_prompt_tokens else [1000]
+            for req in running
+        ],
+    )
+
+
+def test_scheduler_ends_prefill_chunks_at_bidirectional_span_starts():
+    scheduler = create_scheduler(max_num_batched_tokens=80, max_model_len=256)
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        bidirectional_spans=[(0, 30), (30, 90), (90, 160)],
+    )
+    scheduler.add_request(request)
+
+    chunks = []
+    for _ in range(4):
+        output = scheduler.schedule()
+        chunks.append(output.num_scheduled_tokens[request.request_id])
+        scheduler.update_from_output(output, span_step_output(scheduler))
+    # The first chunk is cut on the waiting path and the others on the running
+    # path. Each ends at a span start or outside the spans.
+    assert chunks == [30, 60, 80, 30]
+    assert request.num_computed_tokens == 200
+
+
+def test_request_that_cannot_start_its_span_holds_the_waiting_queue():
+    """Later requests must not take the budget a span needs, step after step."""
+    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=256)
+    first, later = create_requests(
+        num_requests=2, num_tokens=30, max_tokens=1, req_ids=["first", "later"]
+    )
+    (spans,) = create_requests(
+        num_requests=1,
+        num_tokens=60,
+        max_tokens=1,
+        req_ids=["spans"],
+        bidirectional_spans=[(0, 40)],
+    )
+    for request in (first, spans, later):
+        scheduler.add_request(request)
+
+    # 34 tokens are left after "first", not enough for the span.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"first": 30}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+    assert scheduler.schedule().num_scheduled_tokens == {"spans": 60, "later": 4}
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_request_that_starts_inside_a_span_finishes_it_in_one_step(async_scheduling):
+    """A prefix-cache hit can end inside a span. The rest of the span then runs
+    in one step, or the request waits."""
+    block_size = 16
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64,
+        max_model_len=256,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        async_scheduling=async_scheduling,
+    )
+
+    def span_request(req_id: str) -> Request:
+        return create_requests(
+            num_requests=1,
+            num_tokens=50,
+            max_tokens=1,
+            same_prompt=True,
+            block_size=block_size,
+            req_ids=[req_id],
+            bidirectional_spans=[(0, 40), (40, 50)],
+        )[0]
+
+    primer = span_request("primer")
+    scheduler.add_request(primer)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"primer": 50}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+
+    # The hit covers three full blocks and ends at 48, inside [40, 50). "text"
+    # leaves one token of the budget, and the hit waits for two.
+    (text,) = create_requests(
+        num_requests=1, num_tokens=63, max_tokens=1, req_ids=["text"]
+    )
+    hit = span_request("hit")
+    scheduler.add_request(text)
+    scheduler.add_request(hit)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"text": 63}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"hit": 2}
+    assert output.scheduled_new_reqs[0].num_computed_tokens == 48
+
+
+def test_cache_aware_admission_keeps_a_held_span_request_at_the_head():
+    """A request with a cached prefix is not moved ahead of a span request that
+    waited for the budget in the previous step."""
+    scheduler, warm, _ = _setup_cache_aware(
+        max_num_batched_tokens=64, cache_aware_admission_window=4
+    )
+    first = create_requests(
+        num_requests=2, num_tokens=30, max_tokens=2, req_ids=["unused", "first"]
+    )[1]
+    spans = create_requests(
+        num_requests=3,
+        num_tokens=60,
+        max_tokens=1,
+        req_ids=["unused", "unused2", "spans"],
+        bidirectional_spans=[(0, 40)],
+    )[2]
+    scheduler.add_request(first)
+    scheduler.add_request(spans)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"first": 30}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+
+    scheduler.add_request(warm)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["spans"] == 60
+    assert [r.req_id for r in output.scheduled_new_reqs][0] == "spans"
+
+
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+def test_span_request_cut_by_the_encoder_holds_the_waiting_queue(
+    enable_chunked_prefill,
+):
+    """A request whose span holds an image the encoder cache cannot take yet
+    waits at the head of the queue, and later requests do not take the space
+    it needs."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=enable_chunked_prefill,
+        async_scheduling=True,
+    )
+    (first,) = create_requests(
+        num_requests=1,
+        num_tokens=800,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+        mm_hashes_list=[["busy"]],
+        req_ids=["first"],
+    )
+    (spans,) = create_requests(
+        num_requests=1,
+        num_tokens=800,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+        mm_hashes_list=[["new"]],
+        req_ids=["spans"],
+        bidirectional_spans=[(0, 800)],
+    )
+    (small,) = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=10, length=250)]],
+        mm_hashes_list=[["small"]],
+        req_ids=["small"],
+    )
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"first": 800}
+
+    for request in (spans, small):
+        scheduler.add_request(request)
+    # The first image is still in flight. The second needs 600 of the 424 free
+    # cache slots; the small image would fit them, but waits.
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert not scheduler.encoder_cache_manager.get_cached_input_ids(spans)
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(req_ids=["first"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+    )
+    assert scheduler.schedule().num_scheduled_tokens["spans"] == 800
+
+
+def test_running_span_request_cut_by_the_encoder_holds_admissions():
+    """A running request whose next span holds an image the encoder cache
+    cannot take yet keeps later image requests from taking the space."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        async_scheduling=True,
+    )
+    (first,) = create_requests(
+        num_requests=1,
+        num_tokens=800,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+        mm_hashes_list=[["busy"]],
+        req_ids=["first"],
+    )
+    (spans,) = create_requests(
+        num_requests=1,
+        num_tokens=900,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=150, length=600)]],
+        mm_hashes_list=[["new"]],
+        req_ids=["spans"],
+        bidirectional_spans=[(0, 100), (100, 800)],
+    )
+    (small,) = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=10, length=250)]],
+        mm_hashes_list=[["small"]],
+        req_ids=["small"],
+    )
+    scheduler.add_request(first)
+    outputs = [scheduler.schedule()]
+    scheduler.add_request(spans)
+    # The first image is still in flight, so only the first span runs.
+    outputs.append(scheduler.schedule())
+    assert outputs[-1].num_scheduled_tokens == {"spans": 100}
+    scheduler.add_request(small)
+    # The second span needs 600 of the 424 free cache slots. The small image
+    # would fit them, but waits.
+    outputs.append(scheduler.schedule())
+    assert outputs[-1].num_scheduled_tokens == {}
+
+    model_outputs = [
+        ModelRunnerOutput(req_ids=["first"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+        ModelRunnerOutput(req_ids=["spans"], sampled_token_ids=[[]]),
+        ModelRunnerOutput(req_ids=[], sampled_token_ids=[]),
+    ]
+    for output, model_output in zip(outputs, model_outputs):
+        scheduler.update_from_output(output, model_output)
+    assert scheduler.schedule().num_scheduled_tokens["spans"] == 800
+
+
+@pytest.mark.parametrize("first_image_cached", [True, False])
+def test_encoder_cut_inside_a_bidirectional_span_moves_to_its_start(
+    first_image_cached,
+):
+    """When the encoder cache cannot take an image this step, the chunk stops
+    before the span that holds it, and the span's earlier image, cached or not,
+    is neither scheduled nor kept referenced."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+        max_model_len=4096,
+        async_scheduling=True,
+    )
+    if first_image_cached:
+        (primer,) = create_requests(
+            num_requests=1,
+            num_tokens=700,
+            max_tokens=1,
+            mm_positions=[[PlaceholderRange(offset=50, length=576)]],
+            mm_hashes_list=[["a"]],
+            req_ids=["primer"],
+        )
+        scheduler.add_request(primer)
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(req_ids=["primer"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+        )
+    # The next image keeps most of the cache in flight; "a" fits next to it,
+    # "b" does not.
+    (busy,) = create_requests(
+        num_requests=1,
+        num_tokens=1400,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=50, length=1300)]],
+        mm_hashes_list=[["busy"]],
+        req_ids=["busy"],
+    )
+    scheduler.add_request(busy)
+    assert scheduler.schedule().num_scheduled_tokens == {"busy": 1400}
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=1500,
+        max_tokens=1,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=100, length=576),
+                PlaceholderRange(offset=700, length=576),
+            ]
+        ],
+        mm_hashes_list=[["a", "b"]],
+        req_ids=["spans"],
+        bidirectional_spans=[(0, 50), (50, 1450)],
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"spans": 50}
+    assert "spans" not in output.scheduled_encoder_inputs
+    assert not scheduler.encoder_cache_manager.get_cached_input_ids(request)
+
+
+def test_stalled_span_request_releases_the_items_it_has_not_reached():
+    """A drafter that reads one token ahead references the image at a span
+    start before the span runs. If the span then waits for encoder space, that
+    reference is released, so stalled requests cannot pin each other out."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+        max_model_len=4096,
+        async_scheduling=True,
+    )
+    scheduler.num_prefill_lookahead = 1
+    (busy,) = create_requests(
+        num_requests=1,
+        num_tokens=1500,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=50, length=1400)]],
+        mm_hashes_list=[["busy"]],
+        req_ids=["busy"],
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=2000,
+        max_tokens=1,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=600, length=576),
+                PlaceholderRange(offset=1200, length=576),
+            ]
+        ],
+        mm_hashes_list=[["a", "b"]],
+        req_ids=["spans"],
+        bidirectional_spans=[(0, 600), (600, 1900)],
+    )
+    scheduler.add_request(busy)
+    outputs = [scheduler.schedule()]
+    scheduler.add_request(request)
+    # "b" does not fit next to the image in flight, so the chunk ends at the
+    # span start, and the drafter's lookahead takes "a".
+    outputs.append(scheduler.schedule())
+    assert outputs[-1].num_scheduled_tokens == {"spans": 600}
+    assert scheduler.encoder_cache_manager.get_cached_input_ids(request) == {0}
+
+    outputs.append(scheduler.schedule())
+    assert outputs[-1].num_scheduled_tokens == {}
+    assert not scheduler.encoder_cache_manager.get_cached_input_ids(request)
+
+    model_outputs = [
+        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
+        ModelRunnerOutput(req_ids=["spans"], sampled_token_ids=[[]]),
+        ModelRunnerOutput(req_ids=[], sampled_token_ids=[]),
+    ]
+    for output, model_output in zip(outputs, model_outputs):
+        scheduler.update_from_output(output, model_output)
+    assert scheduler.schedule().num_scheduled_tokens == {"spans": 1400}
+
+
+def test_span_request_waiting_for_the_token_budget_does_not_hold_admissions():
+    """Requests admitted later run after it, so they cannot take its budget."""
+    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=256)
+    (decoder,) = create_requests(
+        num_requests=1, num_tokens=5, max_tokens=2, req_ids=["decoder"]
+    )
+    spans = create_requests(
+        num_requests=2,
+        num_tokens=80,
+        max_tokens=1,
+        req_ids=["unused", "spans"],
+        bidirectional_spans=[(0, 10), (10, 74)],
+    )[1]
+    later = create_requests(
+        num_requests=3, num_tokens=20, max_tokens=1, req_ids=["u1", "u2", "later"]
+    )[2]
+    scheduler.add_request(decoder)
+    scheduler.add_request(spans)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decoder": 5, "spans": 10}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+
+    # The decoder's token leaves 63 of the 64 tokens the span needs.
+    scheduler.add_request(later)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"decoder": 1, "later": 20}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+    assert scheduler.schedule().num_scheduled_tokens == {"spans": 64}
+
+
+def test_drafter_shift_does_not_split_span_requests_at_items():
+    """With a drafter that reads one token ahead and chunked multimodal input
+    off, the scheduler rolls a chunk back to one token before an item. For a
+    span request that point lies inside the span before the item, and the
+    request would never run."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+    )
+    scheduler.num_prefill_lookahead = 1
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=1300,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=600, length=576)]],
+        bidirectional_spans=[(0, 600), (600, 1200)],
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 600}
+    scheduler.update_from_output(output, span_step_output(scheduler))
+    assert scheduler.schedule().num_scheduled_tokens == {request.request_id: 700}
+
+
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.

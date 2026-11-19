@@ -286,7 +286,8 @@ class CacheConfig:
     prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. `0` retains only semantic checkpoints, including the latest
-    replay boundary and shared-prefix junctions. Positive values additionally
+    replay boundary, shared-prefix junctions and the ends of bidirectional
+    attention spans. Positive values additionally
     retain periodic checkpoints at the specified interval, which must be a
     multiple of the scheduler block size. `None` retains checkpoints densely.
     Applies only to sliding-window and Mamba cache groups."""

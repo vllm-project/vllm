@@ -553,6 +553,17 @@ class TestChunkedEmbeddingProcessing:
         assert ctx.engine_inputs[1]["prompts"] is image_prompt
         assert ctx.original_engine_inputs is None
 
+    def test_bidirectional_spans_require_chunking_disabled(self):
+        """Chunks would cut the spans, which index the whole prompt."""
+        handler = self._make_handler()
+        ctx = self._make_context()
+        assert ctx.engine_inputs is not None
+        ctx.engine_inputs[1]["prompts"]["bidirectional_spans"] = [(0, 2)]  # type: ignore[typeddict-unknown-key]
+
+        with pytest.raises(VLLMValidationError, match="bidirectional_spans"):
+            handler.maybe_pre_process_chunked(ctx)
+        assert ctx.original_engine_inputs is None
+
     def test_aggregation_uses_metadata_not_request_id_parsing(self):
         handler = self._make_handler()
         ctx = self._make_context()

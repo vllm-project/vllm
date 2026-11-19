@@ -32,6 +32,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
+    reject_bidirectional_spans,
     resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
@@ -579,6 +580,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
         validate_cache_salt(data.get("cache_salt"))
         return data
+
+    @model_validator(mode="after")
+    def check_no_bidirectional_spans(self) -> "ChatCompletionRequest":
+        reject_bidirectional_spans(self.model_extra)
+        return self
 
     @model_validator(mode="before")
     @classmethod
