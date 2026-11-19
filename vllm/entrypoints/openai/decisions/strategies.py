@@ -1669,6 +1669,11 @@ def select_read_strategy(
             f"Structured decisions on {model_config.architecture} need the "
             f"{strategy.task} task"
         )
+    if model_config.declares_bidirectional_spans:
+        raise ValueError(
+            "Structured decisions do not set bidirectional attention spans, "
+            "which this checkpoint declares"
+        )
     if strategy.task == "generate" and model_config.logprobs_mode not in LOGPROBS_MODES:
         raise ValueError(
             "Structured decisions need --logprobs-mode raw_logprobs or "

@@ -120,6 +120,12 @@ class TokensPrompt(_PromptOptions):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
+    bidirectional_spans: NotRequired[list[tuple[int, int]]]
+    """Sorted, disjoint `[start, end)` ranges of `prompt_token_ids` whose tokens
+    attend to each other in both directions, for a checkpoint that declares
+    bidirectional attention spans. Not allowed with multimodal data or prompt
+    truncation, which move token positions."""
+
     prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
     """Char-level (start, end) offsets per token, relative to the
     tokenized source string. Present only when offsets were requested

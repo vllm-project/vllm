@@ -70,6 +70,7 @@ from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 from .interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
+    SupportsBidirectionalSpans,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -508,7 +509,15 @@ class Gemma4Attention(nn.Module):
         # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        sliding_window = config.sliding_window if self.is_sliding else None
+        # The layer types the checkpoint was trained with bidirectional spans
+        # on. Listed sliding-window layers have no window: such a checkpoint
+        # was trained without one.
+        applies_spans = layer_type in (
+            getattr(config, "bidirectional_span_layer_types", None) or ()
+        )
+        sliding_window = (
+            config.sliding_window if self.is_sliding and not applies_spans else None
+        )
 
         # Initialize RoPE based on layer type.
         # Gemma4 uses different RoPE parameters for sliding vs full attention.
@@ -574,7 +583,13 @@ class Gemma4Attention(nn.Module):
             # span (~1100 soft tokens at max_soft_tokens=1120) exceeds the 1024
             # window; the runner keeps the full range and the kernel bounds it
             # per-query here.
-            mm_prefix_clamp_sliding_window=self.is_sliding,
+            mm_prefix_clamp_sliding_window=sliding_window is not None,
+            # With use_bidirectional_attention="vision", images attend
+            # bidirectionally on the sliding layers only, as in HF. Layers that
+            # apply spans take the spans instead.
+            mm_prefix_ranges=self.is_sliding
+            or getattr(config, "use_bidirectional_attention", None) != "vision",
+            bidirectional_spans=applies_spans,
             prefix=f"{prefix}.attn",
         )
 
@@ -1463,7 +1478,12 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class Gemma4ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsBidirectionalSpans,
 ):
     is_3d_moe_weight: ClassVar[bool] = True
 

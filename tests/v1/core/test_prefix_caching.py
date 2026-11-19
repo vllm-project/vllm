@@ -133,6 +133,7 @@ def make_request(
     num_hash_lookahead_tokens: int = 0,
     session_id: str | None = None,
     sampling_params: SamplingParams | None = None,
+    bidirectional_spans: list[tuple[int, int]] | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -162,6 +163,7 @@ def make_request(
             block_size, hash_fn, num_hash_lookahead_tokens
         ),
         session_id=session_id,
+        bidirectional_spans=bidirectional_spans,
     )
 
 
@@ -6524,6 +6526,81 @@ def test_pure_swa_retention_interval_caches_sparse_tails():
     replay = make_request("1", token_ids, block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(replay)
     assert num_computed == 240
+
+
+@pytest.mark.parametrize(
+    ("lookahead", "use_eagle", "expected_hit"),
+    # A lookahead hash of the block that ends at a span end covers the next
+    # span, and EAGLE drops back one block, so both resume one block lower.
+    [(0, False, 128), (1, False, 112), (0, True, 112)],
+    ids=["plain", "lookahead", "eagle"],
+)
+def test_pure_swa_retention_keeps_tails_at_bidirectional_span_ends(
+    lookahead, use_eagle, expected_hit
+):
+    """A prompt that grows inside its last span reuses the blocks up to the end
+    of the span before, so sparse retention keeps the window's tail there."""
+    block_size = 16
+    manager = _make_pure_swa_manager(
+        block_size,
+        sliding_window=2 * block_size,
+        retention_interval=0,
+        num_hash_lookahead_tokens=lookahead,
+        use_eagle=use_eagle,
+    )
+    token_ids = [i for i in range(16) for _ in range(block_size)]
+
+    def request(request_id, tokens, spans):
+        return make_request(
+            request_id,
+            tokens,
+            block_size,
+            sha256,
+            num_hash_lookahead_tokens=lookahead,
+            bidirectional_spans=spans,
+        )
+
+    req = request("0", token_ids, [(0, 64), (64, 128), (128, 256)])
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
+    blocks = manager.allocate_slots(
+        req,
+        len(token_ids),
+        len(computed_blocks.blocks[0]) * block_size,
+        computed_blocks,
+    )
+    assert blocks is not None
+    manager.free(req)
+
+    grown = request("1", token_ids[:200] + [99] * 80, [(0, 64), (64, 128), (128, 280)])
+    _, num_computed, _ = manager.get_computed_blocks(grown)
+    assert num_computed == expected_hit
+
+
+def test_span_end_tails_span_prefill_chunks():
+    """A span end within a window above a chunk's end marks blocks of that
+    chunk, which are not cached again later."""
+    block_size = 16
+    manager = _make_pure_swa_manager(
+        block_size, sliding_window=6 * block_size, retention_interval=0
+    )
+    token_ids = [i for i in range(16) for _ in range(block_size)]
+    spans = [(96, 160), (160, 256)]
+    req = make_request("0", token_ids, block_size, sha256, bidirectional_spans=spans)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
+    assert manager.allocate_slots(req, 96, 0, computed_blocks) is not None
+    req.num_computed_tokens = 96
+    assert manager.allocate_slots(req, 160) is not None
+    manager.free(req)
+
+    grown = make_request(
+        "1",
+        token_ids[:200] + [99] * 80,
+        block_size,
+        sha256,
+        bidirectional_spans=[(96, 160), (160, 280)],
+    )
+    _, num_computed, _ = manager.get_computed_blocks(grown)
+    assert num_computed == 160
 
 
 def test_pure_swa_retention_latest_only():

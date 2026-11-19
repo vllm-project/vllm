@@ -1208,6 +1208,39 @@ def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
 
 
 @runtime_checkable
+class SupportsBidirectionalSpans(Protocol):
+    """The interface for models that apply bidirectional attention spans.
+
+    A checkpoint declares spans in its text config:
+    `bidirectional_span_layer_types` lists the layer types that apply them and
+    `bidirectional_span_max_length` is the longest span it was trained with.
+    The model passes `bidirectional_spans=True` to the
+    [Attention][vllm.model_executor.layers.attention.Attention] of those layers,
+    and builds listed sliding-window layers without a window.
+    """
+
+    supports_bidirectional_spans: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_bidirectional_spans(
+    model: type[object],
+) -> TypeIs[type[SupportsBidirectionalSpans]]: ...
+
+
+@overload
+def supports_bidirectional_spans(
+    model: object,
+) -> TypeIs[SupportsBidirectionalSpans]: ...
+
+
+def supports_bidirectional_spans(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsBidirectionalSpans]] | TypeIs[SupportsBidirectionalSpans]:
+    return getattr(model, "supports_bidirectional_spans", False)
+
+
+@runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
 

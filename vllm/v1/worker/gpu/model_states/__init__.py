@@ -18,6 +18,15 @@ def init_model_state(
 ) -> ModelState:
     cls = resolve_model_state_cls(vllm_config, model)
 
+    if vllm_config.model_config.declares_bidirectional_spans:
+        from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+        # Other model states build attention metadata without the spans.
+        if cls is not DefaultModelState:
+            raise ValueError(
+                f"Bidirectional attention spans are not supported with {cls.__name__}."
+            )
+
     # Reject enable_prompt_embeds for states that would silently ignore it.
     if vllm_config.model_config.enable_prompt_embeds and not cls.supports_prompt_embeds:
         raise ValueError(f"--enable-prompt-embeds not supported with {cls.__name__}.")

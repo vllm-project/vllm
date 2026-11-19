@@ -969,6 +969,7 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_bidirectional_spans()
 
     def _supports_multimodal_inputs(self) -> bool:
         """Checks if the model supports multimodal inputs.
@@ -1542,6 +1543,49 @@ class ModelConfig:
                     self.quantization,
                 )
 
+    def _verify_bidirectional_spans(self) -> None:
+        """Refuse to serve a checkpoint trained with bidirectional attention
+        spans by an implementation that would run it causally."""
+        if self.hf_config is not self.hf_text_config and any(
+            getattr(self.hf_config, key, None) is not None
+            for key in (
+                "bidirectional_span_layer_types",
+                "bidirectional_span_max_length",
+            )
+        ):
+            raise ValueError(
+                "Bidirectional attention spans are declared in the text config "
+                "(text_config), not at the top level of a multimodal config."
+            )
+        layer_types = self.bidirectional_span_layer_types
+        if not layer_types:
+            return
+        if unsupported := sorted(
+            set(layer_types) - {"full_attention", "sliding_attention"}
+        ):
+            raise ValueError(
+                f"bidirectional_span_layer_types={list(layer_types)}: only "
+                "full_attention and sliding_attention layers can apply "
+                f"bidirectional spans, not {unsupported}."
+            )
+        if not self._model_info.supports_bidirectional_spans:
+            raise ValueError(
+                "The checkpoint declares bidirectional_span_layer_types="
+                f"{list(layer_types)}, but {self._model_info.architecture} does "
+                "not implement bidirectional attention spans."
+            )
+        max_length = self.bidirectional_span_max_length
+        if isinstance(max_length, bool) or not isinstance(max_length, int):
+            raise ValueError(
+                "A checkpoint with bidirectional_span_layer_types must set "
+                "bidirectional_span_max_length to a positive integer, got "
+                f"{max_length!r}."
+            )
+        if max_length < 1:
+            raise ValueError(
+                f"bidirectional_span_max_length must be positive, got {max_length}."
+            )
+
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
@@ -1771,6 +1815,32 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def bidirectional_span_layer_types(self) -> tuple[str, ...]:
+        """Layer types that apply bidirectional attention spans, from the
+        checkpoint's text config; empty if it declares none. Listed
+        sliding-window layers are built without a window."""
+        return tuple(
+            getattr(self.hf_text_config, "bidirectional_span_layer_types", None) or ()
+        )
+
+    @property
+    def bidirectional_span_max_length(self) -> int | None:
+        """The longest bidirectional span the checkpoint was trained with."""
+        return getattr(self.hf_text_config, "bidirectional_span_max_length", None)
+
+    @property
+    def declares_bidirectional_spans(self) -> bool:
+        """Whether the checkpoint was trained with bidirectional attention
+        spans, so that every request states its spans."""
+        return bool(self.bidirectional_span_layer_types)
+
+    @property
+    def uses_prefix_lm_ranges(self) -> bool:
+        """Whether attention takes per-request PrefixLM ranges, for images of
+        a multimodal PrefixLM model or for bidirectional attention spans."""
+        return self.is_mm_prefix_lm or self.declares_bidirectional_spans
 
     @property
     def rswa_window(self) -> int | None:

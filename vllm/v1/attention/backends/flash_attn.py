@@ -785,7 +785,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
         self.mm_prefix_query_ranges_np: np.ndarray | None = None
         self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
-        if self.model_config.is_mm_prefix_lm:
+        if self.model_config.uses_prefix_lm_ranges:
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self.mm_prefix_query_ranges_cpu = torch.empty(
                 (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
@@ -963,8 +963,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         # Compute mm_prefix range tensor if the batch contains
-        # multimodal tokens with bidirectional ranges.  Built for every FA
-        # group; Gemma4 nulls the field for its non-sliding layers.
+        # multimodal tokens with bidirectional ranges.  Groups whose layers
+        # opt out of the ranges get metadata without them.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
             # The upper bound is exact for prefill rows, which is where
