@@ -71,7 +71,7 @@ def fused_gdn_gated_rms_norm(
     head_v_dim: int,
     activation: str,
 ) -> None:
-    """Gated RMS norm ``out = rms_norm(x) * act(z)`` for Qwen3.5 GDN.
+    """Gated RMS norm `out = rms_norm(x) * act(z)` for Qwen3.5 GDN.
 
     Args:
         x: (num_tokens, num_v_heads * head_v_dim), contiguous. May alias out.
@@ -165,10 +165,10 @@ def rocm_fused_gdn_gated_rms_norm(
     norm_before_gate: bool,
     activation: str,
 ) -> torch.Tensor:
-    """``fused_gdn_gated_rms_norm`` hook for ``QwenGatedDeltaNetAttention``.
+    """`fused_gdn_gated_rms_norm` hook for `QwenGatedDeltaNetAttention`.
 
-    ``z`` is the strided gate slice of the packed qkvz projection. Quantized
-    out_proj layers keep the ``fla_rms_norm_gated`` op so the compile-time
+    `z` is the strided gate slice of the packed qkvz projection. Quantized
+    out_proj layers keep the `fla_rms_norm_gated` op so the compile-time
     norm+quant fusion patterns still match.
     """
     del out
@@ -205,10 +205,10 @@ def warmup_fused_gdn_gated_rms_norm(
     device: torch.device,
     activation: str,
 ) -> None:
-    """Compile the kernel for every ``ROWS_PER_BLOCK`` the runtime can pick.
+    """Compile the kernel for every `ROWS_PER_BLOCK` the runtime can pick.
 
-    ``z`` is laid out like the real gate slice: rows ``z_token_stride`` apart,
-    starting ``z_offset`` elements into the packed row.
+    `z` is laid out like the real gate slice: rows `z_token_stride` apart,
+    starting `z_offset` elements into the packed row.
     """
     width = num_v_heads * head_v_dim
     weight = torch.ones(head_v_dim, dtype=weight_dtype, device=device)
