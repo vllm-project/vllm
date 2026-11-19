@@ -76,6 +76,7 @@ struct MoeArgs {
   int N, K;
   size_t w_stride, s_stride;  // per-expert strides (elements)
   const uint8_t* b_base;      // [E][N] per-column E5M2 fold base
+  uint32_t a_bytes;           // numel of aq (buffer descriptor bound)
 };
 
 #if defined(__HIP__MXFP4_RDNA4__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -371,9 +372,19 @@ __global__ void __launch_bounds__(256)
   const int K = ar.K, N = ar.N;
   const int G = K / kGroup;
   const int n0 = blockIdx.y * BN;
-  const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
-  const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
   const uint8_t* bb = ar.b_base + (size_t)e * N;
+  // Buffer resources (gfx12 flags word 0x31004000, probed: in-bounds loads
+  // exact, any offset >= num_records returns 0): per-expert B fragments and
+  // scales, and the whole gathered-A matrix. 32-bit offsets replace per-lane
+  // 64-bit address arithmetic.
+  constexpr int kRsrcFlags = 0x31004000;
+  const __amdgpu_buffer_rsrc_t rb = __builtin_amdgcn_make_buffer_rsrc(
+      (void*)(ar.b_q + (size_t)e * ar.w_stride), 0, (int)(G * N * 16),
+      kRsrcFlags);
+  const __amdgpu_buffer_rsrc_t rs = __builtin_amdgcn_make_buffer_rsrc(
+      (void*)(ar.b_scales + (size_t)e * ar.s_stride), 0, G * N, kRsrcFlags);
+  const __amdgpu_buffer_rsrc_t ra = __builtin_amdgcn_make_buffer_rsrc(
+      (void*)ar.aq, 0, (int)ar.a_bytes, kRsrcFlags);
 
   // Decode duty: thread -> column dc, groups dg0 + f*DG (f < BFT).
   const int dc = tid & (BN - 1);
@@ -387,8 +398,8 @@ __global__ void __launch_bounds__(256)
     const int s = ar.sorted_token_ids[blk * BM + 32 * wave + 16 * t + lo];
     a_row[t] = (s < ar.total_slots) ? s / ar.top_k : 0;  // clamp, mask at store
   }
-  const uint8_t* a_ptr[2] = {ar.aq + (size_t)a_row[0] * K + 16 * hi,
-                             ar.aq + (size_t)a_row[1] * K + 16 * hi};
+  const uint32_t a_off[2] = {(uint32_t)a_row[0] * K + 16 * hi,
+                             (uint32_t)a_row[1] * K + 16 * hi};
 
   __shared__ __align__(16) uint8_t lds[2][GS][2][BN][16];
 
@@ -397,13 +408,13 @@ __global__ void __launch_bounds__(256)
   auto load_b_stage = [&](int st) {
   #pragma unroll
     for (int f = 0; f < BFT; f++) {
-      const int g = min(st * GS + dg0 + f * DG, G - 1);
-      const auto* p =
-          reinterpret_cast<const v4i32*>(bq + ((size_t)g * N + dcol) * 4);
-      const v4i32 v = __builtin_nontemporal_load(p);
+      // Groups past G read out of bounds -> 0 (decoded into LDS, never used).
+      const int g = st * GS + dg0 + f * DG;
+      const v4i32 v =
+          __builtin_amdgcn_raw_buffer_load_b128(rb, (g * N + dcol) * 16, 0, 0);
       nb[f] =
           uint4{(uint32_t)v[0], (uint32_t)v[1], (uint32_t)v[2], (uint32_t)v[3]};
-      nsc[f] = bs[(size_t)g * N + dcol];
+      nsc[f] = __builtin_amdgcn_raw_buffer_load_b8(rs, g * N + dcol, 0, 0);
     }
   };
   auto decode_stage = [&](int buf) {
@@ -431,8 +442,12 @@ __global__ void __launch_bounds__(256)
   auto load_a = [&](int g, int slot) {
     const int gg = min(g, G - 1);
   #pragma unroll
-    for (int t = 0; t < 2; t++)
-      __builtin_memcpy(&a_r[slot][t], a_ptr[t] + gg * kGroup, 16);
+    for (int t = 0; t < 2; t++) {
+      const v4i32 v = __builtin_amdgcn_raw_buffer_load_b128(
+          ra, a_off[t] + gg * kGroup, 0, 0);
+      a_r[slot][t] =
+          uint4{(uint32_t)v[0], (uint32_t)v[1], (uint32_t)v[2], (uint32_t)v[3]};
+    }
   };
 
   v8f32 acc[2][CT];
@@ -734,6 +749,9 @@ void moe_mxfp4_gemm_rdna4(
               "b_base must be contiguous uint8 [E, N] from "
               "mxfp4_moe_fold_base_rdna4");
   ar.b_base = reinterpret_cast<const uint8_t*>(b_base.data_ptr());
+  TORCH_CHECK(a_fp8.numel() < (1ll << 32),
+              "a_fp8 too large for 32-bit offsets");
+  ar.a_bytes = (uint32_t)a_fp8.numel();
   ar.w_stride = (size_t)b_q.size(1) * N * 4;
   ar.s_stride = (size_t)b_scales.size(1) * N;
   if (num_token_blocks == 0) return;
