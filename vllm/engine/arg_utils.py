@@ -116,7 +116,7 @@ from vllm.config.parallel import (
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, replace
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
@@ -453,12 +453,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
-    "--log-config-file is deprecated and will be removed in v0.33.0. "
-    "Use --logging-config.pylogging_config_file instead."
-)
-
-
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
     "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
@@ -475,14 +469,6 @@ _DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
     "--disable-cascade-attn is deprecated and has no effect since cascade "
     "attention has been removed. It will be removed in v0.33.0."
 )
-
-
-class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy `--log-config-file` option is used."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
-        setattr(namespace, self.dest, values)
 
 
 @dataclass
@@ -655,7 +641,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
-    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
@@ -795,7 +781,6 @@ class EngineArgs:
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
-    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -1692,16 +1677,6 @@ class EngineArgs:
                 "Overrides that field if both are specified."
             ),
         )
-        logging_group.add_argument(
-            "--log-config-file",
-            dest="log_config_file",
-            default=argparse.SUPPRESS,
-            metavar="PYLOGGING_CONFIG_FILE",
-            action=DeprecatedLogConfigFileAction,
-            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
-        )
-        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
-        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -2287,10 +2262,6 @@ class EngineArgs:
         config = self.logging_config or LoggingConfig()
         if self.log_level is not None:
             config = dataclasses.replace(config, log_level=self.log_level)
-        if self.log_config_file is not None:
-            config = dataclasses.replace(
-                config, pylogging_config_file=self.log_config_file
-            )
         return config
 
     def create_engine_config(
@@ -2797,9 +2768,9 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Reuse the validator to handle "auto" and string-to-enum conversion
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            attention_config = replace(
+                attention_config,
+                backend=self.attention_backend,
             )
 
         # Batch-invariant mode requires deterministic attention behavior.
