@@ -160,8 +160,7 @@ guide: |
     --tensor-parallel-size 2 \
     --tool-call-parser mistral --enable-auto-tool-choice \
     --reasoning-parser mistral \
-    --max-num-batched-tokens 16384 --max-num-seqs 128 \
-    --gpu-memory-utilization 0.8
+    --max-num-batched-tokens 16384 --max-num-seqs 128
   ```
 
   NVFP4 variant (single B200, or 2xB200 for full 256K context):
@@ -172,8 +171,7 @@ guide: |
     --tensor-parallel-size 2 \
     --tool-call-parser mistral --enable-auto-tool-choice \
     --reasoning-parser mistral \
-    --max-num-batched-tokens 16384 --max-num-seqs 128 \
-    --gpu-memory-utilization 0.8
+    --max-num-batched-tokens 16384 --max-num-seqs 128
   ```
 
   Mistral publishes a custom Docker image
@@ -193,7 +191,6 @@ guide: |
     --tool-call-parser mistral --enable-auto-tool-choice \
     --reasoning-parser mistral \
     --max-num-batched-tokens 16384 --max-num-seqs 128 \
-    --gpu-memory-utilization 0.8 \
     --speculative-config '{
       "model": "mistralai/Mistral-Small-4-119B-2603-eagle",
       "num_speculative_tokens": 3,

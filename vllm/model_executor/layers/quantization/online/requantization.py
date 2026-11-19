@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -16,10 +16,12 @@ _requantization_source: ContextVar[bool] = ContextVar(
 
 
 @contextmanager
-def requantization_source_scope() -> Iterator[None]:
-    """Mark quantization methods created in this scope as requantization sources.
+def skip_checkpoint_backend_selection() -> Generator[None]:
+    """Skip backend selection for checkpoint quantization methods in this scope.
 
-    Their weights are only dequantized, so oracles can skip backend selection.
+    Covers checkpoint methods used as requantization sources (their weights are
+    only dequantized) and unquantized checkpoint methods discarded when an online
+    target replaces them, so oracles need not probe a compute backend.
     """
     token = _requantization_source.set(True)
     try:
@@ -35,7 +37,8 @@ def is_requantization_source() -> bool:
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
 
-    # Only the MXFP4 online methods honor an activation override for now.
+    # Only the MXFP4 and FP8 per-channel (PTPC) online linear methods honor an
+    # activation override for now.
     accepts_activation_override: bool = False
 
     @classmethod
@@ -77,9 +80,11 @@ class OnlineRequantizationMixin:
             return False
 
         existing_parameter_names = set(layer._parameters)
-        self.requantization_source.create_weights(
-            layer, *weight_args, **extra_weight_attrs
-        )
+        # Schemes may select kernels in `create_weights`: skip them for sources.
+        with skip_checkpoint_backend_selection():
+            self.requantization_source.create_weights(
+                layer, *weight_args, **extra_weight_attrs
+            )
         self.requantization_source_parameters = {
             name: parameter
             for name, parameter in layer._parameters.items()

@@ -7,8 +7,11 @@ token_in_token_out generate endpoint.
 import pytest
 import torch
 from pydantic import ValidationError
-from transformers import PreTrainedConfig
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import Mistral3Config, PixtralVisionConfig, TokenizersBackend
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -18,7 +21,6 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
     rebuild_mm_placeholders,
-    validate_pixtral_image_features,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -30,6 +32,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     PlaceholderRangeInfo,
 )
 from vllm.inputs import mm_input
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -39,6 +42,21 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+
+
+@pytest.fixture(scope="module")
+def pixtral_processor(tmp_path_factory):
+    model_path = tmp_path_factory.mktemp("pixtral")
+    Mistral3Config(
+        architectures=["PixtralForConditionalGeneration"],
+        vision_config=PixtralVisionConfig(image_size=1024, patch_size=16),
+    ).save_pretrained(model_path)
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    config = ModelConfig(str(model_path), max_model_len=512, dtype="float32")
+    return MULTIMODAL_REGISTRY.create_processor(config, tokenizer=tokenizer)
 
 
 @pytest.mark.parametrize("metadata_override", [False, True])
@@ -57,13 +75,9 @@ from vllm.multimodal.inputs import (
     ],
 )
 def test_pixtral_feature_geometry_rejected_before_engine_admission(
-    shape, metadata_override
+    pixtral_processor, shape, metadata_override
 ):
     """Matching placeholders cannot make oversized Pixtral tensors valid."""
-    config = PreTrainedConfig(
-        model_type="pixtral",
-        vision_config=PreTrainedConfig(image_size=1024, patch_size=16),
-    )
     image = MultiModalKwargsItem(
         {"images": MultiModalFieldElem(torch.zeros(shape), MultiModalBatchedField())}
     )
@@ -93,12 +107,13 @@ def test_pixtral_feature_geometry_rejected_before_engine_admission(
                 )
             ]
         }
-    items = mm_kwargs_from_features(features)["image"]
+    (item,) = mm_kwargs_from_features(features)["image"]
+    assert item is not None
     if shape in ((3, 1024, 1024), (3, 16, 1024)):
-        validate_pixtral_image_features(items, config, allow_shm_handles=False)
+        pixtral_processor.validate_preprocessed_item("image", item)
     else:
         with pytest.raises(ValueError, match="Pixtral"):
-            validate_pixtral_image_features(items, config, allow_shm_handles=False)
+            pixtral_processor.validate_preprocessed_item("image", item)
 
 
 def test_mm_kwargs_item_roundtrip():

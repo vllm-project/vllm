@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-11-11
+  date_updated: 2026-11-17
   tasks:
     - multimodal
     - text
@@ -43,8 +43,6 @@ model:
     - "--trust-remote-code"
     # Canonical Inferact serve uses fastsafetensors for much faster weight load.
     # Leave --moe-backend unset so vLLM selects its default automatic backend.
-    - "--gpu-memory-utilization"
-    - "0.95"
 
 features:
   tool_calling:
@@ -178,8 +176,6 @@ strategy_min_gpus:
 hardware_overrides:
   hopper:
     extra_args:
-      - "--gpu-memory-utilization"
-      - "0.97"
       - "--max-num-seqs"
       - "5"
       - "--max-model-len"
@@ -235,8 +231,6 @@ hardware_overrides:
     extra_args:
       - "--load-format"
       - "auto"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--mm-encoder-tp-mode"
       - "data"
       - "--max-num-seqs"
@@ -276,16 +270,10 @@ strategy_overrides:
   # the 1M max-model-len, fp8 KV and prefix caching. These are plain strategy
   # args instead: they emit before hardware overrides, so on Blackwell the
   # baseline layers on top and the two flags below survive (the baseline sets
-  # neither), while Hopper/AMD keep their own memory-utilization and
-  # batched-token tuning by last-wins dedupe.
+  # neither), while Hopper/AMD keep their own batched-token tuning by
+  # last-wins dedupe.
   multi_node_tp_pp:
     extra_args:
-      # 0.90, not the 0.95 baseline: the flashinfer TRTLLM MXFP4 MoE kernel
-      # allocates a ~1.6 GiB runtime workspace outside vLLM's pool on the first
-      # forward, and at 0.95 a 180 GB B200 OOMs on the first warmup pass. B300
-      # has the headroom to spare, so the pair shares one value.
-      - "--gpu-memory-utilization"
-      - "0.90"
       # Cap prefill chunks so one long request cannot OOM a pipeline stage.
       - "--max-num-batched-tokens"
       - "8192"
@@ -339,7 +327,6 @@ presets:
     hardware: gb200
     strategy: multi_node_tp_pp
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 x PP2 + DCP8 across four GB200 trays with the DSpark K4 draft and an embedded Mooncake store."
     source: { label: "InferenceX #3748", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3748", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-agg", revision: b7eee97 }
     image: "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f"
@@ -472,7 +459,6 @@ presets:
     hardware: gb200
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "One TP16 + DCP16 prefill pool and one decode pool across four GB200 trays each, served by Dynamo with the DSpark K4 draft."
     source: { label: "InferenceX #4322", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4322", key: "kimik3-fp4-gb200-dynamo-vllm-agentic-dspark-mooncake-disagg", revision: b7eee97 }
     image:
@@ -651,7 +637,6 @@ presets:
     hardware: gb300
     strategy: pd_cluster
     workload: "Agentic (InferenceX AgentX)"
-    default: true
     description: "TP8 + DCP8 prefill and decode workers across two GB300 trays each, served by Dynamo with the DSpark K4 draft: latency-specialized decode at 16-32 clients, KV-balanced decode attention at 112-264."
     source: { label: "InferenceX #4638", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4638", key: "kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: bc4d49f5df307680be5a1567e01b838b83b31b62 }
     image:

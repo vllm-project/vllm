@@ -12,6 +12,11 @@ from vllm.distributed import parallel_state
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.model_loader.reload import (
+    finish_reload,
+    record_metadata_for_reloading,
+    start_reload,
+)
 from vllm.models.deepseek_v41.amd import engram as rocm_engram_ops
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.common import engram as engram_ops
@@ -768,6 +773,50 @@ def test_engram_meta_initialization_does_not_allocate_host_tables(
     assert layer.weight_scale_inv.dtype == torch.uint8
 
 
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_engram_layerwise_reload_preserves_storage(dist_init, monkeypatch, cpu_offload):
+    """Reload FP8 values and E8M0 scale bytes without replacing host/UVA storage."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with torch.device("cuda"):
+        table = ParallelEngramEmbedding(36, 64, (17, 19), cpu_offload=cpu_offload)
+        record_metadata_for_reloading(table)
+    originals = {
+        name: (param, param.data_ptr(), param.weight_loader)
+        for name, param in table.named_parameters()
+    }
+    ids = torch.tensor([[0, 17], [16, 35]], dtype=torch.int32, device="cuda")
+    out = torch.empty(2, 2, 64, dtype=torch.bfloat16, device="cuda")
+
+    for value in (1, 2, 1):
+        weight = torch.full((36, 64), value, dtype=torch.float32).to(
+            torch.float8_e4m3fn
+        )
+        scales = torch.full((36, 2), 127 + value, dtype=torch.uint8)
+        start_reload(table)
+        for param in table.parameters():
+            assert param.is_meta == (not cpu_offload)
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(
+            table.weight_scale_inv, scales.view(torch.float8_e8m0fnu)
+        )
+        finish_reload(table, model_config=None, device=torch.device("cuda"))
+
+        for name, expected in (("weight", weight), ("weight_scale_inv", scales)):
+            param = getattr(table, name)
+            original, pointer, loader = originals[name]
+            assert param is original
+            assert param.data_ptr() == pointer
+            assert param.weight_loader is loader
+            if cpu_offload:
+                assert param.device.type == "cpu" and param.is_pinned()
+            assert torch.equal(
+                param.view(torch.uint8).cpu(), expected.view(torch.uint8)
+            )
+        table.lookup(ids, out)
+        expected = _reference_lookup(weight.cuda(), scales.cuda(), ids, 0, 36)
+        assert torch.equal(out, expected)
+
+
 @pytest.mark.parametrize(
     "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
 )
@@ -875,7 +924,8 @@ def test_engram_head_shards_reconstruct_checkpoint(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 def test_engram_lookup_reuses_jit_across_token_shapes():
-    """Runtime token counts and launch grids must share one JIT variant."""
+    """Runtime token counts and launch grids share one JIT variant per tile
+    size, on either side of the 128-row tile threshold on any SM count."""
     layer = _make_embedding(cpu_offload=False)
     kernel = engram_ops._engram_lookup_kernel
     kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
@@ -883,7 +933,10 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 
     cache_sizes = []
     for background in (False, True):
-        for num_tokens in (1, 7, 256):
+        grid = layer._num_sms // 2 if background else layer._num_sms
+        # The fewest tokens whose rows fill the grid with 128-row tiles.
+        large = -(-128 * grid // 24)
+        for num_tokens in (1, 7, large - 1, large, 2 * large):
             ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
             out = torch.empty(
                 num_tokens,
@@ -895,7 +948,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
             layer.lookup(ids, out, background=background)
             cache_sizes.append(len(kernel_cache))
 
-    assert cache_sizes == [1] * len(cache_sizes)
+    # 16-row tiles, then 128-row tiles; the background grid adds neither.
+    assert cache_sizes == [1, 1, 1, 2, 2] + [2] * 5
 
 
 @pytest.mark.skipif(
@@ -904,7 +958,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
+# 1024 tokens fill the grid with 128-row tiles.
+@pytest.mark.parametrize("num_tokens", [1, 7, 256, 1024])
 def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
