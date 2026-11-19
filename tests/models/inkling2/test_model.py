@@ -10,8 +10,11 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 requires Blackwell", allow_module_level=True)
+if not (
+    current_platform.is_device_capability_family(100)
+    or current_platform.is_device_capability(90)
+):
+    pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
 TINY_CONFIG = {
     "architectures": ["Inkling2ForConditionalGeneration"],
