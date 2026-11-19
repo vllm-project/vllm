@@ -245,11 +245,16 @@ class MoriIOTransport(PPTransport):
             self.sender = _Worker("mori-pp-send", device)
             self.writes: list[Future | None] = [None] * self.num_slots
             self.credits = self.num_slots
+        # Every stage logs: slot sizes differ per boundary.
         logger.info_once(
-            "MoRI-IO PP transport: %s backend, %d slots, receive slot %.1f MiB",
+            "MoRI-IO PP transport on PP rank %d: %s backend, %d slots, "
+            "receive slot %.1f MiB, send slot %.1f MiB",
+            rank,
             "XGMI" if one_node else "RDMA",
             self.num_slots,
             getattr(self, "recv_slot_bytes", 0) / 2**20,
+            getattr(self, "send_slot_bytes", 0) / 2**20,
+            scope="process",
         )
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
