@@ -6,7 +6,10 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -144,6 +147,7 @@ impl HfSpecialTokens {
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
+#[serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -155,15 +159,30 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. An unexpected
+    /// value reads as absent rather than failing model loading.
+    #[serde_as(as = "DefaultOnError")]
+    dtype: Option<ModelDtype>,
+    #[serde_as(as = "DefaultOnError")]
+    torch_dtype: Option<ModelDtype>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
 
-/// Minimal subset of `generation_config.json`.
+/// `generation_config.json`: EOS ids typed, everything else kept raw so
+/// overrides can merge over it before [`SamplingDefaults`] parses the result.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
+    #[serde(flatten)]
+    pub sampling: Map<String, Value>,
+}
+
+/// Sampling keys of a merged generation config.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct SamplingDefaults {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     #[serde(deserialize_with = "deserialize_top_k")]
@@ -173,6 +192,7 @@ pub(super) struct GenerationConfig {
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub skip_special_tokens: Option<bool>,
 }
 
 /// Deserialize a generation-config `top_k` into the text sampling model.
@@ -259,6 +279,12 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
+    /// Return the checkpoint dtype, following the same text-config selection
+    /// as `model_type`.
+    pub fn dtype(&self) -> Option<ModelDtype> {
+        (self.dtype.or(self.torch_dtype)).or_else(|| self.text_config.as_deref()?.dtype())
+    }
+
     /// Return the effective model vocabulary size, following the same
     /// simplified text-config selection as `model_type`.
     pub fn vocab_size(&self) -> Result<u32> {
@@ -333,9 +359,19 @@ pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
     read_json_file(path)
 }
 
-/// Load the generation-side EOS metadata if a config file is present.
+/// Load `generation_config.json`, if present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
     read_json_file(path)
+}
+
+/// Parse merged generation-config JSON into its sampling defaults.
+pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<SamplingDefaults> {
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse generation config: {}",
+            error.as_report()
+        ))
+    })
 }
 
 /// Load the model-side config (`config.json`) if present.
@@ -368,7 +404,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig};
+    use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {
@@ -410,13 +446,41 @@ mod tests {
             (r#"{"top_k":0}"#, None),
             (r#"{"top_k":20}"#, Some(20)),
         ] {
-            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            let config: SamplingDefaults = serde_json::from_str(input).unwrap();
             assert_eq!(config.top_k, expected, "input={input}");
         }
 
         for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
-            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+            assert!(serde_json::from_str::<SamplingDefaults>(input).is_err());
         }
+    }
+
+    #[test]
+    fn model_config_reads_checkpoint_dtype() {
+        for (config, expected) in [
+            (r#"{"dtype":"bfloat16"}"#, Some(ModelDtype::BFloat16)),
+            (r#"{"torch_dtype":"float16"}"#, Some(ModelDtype::Float16)),
+            // Both names, as written by some transformers versions.
+            (
+                r#"{"dtype":"bfloat16","torch_dtype":"bfloat16"}"#,
+                Some(ModelDtype::BFloat16),
+            ),
+            (
+                r#"{"text_config":{"torch_dtype":"float32"}}"#,
+                Some(ModelDtype::Float32),
+            ),
+            (r#"{"torch_dtype":"float8_e4m3fn"}"#, None),
+            (r#"{"torch_dtype":{"unexpected":true}}"#, None),
+            ("{}", None),
+        ] {
+            let config: ModelConfig = serde_json::from_str(config).unwrap();
+            assert_eq!(config.dtype(), expected, "{config:?}");
+        }
+        // An unexpected dtype does not fail the rest of the config.
+        let config: ModelConfig =
+            serde_json::from_str(r#"{"torch_dtype":"float8_e4m3fn","model_type":"llama"}"#)
+                .unwrap();
+        assert_eq!(config.model_type(), Some("llama"));
     }
 
     #[test]

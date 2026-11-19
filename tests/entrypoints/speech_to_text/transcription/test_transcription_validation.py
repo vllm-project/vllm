@@ -8,10 +8,14 @@ import httpx
 import numpy as np
 import pytest
 import soundfile as sf
+import transformers
 from fastapi import UploadFile
+from packaging.version import Version
+from prometheus_client.parser import text_string_to_metric_families
 from transformers import WhisperConfig
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from vllm.assets.audio import AudioAsset
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.multimodal.audio import AudioResampler
@@ -139,6 +143,153 @@ async def transcribe_and_check(
         )
 
     return out_text
+
+
+async def transcription_token_usage(remote_server):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(remote_server.url_for("metrics"))
+        response.raise_for_status()
+    names = ("vllm:request_prompt_tokens_sum", "vllm:request_generation_tokens_sum")
+    samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        for sample in family.samples
+    ]
+    return tuple(sum(s.value for s in samples if s.name == name) for name in names)
+
+
+def check_diarized_stream_events(events, expected, usage_before, usage_after):
+    """Delta-only clients must receive the same text as the completed transcript."""
+    assert expected.segments
+    assert [event.type for event in events] == [
+        event_type
+        for _ in expected.segments
+        for event_type in ("transcript.text.delta", "transcript.text.segment")
+    ] + ["transcript.text.done"]
+    deltas = events[:-1:2]
+    segments = events[1:-1:2]
+    done = events[-1]
+    assert [delta.segment_id for delta in deltas] == [s.id for s in segments]
+    assert [delta.delta for delta in deltas] == [
+        (" " if index else "") + segment.text for index, segment in enumerate(segments)
+    ]
+    assert [segment.model_dump() for segment in segments] == [
+        segment.model_dump() for segment in expected.segments
+    ]
+    assert "".join(delta.delta for delta in deltas) == done.text == expected.text
+    assert done.usage.type == "tokens"
+    assert done.usage.input_tokens > 0
+    assert done.usage.output_tokens > 0
+    assert (done.usage.input_tokens, done.usage.output_tokens) == tuple(
+        after - before for before, after in zip(usage_before, usage_after)
+    )
+    assert done.usage.total_tokens == (
+        done.usage.input_tokens + done.usage.output_tokens
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires `tokenize` on `apply_transcription_request`",
+)
+async def test_transformers_backend_audio(mary_had_lamb):
+    """Serve transcription and diarization for a Transformers backend model."""
+    model_name = "microsoft/VibeVoice-ASR-HF"
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "2048",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.85",
+        *ROCM_EXTRA_ARGS,
+    ]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        await transcribe_and_check(
+            client,
+            model_name,
+            mary_had_lamb,
+            language="en",
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
+        )
+
+        mary_had_lamb.seek(0)
+        response = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+        )
+        assert "Mary had a little lamb" in response.text
+        assert response.segments
+        assert all(segment.end >= segment.start for segment in response.segments)
+
+        mary_had_lamb.seek(0)
+        usage_before = await transcription_token_usage(remote_server)
+        stream = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+            stream=True,
+        )
+        events = [event async for event in stream]
+        check_diarized_stream_events(
+            events,
+            response,
+            usage_before,
+            await transcription_token_usage(remote_server),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires `tokenize` on `apply_transcription_request`",
+)
+async def test_transformers_backend_diarization_spans_audio_windows():
+    """Speaker labels hold past 30 s, which is where chunking the audio would start
+    a new transcript. `winning_call` follows `mary_had_lamb` and is one speaker."""
+    model_name = "hf-audio/MOSS-Transcribe-Diarize-HF"
+    target_sr = 16000
+    resampler = AudioResampler(target_sr=target_sr)
+    assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+    audios = [
+        resampler.resample(audio, orig_sr=sr)
+        for audio, sr in (asset.audio_and_sample_rate for asset in assets)
+    ]
+    file = BytesIO()
+    sf.write(file, np.concatenate(audios), target_sr, format="WAV")
+    file.seek(0)
+    file.name = "conversation.wav"
+    server_args = [
+        "--model-impl",
+        "transformers",
+        "--enforce-eager",
+        "--max-model-len",
+        "4096",
+        "--gpu-memory-utilization",
+        "0.85",
+        *ROCM_EXTRA_ARGS,
+    ]
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        response = await client.audio.transcriptions.create(
+            model=model_name, file=file, response_format="diarized_json"
+        )
+
+    first_audio_s = len(audios[0]) / target_sr
+    first = [s for s in response.segments if s.start < first_audio_s]
+    second = [s for s in response.segments if s.start >= first_audio_s]
+    assert second[-1].end > 30
+    assert len({s.speaker for s in second}) == 1
+    assert {s.speaker for s in first}.isdisjoint(s.speaker for s in second)
 
 
 @pytest.mark.asyncio
@@ -306,4 +457,42 @@ async def test_ming_chunk_policy_prefix_cache(model_name, ming_server, ming_audi
         after = await prefix_hits()
         assert after > before, (
             f"Restoring the chunk policy added no prefix hits: {before=} {after=}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_diarized_json_stream_matches_non_stream(mary_had_lamb):
+    model_name = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    server_args = [
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--max-model-len",
+        "4096",
+        # Keep the second request from reusing the first one's KV cache.
+        "--no-enable-prefix-caching",
+        *ROCM_EXTRA_ARGS,
+    ]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        expected = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+        )
+        mary_had_lamb.seek(0)
+        usage_before = await transcription_token_usage(remote_server)
+        stream = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            response_format="diarized_json",
+            temperature=0.0,
+            stream=True,
+        )
+        events = [event async for event in stream]
+        check_diarized_stream_events(
+            events,
+            expected,
+            usage_before,
+            await transcription_token_usage(remote_server),
         )

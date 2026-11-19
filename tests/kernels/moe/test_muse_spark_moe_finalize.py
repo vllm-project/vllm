@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x post-expert finalize kernels: CuTe-DSL and Triton."""
+"""Muse Spark post-expert finalize kernels: CuTe-DSL and Triton."""
 
 import pytest
 import torch
@@ -24,7 +24,7 @@ requires_cutedsl_finalize = pytest.mark.skipif(
 
 
 def _ref_finalize(rows, norm_weight, weights, eps, weight_first, gain_center=1.0):
-    """``sum_k weights * norm(rows[:, k])`` in fp32."""
+    """`sum_k weights * norm(rows[:, k])` in fp32."""
     x = rows.float()
     gain = 1 if norm_weight is None else norm_weight.float() + gain_center
     if weight_first:
@@ -36,7 +36,7 @@ def _ref_finalize(rows, norm_weight, weights, eps, weight_first, gain_center=1.0
 
 
 # 2048 is the widest row served by a single warp; wider rows reduce through
-# shared memory. MuseSpark1x's compressed MoE hidden dim is 4096.
+# shared memory. Muse Spark's compressed MoE hidden dim is 4096.
 @requires_cutedsl_finalize
 @pytest.mark.parametrize("hidden_dim", [2048, 4096])
 @pytest.mark.parametrize("weight_before_norm", [False, True])
@@ -45,7 +45,7 @@ def test_masked_slots_never_produce_nan(
 ) -> None:
     """An EP rank that owns no expert in the batch must contribute exactly zero.
 
-    Its unwritten workspace holds arbitrary bits and ``NaN * 0`` is NaN, so
+    Its unwritten workspace holds arbitrary bits and `NaN * 0` is NaN, so
     zero-weighting the rows is not enough.
     """
     dtype = torch.bfloat16

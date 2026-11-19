@@ -210,13 +210,6 @@ class Mistral3MultiModalProjector(nn.Module):
 
 
 class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
-    def __init__(self, hf_config: Mistral3Config, image_size: int) -> None:
-        super().__init__(hf_config)
-        self.image_size = image_size
-
-    def get_image_size(self) -> int:
-        return self.image_size
-
     def get_patch_grid_size(
         self,
         *,
@@ -493,7 +486,7 @@ class Mistral3ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         # NOTE: This is a special case for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json
         if (
             config.projector_hidden_act is None
             and config.vision_config.hidden_act == "gelu"

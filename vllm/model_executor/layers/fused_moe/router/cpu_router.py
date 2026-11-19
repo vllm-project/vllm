@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm._custom_ops import biased_topk_cpu, hash_topk_cpu
+from vllm._cpu_ops import biased_topk_cpu, hash_topk_cpu
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -91,14 +91,14 @@ def _sqrtsoftplus_bias_topk(
     selection uses a bias-corrected score (weight + correction_bias), but
     the returned weight for each selected expert is the *unbiased* value
     (the "noaux_tc" pattern -- bias steers selection only). Always
-    renormalizes selected weights to sum to ``routed_scaling_factor``,
+    renormalizes selected weights to sum to `routed_scaling_factor`,
     matching the reference Triton kernel
     (vllm/model_executor/layers/fused_moe/router/dsv4_topk.py).
 
-    When ``hash_indices_table`` is given (hash-routed layers), expert
-    selection instead comes from ``hash_indices_table[input_ids]`` --
+    When `hash_indices_table` is given (hash-routed layers), expert
+    selection instead comes from `hash_indices_table[input_ids]` --
     the bias-corrected-score topk is skipped entirely, matching the CUDA
-    reference kernel (``dsv4HashTopkSoftplusSqrt``).
+    reference kernel (`dsv4HashTopkSoftplusSqrt`).
 
     Backed by the ported SGLang AVX512 kernels `biased_topk_cpu` (the
     correction-bias path) and `hash_topk_cpu` (the hash-routed-layer path);
@@ -283,11 +283,11 @@ def select_experts(
     hash_indices_table: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Routing helper for the CPU MoE experts that still use the monolithic
-    contract and so must compute routing themselves from ``router_logits``
+    contract and so must compute routing themselves from `router_logits`
     (the zentorch-accelerated path and the ARM W4A8 dynamic-quant kernel,
     kept monolithic since zentorch/Arm hardware isn't available to validate
     a modular migration here). Modular CPU experts get routing from
-    ``CPURouter`` instead; this is a thin wrapper around the same logic for
+    `CPURouter` instead; this is a thin wrapper around the same logic for
     the two classes that can't use it.
     """
     router = CPURouter(

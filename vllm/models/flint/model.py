@@ -4,7 +4,7 @@
 
 Flint is a Qwen3-MoE-style decoder with learned attention sinks, hybrid
 sliding-window/full attention (full layers use no RoPE), dense SwiGLU MLPs on
-``mlp_only_layers``, sigmoid top-k routing with renormalized weights, and an
+`mlp_only_layers`, sigmoid top-k routing with renormalized weights, and an
 ungated shared expert.
 """
 
@@ -202,7 +202,7 @@ class FlintSparseMoeBlock(nn.Module):
     def forward_ll(
         self, attn_out: torch.Tensor, residual: torch.Tensor, norm: RMSNorm
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """``(mlp(norm(attn_out + residual)), attn_out + residual)`` via the
+        """`(mlp(norm(attn_out + residual)), attn_out + residual)` via the
         fused decode MoE block (NVFP4, M <= LL_MOE_MAX_TOKENS), else None."""
         if not self.use_flint_kernel or attn_out.shape[0] > LL_MOE_MAX_TOKENS:
             return None
@@ -392,7 +392,7 @@ class FlintAttention(nn.Module):
 
     def _decode_plan(self) -> tuple | None:
         """(decode metadata, num_decodes, window) when the batch is pure
-        single-token decode of at most ``max_decode_batch`` requests (the Flint
+        single-token decode of at most `max_decode_batch` requests (the Flint
         decode attention kernel), else None. K/V are already in the cache."""
         forward_metadata = get_forward_context().attn_metadata
         attn_metadata = (

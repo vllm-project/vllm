@@ -456,9 +456,11 @@ def test_whitespace_after_start_token(lfm2_tokenizer: TokenizerLike):
 def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     model_output_deltas = [
-        f"{TOOL_CALL_START}[get_candidate_status(candidate_id='12345'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}",
+        (
+            f"{TOOL_CALL_START}[get_candidate_status(candidate_id='12345'), "
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -594,7 +596,7 @@ def test_streaming_char_by_char_multi_dict_list(lfm2_tokenizer: TokenizerLike):
 
 def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
     """A pythonic call with a dotted/attribute function name (e.g.
-    ``domain.method(arg=...)``) must be parsed correctly in streaming mode
+    `domain.method(arg=...)`) must be parsed correctly in streaming mode
     just as in non-streaming mode."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     full_text = f"{TOOL_CALL_START}[{DOTTED_NAME_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
@@ -609,7 +611,7 @@ def test_adjust_request_disables_skip_special_tokens(
     lfm2_tokenizer: TokenizerLike,
 ):
     """When tools are present, the parser must force
-    ``skip_special_tokens=False`` so the engine does not strip the
+    `skip_special_tokens=False` so the engine does not strip the
     <|tool_call_start|>/<|tool_call_end|> sentinels before they reach the
     parser."""
     from vllm.entrypoints.openai.chat_completion.protocol import (
