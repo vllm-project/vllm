@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
+    kFp8Static128GroupSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -42,9 +43,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
         self.is_static_input_scheme = is_static_input_scheme
-        self.weight_block_size = self.weight_quant.block_structure
-
-        self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
+        if self.strategy == QuantizationStrategy.GROUP:
+            # One scale per output channel and group of 128 inputs.
+            self.strategy = QuantizationStrategy.BLOCK
+            self.weight_block_size = [1, 128]
+            self.weight_quant_key = kFp8Static128GroupSym
+        else:
+            self.weight_block_size = self.weight_quant.block_structure
+            self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
         self.activation_quant_key = (
             kFp8StaticTensorSym if is_static_input_scheme else kFp8DynamicTensorSym
         )
@@ -115,6 +121,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
+            module_name=type(self).__name__,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

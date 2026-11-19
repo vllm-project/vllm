@@ -237,6 +237,9 @@ kNvfp4Static = QuantKey(
     FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
 )
 
+kStatic128GroupScale = ScaleDesc(torch.float32, True, GroupShape(1, 128))
+kFp8Static128GroupSym = QuantKey(FP8_DTYPE, kStatic128GroupScale, symmetric=True)
+
 kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
 kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 
