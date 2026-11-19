@@ -797,7 +797,8 @@ def _tier(
 def _pick(values, items, mask, need, row_max, slots, C: tl.constexpr):
     """The items in the best bins (1/32 nat below the row max, the last bin refined over
     its own value range if crowded) that hold at least need of them, if at most C:
-    whether they fit, the items (compacted through slots) and their count."""
+    whether they fit, the items (compacted through slots) and their count. With fewer
+    than need finite items, they are all picked."""
     j = tl.arange(0, 512)
     b = _bin(values, row_max, 32.0, 512)
     hist = tl.histogram(b, 512, mask=mask)
@@ -805,7 +806,12 @@ def _pick(values, items, mask, need, row_max, slots, C: tl.constexpr):
     last = tl.min(tl.where(cum >= need, j, 511))
     count = tl.sum(tl.where(j == last, cum, 0))
     take = mask & (b <= last)
-    if count > C:  # crowded bin (or the open last one): refine it
+    finite = mask & (values > -float("inf"))
+    num_finite = tl.sum(finite.to(tl.int32))
+    if num_finite < need:  # the cut falls on -inf (masked logits): every finite item
+        count = num_finite
+        take = finite
+    elif count > C:  # crowded bin (or the open last one): refine it
         above = count - tl.sum(tl.where(j == last, hist, 0))
         inside = mask & (b == last)
         top = tl.max(tl.where(inside, values, -float("inf")))
@@ -822,7 +828,8 @@ def _pick(values, items, mask, need, row_max, slots, C: tl.constexpr):
     rank = tl.arange(0, C)
     picked = tl.load(slots + rank, mask=rank < count, other=0)
     tl.debug_barrier()
-    return (count >= need) & (count <= C), picked, count
+    fits = (num_finite < need) | ((count >= need) & (count <= C))
+    return fits, picked, count
 
 
 @triton.jit
