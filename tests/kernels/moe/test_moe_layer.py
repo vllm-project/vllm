@@ -517,54 +517,49 @@ def visible_devices_have_peer_access(world_size: int) -> bool:
         return False
 
 
-# TODO: break this up into sections
-def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
+def routed_input_transform_skip_reason(config: MoETestConfig) -> str | None:
+    """Platform-independent, so it can also filter cases at collection time."""
+    if not config.use_routed_input_transform:
+        return None
+
     # routed_input_transform only makes sense with shared_experts (latent MoE)
     # TODO: not sure this is true
-    if config.use_routed_input_transform and not config.use_shared_experts:
-        return False, "routed_input_transform requires shared_experts"
+    if not config.use_shared_experts:
+        return "routed_input_transform requires shared_experts"
 
     # TODO: disable for now
-    if config.use_routed_input_transform and config.enable_eplb:
-        return False, "routed_input_transform not supported with EPLB."
+    if config.enable_eplb:
+        return "routed_input_transform not supported with EPLB."
 
     # TODO: disable for now
-    if config.use_routed_input_transform and config.use_gate:
+    if config.use_gate:
         return (
-            False,
-            (
-                "routed_input_transform not supported with gate because of "
-                "padding problems"
-            ),
+            "routed_input_transform not supported with gate because of padding problems"
         )
 
     # TODO: disable for now
-    if config.use_routed_input_transform and config.backend in [
-        "deepep_low_latency",
-        "deepep_high_throughput",
-    ]:
+    if config.backend in ["deepep_low_latency", "deepep_high_throughput"]:
         return (
-            False,
-            (
-                "routed_input_transform not supported with DeepEP backends because "
-                "of padding problems"
-            ),
+            "routed_input_transform not supported with DeepEP backends because "
+            "of padding problems"
         )
 
     # routed_input_transform + quantization + high hidden dimensions
     # TODO: Disable >= 2048 for now due to insane errors.
-    if (
-        config.use_routed_input_transform
-        and config.quantization is not None
-        and config.k >= 2048
-    ):
+    if config.quantization is not None and config.k >= 2048:
         return (
-            False,
-            (
-                "routed_input_transform + quantization + higher hidden dimensions "
-                "leads to large differences."
-            ),
+            "routed_input_transform + quantization + higher hidden dimensions "
+            "leads to large differences."
         )
+
+    return None
+
+
+# TODO: break this up into sections
+def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
+    reason = routed_input_transform_skip_reason(config)
+    if reason is not None:
+        return False, reason
 
     # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+) or gfx950.
     if config.quantization == "modelopt_fp4" and not (
@@ -1690,14 +1685,35 @@ def _run_one_config(
         torch.accelerator.synchronize()
 
 
+NO_PARALLEL_CASES = [
+    (transform, gate, shared, quantization, top_k, num_experts, m, n, k)
+    for (m, n, k), num_experts, top_k, quantization, shared, gate, transform in product(
+        SHAPE_COMBOS, NUM_EXPERTS, TOP_KS, QUANT_METHODS, *[[False, True]] * 3
+    )
+    if routed_input_transform_skip_reason(
+        MoETestConfig(
+            m,
+            n,
+            k,
+            num_experts,
+            top_k,
+            torch.bfloat16,
+            quantization,
+            shared,
+            gate,
+            transform,
+        )
+    )
+    is None
+]
+
+
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter
-@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
-@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@pytest.mark.parametrize("top_k", TOP_KS)
-@pytest.mark.parametrize("quantization", QUANT_METHODS)
-@pytest.mark.parametrize("use_shared_experts", [False, True])
-@pytest.mark.parametrize("use_gate", [False, True])
-@pytest.mark.parametrize("use_routed_input_transform", [False, True])
+@pytest.mark.parametrize(
+    "use_routed_input_transform, use_gate, use_shared_experts, quantization, "
+    "top_k, num_experts, m, n, k",
+    NO_PARALLEL_CASES,
+)
 def test_moe_layer_no_parallel(
     m: int,
     n: int,
