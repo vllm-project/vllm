@@ -328,6 +328,24 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     assert hasattr(engine.model, "_direct_reload_begun") is not direct
 
 
+def test_failed_start_aborts_direct_reload(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+
+    def fail_after_start_reload() -> None:
+        monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+        engine.model._direct_reload_begun = True
+        raise ValueError("boom")
+
+    monkeypatch.setattr(engine, "start_weight_update", fail_after_start_reload)
+    with pytest.raises(ValueError, match="boom"):
+        Worker.start_weight_update(worker)
+
+    assert not lifecycle.weight_update_active()
+    assert not hasattr(engine.model, "_direct_reload_begun")
+
+
 def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):

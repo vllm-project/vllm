@@ -84,15 +84,36 @@ def grow_buffer(
     keep: int = 0,
 ) -> torch.Tensor:
     """`buf` if it holds `nbytes`, else a new buffer with its first `keep` bytes:
-    the first sized to `nbytes`, a later one to `capacity`, so at most two sizes."""
+    `buf`'s size (at first, `nbytes` rounded up) doubled to hold `nbytes`, at most
+    `capacity`."""
     if buf is not None and buf.numel() >= nbytes:
         return buf
-    size = capacity if buf is not None else round_up(nbytes, ALIGN)
+    size = buf.numel() if buf is not None else round_up(nbytes, ALIGN)
+    while size < nbytes:
+        size *= 2
+    size = min(size, capacity)
     grown = torch.empty(size, dtype=torch.uint8, device=device)
     if keep:
         assert buf is not None
         grown[:keep].copy_(buf[:keep])
     return grown
+
+
+def _current_device() -> torch.device:
+    """The current accelerator device, where packed buffers are allocated."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    return torch.device(accelerator.type, torch.accelerator.current_device_index())
+
+
+def _record_sources(
+    srcs: list[torch.Tensor], device: torch.device, stream: torch.cuda.Stream
+) -> None:
+    """Keep same-device `srcs` alive until `stream`'s copies end; `copy_` already
+    syncs copies from the host or another GPU with their source."""
+    for t in srcs:
+        if t.device == device:
+            t.record_stream(stream)
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -264,7 +285,8 @@ def packed_nccl_broadcast_producer(
             yield t.shape, t.dtype
 
     capacity = chunk_capacity(buffer_size_bytes)
-    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
+    device = _current_device()
+    streams = _get_streams(device.index, num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
     bufs: list[torch.Tensor | None] = [None] * num_buffers
@@ -284,12 +306,10 @@ def packed_nccl_broadcast_producer(
             done[slot] = None
         # On the caller stream, so the source's next writes wait for the copies.
         with torch.cuda.stream(caller_stream):
-            device = tensors[pieces[0].position].device
             buf = bufs[slot] = grow_buffer(bufs[slot], end, capacity, device, filled)
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             torch._foreach_copy_(dsts, srcs)
-            for t in srcs:  # not reused before the copy ends
-                t.record_stream(caller_stream)
+            _record_sources(srcs, buf.device, caller_stream)
         filled = end
 
     for chunk in chunks(specs(), buffer_size_bytes, before_pull=pack):
@@ -426,11 +446,12 @@ def packed_ipc_producer(
         iterator: Iterator of (name, tensor) pairs.
         gpu_uuid: Physical GPU UUID string for this rank.
         post_iter_func: Applied to each (name, tensor) before packing.
-        buffer_size_bytes: Chunk size; the IPC buffer is smaller when the
-            transfer ends within its first chunk.
+        buffer_size_bytes: Chunk size; the IPC buffer, on the current device,
+            doubles up to it while the first chunk is packed.
 
     """
     capacity = chunk_capacity(buffer_size_bytes)
+    device = _current_device()  # where `gpu_uuid` maps the buffer
     caller_stream = torch.accelerator.current_stream()
     buf: torch.Tensor | None = None  # at the first byte: none for no bytes
     filled = 0  # the bytes of the current chunk's copied pieces end at
@@ -456,14 +477,13 @@ def packed_ipc_producer(
         end = _bytes_end(pieces)
         with torch.cuda.stream(caller_stream):
             if end:
-                device = tensors[pieces[0].position].device
                 buf = grow_buffer(buf, end, capacity, device, filled)
                 filled = end
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             if dsts:
+                assert buf is not None
                 torch._foreach_copy_(dsts, srcs)
-            for t in srcs:  # not reused before the copy ends
-                t.record_stream(caller_stream)
+                _record_sources(srcs, buf.device, caller_stream)
 
     for k, chunk in enumerate(chunks(specs(), buffer_size_bytes, before_pull=pack)):
         caller_stream.synchronize()  # before the consumer reads

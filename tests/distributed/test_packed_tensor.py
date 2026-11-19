@@ -641,11 +641,11 @@ class TestPackedIpcRoundtrip:
             assert res_tensor.dtype == dtype
             assert torch.equal(_flat(res_tensor), _flat(orig_tensor.cpu()))
 
-    def test_roundtrip_multiple_chunks(self):
-        """Test IPC roundtrip across multiple chunks."""
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    def test_roundtrip_multiple_chunks(self, device):
+        """Test IPC roundtrip across multiple chunks, also from CPU sources."""
         params = [
-            (f"layer{i}.weight", torch.randn(100, 100, dtype=torch.float32).cuda())
-            for i in range(8)
+            (f"layer{i}.weight", torch.randn(100, 100, device=device)) for i in range(8)
         ]
         gpu_uuid = self._get_gpu_uuid()
         device_index = torch.cuda.current_device()

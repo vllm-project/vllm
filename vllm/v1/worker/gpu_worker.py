@@ -1785,6 +1785,8 @@ class Worker(WorkerBase):
             self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
+            if direct_reload_enabled():  # the engine may have begun a reload
+                abort_reload(self.weight_transfer_engine.model)
             self.weight_transfer_engine.reset_weight_update_target()
             if draft_model is not None:
                 restore_quantized_lm_heads(draft_model, refresh=False)

@@ -104,8 +104,9 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 
 !!! note "Memory"
     On the trainer, each rotating buffer starts at the size of the first bytes
-    packed into it and grows once, straight to `packed_buffer_size_bytes`, when
-    a chunk needs more; the workers size each receive buffer to its chunk. That
+    packed into it and doubles, up to `packed_buffer_size_bytes`, when a chunk
+    needs more, so a small transfer holds at most twice its bytes; the workers
+    size each receive buffer to its chunk. That
     is up to `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB
     at the defaults). Lower
     `packed_buffer_size_bytes` if that is too much headroom. A non-contiguous

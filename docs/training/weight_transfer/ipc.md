@@ -90,7 +90,7 @@ GPU memory:
 
 - Weights are laid out as one byte stream, each starting 16-byte aligned, and cut into chunks of `packed_buffer_size_bytes`; a tensor larger than a chunk is split across chunks (the same layout as NCCL packed transfer).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the model is prepared for reloading once at the start and finalized once at the end regardless of chunk count.
-- One buffer of `packed_buffer_size_bytes` (less if the transfer fits in one chunk) is reused for every chunk of a transfer, bounding its extra GPU memory; a non-contiguous tensor split across chunks also needs a contiguous copy of its full size on the trainer while it is sent.
+- One buffer on the trainer's current CUDA device (so CPU-resident sources work too), doubled while the first chunk is packed (so a transfer that fits in one chunk holds at most twice its bytes) up to `packed_buffer_size_bytes`, is reused for every chunk of a transfer, bounding its extra GPU memory; a non-contiguous tensor split across chunks also needs a contiguous copy of its full size on the trainer while it is sent.
 
 ```python
 engine = WeightTransferTrainerFactory.trainer_init(
@@ -135,8 +135,8 @@ the first `/update_weights` returns 500. Reference:
   (device index) with its own.
 - `ipc_handles` (unpickled) is not JSON-serializable; over HTTP use
   `ipc_handles_pickled`.
-- Packed: export one `uint8` buffer once per transfer, its size the chunk
-  size, or the stream's length rounded up to 16 if it fits in one chunk; send
+- Packed: export one `uint8` buffer once per transfer, large enough for its
+  largest chunk; send
   its handle and `chunk_capacity` with the first chunk only, and reuse it for
   every chunk. Lay the tensors'
   `t.contiguous().view(-1).view(torch.uint8)` bytes out as one stream, each

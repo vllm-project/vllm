@@ -7,7 +7,12 @@ import torch
 
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, direct_reload_enabled, finish_direct_reload
+from .direct import (
+    abort_direct_reload,
+    begin_direct_reload,
+    direct_reload_enabled,
+    finish_direct_reload,
+)
 from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
 
 __all__ = ["abort_reload", "finish_reload", "start_reload", "weight_update_active"]
@@ -50,4 +55,4 @@ def abort_reload(model: torch.nn.Module) -> None:
     only a new full update repairs the model."""
     global _weight_update_active
     _weight_update_active = False
-    model.__dict__.pop("_direct_reload_begun", None)
+    abort_direct_reload(model)
