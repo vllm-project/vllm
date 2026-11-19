@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
 import sys
+import tracemalloc
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,8 +10,10 @@ import numpy as np
 import numpy.typing as npt
 import pybase64
 import pytest
+import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import (
     video_get_metadata,
@@ -18,6 +21,7 @@ from vllm.assets.video import (
     video_to_pil_images_list,
 )
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
+from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
@@ -45,6 +49,120 @@ class Assert10Frames1FPSVideoLoader(VideoLoader):
         assert num_frames == 10, "bad num_frames"
         assert fps == 1.0, "bad fps"
         return FAKE_OUTPUT_2
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_counts_torch_frames(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 16)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget))
+    frames = torch.zeros((2, 2, 2, 3), dtype=torch.uint8)
+    video_io.video_loader = SimpleNamespace(load_bytes=lambda *_args, **_kwargs: frames)
+
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        video_io.load_bytes(b"video")
+
+
+def _write_opencv_test_video(tmp_path: Path, side: int, num_frames: int) -> bytes:
+    image_path = f"{tmp_path}/budget_frame.png"
+    Image.new("RGB", (side, side), color=(0, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/budget_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=num_frames)
+    return Path(video_path).read_bytes()
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_rejects_before_decoding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """An oversized sample is rejected before its frames are allocated."""
+    data = _write_opencv_test_video(tmp_path, side=512, num_frames=8)
+    frame_bytes = 512 * 512 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget), num_frames=-1)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            video_io.load_bytes(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 2 * frame_bytes
+    assert budget.used == 0
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_charges_decoded_frames_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    data = _write_opencv_test_video(tmp_path, side=32, num_frames=8)
+    frame_bytes = 32 * 32 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(ImageMediaIO(decoded_budget=budget), num_frames=4)
+
+    frames, _ = video_io.load_bytes(data).media
+
+    assert frames.shape == (4, 32, 32, 3)
+    assert budget.used == frames.nbytes
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_rejects_repeated_frames_before_copying(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """EmbeddingGemma2 repeats decoded frames to fill the requested indices.
+
+    A 1 fps clip of two frames sampled at 60 fps decodes two frames and
+    repeats them 32 times. The copies are charged before they are allocated.
+    """
+    data = _write_opencv_test_video(tmp_path, side=512, num_frames=2)
+    frame_bytes = 512 * 512 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(
+        ImageMediaIO(decoded_budget=budget),
+        video_backend="embedding_gemma2",
+        fps=60,
+        max_frames=32,
+    )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            video_io.load_bytes(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Decoding the two frames needs a few frames of buffers. The copies would
+    # need 32 frames.
+    assert peak < 8 * frame_bytes
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_charges_repeated_frames_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    data = _write_opencv_test_video(tmp_path, side=32, num_frames=2)
+    frame_bytes = 32 * 32 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 32 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(
+        ImageMediaIO(decoded_budget=budget),
+        video_backend="embedding_gemma2",
+        fps=60,
+        max_frames=32,
+    )
+
+    frames, metadata = video_io.load_bytes(data).media
+
+    assert frames.shape == (32, 32, 32, 3)
+    assert set(metadata["frames_indices"]) == {0, 1}
+    assert budget.used == frames.nbytes
 
 
 def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
@@ -372,9 +490,14 @@ def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
     original_error = RuntimeError("GPU decoder unavailable")
 
-    def raise_unrelated_error(cls, file_path, nvc):
+    def raise_unrelated_error(cls, file_path, nvc, max_width, max_height, **kwargs):
         raise original_error
 
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_validate_decoder_caps",
+        classmethod(lambda cls, file_path, nvc, **kwargs: (4096, 4096)),
+    )
     monkeypatch.setattr(
         PyNvVideoCodecVideoBackendMixin,
         "_read_source_metadata",
@@ -448,6 +571,18 @@ class TestMergeKwargsGpuBackendPolicy:
             runtime_kwargs={"hw_decoders": 4},
         )
         assert result["hw_decoders"] == 2
+
+    def test_prevents_request_level_pynv_dimension_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "backend": "pynvvideocodec",
+                "max_width": 3840,
+                "max_height": 2160,
+            },
+            runtime_kwargs={"max_width": 1920, "max_height": 1080},
+        )
+        assert result["max_width"] == 3840
+        assert result["max_height"] == 2160
 
     @pytest.mark.parametrize("backend", ["opencv", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):

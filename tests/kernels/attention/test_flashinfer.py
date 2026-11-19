@@ -706,7 +706,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 
 
 @pytest.mark.skipif(
-    not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
+    not any(current_platform.is_device_capability_family(f) for f in (80, 90, 120)),
     reason="NVFP4 fa2 path",
 )
 @pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLNHC", "BLHNC"])

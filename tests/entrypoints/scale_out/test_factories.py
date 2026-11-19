@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+import os
+import subprocess
+import sys
 from argparse import Namespace
 
+import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
+from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 from vllm.entrypoints.scale_out.token_in_token_out.api_router import attach_router
-from vllm.entrypoints.serve.middleware.authenticate import GUARDED_PREFIX
+from vllm.entrypoints.serve.middleware.authenticate import (
+    GUARDED_PREFIX,
+    AuthenticationMiddleware,
+)
 from vllm.tasks import SupportedTask
 
 RENDER_PATHS = {
@@ -41,17 +51,70 @@ def registered_paths(
     return {route.path for route in app.routes}
 
 
-def test_scale_out_routes_are_disabled_by_default():
-    paths = registered_paths(("generate",))
+@pytest.mark.parametrize("path", sorted(SCALE_OUT_PATHS))
+@pytest.mark.parametrize("authorized", [False, True])
+def test_disabled_scale_out_routes_explain_opt_in_without_parsing(path, authorized):
+    app = FastAPI()
+    register_scale_out_api_routers(app, ("generate",))
+    app.add_middleware(AuthenticationMiddleware, tokens=["secret"])
+    headers = {"Authorization": "Bearer secret"} if authorized else {}
+    client = TestClient(app)
+    response = client.post(path, content="not JSON", headers=headers)
 
-    assert SCALE_OUT_PATHS.isdisjoint(paths)
+    assert response.status_code == (403 if authorized else 401)
+    if authorized:
+        assert "--enable-scale-out" in response.json()["error"]["message"]
+        assert response.json()["error"]["type"] == "PermissionDeniedError"
+        assert path not in app.openapi()["paths"]
+        assert client.post("/unknown", headers=headers).status_code == 404
 
 
-def test_disabled_scale_out_routes_are_logged(caplog):
+def test_disabled_scale_out_routes_are_logged_at_info(caplog):
     with caplog.at_level("INFO", logger="vllm.entrypoints.scale_out.factories"):
         registered_paths(("generate",))
 
-    assert any("--enable-scale-out" in record.message for record in caplog.records)
+    assert [
+        record.levelno
+        for record in caplog.records
+        if "--enable-scale-out" in record.message
+    ] == [logging.INFO]
+
+
+@pytest.mark.parametrize("dev_mode", ["0", "1"])
+def test_enable_scale_out_defaults_to_server_dev_mode(dev_mode):
+    code = (
+        "from vllm.entrypoints.common.cli_args import make_arg_parser\n"
+        "from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+        "parser = make_arg_parser(FlexibleArgumentParser())\n"
+        "print(parser.parse_args(['model']).enable_scale_out,"
+        " parser.parse_args(['model', '--disable-scale-out']).enable_scale_out)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=os.environ | {"VLLM_SERVER_DEV_MODE": dev_mode},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.split()[-2:] == [str(dev_mode == "1"), "False"]
+
+
+@pytest.mark.parametrize("tokens_only", [False, True])
+def test_enabled_generate_routes_use_native_request_validation(tokens_only):
+    app = FastAPI()
+    app.state.args = Namespace(
+        tokens_only=tokens_only, enable_scale_out=not tokens_only
+    )
+    register_scale_out_api_routers(app, ("generate",))
+    response = TestClient(app).post(
+        GENERATE_PATH,
+        content="not JSON",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "json_invalid"
 
 
 def test_scale_out_routes_can_be_enabled_for_generate_server():

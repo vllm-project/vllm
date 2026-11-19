@@ -8,6 +8,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
@@ -77,7 +78,9 @@ def _create_mamba2_builder(
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
 ) -> Mamba2AttentionMetadataBuilder:
-    vllm_config = create_vllm_config(block_size=MAMBA_BLOCK_SIZE)
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
+    )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     # get_mamba_chunk_size() reads `mamba_chunk_size` then `chunk_size`.
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
@@ -85,16 +88,21 @@ def _create_mamba2_builder(
         block_size=MAMBA_BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
-        num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-        prefill_checkpoint_alignment=prefill_checkpoint_alignment,
     )
-    return Mamba2AttentionMetadataBuilder(
+    register_mamba_layers(
+        vllm_config,
+        ["layer.0"],
+        prefill_checkpoint_alignment if num_prefill_checkpoint_blocks else None,
+    )
+    builder = Mamba2AttentionMetadataBuilder(
         kv_cache_spec=spec,
         layer_names=["layer.0"],
         vllm_config=vllm_config,
         device=DEVICE,
     )
+    vllm_config.cache_config.hash_block_size = MAMBA_BLOCK_SIZE
+    vllm_config.cache_config.cache_hit_alignment_tokens = MAMBA_BLOCK_SIZE
+    return builder
 
 
 def _build(builder, seq_lens, query_lens):

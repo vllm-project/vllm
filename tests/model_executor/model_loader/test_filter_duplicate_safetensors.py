@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.weight_cache.protocol import hash_checkpoint
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
@@ -52,6 +53,27 @@ def test_filter_duplicate_safetensors_files_missing_weight():
             )
 
         assert "model-00003-of-00002.safetensors" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_filter_duplicate_safetensors_files_outside_folder(tmp_path, absolute):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "model.safetensors").touch()
+    other = tmp_path / "other.safetensors"
+    other.touch()
+    weight_map = {"a": "model.safetensors"}
+    weight_map["b"] = str(other) if absolute else "../other.safetensors"
+    (model / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map})
+    )
+
+    with pytest.raises(ValueError, match="other.safetensors"):
+        filter_duplicate_safetensors_files(
+            [str(model / "model.safetensors")],
+            str(model),
+            "model.safetensors.index.json",
+        )
 
 
 def test_filter_duplicate_safetensors_files_all_exist():
@@ -137,3 +159,95 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
         ["model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"],
         sorted(f.name for f in mtp_checkpoint.glob("*.safetensors")),
     ]
+
+
+def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
+    """A source with explicit allow patterns (e.g. a standalone head file in
+    the repo root) must not be validated against the backbone's index."""
+    save_file(
+        {"backbone.weight": torch.zeros(1)},
+        tmp_path / "model-00001-of-00001.safetensors",
+    )
+    save_file({"head.weight": torch.zeros(1)}, tmp_path / "joint_head.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"backbone.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+
+    loader = DefaultModelLoader(LoadConfig())
+    secondary = DefaultModelLoader.Source(
+        model_or_path=str(tmp_path),
+        revision=None,
+        prefix="pooler.head.",
+        allow_patterns_overrides=["joint_head.safetensors"],
+    )
+    assert [n for n, _ in loader._get_weights_iterator(secondary)] == [
+        "pooler.head.head.weight"
+    ]
+    # The primary source still filters files the backbone index doesn't list.
+    primary = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
+    assert [n for n, _ in loader._get_weights_iterator(primary)] == ["backbone.weight"]
+
+
+@pytest.mark.parametrize(
+    ("shard_names", "is_local"),
+    [
+        (
+            [
+                "tensors/model-00001-of-00002.safetensors",
+                "tensors/model-00002-of-00002.safetensors",
+            ],
+            False,
+        ),
+        (
+            [
+                "model-00001-of-00003.safetensors",
+                "model-00002-of-00003.safetensors",
+                "tensors/model-00003-of-00003.safetensors",
+            ],
+            False,
+        ),
+        (["pytorch_model.bin"], False),
+        (["tensors/model-00001-of-00001.safetensors"], True),
+    ],
+)
+def test_finds_shards_listed_by_the_index(tmp_path, monkeypatch, shard_names, is_local):
+    """Shards under tensors/, alone or next to root shards, are found through
+    the index, also by the IPC weight cache key. A Hub snapshot without the
+    index fetches it once, and never for a .bin-only snapshot; a local
+    directory already has it."""
+    shards = [tmp_path / name for name in shard_names]
+    for i, shard in enumerate(shards):
+        shard.parent.mkdir(exist_ok=True)
+        save_file({f"w{i}": torch.zeros(1)}, shard)
+    fetched = []
+
+    def fetch_index(model, index_file, **kwargs):
+        fetched.append(index_file)
+        weight_map = {f"w{i}": name for i, name in enumerate(shard_names)}
+        (tmp_path / index_file).write_text(json.dumps({"weight_map": weight_map}))
+
+    loader_module = "vllm.model_executor.model_loader.default_loader"
+    monkeypatch.setattr(
+        f"{loader_module}.download_weights_from_hf", lambda *a, **k: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        f"{loader_module}.download_safetensors_index_file_from_hf", fetch_index
+    )
+    model = "org/model"
+    if is_local:
+        fetch_index(model, "model.safetensors.index.json")
+        fetched.clear()
+        model = str(tmp_path)
+
+    _, files, use_safetensors, _ = DefaultModelLoader(
+        LoadConfig(load_format="hf")
+    )._prepare_weights(
+        model, None, None, fall_back_to_pt=False, allow_patterns_overrides=None
+    )
+
+    assert sorted(files) == sorted(map(str, shards))
+    assert use_safetensors == shard_names[0].endswith(".safetensors")
+    assert len(fetched) == (use_safetensors and not is_local)
+    assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors

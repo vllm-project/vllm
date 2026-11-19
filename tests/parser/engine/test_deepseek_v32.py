@@ -3,8 +3,8 @@
 """Tests for DeepSeek V3.2 parser engine semantics.
 
 V3.2 uses the same DSML parameter format as V4 but wraps tool calls in
-``<｜DSML｜function_calls>`` instead of ``<｜DSML｜tool_calls>`` and has
-no reasoning (``<think>``/``</think>``) support.
+`<｜DSML｜function_calls>` instead of `<｜DSML｜tool_calls>` and has
+no reasoning (`<think>`/`</think>`) support.
 """
 
 import json
@@ -288,7 +288,7 @@ class TestStreaming:
 
 
 class TestMissingFunctionCallsWrapper:
-    """An invoke without the ``<｜DSML｜function_calls>`` wrapper is still a
+    """An invoke without the `<｜DSML｜function_calls>` wrapper is still a
     tool call (V3.2 counterpart of #48931)."""
 
     def test_non_streaming(self, mock_tokenizer, mock_request):

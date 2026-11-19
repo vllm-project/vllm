@@ -27,10 +27,11 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
-- `vllm:prefix_cache_sparse_retention_misses` (Counter) - Shared-prefix tokens matched by some KV cache group but not reused, because a sparse-retention group (Mamba / sliding window) held no checkpoint there.
+- `vllm:prefix_cache_sparse_retention_misses` (Counter) - Shared-prefix tokens another KV cache group matched but that were not reused because a Mamba / sliding-window group held no state there (sparse retention or eviction). Counts whole blocks of the local lookup for new requests, so tokens a KV connector then loads are still counted, and connectors that reconcile per-group hits themselves (e.g. NIXL) report 0.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
+- `vllm:admission_rejections_total` (Counter) - Admission attempts rejected by a queue limit, by reason.
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
@@ -597,7 +598,7 @@ A common use case for our metrics is to support automated scaling of
 vLLM instances.
 
 For related discussion from the
-[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/master/wg-serving),
+[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/main/archive/wg-serving),
 see:
 
 - [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)

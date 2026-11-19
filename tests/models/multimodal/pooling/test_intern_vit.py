@@ -49,14 +49,14 @@ def run_intern_vit_test(
         _orig_init(self, *args, **kwargs)
         self.all_tied_weights_keys = {}
 
-    PreTrainedModel.__init__ = _patched_init
+    PreTrainedModel.__init__ = _patched_init  # type: ignore[method-assign]
 
     try:
         hf_model = AutoModel.from_pretrained(
             model, dtype=torch_dtype, trust_remote_code=True
         ).to(DEVICE_TYPE)
     finally:
-        PreTrainedModel.__init__ = _orig_init
+        PreTrainedModel.__init__ = _orig_init  # type: ignore[method-assign]
     hf_outputs_per_image = [
         hf_model(pixel_value.to(DEVICE_TYPE)).last_hidden_state
         for pixel_value in pixel_values
