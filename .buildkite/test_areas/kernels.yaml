@@ -865,6 +865,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/kernels/linear/mxfp8/flashinfer.py
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
@@ -901,6 +902,8 @@ steps:
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
+  - tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/layers/quantization/compressed_tensors/transform/
@@ -921,6 +924,8 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
