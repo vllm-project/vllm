@@ -156,8 +156,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "b_q, "
       "Tensor b_scales, Tensor topk_weights, Tensor sorted_token_ids, "
       "Tensor expert_ids, Tensor num_tokens_post_padded, int top_k, "
-      "int block_size_m, bool mul_topk_weight, Tensor? bias) -> ()");
+      "int block_size_m, bool mul_topk_weight, Tensor? bias, Tensor? "
+      "b_base=None) -> ()");
   rocm_ops.impl("moe_mxfp4_gemm_rdna4", torch::kCUDA, &moe_mxfp4_gemm_rdna4);
+  rocm_ops.def("mxfp4_moe_fold_base_rdna4(Tensor b_scales) -> Tensor");
+  rocm_ops.impl("mxfp4_moe_fold_base_rdna4", torch::kCUDA,
+                &mxfp4_moe_fold_base_rdna4);
 #endif
 
 #ifdef VLLM_ROCM_GFX115X

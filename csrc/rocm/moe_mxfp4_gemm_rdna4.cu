@@ -75,6 +75,7 @@ struct MoeArgs {
   int top_k;
   int N, K;
   size_t w_stride, s_stride;  // per-expert strides (elements)
+  const uint8_t* b_base;      // [E][N] per-column E5M2 fold base (hybrid)
 };
 
 #if defined(__HIP__MXFP4_RDNA4__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -82,6 +83,8 @@ using v8f32 = float __attribute__((ext_vector_type(8)));
 using v2i32 = int __attribute__((ext_vector_type(2)));
 using v4i32 = int __attribute__((ext_vector_type(4)));
 using mxfp4_rdna4::dequant_mxfp4_8_e4m3;
+using mxfp4_rdna4::dequant_mxfp4_8_e5m2;
+using mxfp4_rdna4::mxfp4_e5m2_tables;
 using mxfp4_rdna4::mxfp4_e8m0_to_f32;
 
 __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
@@ -340,11 +343,209 @@ __global__ void __launch_bounds__(32 * KW)
     }
   }
 }
+// ---------------------------------------------------------------------------
+// block_size_m == 256: PREFILL "hybrid" kernel (after FlyDSL's RDNA4 hybrid
+// strategy). One workgroup = one 256-slot token block x BN columns (BN = 64
+// or 128) of its expert; 8 waves, wave w owns rows [32w, 32w+32) (2 row
+// tiles) x all BN/16 column tiles. Per K-stage (4 E8M0 groups = 128 K) the
+// expert's B fragments are loaded once (one or two 16-byte fragments per
+// thread, nontemporal), decoded ONCE to E5M2 with the E8M0 scale folded into
+// the perm table (shift = e8m0 - base[n], base = column max - 13 keeps every
+// shift in E5M2's normal range; 2^(base-127) is applied in the epilogue),
+// written to a ping-pong LDS arena laid out [group][K-half][col][16 B]
+// (conflict-free for both the decode stores and the ds_load_b128 fragment
+// reads) and shared by the 8 M-waves: 2*BN WMMAs per wave per barrier,
+// 8/BN v_perm per WMMA. A rows are gathered through sorted_token_ids straight
+// into registers one group ahead. No load is predicated: out-of-range
+// columns/rows are clamped to valid addresses and discarded at the store, so
+// every load stays in flight (no execz regions).
+// grid = (token blocks, ceil(N/BN)), block = 256.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ v8f32 wmma_fp8_bf8(v2i32 a, v2i32 b, v8f32 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_fp8_bf8_w32_gfx12(a, b, c);
+}
+
+template <typename T, int BN>
+__global__ void __launch_bounds__(256)
+    moe_hybrid_kernel(MoeArgs ar, T* __restrict__ c,
+                      const T* __restrict__ bias) {
+  constexpr int BM = 256, GS = 4,
+                CT = BN / 16;           // rows, groups/stage, col tiles
+  constexpr int BFT = (BN * GS) / 256;  // B fragments per thread/stage
+  constexpr int DG = 256 / BN;          // groups covered per fragment pass
+  const int blk = blockIdx.x;
+  if (blk * BM >= ar.num_tokens_post_padded[0]) return;
+  const int e = ar.expert_ids[blk];
+  const int tid = threadIdx.x;
+  const int wave = tid >> 5;
+  const int lane = tid & 31;
+  const int lo = lane & 15;
+  const int hi = lane >> 4;
+  const int K = ar.K, N = ar.N;
+  const int G = K / kGroup;
+  const int n0 = blockIdx.y * BN;
+  const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
+  const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
+  const uint8_t* bb = ar.b_base + (size_t)e * N;
+
+  // Decode duty: thread -> column dc, groups dg0 + f*DG (f < BFT).
+  const int dc = tid & (BN - 1);
+  const int dg0 = tid / BN;
+  const int dcol = min(n0 + dc, N - 1);
+  const int dbase = bb[dcol];
+
+  int a_row[2];
+  #pragma unroll
+  for (int t = 0; t < 2; t++) {
+    const int s = ar.sorted_token_ids[blk * BM + 32 * wave + 16 * t + lo];
+    a_row[t] = (s < ar.total_slots) ? s / ar.top_k : 0;  // clamp, mask at store
+  }
+  const uint8_t* a_ptr[2] = {ar.aq + (size_t)a_row[0] * K + 16 * hi,
+                             ar.aq + (size_t)a_row[1] * K + 16 * hi};
+
+  __shared__ __align__(16) uint8_t lds[2][GS][2][BN][16];
+
+  uint4 nb[BFT];
+  uint32_t nsc[BFT];
+  auto load_b_stage = [&](int st) {
+  #pragma unroll
+    for (int f = 0; f < BFT; f++) {
+      const int g = min(st * GS + dg0 + f * DG, G - 1);
+      const auto* p =
+          reinterpret_cast<const v4i32*>(bq + ((size_t)g * N + dcol) * 4);
+      const v4i32 v = __builtin_nontemporal_load(p);
+      nb[f] =
+          uint4{(uint32_t)v[0], (uint32_t)v[1], (uint32_t)v[2], (uint32_t)v[3]};
+      nsc[f] = bs[(size_t)g * N + dcol];
+    }
+  };
+  auto decode_stage = [&](int buf) {
+  #pragma unroll
+    for (int f = 0; f < BFT; f++) {
+      uint32_t tl, th;
+      mxfp4_e5m2_tables((int)nsc[f] - dbase, tl, th);
+      uint32_t w[4] = {nb[f].x, nb[f].y, nb[f].z, nb[f].w};
+      uint32_t d[8];
+  #pragma unroll
+      for (int o = 0; o < 4; o++)
+        dequant_mxfp4_8_e5m2(w[o], tl, th, d[2 * o], d[2 * o + 1]);
+      const int dg = dg0 + f * DG;
+      *reinterpret_cast<uint4*>(&lds[buf][dg][0][dc][0]) =
+          uint4{d[0], d[1], d[2], d[3]};
+      *reinterpret_cast<uint4*>(&lds[buf][dg][1][dc][0]) =
+          uint4{d[4], d[5], d[6], d[7]};
+    }
+  };
+  // A ring: 8 groups (two K-stages) in flight per row tile, refilled in place
+  // right after use so no copy ever forces an early s_wait_loadcnt. Static
+  // slot indices come from unrolling two stages per loop iteration.
+  constexpr int AR = 2 * GS;
+  uint4 a_r[AR][2];
+  auto load_a = [&](int g, int slot) {
+    const int gg = min(g, G - 1);
+  #pragma unroll
+    for (int t = 0; t < 2; t++)
+      __builtin_memcpy(&a_r[slot][t], a_ptr[t] + gg * kGroup, 16);
+  };
+
+  v8f32 acc[2][CT];
+  #pragma unroll
+  for (int t = 0; t < 2; t++)
+  #pragma unroll
+    for (int ct = 0; ct < CT; ct++) acc[t][ct] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  const int nstages = (G + GS - 1) / GS;
+  load_b_stage(0);
+  #pragma unroll
+  for (int q = 0; q < AR; q++) load_a(q, q);
+  decode_stage(0);
+  __syncthreads();
+
+  for (int st0 = 0; st0 < nstages; st0 += 2) {
+  #pragma unroll
+    for (int h = 0; h < 2; h++) {
+      const int st = st0 + h;
+      if (st >= nstages) break;
+      const int buf = st & 1;
+      const bool has_next = st + 1 < nstages;
+      if (has_next) load_b_stage(st + 1);
+      // B-fragment lookahead: group gi+1's LDS reads are issued before group
+      // gi's WMMAs (static double buffer, gi unrolled). Group 0 of a stage is
+      // read right after the barrier.
+      uint4 bwr[2][CT];
+  #pragma unroll
+      for (int ct = 0; ct < CT; ct++)
+        bwr[0][ct] =
+            *reinterpret_cast<const uint4*>(&lds[buf][0][hi][16 * ct + lo][0]);
+  #pragma unroll
+      for (int gi = 0; gi < GS; gi++) {
+        const int g = st * GS + gi;
+        if (g >= G) break;
+        if (gi + 1 < GS) {
+  #pragma unroll
+          for (int ct = 0; ct < CT; ct++)
+            bwr[(gi + 1) & 1][ct] = *reinterpret_cast<const uint4*>(
+                &lds[buf][gi + 1][hi][16 * ct + lo][0]);
+        }
+        const int slot = h * GS + gi;
+        v2i32 af0[2], af1[2];
+  #pragma unroll
+        for (int t = 0; t < 2; t++) {
+          af0[t][0] = (int)a_r[slot][t].x;
+          af0[t][1] = (int)a_r[slot][t].y;
+          af1[t][0] = (int)a_r[slot][t].z;
+          af1[t][1] = (int)a_r[slot][t].w;
+        }
+  #pragma unroll
+        for (int ct = 0; ct < CT; ct++) {
+          const uint4 bw = bwr[gi & 1][ct];
+          v2i32 bf0, bf1;
+          bf0[0] = (int)bw.x;
+          bf0[1] = (int)bw.y;
+          bf1[0] = (int)bw.z;
+          bf1[1] = (int)bw.w;
+  #pragma unroll
+          for (int t = 0; t < 2; t++) {
+            acc[t][ct] = wmma_fp8_bf8(af0[t], bf0, acc[t][ct]);
+            acc[t][ct] = wmma_fp8_bf8(af1[t], bf1, acc[t][ct]);
+          }
+        }
+        load_a(g + AR, slot);  // registers of this slot are dead now: refill
+      }
+      if (has_next) decode_stage(buf ^ 1);
+      __syncthreads();
+    }
+  }
+
+  // Epilogue: lane -> col 16*ct + lo, slot i -> row 8*hi + i of each row tile.
+  #pragma unroll
+  for (int ct = 0; ct < CT; ct++) {
+    const int n = n0 + 16 * ct + lo;
+    if (n >= N) continue;
+    const float bsc = __uint_as_float((uint32_t)bb[n] << 23);  // 2^(base-127)
+    const float bv = bias ? to_f<T>(bias[(size_t)e * N + n]) : 0.0f;
+  #pragma unroll
+    for (int t = 0; t < 2; t++) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int r = 32 * wave + 16 * t + 8 * hi + i;
+        const int s = ar.sorted_token_ids[blk * BM + r];
+        if (s >= ar.total_slots) continue;
+        float v = acc[t][ct][i] * bsc * ar.ascale[s / ar.top_k];
+        if (ar.topk_w) v *= ar.topk_w[s];
+        c[(size_t)s * N + n] = from_f<T>(v + bv);
+      }
+    }
+  }
+}
+
 #else
 template <typename T, int KW, int PF>
 __global__ void moe_swmmac_kernel(MoeArgs, T*, const T*) {}
 template <typename T, int MT, int KW, int PF>
 __global__ void moe_wmma_kernel(MoeArgs, T*, const T*) {}
+template <typename T, int BN>
+__global__ void moe_hybrid_kernel(MoeArgs, T*, const T*) {}
 #endif
 
 // KW (waves per block, K split): start high for latency hiding and back off
@@ -393,7 +594,19 @@ void launch(const MoeArgs& ar, T* c, const T* bias, int block_size_m,
     else               \
       L_WM(MT_, 8);    \
   } while (0)
-  if (block_size_m == 8) {
+  if (block_size_m == 256) {
+    // VLLM_MXFP4_RDNA4_MOE_BN = 64 | 128 (default 64) selects the hybrid
+    // N-tile.
+    static const int bn = [] {
+      const char* e = std::getenv("VLLM_MXFP4_RDNA4_MOE_BN");
+      return (e && atoi(e) == 128) ? 128 : 64;
+    }();
+    const dim3 g2((unsigned)num_token_blocks, (unsigned)((ar.N + bn - 1) / bn));
+    if (bn == 64)
+      moe_hybrid_kernel<T, 64><<<g2, 256, 0, st>>>(ar, c, bias);
+    else
+      moe_hybrid_kernel<T, 128><<<g2, 256, 0, st>>>(ar, c, bias);
+  } else if (block_size_m == 8) {
     const int kw = moe_kw(blocks, 8);
     SW_KW(kw);
   } else if (block_size_m == 16) {
@@ -425,6 +638,23 @@ torch::Tensor mxfp4_moe_repack_rdna4(torch::Tensor const& b_q) {
   return b_q.contiguous().view({E, G, 4, N}).permute({0, 1, 3, 2}).contiguous();
 }
 
+// Per-column E5M2 fold base for the hybrid kernel: base = max_g(e8m0) - 13,
+// clamped to >= 1, as uint8 [E, N] from scales [E, K/32, N].
+torch::Tensor mxfp4_moe_fold_base_rdna4(torch::Tensor const& b_scales) {
+  TORCH_CHECK(b_scales.dim() == 3 && b_scales.scalar_type() == at::kByte,
+              "mxfp4_moe_fold_base_rdna4: expected uint8 [E, K/32, N]");
+  const auto si = b_scales.to(at::kInt);
+  const auto base = (si.amax(1) - 13).clamp_min(1);
+  // Lossless iff every group scale is within [base-13, base+13] (the shifted
+  // E2M1 magnitudes 0.5..6 stay E5M2 normals). Measured spans: <= 10 (dense
+  // Qwen3.8-27B), <= 8 (gpt-oss-120b experts), so this never fires on real
+  // checkpoints; callers that hit it must use block_size_m <= 64.
+  TORCH_CHECK((si.amin(1) - base >= -13).all().item<bool>(),
+              "mxfp4_moe_fold_base_rdna4: an E8M0 column span exceeds the "
+              "E5M2 fold range; use block_size_m <= 64 for this weight");
+  return base.to(at::kByte).contiguous();
+}
+
 void moe_mxfp4_gemm_rdna4(
     torch::Tensor const& a_fp8, torch::Tensor const& a_scale, torch::Tensor& c,
     torch::Tensor const& b_q, torch::Tensor const& b_scales,
@@ -432,7 +662,8 @@ void moe_mxfp4_gemm_rdna4(
     torch::Tensor const& expert_ids,
     torch::Tensor const& num_tokens_post_padded, int64_t top_k,
     int64_t block_size_m, bool mul_topk_weight,
-    const std::optional<torch::Tensor>& bias) {
+    const std::optional<torch::Tensor>& bias,
+    const std::optional<torch::Tensor>& b_base) {
   using namespace vllm::moe_mxfp4_rdna4;
   TORCH_CHECK(a_fp8.is_cuda() && a_fp8.dim() == 2 &&
                   a_fp8.scalar_type() == at::kByte && a_fp8.is_contiguous(),
@@ -455,8 +686,8 @@ void moe_mxfp4_gemm_rdna4(
               "K/32 mismatch between a_fp8, b_q and b_scales");
   TORCH_CHECK(c.size(1) == N, "c must have N columns");
   TORCH_CHECK(block_size_m == 8 || block_size_m == 16 || block_size_m == 32 ||
-                  block_size_m == 64,
-              "block_size_m must be 8, 16, 32 or 64");
+                  block_size_m == 64 || block_size_m == 256,
+              "block_size_m must be 8, 16, 32, 64 or 256");
   TORCH_CHECK(top_k >= 1, "top_k must be >= 1");
   TORCH_CHECK(sorted_token_ids.scalar_type() == at::kInt &&
                   expert_ids.scalar_type() == at::kInt &&
@@ -492,6 +723,23 @@ void moe_mxfp4_gemm_rdna4(
   ar.top_k = (int)top_k;
   ar.N = N;
   ar.K = K;
+  // Hybrid (block_size_m 256) folds the E8M0 scale into E5M2 weights around a
+  // per-column base = max - 13 (mxfp4_moe_fold_base_rdna4). Fold is lossless
+  // while every group scale is within [base-13, base+13]; if a checkpoint ever
+  // violates that (none measured do), fall back to the E4M3 64-row kernel.
+  torch::Tensor base_t;
+  if (block_size_m == 256) {
+    // A supplied b_base is trusted (validated once by mxfp4_moe_fold_base_rdna4
+    // at weight load); computing it here per call costs two reductions.
+    base_t = b_base ? *b_base : mxfp4_moe_fold_base_rdna4(b_scales);
+    TORCH_CHECK(base_t.dim() == 2 && base_t.size(0) == b_q.size(0) &&
+                    base_t.size(1) == N && base_t.is_contiguous() &&
+                    base_t.scalar_type() == at::kByte,
+                "b_base must be contiguous uint8 [E, N]");
+    ar.b_base = reinterpret_cast<const uint8_t*>(base_t.data_ptr());
+  } else {
+    ar.b_base = nullptr;
+  }
   ar.w_stride = (size_t)b_q.size(1) * N * 4;
   ar.s_stride = (size_t)b_scales.size(1) * N;
   if (num_token_blocks == 0) return;
