@@ -195,13 +195,16 @@ class EngramConfig:
 
             if (
                 not current_platform.is_cuda()
+                # Pool rows are dequantized from FP8 (e4m3), which Triton
+                # supports from SM89 on.
+                or not current_platform.has_device_capability(89)
                 or parallel_config.tensor_parallel_size > 1
                 # Every GPU of the group must build the same tables.
                 or parallel_config.pipeline_parallel_size > 1
                 or parallel_config.enable_elastic_ep
             ):
                 raise ValueError(
-                    "peer_group_size requires CUDA, TP=1, PP=1 and no elastic EP"
+                    "peer_group_size requires CUDA SM89+, TP=1, PP=1 and no elastic EP"
                 )
             if self.peer_group_size < parallel_config.data_parallel_size:
                 raise ValueError(
