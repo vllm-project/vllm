@@ -7,8 +7,9 @@ v0.5.7.post1, plus the LMCache fixes that release needs to run on this vLLM:
 
 - LMCache/LMCache#6457: `CachedRequestData.resumed_req_ids` is gone.
 - LMCache/LMCache#6487: declare `kv_cache_access`.
-- LMCache/LMCache#6608: read `KVCacheGroup` instead of `KVCacheGroupSpec`
-  (see `lmcache_mp_kv_cache_groups` and `lmcache_mp_kv_cache_group_edits`).
+- LMCache/LMCache#6608: read `KVCacheGroup` instead of `KVCacheGroupSpec`.
+  Only the group helpers below are carried here; recurrent-state (Mamba)
+  groups need the package's KV cache edits and are rejected.
 
 `LMCacheMPConnector` at the bottom of this module prefers the connector the
 installed `lmcache` package ships and falls back to this one.
@@ -25,6 +26,7 @@ import torch
 import zmq
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.kv_cache_groups import cb_aux_pool_entries
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -49,11 +51,20 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     ParallelStrategy,
 )
-from lmcache.utils import CacheRemoveEvent
+from lmcache.utils import CacheRemoveEvent, EngineType
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
+    normalize_and_discover_per_layer_formats,
+)
+from lmcache.v1.kv_layer_groups import (
+    EXCLUDED_ENGINE_GROUP,
+    group_layers_by_identity,
+)
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord as RequestAllocationRecord,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
@@ -71,20 +82,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_kv_cache_group_edits import (  # noqa: E501
-    apply_kv_cache_group_edits,
-    validate_kv_cache_groups,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_kv_cache_groups import (
-    create_engine_group_infos_from_vllm,
-    group_prefix_replay_tokens,
-    group_specs,
-    is_scratch_group,
-    tokens_per_group_block,
-)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SlidingWindowManager,
+    get_kv_cache_kind,
+)
+from vllm.v1.kv_cache_interface import KVCacheSpecKind
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -156,6 +161,119 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         self._aggregator.clear_events()
         self._aggregator.reset_workers()
         self._batches.clear()
+
+
+# KV cache group helpers. The lmcache 0.5.7.post1 package reads the group
+# layout from before #61452, so the builtin carries the subset it needs.
+def group_specs(group: Any) -> list[Any]:
+    return list(group.distinct_specs)
+
+
+def is_scratch_group(group: Any) -> bool:
+    """Whether vLLM never prefix-caches the group, so it covers no tokens."""
+    return not group.prefix_cacheable
+
+
+def tokens_per_group_block(group: Any, dcp_size: int) -> int:
+    """Global tokens one block id of the group covers; 0 for scratch groups."""
+    if is_scratch_group(group):
+        return 0
+    return group.block_size * (dcp_size if group.dcp_sharded else 1)
+
+
+def group_prefix_replay_tokens(group: Any) -> int:
+    return int(group.prefix_replay_tokens or 0)
+
+
+def validate_kv_cache_groups(kv_cache_config: "KVCacheConfig | None") -> None:
+    """Reject the cross-attention and recurrent-state groups of a model, which
+    the builtin connector cannot transfer."""
+    if kv_cache_config is None:
+        return
+    unsupported = [
+        f"group {idx}: {kind.value}"
+        for idx, group in enumerate(kv_cache_config.kv_cache_groups)
+        if (kind := get_kv_cache_kind(group.manager_config, group.distinct_specs))
+        in (KVCacheSpecKind.CROSS_ATTENTION, KVCacheSpecKind.MAMBA)
+    ]
+    if unsupported:
+        raise ValueError(
+            "The builtin LMCacheMPConnector cannot serve this model's KV cache "
+            f"groups: {'; '.join(unsupported)}. Recurrent-state groups need an "
+            "lmcache release that includes LMCache/LMCache#6608."
+        )
+
+
+def create_engine_group_infos(
+    kv_cache_config: "KVCacheConfig | None",
+    kv_caches: dict[str, torch.Tensor],
+    layout_hints: LayoutHints,
+    dcp_size: int,
+) -> list[EngineGroupInfo]:
+    """Build LMCache's engine group infos for the registered KV tensors, in the
+    group order of the store and retrieve block ids."""
+    layer_to_idx = {name: idx for idx, name in enumerate(kv_caches)}
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else []
+    # CacheBlend aux page pools are connector-owned and form their own groups.
+    aux_entries = cb_aux_pool_entries(kv_caches)
+    normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
+        list(kv_caches.values()),
+        [
+            [layer_to_idx[name] for name in group.layer_names]
+            for group in groups
+            if not is_scratch_group(group)
+        ]
+        + [[layer_to_idx[name]] for name, _ in aux_entries],
+        EngineType.VLLM,
+        layout_hints,
+    )
+    num_layers = len(engine_kv_formats)
+    # Layers of no group alias another layer's KV (cross-layer KV sharing);
+    # they and scratch groups' layers form no LMCache group.
+    layer_group_idx: list[int] | None = None
+    group_tokens_per_block: dict[int, int] = {}
+    group_sw_size: dict[int, int] = {}
+    if groups:
+        layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
+        for group_id, group in enumerate(groups):
+            group_tokens_per_block[group_id] = tokens_per_group_block(group, dcp_size)
+            if group_tokens_per_block[group_id] == 0:
+                continue
+            params = group.manager_config.params
+            if isinstance(params, SlidingWindowManager.Params):
+                group_sw_size[group_id] = params.sliding_window
+            for name in group.layer_names:
+                layer_group_idx[layer_to_idx[name]] = group_id
+
+    aux_group_tags: dict[int, int] = {}
+    if aux_entries:
+        if layer_group_idx is None:
+            layer_group_idx = [0] * num_layers
+        next_group_id = len(groups) or 1
+        group_by_tokens_per_block: dict[int, int] = {}
+        for name, tokens_per_block in aux_entries:
+            group_id = group_by_tokens_per_block.get(tokens_per_block, -1)
+            if group_id < 0:
+                group_id = next_group_id
+                next_group_id += 1
+                group_by_tokens_per_block[tokens_per_block] = group_id
+                group_tokens_per_block[group_id] = tokens_per_block
+                aux_group_tags[group_id] = len(group_by_tokens_per_block)
+            layer_group_idx[layer_to_idx[name]] = group_id
+
+    return [
+        EngineGroupInfo(
+            engine_group_id=identity.engine_group_idx,
+            layer_indices=tuple(indices),
+            tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
+            sw_size_tokens=group_sw_size.get(identity.engine_group_idx, -1),
+            extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
+            recurrent_state=False,
+        )
+        for identity, indices in group_layers_by_identity(
+            normalized_kv_caches, engine_kv_formats, layer_group_idx
+        )
+    ]
 
 
 # Helper functions
@@ -879,17 +997,9 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        # Must precede both group-info creation and transfer registration so
-        # they see the same edited views.
         layout_hints = vllm_layout_hints(self._vllm_config)
-        kv_caches = apply_kv_cache_group_edits(
-            kv_cache_config, kv_caches, layout_hints=layout_hints
-        )
-        engine_group_infos = create_engine_group_infos_from_vllm(
-            kv_cache_config,
-            kv_caches,
-            layout_hints=layout_hints,
-            dcp_size=self._dcp_size,
+        engine_group_infos = create_engine_group_infos(
+            kv_cache_config, kv_caches, layout_hints, self._dcp_size
         )
         self.worker_adapter.register_kv_caches(
             kv_caches,
