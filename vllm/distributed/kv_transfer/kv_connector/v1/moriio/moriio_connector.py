@@ -82,6 +82,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_head_layout,
     get_layer_transfer_geometry,
     get_mamba_state_layout,
+    get_nvfp4_page_split,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
@@ -1040,8 +1041,11 @@ class MoRIIOConnectorScheduler:
         if dp_local > 0 and pod_idx < len(hosts):
             remote_host = hosts[pod_idx]
         local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
+        peer_tp_size = get_moriio_peer_tp_size(params, self.tp_size)
+        for tp_index in range(peer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                local_dp_rank, tp_index, peer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1358,9 +1362,10 @@ class MoRIIOConnectorScheduler:
                             _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                    peer_tp_size = get_moriio_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(peer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, peer_tp_size
                         )
 
                         self.send_notify_block(
@@ -3643,12 +3648,18 @@ class MoRIIOConnectorWorker:
         self, remote_tp_size: int | None, layer_name: str | None = None
     ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
+        # An MLA-style cache in a non-MLA model (e.g. MiniMax-M3's indexer
+        # keys) has no KV heads: it is identical on every TP rank, so it is
+        # copied whole like an MLA latent rather than sliced by head.
+        is_mla = self.use_mla or (
+            layer_name is not None and self._is_mla_cache_layer(layer_name)
+        )
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
-            self.use_mla,
+            1 if is_mla else self._layer_total_num_kv_heads(layer_name),
+            is_mla,
             self._has_mamba,
         )
 
@@ -3939,6 +3950,8 @@ class MoRIIOConnectorWorker:
             merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
                 local, remote, sizes, assume_sorted=False
             ),
+            # A packed NVFP4 page's head slots are not per-head rows.
+            nvfp4_split=get_nvfp4_page_split(self.layer_to_spec.get(layer_name)),
         )
         return self._apply_layer_mr_offsets(
             layer_name, offsets, remote_moriio_meta, remote_engine_id

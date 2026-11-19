@@ -12,6 +12,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [LiLiCorr](lilicorr.md)
 - [DSpine](#dspine)
 - [Multi-Token Prediction (MTP)](mtp.md)
+- [DFly](dfly.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
@@ -128,6 +129,14 @@ The speculator reads its options from
 `speculative_config.custom_method` is the registered name (`"my_spec"`), and
 `speculative_config.method` is the built-in method its config is based on
 (`"eagle3"`), so vLLM treats it like that built-in speculator.
+
+A speculator that keeps per-request state can override `BaseSpeculator`'s
+no-op request hooks, `add_request` and `on_requests_finished`, and `shutdown`.
+An override of `shutdown` must call `super().shutdown()`, which releases the
+draft model.
+A preempted request's slot is freed without a hook, and the request is added
+again when it resumes, so keep such state per slot and reset it in
+`add_request`.
 
 ## `--speculative-config` schema
 

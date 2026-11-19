@@ -49,7 +49,7 @@ MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8"
 # (XPUPlatform.update_block_size_for_backend), so use one.
 BLOCK_SIZE = 576
 # The step actions also encode the split at the prompt's last block boundary,
-# which a GDN prefill backend with internal checkpoints (FlashInfer) skips; see
+# which a GDN prefill backend with internal checkpoints skips; see
 # get_internal_checkpoint_step_configs.
 GDN_PREFILL_CONFIG = {"gdn_prefill_backend": "triton"}
 DEVICE_TYPE = current_platform.device_type
@@ -151,7 +151,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -173,7 +173,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -192,11 +192,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 3, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 3, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_1": TestConfig(
@@ -213,11 +213,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_2": TestConfig(
@@ -232,7 +232,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -249,11 +249,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 4, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 4, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_1": TestConfig(
@@ -267,11 +267,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_2": TestConfig(
@@ -285,11 +285,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 6, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 6, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_3": TestConfig(
@@ -303,11 +303,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 7, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 7, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_4": TestConfig(
@@ -321,7 +321,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 4,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -470,9 +470,10 @@ def get_mamba_prefix_cache_step_configs(
     return tests
 
 
-def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
-    """Async-scheduling steps when the GDN prefill exports the checkpoint at
-    the prompt's last block boundary itself, so the final chunk runs whole.
+def get_internal_checkpoint_step_configs(
+    async_scheduling: bool,
+) -> dict[str, TestConfig]:
+    """The GDN prefill exports its checkpoint, so the final chunk runs whole.
 
     The checkpoint goes in the second-to-last block the chunk reaches, keyed to
     the boundary: column 1 holds the state at 2B for a 2B + 10 prompt.
@@ -485,7 +486,13 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, B * 2, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B * 2, 4, [1, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+                StepAction(
+                    B * 2,
+                    4,
+                    [1, 1, 1, 1, 1, 1] if async_scheduling else [0, 1, 1, 1, 1, 1],
+                    (1, 2),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_2_block_size_10": TestConfig(
@@ -494,7 +501,13 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, B * 2 + 10, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B * 2 + 10, 4, [0, 1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 2 + 10,
+                    4,
+                    [0, 1, 1, 1, 1, 1] if async_scheduling else [0, 0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_10_block_size": TestConfig(
@@ -513,7 +526,9 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
                 StepAction(
                     B * 10,
                     4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    if async_scheduling
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
                     (-1, -1),
                 ),
@@ -542,7 +557,10 @@ def _run_mamba_prefix_cache_mrv2(
     async_scheduling: bool,
     additional_config: dict[str, Any] = GDN_PREFILL_CONFIG,
 ):
-    internal_checkpoints = additional_config["gdn_prefill_backend"] == "flashinfer"
+    backend = additional_config["gdn_prefill_backend"]
+    internal_checkpoints = backend == "flashinfer" or (
+        backend == "triton" and current_platform.is_cuda_alike()
+    )
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -775,7 +793,7 @@ def _run_mamba_prefix_cache_mrv2(
 
     try:
         tests = (
-            get_internal_checkpoint_step_configs()
+            get_internal_checkpoint_step_configs(async_scheduling)
             if internal_checkpoints
             else get_mamba_prefix_cache_step_configs(async_scheduling)
         )
