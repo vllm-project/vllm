@@ -2647,6 +2647,47 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
 }
 
 #[tokio::test]
+async fn render_completion_returns_one_generate_request_per_prompt() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "prompt": ["ab", "cde"],
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    // Like Python, the prompt index is appended to the request ID of a batch.
+    let requests = json.as_array().expect("generate requests");
+    let requests = requests
+        .iter()
+        .map(|request| (&request["request_id"], &request["token_ids"]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests,
+        [
+            (&json!("cmpl-body-req-0"), &json!([256, 97, 98])),
+            (&json!("cmpl-body-req-1"), &json!([256, 99, 100, 101])),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn render_list_models_reports_configured_max_model_len() {
     for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
         let mut app = test_render_app_with_max_model_len(configured);
@@ -13915,10 +13956,11 @@ async fn log_outputs_disabled_logs_nothing() {
     assert_eq!(logs, "");
 }
 
-/// Serve the OpenAI routes against a mock engine that expects the child
-/// requests of one parallel-sampling request, one per entry of `outputs`, and
-/// finishes child `i` with `outputs[i]`. The receiver yields the child
-/// requests the engine received, in arrival order.
+/// Serve the OpenAI routes against a mock engine that expects the engine
+/// requests of one request's choices, one per entry of `outputs`, and
+/// finishes choice `i` with `outputs[i]`, counting choices by prompt (external
+/// request ID), then by sample. The receiver yields the engine requests the
+/// engine received, in arrival order.
 async fn test_app_with_parallel_samples(
     outputs: Vec<Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>>,
 ) -> (
@@ -13941,12 +13983,12 @@ async fn test_app_with_parallel_samples(
                         rmp_serde::from_slice(&add[1]).expect("decode request");
                     requests.push(request);
                 }
-                for request in &requests {
-                    let (index, _) = request.request_id.split_once('_').expect("child request ID");
-                    let index: usize = index.parse().expect("child index");
+                let mut choices = requests.iter().collect::<Vec<_>>();
+                choices.sort_by_key(|request| (&request.external_req_id, &request.request_id));
+                for (request, output) in choices.into_iter().zip(outputs) {
                     send_outputs(
                         push,
-                        engine_outputs_for_request(&request.request_id, outputs[index].clone()),
+                        engine_outputs_for_request(&request.request_id, output),
                     )
                     .await;
                 }
@@ -14238,6 +14280,157 @@ async fn completions_stream_n_indexes_chunks_and_sends_one_usage_chunk() {
     let prompt_tokens = usage_chunks[0]["usage"]["prompt_tokens"].as_u64().expect("prompt");
     assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 5);
     assert_eq!(usage_chunks[0]["usage"]["total_tokens"], prompt_tokens + 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_batched_prompts_return_n_choices_per_prompt() {
+    let (mut app, engine_task, requests) =
+        test_app_with_parallel_samples([two_sample_outputs(), two_sample_outputs()].concat()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": ["ab", "cde"],
+            "n": 2,
+            "echo": true,
+            "seed": 7
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+
+    // Like Python, each prompt is its own engine request, with the prompt
+    // index appended to the request ID, sampled `n` times.
+    let requests = requests.await.expect("engine requests");
+    let id = json["id"].as_str().expect("response id");
+    let mut engine_requests = requests
+        .iter()
+        .map(|request| {
+            (
+                request.external_req_id.clone(),
+                request.sampling_params.as_ref().and_then(|params| params.seed),
+            )
+        })
+        .collect::<Vec<_>>();
+    engine_requests.sort();
+    assert_eq!(
+        engine_requests,
+        [
+            (Some(format!("{id}-0")), Some(7)),
+            (Some(format!("{id}-0")), Some(8)),
+            (Some(format!("{id}-1")), Some(7)),
+            (Some(format!("{id}-1")), Some(8)),
+        ]
+    );
+
+    // Choices are prompt-major, each echoing its own prompt.
+    let choices = json["choices"].as_array().expect("choices");
+    let choices = choices
+        .iter()
+        .map(|choice| (&choice["index"], &choice["text"], &choice["finish_reason"]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        choices,
+        [
+            (&json!(0), &json!("abhi"), &json!("stop")),
+            (&json!(1), &json!("abyo"), &json!("length")),
+            (&json!(2), &json!("cdehi"), &json!("stop")),
+            (&json!(3), &json!("cdeyo"), &json!("length")),
+        ]
+    );
+    // Each prompt (with BOS) counts once; completion tokens add up over all
+    // choices.
+    assert_eq!(json["usage"]["prompt_tokens"], 7);
+    assert_eq!(json["usage"]["completion_tokens"], 10);
+    assert_eq!(json["usage"]["total_tokens"], 17);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_stream_batched_prompts_index_chunks_and_send_one_usage_chunk() {
+    let (mut app, engine_task, _requests) =
+        test_app_with_parallel_samples(two_sample_outputs()).await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": [[97, 98], [99, 100, 101]],
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        }),
+    )
+    .await;
+    // Checked first: an unexpected error leaves the engine waiting for samples.
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+    let text = json["raw"].as_str().expect("SSE body");
+    let payloads = sse_json_payloads(text);
+
+    for (index, content, finish_reason) in [(0, "hi", "stop"), (1, "yo", "length")] {
+        let choice_chunks = payloads
+            .iter()
+            .filter_map(|payload| payload["choices"].as_array()?.first())
+            .filter(|choice| choice["index"] == json!(index))
+            .collect::<Vec<_>>();
+        let streamed = choice_chunks
+            .iter()
+            .filter_map(|choice| choice["text"].as_str())
+            .collect::<String>();
+        assert_eq!(streamed, content, "{text}");
+        let finish_reasons = choice_chunks
+            .iter()
+            .filter_map(|choice| choice["finish_reason"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(finish_reasons, [finish_reason], "{text}");
+    }
+
+    // Like Python, the prompts add up in the one final usage chunk, and the
+    // per-request metrics of a single sample are left out.
+    let usage_chunks = payloads
+        .iter()
+        .filter(|payload| payload["choices"] == json!([]))
+        .collect::<Vec<_>>();
+    assert_eq!(usage_chunks.len(), 1, "{text}");
+    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 5);
+    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 5);
+    assert_eq!(usage_chunks[0]["usage"]["total_tokens"], 10);
+    assert_eq!(payloads.last(), Some(usage_chunks[0]));
+}
+
+/// A prompt of a batch that fails to submit drops the requests of the prompts
+/// submitted before it, which aborts them in the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_batched_prompts_abort_earlier_prompts_when_a_later_prompt_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let request_id = decode_add_request(&recv_engine_message(dealer).await).request_id;
+            let abort = recv_engine_message(dealer).await;
+            assert_eq!(abort[0].as_ref(), b"\x01");
+            assert_eq!(
+                decode_value(&abort[1]).expect("decode abort payload"),
+                Value::Array(vec![Value::from(request_id)])
+            );
+        })
+    })
+    .await;
+
+    // The empty token-ID prompt fails to submit after the first prompt is.
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": [[97, 98], []]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    tokio::time::timeout(Duration::from_secs(5), engine_task.finish())
+        .await
+        .expect("the first prompt is aborted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
