@@ -134,7 +134,9 @@ def run_worker(args):
         # *ForConditionalGeneration model); ignored by text-only Mamba2 models.
         language_model_only=True,
         # GDN prefill kernel only; decode (and thus the speedup) is unaffected.
-        additional_config={"gdn_prefill_backend": args.gdn_prefill_backend},
+        gdn_prefill_backend=(
+            None if args.gdn_prefill_backend == "auto" else args.gdn_prefill_backend
+        ),
     )
     if args.disable_flashinfer_autotune:
         # FP4-MoE autotuner is unstable under CUDA-graph capture on Blackwell;

@@ -111,7 +111,7 @@ def _check_replayssm_parity(
         mamba_backend=mamba_backend,
         speculative_config=speculative_config,
         disable_log_stats=speculative_config is None,
-        additional_config={"gdn_prefill_backend": "triton"},
+        gdn_prefill_backend="triton",
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
@@ -293,7 +293,7 @@ def _check_replayssm_prefix_caching(
         tensor_parallel_size=tensor_parallel_size,
         # GDN prefill JIT-compiles under FlashInfer; the backend is irrelevant
         # to the decode parity measured here and Triton avoids the JIT.
-        additional_config={"gdn_prefill_backend": "triton"},
+        gdn_prefill_backend="triton",
     )
     prompts = PREFIX_CACHING_PROMPTS
     if speculative_method is not None:
