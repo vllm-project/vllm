@@ -20,6 +20,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     RankLocalStoreLayout,
     StoreLayout,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offload_limits import (
+    RequestOffloadLimits,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import (
@@ -244,6 +247,7 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
+    offload_limits: RequestOffloadLimits = RequestOffloadLimits()
 
     def update(
         self,
@@ -304,6 +308,7 @@ class ReqMeta:
     boundary_puts: list[BoundaryPut] | None = None
     # Total computed prefix length at the end of this step.
     completed_token_len: int | None = None
+    offload_limits: RequestOffloadLimits = RequestOffloadLimits()
     # Set on the save that first covers the whole prompt, so the scheduler
     # publishes the prompt's partial tail once rather than on every save.
     publish_partial_tail: bool = False
@@ -328,7 +333,8 @@ class ReqMeta:
 
         token_ids_start = tracker.num_saved_tokens
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
-        num_tokens_to_save = input_token_len // block_size * block_size
+        save_token_len = tracker.offload_limits.cap_store(input_token_len)
+        num_tokens_to_save = save_token_len // block_size * block_size
         num_tokens_to_save = min(
             num_tokens_to_save,
             len(block_hashes) * hash_block_size // block_size * block_size,
@@ -339,6 +345,7 @@ class ReqMeta:
             and not tracker.partial_tail_sent
             and num_prompt_tokens is not None
             and 0 < num_prompt_tokens <= input_token_len
+            and not tracker.offload_limits.store_disabled
         )
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and not publish_tail
@@ -390,6 +397,7 @@ class ReqMeta:
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=input_token_len,
             publish_partial_tail=publish_tail and not skip_save,
+            offload_limits=tracker.offload_limits,
         )
 
 

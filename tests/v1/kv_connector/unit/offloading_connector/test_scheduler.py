@@ -716,6 +716,32 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     )
 
 
+@pytest.mark.parametrize(("max_offload_tokens", "num_jobs"), [(0, 0), (24, 0), (28, 1)])
+def test_partial_tail_store_honors_max_offload_tokens(
+    max_offload_tokens: int, num_jobs: int
+):
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(
+        scheduler, kv_transfer_params={"max_offload_tokens": max_offload_tokens}
+    )
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        kv_connector_block_state=KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"req": [(1, 99, 28)]},
+        )
+    )
+
+    assert len(_partial_tail_store_jobs(scheduler, output)) == num_jobs
+
+
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)

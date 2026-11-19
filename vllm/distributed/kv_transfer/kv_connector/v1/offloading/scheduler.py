@@ -526,11 +526,9 @@ class OffloadingConnectorScheduler:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
             )
-        if req_status.max_load_tokens is not None:
-            max_hit_size_tokens = min(
-                max_hit_size_tokens,
-                num_computed_tokens + req_status.max_load_tokens,
-            )
+        max_hit_size_tokens = req_status.limits.cap_load(
+            max_hit_size_tokens, num_computed_tokens
+        )
         if self._sliding_window_groups and self._mamba_align_size is not None:
             # Constrain hit-window to the mamba block size.
             max_hit_size_tokens = round_down(
@@ -579,7 +577,7 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
                 )
-                if req_status.max_load_tokens is not None:
+                if req_status.limits.max_load_tokens is not None:
                     max_hit_size_tokens = round_down(
                         max_hit_size_tokens, tokens_per_chunk
                     )
@@ -791,11 +789,7 @@ class OffloadingConnectorScheduler:
         )
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
-        if req_status.max_load_tokens is not None:
-            max_boundary = min(
-                max_boundary,
-                local_tokens + req_status.max_load_tokens,
-            )
+        max_boundary = req_status.limits.cap_load(max_boundary, local_tokens)
         max_boundary = round_down(max_boundary, tokens_per_hash)
         if max_boundary <= complete_boundary:
             return complete_hit
