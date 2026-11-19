@@ -771,3 +771,37 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
 
         # Now call parent's set_lora which expects lists
         super().set_lora(index, lora_a, lora_b)
+
+
+class MergedColumnParallelLinearVariableSliceWithShardedLoRA(
+    MergedColumnParallelLinearVariableSliceWithLoRA
+):
+    """Differs from MergedColumnParallelLinearVariableSliceWithLoRA by slicing
+    the LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    slice_lora_a = MergedColumnParallelLinearWithShardedLoRA.slice_lora_a
+
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        return _mcp_apply(x, bias, self)
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: PreTrainedConfig | None = None,
+        decorate: bool = True,
+    ) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
