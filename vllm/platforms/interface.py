@@ -63,6 +63,23 @@ def get_assigned_physical_gpu_ids() -> list[int] | None:
     return _assigned_physical_gpu_ids
 
 
+_model_attn_backends: "list[type[AttentionBackend]] | None" = None
+
+
+@contextlib.contextmanager
+def set_model_attn_backends(backends: "list[type[AttentionBackend]]"):
+    """Make `Platform.update_block_size_for_backend` choose the KV cache block
+    size from `backends`, the attention backends of every layer of the model in
+    layer order, instead of from the layers of this process: a pipeline stage
+    holds only some of them."""
+    global _model_attn_backends
+    previous, _model_attn_backends = _model_attn_backends, backends
+    try:
+        yield
+    finally:
+        _model_attn_backends = previous
+
+
 @functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
@@ -687,10 +704,14 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backends(
+    def _find_attn_backends(
         cls, vllm_config: "VllmConfig"
     ) -> "list[type[AttentionBackend]]":
-        """Distinct non-SSM attention backends, in layer order."""
+        """Distinct attention backends of the model, in layer order: those set
+        by `set_model_attn_backends`, else those of this process's layers."""
+        if _model_attn_backends is not None:
+            return _model_attn_backends
+
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -703,9 +724,16 @@ class Platform:
         backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm() and b not in backends:
+            if b not in backends:
                 backends.append(b)
         return backends
+
+    @classmethod
+    def _find_non_ssm_backends(
+        cls, vllm_config: "VllmConfig"
+    ) -> "list[type[AttentionBackend]]":
+        """Distinct non-SSM attention backends of the model, in layer order."""
+        return [b for b in cls._find_attn_backends(vllm_config) if not b.is_ssm()]
 
     @classmethod
     def _preferred_block_size_for_backends(

@@ -169,6 +169,8 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
 
         try:
+            self._update_block_size()
+
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 self._eep_scale_up_before_kv_init()
 
@@ -282,6 +284,21 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _update_block_size(self) -> None:
+        """Have the workers choose the KV cache block size from the attention
+        backends of every layer of the model, not only the layers each holds.
+
+        Workers are in rank order, which follows the layer order across
+        pipeline stages.
+        """
+        worker_paths = self.model_executor.get_attn_backend_cls_paths()
+        paths = list(dict.fromkeys(p for worker in worker_paths for p in worker))
+        choices = self.model_executor.update_block_size(paths)
+        if any(choice != choices[0] for choice in choices):
+            raise RuntimeError(
+                f"Workers chose different KV cache block sizes: {choices}"
+            )
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:

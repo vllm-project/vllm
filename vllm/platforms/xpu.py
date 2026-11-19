@@ -523,28 +523,15 @@ class XPUPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
-        from vllm.config.vllm import get_layers_from_vllm_config
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
         from vllm.utils.math_utils import cdiv
 
         cache_config = vllm_config.cache_config
         # special fix for GDN since kernel only supports block size dividable by 64
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-
-        kernel_block_size = None
-        for layer in attn_layers.values():
-            b = layer.get_attn_backend()
-            if b.get_name() == "GDN_ATTN":
-                kernel_block_size = 64
-                break
-
-        if kernel_block_size is None:
+        if not any(
+            b.get_name() == "GDN_ATTN" for b in cls._find_attn_backends(vllm_config)
+        ):
             return
+        kernel_block_size = 64
         new_block_size = (
             cdiv(cache_config.block_size, kernel_block_size) * kernel_block_size
         )

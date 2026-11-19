@@ -71,9 +71,6 @@ class UniProcExecutor(Executor):
             self.driver_worker.elastic_ep_execute("load_model")
         else:
             self.driver_worker.load_model()
-        from vllm.v1.worker.utils import update_block_size_for_backend
-
-        update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -196,6 +193,17 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         return distributed_init_method, rank, local_rank
+
+    def get_attn_backend_cls_paths(self) -> list[list[str]]:
+        # Each engine holds one worker; take the attention backends of all of
+        # them, since pipeline stages hold different layers.
+        paths = super().get_attn_backend_cls_paths()
+        from vllm.distributed.parallel_state import get_world_group
+
+        world_group = get_world_group()
+        all_paths: list[Any] = [None] * world_group.world_size
+        dist.all_gather_object(all_paths, paths[0], group=world_group.cpu_group)
+        return all_paths
 
     def determine_available_memory(self) -> list[int]:  # in bytes
         # we need to get the min across all ranks.

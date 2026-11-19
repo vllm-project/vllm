@@ -211,6 +211,15 @@ class Executor(ABC):
             )
         return aligned
 
+    def get_attn_backend_cls_paths(self) -> list[list[str]]:
+        """Import paths of each worker's attention backends, in layer order."""
+        return self.collective_rpc("get_attn_backend_cls_paths")
+
+    def update_block_size(self, attn_backend_cls_paths: list[str]) -> list[dict]:
+        """Have every worker choose the KV cache block size from the attention
+        backends of the whole model; returns the cache config fields each set."""
+        return self.collective_rpc("update_block_size", args=(attn_backend_cls_paths,))
+
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")
 

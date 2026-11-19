@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
@@ -42,62 +42,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
-
-
-# Cache config fields that `Platform.update_block_size_for_backend` derives from
-# the attention backends of the layers a worker holds.
-_BACKEND_DERIVED_BLOCK_FIELDS = (
-    "block_size",
-    "mamba_block_size",
-    "mamba_page_size_padded",
-    "skip_page_size_padded",
-)
-
-
-def update_block_size_for_backend(vllm_config: VllmConfig) -> None:
-    """Pick the KV cache block sizes from the attention backends, the same on
-    every pipeline stage.
-
-    `Platform.update_block_size_for_backend` derives the block size, and for
-    hybrid models the Mamba block and page sizes, from the attention layers of
-    this worker. A pipeline stage without attention layers takes these sizes
-    from the stages that have them.
-    """
-    from vllm.config.vllm import get_layers_from_vllm_config
-    from vllm.distributed.parallel_state import get_pp_group
-    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-    current_platform.update_block_size_for_backend(vllm_config)
-
-    pp_group = get_pp_group()
-    if pp_group.world_size == 1:
-        return
-    cache_config = vllm_config.cache_config
-    attn_layers = get_layers_from_vllm_config(
-        vllm_config,
-        AttentionLayerBase,  # type: ignore[type-abstract]
-    )
-    has_attention = any(
-        not layer.get_attn_backend().is_ssm() for layer in attn_layers.values()
-    )
-    local = (
-        tuple(getattr(cache_config, f) for f in _BACKEND_DERIVED_BLOCK_FIELDS)
-        if has_attention
-        else None
-    )
-    stages: list[tuple | None] = [None] * pp_group.world_size
-    torch.distributed.all_gather_object(stages, local, group=pp_group.cpu_group)
-    chosen = {stage for stage in stages if stage is not None}
-    if local is not None or len(chosen) != 1:
-        return
-    values = chosen.pop()
-    for name, value in zip(_BACKEND_DERIVED_BLOCK_FIELDS, values):
-        setattr(cache_config, name, value)
-    logger.info(
-        "This pipeline stage holds no attention layer; using the KV cache "
-        "block size %d chosen by the other stages.",
-        cache_config.block_size,
-    )
 
 
 def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
