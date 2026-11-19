@@ -197,17 +197,39 @@ MEGA_MOE_MXFP4_SM90 = replace(
         ScaleDesc(torch.float32, False, GroupShape(1, 128)),
         symmetric=True,
     ),
-    activations=frozenset({"swiglu"}),
+    activations=frozenset({"swiglu", "situ"}),
     sm90=True,
 )
 # Block-FP8 routed and shared experts on SM90, lossless (no MXFP8 requant).
+# SwiGLU only: SM90 SiTU is validated for FP8 x FP4 experts, not this MMA type.
 MEGA_MOE_FP8_BLOCK_SM90 = replace(
     MEGA_MOE_MXFP4_SM90,
     name="fp8_block_sm90",
     mma_type="fp8xfp8",
     routed=_FP8_BLOCK_WEIGHT,
     shared=(_FP8_BLOCK_WEIGHT,),
+    activations=frozenset({"swiglu"}),
 )
+
+
+def deep_gemm_supports_sm90_situ() -> bool:
+    """Whether the installed DeepGEMM runs SiTU experts on SM90.
+
+    SM90 SiTU came with the `situ_beta` alias in DeepGEMM's Python layer
+    (vllm-project/DeepGEMM#62). Older builds assert against it in the C++ host
+    code, which surfaces as an opaque launch failure rather than a clear
+    "unsupported" error.
+    """
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    deep_gemm = _import_deep_gemm()
+    if deep_gemm is None:
+        return False
+    try:
+        params = signature(deep_gemm.fp8_fp4_mega_moe).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "situ_beta" in params
 
 
 def check_deep_gemm_mega_moe_supported(
@@ -339,6 +361,16 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise NotImplementedError(
                 f"DeepGEMM MegaMoE {weight_format.name} experts support "
                 f"{sorted(weight_format.activations)}, not {activation.name!r}."
+            )
+        if (
+            weight_format.sm90
+            and activation.name == "situ"
+            and not deep_gemm_supports_sm90_situ()
+        ):
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE SiTU experts on SM90 need a DeepGEMM with "
+                "`situ_beta` in `fp8_fp4_mega_moe`; the installed build only "
+                "runs SwiGLU there. See vllm-project/DeepGEMM#62."
             )
 
         self.prefix = prefix
