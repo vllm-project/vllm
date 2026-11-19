@@ -25,14 +25,12 @@ from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
-    HiSparseResidentManager,
     MambaManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
-    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
@@ -558,36 +556,21 @@ def test_hisparse_offloads_only_indexer_group():
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
-def _make_hisparse_mla_kv_cache_config(host_num_blocks: int = 4) -> KVCacheConfig:
+def test_hisparse_indexer_tier_defaults_to_host_pool_tokens():
     source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
     indexer = make_kv_cache_group(
         ["indexer"],
         _mla_spec(block_size=64, head_size=128),
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
-    resident = make_kv_cache_group(
-        ["source.hisparse_resident"],
-        HiSparsePageSpec(block_size=16, page_size=_MLA_PAGE),
-        manager_cls=HiSparseResidentManager,
-    )
-    return KVCacheConfig(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[],
-        kv_cache_groups=[source, indexer, resident],
-        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=37,
     )
 
-
-def test_hisparse_indexer_tier_is_single_copy_under_tp():
-    """The resident groups' raw pages carry no TP metadata; they must not
-    force a copy of the replicated indexer per rank."""
-    assert _replicated_layout(_make_hisparse_mla_kv_cache_config())
-
-
-def test_hisparse_indexer_tier_defaults_to_host_pool_tokens():
-    offloading_config = build_offloading_config(
-        _make_vllm_config(), _make_hisparse_mla_kv_cache_config(host_num_blocks=37)
-    )
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
 
     # 37 host blocks of 16 tokens fit in 10 indexer blocks of 64 tokens.
     assert offloading_config.default_num_blocks == 10
