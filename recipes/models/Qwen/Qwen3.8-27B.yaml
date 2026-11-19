@@ -194,20 +194,8 @@ variants:
         extra_args:
           - "--attention-backend"
           - "ROCM_AITER_FA"
-          - "--max-model-len"
-          - "262144"
-          - "--max-num-seqs"
-          - "8"
-          - "--max-num-batched-tokens"
-          - "30720"
-          - "--gpu-memory-utilization"
-          - "0.9"
           - "--kv-cache-dtype"
           - "fp8"
-          - "--enable-chunked-prefill"
-          - "--compilation-config"
-          - '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["+rms_norm","+quant_fp8"]}'
-          - "--disable-log-stats"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
   nvfp4:
@@ -449,8 +437,9 @@ guide: |
   `vllm/vllm-openai-rocm:nightly` image (tested at `nightly-7c3a9302`), tool calls
   included. BF16, the other variants and TP > 1 were not run on this GPU.
 
-  GSM8K scores 0.950 with vLLM's `tests/evals/gsm8k/gsm8k_eval.py`: 5-shot, all 1,319
-  questions, temperature 0, `--max-tokens 1024`.
+  GSM8K scores 0.952 with vLLM's `tests/evals/gsm8k/gsm8k_eval.py`: 5-shot, all 1,319
+  questions, temperature 0, `--max-tokens 1024`. RULER `niah_single_2` at 128K scores
+  1.00 (50 samples).
 
   <!-- overlay:vllm-ascend:ascend -->
   
