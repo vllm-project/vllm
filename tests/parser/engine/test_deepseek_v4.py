@@ -37,6 +37,7 @@ from vllm.parser.deepseek_v4 import (
     _unwrap_wrapper_args,
     deepseek_v4_config,
 )
+from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4ParserReasoningAdapter,
     DeepSeekV4ParserToolAdapter,
@@ -124,7 +125,7 @@ class TestArgConverter:
         return f'<｜DSML｜parameter name="{name}">{value}{_PARAM_CLOSE}'
 
     def test_missing_string_attribute_keeps_literal(self):
-        """The model sometimes omits ``string``; the parameter must survive."""
+        """The model sometimes omits `string`; the parameter must survive."""
         raw = self._bare("name", "alpha")
         assert json.loads(_dsml_arg_converter(raw, partial=False)) == {"name": "alpha"}
 
@@ -242,8 +243,10 @@ class TestImplicitParameterClose:
         chunks = [
             DSML_TOOL_START,
             f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
-            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
-            "Paris a<b><｜DSML｜parameter",
+            (
+                f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+                "Paris a<b><｜DSML｜parameter"
+            ),
             ' name="date" string="true">tomorrow',
             _PARAM_CLOSE,
             DSML_INVOKE_END,
@@ -303,6 +306,100 @@ class TestMissingStringAttribute:
         }
 
 
+class TestNonStringArgValueConversions:
+    """Markup in a non-JSON value is not reconverted on every `>` delta."""
+
+    _HTML_LINE = '<div class="card"><a href="/p/1">title</a></div>\n'
+
+    @pytest.fixture
+    def count_arg_conversions(self, monkeypatch):
+        calls = []
+        original = ParserEngine._safe_arg_prefix
+
+        def counting(json_str, string_keys=None):
+            calls.append(json_str)
+            return original(json_str, string_keys)
+
+        monkeypatch.setattr(ParserEngine, "_safe_arg_prefix", staticmethod(counting))
+        return calls
+
+    @staticmethod
+    def _html_call(attr: str, path_first: bool = True) -> str:
+        value = TestNonStringArgValueConversions._HTML_LINE * 200
+        path = f"{_param('path', 'true', 'index.html')}\n" if path_first else ""
+        return (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}write_file{DSML_INVOKE_NAME_END}\n"
+            f"{path}"
+            f'<｜DSML｜parameter name="content"{attr}>{value}{_PARAM_CLOSE}\n'
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_non_streaming_converts_few_times(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr)
+
+        _, _, tool_calls = DeepSeekV4Parser(mock_tokenizer).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert tool_calls is not None
+        assert json.loads(tool_calls[0].arguments) == {
+            "path": "index.html",
+            "content": self._HTML_LINE * 200,
+        }
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_streaming_matches_final_arguments(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr)
+        chunks = [text[i : i + 16] for i in range(0, len(text), 16)]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "path": "index.html",
+            "content": self._HTML_LINE * 200,
+        }
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_non_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+
+        _, _, tool_calls = DeepSeekV4Parser(mock_tokenizer).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert tool_calls is not None
+        assert json.loads(tool_calls[0].arguments) == {"content": self._HTML_LINE * 200}
+        assert len(count_arg_conversions) <= 5
+
+    @pytest.mark.parametrize("attr", [' string="false"', ""], ids=["false", "absent"])
+    def test_markup_only_parameter_streaming(
+        self, mock_tokenizer, mock_request, count_arg_conversions, attr
+    ):
+        text = self._html_call(attr, path_first=False)
+        chunks = [text[i : i + 16] for i in range(0, len(text), 16)]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": self._HTML_LINE * 200
+        }
+        assert len(count_arg_conversions) <= 5
+
+
 # ── Bare </think> absorption and duplicate <think> absorption ─────────
 
 
@@ -354,8 +451,10 @@ class TestMissingInvokeEnd:
         parser = DeepSeekV4Parser(mock_tokenizer)
         chunks = [
             DSML_TOOL_START,
-            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
-            f"{_param('location', 'true', 'NYC')}\n",
+            (
+                f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+                f"{_param('location', 'true', 'NYC')}\n"
+            ),
             DSML_TOOL_END,
             "Done.",
         ]
@@ -371,8 +470,8 @@ class TestMissingInvokeEnd:
 
 
 class TestMissingToolCallsWrapper:
-    """The model sometimes drops ``<｜DSML｜tool_calls>`` at long context and
-    opens ``<｜DSML｜invoke ...>`` directly (#48931). The invoke itself must
+    """The model sometimes drops `<｜DSML｜tool_calls>` at long context and
+    opens `<｜DSML｜invoke ...>` directly (#48931). The invoke itself must
     anchor tool-call detection so the block is never leaked as content.
     """
 
@@ -404,7 +503,7 @@ class TestMissingToolCallsWrapper:
         self, mock_tokenizer, mock_request, trailing_end
     ):
         """Text after a tool block is dropped whether or not the closing
-        wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
+        wrapper is present, so a missing `</｜DSML｜tool_calls>` does not
         change what the client sees."""
         text = "pre\n" + self._ORPHAN
         if trailing_end:
@@ -478,7 +577,7 @@ class TestMissingToolCallsWrapper:
     def test_drafted_invoke_in_reasoning_does_not_hijack_real_call(
         self, mock_tokenizer, mock_request
     ):
-        """A drafted invoke in ``<think>`` must not steal the real call."""
+        """A drafted invoke in `<think>` must not steal the real call."""
         parser = DeepSeekV4Parser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
         )
@@ -1359,7 +1458,7 @@ _WRAPPER_VARIANTS = list(DSML_TOOL_START_VARIANTS)
 
 class TestMalformedDsmlNoise:
     """DeepSeek-V4-Flash intermittently misspells the tool-call opener, e.g.
-    ``<｜DSML｜toolcalls>``. Known corrupted openers open a tool block like
+    `<｜DSML｜toolcalls>`. Known corrupted openers open a tool block like
     the real wrapper so the markup never surfaces as assistant content.
     """
 
@@ -1404,7 +1503,7 @@ class TestMalformedDsmlNoise:
     def test_corrupted_wrapper_ends_reasoning(
         self, mock_tokenizer, mock_request, wrapper
     ):
-        """Like the real wrapper, a corrupted one inside ``<think>`` closes
+        """Like the real wrapper, a corrupted one inside `<think>` closes
         the reasoning block and starts the tool call."""
         text = f"thinking{wrapper}\n{self._INNER}"
         parser = self._parser(mock_tokenizer, thinking=True)
@@ -1448,7 +1547,7 @@ class TestMalformedDsmlNoise:
         """A registered spelling mentioned in prose behaves exactly like a
         prose mention of the real wrapper: the opener starts a tool block and
         the rest of the message is dropped. That is pre-existing behavior of
-        ``<｜DSML｜tool_calls>``; the variants must not differ from it either
+        `<｜DSML｜tool_calls>`; the variants must not differ from it either
         way."""
         template = "The opener looks like {} and then params follow. Done."
         text = template.format(wrapper)

@@ -183,8 +183,6 @@ hardware_overrides:
     extra_args:
       - "--max-model-len"
       - "800000"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--max-num-seqs"
       - "512"
       - "--disable-flashinfer-autotune"
@@ -199,8 +197,6 @@ hardware_overrides:
     extra_args:
       - "--distributed-executor-backend"
       - "mp"
-      - "--gpu-memory-utilization"
-      - "0.9"
       - "--max-num-seqs"
       - "512"
       - "--max-num-batched-tokens"
@@ -946,7 +942,7 @@ guide: |
     800K tokens (`--max-model-len 800000`) to leave KV headroom with dense params
     replicated across ranks — applies to both single-node and multi-node H200.
   - **MI355X (8× GPU)**: validated with ROCm + AITER (`VLLM_ROCM_USE_AITER=1`),
-    `--gpu-memory-utilization 0.9`, `--max-num-seqs 128`,
+    `--max-num-seqs 128`,
     `--max-num-batched-tokens 8192`, and `--distributed-executor-backend mp`.
   - **GB200 NVL4 (4× GPU per tray)**: the ~960 GB mixed-precision checkpoint does not
     fit on one tray; run multi-node DP + EP across **2 trays** (8 GPUs total) with
@@ -967,7 +963,6 @@ guide: |
     --max-num-batched-tokens 8192 \
     --distributed-executor-backend mp \
     --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
     --tokenizer-mode deepseek_v4 \
     --reasoning-parser deepseek_v4 \
     --tool-call-parser deepseek_v4 \

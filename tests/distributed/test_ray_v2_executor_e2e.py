@@ -22,7 +22,7 @@ def _ray_init():
     """Start Ray with the project root on workers' PYTHONPATH.
 
     Without this, workers cannot unpickle actor classes defined in the
-    ``tests`` package, causing FunctionActorManager to fall back to
+    `tests` package, causing FunctionActorManager to fall back to
     TemporaryActor which drops async method signatures."""
     project_root = str(pathlib.Path(__file__).resolve().parents[2])
     ray.init(

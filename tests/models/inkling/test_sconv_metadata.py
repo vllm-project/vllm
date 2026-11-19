@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parity test for the fused sconv seq-metadata kernel.
 
-``sconv_seq_metadata`` fills the per-token ``seq_idx`` (owning request) and
-``query_start`` (first x-row of that request) buffers in a single launch. Actual
+`sconv_seq_metadata` fills the per-token `seq_idx` (owning request) and
+`query_start` (first x-row of that request) buffers in a single launch. Actual
 tokens must match the searchsorted-based reference, while CUDA graph padding
 must be initialized to safe zero values.
 """

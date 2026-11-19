@@ -7,7 +7,7 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 
 from ..base.serving import PoolingServing
 from ..factories import init_pooling_io_processors
-from ..typing import PoolingServeContext
+from ..types import PoolingServeContext
 from ..utils import (
     encode_pooling_output_float_or_ndarray,
     get_pooling_usage,

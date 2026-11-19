@@ -93,7 +93,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
       "Tensor? b_bias_or_none,Tensor b_scales, "
-      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? global_scale, Tensor? b_zeros_or_none, "
       "Tensor workspace, int b_type_id, "
       "SymInt size_m, SymInt size_n, SymInt size_k, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
@@ -102,19 +102,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+      "SymInt size_k, SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // awq_marlin repack from AWQ.
   ops.def(
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
-  // preprocess W-int4A-fp8 weight for marlin kernel
-  ops.def(
-      "marlin_int4_fp8_preprocess(Tensor qweight, "
-      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+      "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 #endif
 
@@ -196,7 +190,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
       "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
+      "                      Tensor alpha, Tensor? bias=None) -> ()");
 
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
@@ -416,6 +410,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                 Tensor cos_sin_cache, bool is_neox, int "
       "rope_dim_offset=0, bool inverse=False) -> ()");
 
+  // Out-of-place rotary embedding; also copies the non-rotated tail.
+  ops.def(
+      "rotary_embedding_out(Tensor positions, Tensor query, Tensor? key,"
+      "                     Tensor! query_out, Tensor!? key_out, int head_size,"
+      "                     Tensor cos_sin_cache, bool is_neox) -> ()");
+
   // Function for fused QK Norm and RoPE
   ops.def(
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
@@ -523,8 +523,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor positions, Tensor slot_mapping, Tensor! k_cache, "
       "Tensor! v_cache, int head_dim, int num_q_heads, int num_kv_heads, "
       "int rotary_pairs, float epsilon, float norm_weight_bias, "
-      "str kv_cache_dtype=\"auto\", Tensor? k_scale=None, Tensor? "
-      "v_scale=None) -> ()");
+      "str kv_cache_dtype=\"auto\", float q_scale=1.0, "
+      "Tensor? k_scale=None, Tensor? v_scale=None) -> ()");
 #endif
 
   ops.def(
@@ -615,6 +615,49 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_INKLING2_KERNELS
+  // Inkling2's MNNVL all-reduce fused with its short conv and AttnRes mix.
+  ops.def(
+      "inkling2_allreduce_conv_mix(Tensor? x, Tensor? down, Tensor? src2dst, "
+      "bool two_shot, int multicast_ptr, int local_ptr, int buffer_ptrs, "
+      "Tensor! flags, int rank, int world, Tensor! cache, Tensor conv_weight, "
+      "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
+      "Tensor query_start, int stream_offset, int stream_width, "
+      "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "float eps, float norm_eps, Tensor! out) -> ()");
+  // Its short conv and AttnRes mix on an already reduced input.
+  ops.def(
+      "inkling2_conv_mix(Tensor x, Tensor! cache, Tensor conv_weight, "
+      "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
+      "Tensor query_start, int stream_offset, int stream_width, "
+      "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "float eps, float norm_eps, Tensor! out) -> ()");
+  // Its sequence-parallel collectives: the reduce-scatter of the partial
+  // sums, and the conv + mix of a token shard that all-gathers the mixes.
+  ops.def(
+      "inkling2_seq_parallel_conv_mix(Tensor x, Tensor! cache, "
+      "Tensor conv_weight, Tensor positions, Tensor seq_idx, Tensor slots, "
+      "Tensor block_table, Tensor query_start, int stream_offset, "
+      "int stream_width, float conv_scale, Tensor? residual, Tensor? addend, "
+      "Tensor! conv_out, Tensor stack, Tensor? last, Tensor queries, "
+      "Tensor norm_weight, float eps, float norm_eps, int token_base, "
+      "int halo_rows, int out_bases, int out_offset, int world, "
+      "int out_tokens, int rank, int gather_slot, Tensor! epochs, "
+      "int staging_offset, int tail_rows, int align) -> ()");
+  ops.def(
+      "inkling2_reduce_scatter(int bases, Tensor! epochs, int rank, "
+      "int world, int src_offset, int first, Tensor! out) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
+  // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
+  ops.def(
+      "qwen4_exp_hc_up_gate_mix(Tensor! out, Tensor lowrank, Tensor xn, "
+      "Tensor w_up) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -868,6 +911,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("rotary_embedding_out", TORCH_BOX(&rotary_embedding_out));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_kv_rope_insert",
            TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));
@@ -923,6 +967,14 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_BEAM_KERNELS
   ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
   ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
+#endif
+#ifdef VLLM_ENABLE_INKLING2_KERNELS
+  ops.impl("inkling2_allreduce_conv_mix",
+           TORCH_BOX(&inkling2_allreduce_conv_mix));
+  ops.impl("inkling2_conv_mix", TORCH_BOX(&inkling2_conv_mix));
+  ops.impl("inkling2_seq_parallel_conv_mix",
+           TORCH_BOX(&inkling2_seq_parallel_conv_mix));
+  ops.impl("inkling2_reduce_scatter", TORCH_BOX(&inkling2_reduce_scatter));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -1077,21 +1129,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 int max_union_rows,"
-      "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None,"
-      "                 Tensor(c!)? attention_indices=None,"
+      "                 Tensor(a!)? stats=None,"
+      "                 Tensor(b!)? attention_indices=None,"
       "                 int attention_block_stride=0,"
       "                 Tensor? request_ids=None,"
       "                 Tensor? source_block_table=None,"
       "                 int source_block_size=0,"
-      "                 Tensor(d!)? resolved_global_indices=None,"
-      "                 Tensor(e!)? valid_counts=None,"
-      "                 Tensor(f!)? swap_host_physical_rows=None,"
-      "                 Tensor(g!)? swap_device_physical_rows=None,"
-      "                 Tensor(h!)? swap_counts=None,"
+      "                 Tensor(c!)? valid_counts=None,"
+      "                 Tensor(d!)? swap_host_physical_rows=None,"
+      "                 Tensor(e!)? swap_device_physical_rows=None,"
+      "                 Tensor(f!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0,"
       "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
@@ -1107,10 +1156,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! hot_cache,"
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
-      "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices,"
-      "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     Tensor miss_mask) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"

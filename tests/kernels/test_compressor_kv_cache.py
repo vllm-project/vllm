@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from vllm import _custom_ops as ops
 from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
@@ -44,6 +45,102 @@ from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("row_bytes", [584, 528, 288, 132, 68])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize(
+    "num_tokens,use_graph", [(1, False), (17, False), (1025, True)]
+)
+def test_pipeline_cache_relay_matches_direct_insert(
+    row_bytes, compress_ratio, num_tokens, use_graph
+):
+    """Relayed rows equal the cache writer's own insert at the receiver's slots.
+
+    The relay copies packed rows without decoding them, so the writers define the
+    expected bytes, including the skipped slots, open groups and page padding.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        copy_pipeline_cache_rows,
+        rope_quant_insert,
+    )
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
+        indexer_k_norm_rope_store,
+    )
+
+    indexer = row_bytes in (132, 68)
+    if row_bytes in (288, 68) and not current_platform.is_device_capability_family(100):
+        pytest.skip("FP4 cache writer test requires an SM100-family GPU")
+    torch.manual_seed(0)
+    block_size = 32
+    num_blocks = math.ceil(num_tokens / block_size) + 1
+    stride = block_size * row_bytes + 256
+    backings = [
+        torch.full((num_blocks, stride), 165, dtype=torch.uint8, device="cuda")
+        for _ in range(3)
+    ]
+    source, target, expected = (
+        b.as_strided((num_blocks, block_size, row_bytes), (stride, row_bytes, 1))
+        for b in backings
+    )
+    # Offset views exercise the alignment variants used by sliced PP batches.
+    positions = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots[2::5] = -1
+    # Valid rows land at another physical location on the receiver.
+    target_slots = torch.where(source_slots >= 0, source_slots + block_size, -1)
+    angles = torch.randn(num_tokens + 2, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    norm_weight = torch.randn(128, dtype=torch.bfloat16, device="cuda")
+    inputs = torch.empty(
+        num_tokens, 128 if indexer else 512, dtype=torch.bfloat16, device="cuda"
+    )
+    rows = torch.empty((num_tokens + 1, row_bytes), device="cuda", dtype=torch.uint8)[
+        1:
+    ]
+
+    def insert(cache, slots):
+        if indexer:
+            indexer_k_norm_rope_store(
+                inputs,
+                positions,
+                cos_sin,
+                norm_weight,
+                1e-6,
+                cache,
+                slots,
+                compress_ratio,
+                row_bytes == 68,
+            )
+        else:
+            rope_quant_insert(inputs, positions, cos_sin, cache, slots, compress_ratio)
+
+    def relay():
+        copy_pipeline_cache_rows(
+            source, rows, positions, source_slots, compress_ratio, scatter=False
+        )
+        copy_pipeline_cache_rows(
+            target, rows, positions, target_slots, compress_ratio, scatter=True
+        )
+
+    def write_inputs():
+        inputs.normal_()
+        for backing in backings:
+            backing.fill_(165)
+        insert(source, source_slots)
+        insert(expected, target_slots)
+
+    write_inputs()
+    relay()
+    torch.testing.assert_close(backings[1], backings[2])
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            relay()
+        write_inputs()
+        graph.replay()
+        torch.testing.assert_close(backings[1], backings[2])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
     [
@@ -159,7 +256,7 @@ def test_dspark_context_kv_matches_query_insert(
         torch.testing.assert_close(kv, before, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("kv_mxfp8", [False, True])
 def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
     """PCP SWA writes must preserve the established CUDA cache bytes."""
@@ -278,7 +375,7 @@ def test_v41_fused_save_compress_and_insert(
 ):
     """Ring states: a group boundary whose previous token is outside the chunk
     pools the ring row that chunk left behind, even when this chunk overwrites
-    that row; only the last ``capacity`` tokens of a chunk are stored.
+    that row; only the last `capacity` tokens of a chunk are stored.
 
     Exercise historical group starts, adjacent requests, a chunk longer than
     the ring, single-token decode pairs, empty requests, wrap thresholds at
@@ -454,7 +551,7 @@ def _mxfp8_record_reference(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference V4.1 record for one token: 512 fp8 bytes + 16 UE8M0 scales.
 
-    Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
+    Mirrors FlashMLA's `KVCacheLayout.V41_FP8Sparse` quantizer: rotate the
     RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
     """
     rotated = _rotate_rope_tail(latent_row, cos_sin_row)
@@ -462,11 +559,11 @@ def _mxfp8_record_reference(
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
-    in bf16, so a token is [512 fp8][16 UE8M0].
+    in bf16, so a token is `[512 fp8][16 UE8M0]`.
 
     Byte-exact against the reference quantizer, including the rows and page
     padding the kernel must leave alone.
@@ -584,7 +681,61 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("record", ["fp8", "fp8_one_pass", "mxfp8"])
+# A regression faults the GPU and aborts the process; keep that to this test.
+@create_new_process_for_each_test("spawn")
+def test_v41_gather_rows_past_int32_elements(record, monkeypatch):
+    """A request whose rows start past 2^31 elements of `out` gets them.
+
+    The prefill gather workspace reaches this size for compress-ratio-1
+    layers at a 1M max_model_len. The request stride itself still fits in
+    int32, so only the row offset product can overflow.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: record == "fp8_one_pass")
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    block_size = 64
+    record_bytes = 528 if record == "mxfp8" else 584
+    insert_kwargs = {"bytes_per_token": 528} if record == "mxfp8" else {}
+    num_reqs = 64
+    rows = 2**31 // ((num_reqs - 1) * 512) + 1
+    assert (num_reqs - 1) * rows * 512 >= 2**31 > rows * 512
+
+    k = torch.randn(block_size, 512, dtype=torch.bfloat16, device=device)
+    cache = torch.zeros(1, block_size * record_bytes, dtype=torch.uint8, device=device)
+    quantize_and_insert_k_cache(
+        k,
+        cache,
+        torch.arange(block_size, dtype=torch.int64, device=device),
+        block_size=block_size,
+        **insert_kwargs,
+    )
+
+    # Every request gathers the same cached block, so all rows must match.
+    out = torch.zeros(num_reqs, rows, 512, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache_triton(
+        out,
+        cache.view(1, block_size, record_bytes),
+        torch.full((num_reqs,), block_size, dtype=torch.int32, device=device),
+        None,
+        torch.zeros(num_reqs, 1, dtype=torch.int32, device=device),
+        block_size,
+        0,
+    )
+    first = out[0, :block_size]
+    assert first.abs().amax() > 0
+    torch.testing.assert_close(out[-1, :block_size], first, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
 
@@ -671,9 +822,9 @@ def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
     """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales
     per token.
 
-    Scales are byte-exact against the reference (``amax / 6`` clamped to the
+    Scales are byte-exact against the reference (`amax / 6` clamped to the
     e4m3 range); values are checked as round-to-nearest on the e2m1 grid, whose
-    coarsest step is 2 between 4 and 6, so half a step is ``1.0 * scale``.
+    coarsest step is 2 between 4 and 6, so half a step is `1.0 * scale`.
     """
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         rope_quant_insert,
@@ -1018,7 +1169,7 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     assert cos > (0.98 if extra is not None else 0.999)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("store_fp8", [False, True])
 def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
@@ -1097,23 +1248,23 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
-    builder must map every real token to ``ring_block * capacity + pos %
-    capacity``. Padding tokens and requests on the null block (block 0, as in
+    builder must map every real token to `ring_block * capacity + pos %
+    capacity`. Padding tokens and requests on the null block (block 0, as in
     dummy batches) must stay at PAD."""
     from unittest.mock import MagicMock
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     capacity = 8
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_batched_tokens = 16
     vllm_config.parallel_config.prefill_context_parallel_size = 1
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,
@@ -1147,6 +1298,166 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     assert metadata.slot_mapping.tolist() == ring + [-1] * 5
     assert metadata.query_start_loc is query_start_loc
     assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_compressor_inserts_main_cache_in_compression_launch(compress_ratio):
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    capacity = 8
+    lengths, starts = (7, 7, 33, 0, 1, 7), (4095, 4096, 0, 9, 71, 1001)
+    num_reqs, actual = len(lengths), sum(lengths)
+    cache_block = 256 // compress_ratio
+    positions = torch.zeros(actual + 3, dtype=torch.int64)
+    req_ids = torch.zeros(actual + 3, dtype=torch.int32)
+    ring_slots = torch.full_like(positions, -1)
+    cache_slots = torch.full_like(positions, -1)
+    cursor = 0
+    for req, (start, length) in enumerate(zip(starts, lengths)):
+        pos = torch.arange(start, start + length)
+        rows = slice(cursor, cursor + length)
+        positions[rows] = pos
+        req_ids[rows] = req
+        ring_slots[rows] = (req + 1) * capacity + pos % capacity
+        slots = 2 * req * cache_block + pos // compress_ratio - start // compress_ratio
+        closing = (pos + 1) % compress_ratio == 0
+        cache_slots[rows] = torch.where(closing & (req != 1), slots, -1)
+        cursor += length
+    positions, req_ids, ring_slots, cache_slots = (
+        x.to(device) for x in (positions, req_ids, ring_slots, cache_slots)
+    )
+    main_slots = cache_slots[: actual - 4]
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+    ).to(device)
+    raw = torch.randn(actual + 3, 512 * compress_ratio, device=device)
+    raw[16:44:9, 100] = torch.tensor([float("nan"), float("inf"), -float("inf"), 3e38])
+    norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(max(starts) + max(lengths), 32, device=device) * 3
+    rotary = SimpleNamespace(cos_sin_cache=torch.cat((angles.cos(), angles.sin()), -1))
+    cache_stride = math.ceil(cache_block * 584 / 576) * 576
+    state = torch.randn(num_reqs + 1, capacity, 1024, device=device)
+    cache = torch.randint(
+        256, (2 * num_reqs, cache_stride), dtype=torch.uint8, device=device
+    )
+    metadata = {
+        "k_cache": SimpleNamespace(slot_mapping=main_slots),
+        "state": CompressorMetadata(
+            slot_mapping=ring_slots,
+            query_start_loc=query_start_loc,
+            token_to_req_indices=req_ids,
+        ),
+    }
+
+    def make_compressor(state_cache, kv_cache):
+        return SimpleNamespace(
+            compress_ratio=compress_ratio,
+            head_dim=512,
+            rms_norm_eps=1e-6,
+            norm=SimpleNamespace(weight=norm),
+            pcp_size=1,
+            k_cache_prefix="k_cache",
+            state_cache=SimpleNamespace(prefix="state", kv_cache=state_cache)
+            if compress_ratio == 2
+            else None,
+            _static_forward_context={
+                "k_cache": SimpleNamespace(
+                    kv_cache=kv_cache.as_strided(
+                        (2 * num_reqs, cache_block, 584), (cache_stride, 584, 1)
+                    )
+                )
+            },
+        )
+
+    separate = (state.clone(), cache.clone())
+    fused = (state.clone(), cache.clone())
+    with override_forward_context(ForwardContext({}, metadata, {})):
+        reference = make_compressor(*separate)
+        expected = DeepseekCompressor.forward(reference, raw, positions)
+        DeepseekCompressor.insert_cache(reference, expected, positions, rotary)
+        latent = DeepseekCompressor.forward(
+            make_compressor(*fused), raw, positions, rotary
+        )
+    assert latent is not None and expected is not None
+
+    slot_mapping = ring_slots if compress_ratio == 2 else main_slots
+    written = (slot_mapping >= 0) & (
+        (positions[: slot_mapping.numel()] + 1) % compress_ratio == 0
+    )
+    assert not torch.equal(separate[1], cache)
+    assert torch.equal(fused[1], separate[1])
+    assert torch.equal(fused[0].view(torch.uint8), separate[0].view(torch.uint8))
+    assert torch.equal(
+        latent[: written.numel()][written].view(torch.uint8),
+        expected[: written.numel()][written].view(torch.uint8),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_compressor_plain_row_cache_keeps_insert_cache(compress_ratio, cache_dtype):
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    num_tokens = 9
+    positions = torch.arange(3, 3 + num_tokens, device=device)
+    main_slots = torch.where(
+        (positions + 1) % compress_ratio == 0, positions // compress_ratio, -1
+    )
+    main_cache = torch.zeros(1, 128, 512, dtype=cache_dtype, device=device)
+    calls = []
+    compressor = SimpleNamespace(
+        compress_ratio=compress_ratio,
+        head_dim=512,
+        rms_norm_eps=1e-6,
+        norm=SimpleNamespace(
+            weight=torch.ones(512, dtype=torch.bfloat16, device=device)
+        ),
+        pcp_size=1,
+        k_cache_prefix="k_cache",
+        state_cache=SimpleNamespace(
+            prefix="state", kv_cache=torch.randn(2, 8, 1024, device=device)
+        )
+        if compress_ratio == 2
+        else None,
+        _static_forward_context={"k_cache": SimpleNamespace(kv_cache=main_cache)},
+        insert_cache=lambda *args: calls.append(args),
+    )
+    metadata = {
+        "k_cache": SimpleNamespace(slot_mapping=main_slots),
+        "state": CompressorMetadata(
+            slot_mapping=8 + positions % 8,
+            query_start_loc=torch.tensor(
+                [0, num_tokens], dtype=torch.int32, device=device
+            ),
+            token_to_req_indices=torch.zeros(
+                num_tokens, dtype=torch.int32, device=device
+            ),
+        ),
+    }
+    rotary = SimpleNamespace(cos_sin_cache=torch.randn(64, 64, device=device))
+    raw = torch.randn(num_tokens, 512 * compress_ratio, device=device)
+    with override_forward_context(ForwardContext({}, metadata, {})):
+        latent = DeepseekCompressor.forward(compressor, raw, positions, rotary)
+
+    assert len(calls) == 1
+    assert calls[0][0] is latent
+    assert calls[0][1] is positions
+    assert calls[0][2] is rotary
+    assert not main_cache.view(torch.uint8).any()
 
 
 def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
@@ -1481,7 +1792,7 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
         local.metadata = builder.build(0, local.common)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
 @pytest.mark.parametrize("num_speculative_tokens", [0, 5, 9])
 def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
@@ -1495,7 +1806,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
     )
     from vllm.models.deepseek_v41.compressor import DeepseekCompressor
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
     torch.manual_seed(42)
@@ -1514,7 +1825,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
         if num_speculative_tokens
         else None,
     )
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,
@@ -2982,18 +3293,14 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         weight=torch.randn(1024, 1024, device="cuda")
     )
 
-    def compressor_forward(kv_score, positions_):
+    def compressor_forward(kv_score, positions_, rotary_emb):
         order.append("compressor")
         streams["compressor"] = torch.cuda.current_stream()
+        assert rotary_emb is rotary
+        main_cache.fill_(5)
         return latent
 
-    def compressor_insert(latent_, positions_, rotary_emb):
-        order.append("insert_cache")
-        streams["insert_cache"] = torch.cuda.current_stream()
-        main_cache.fill_(5)
-
     monkeypatch.setattr(compressor, "forward", compressor_forward)
-    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")
@@ -3065,7 +3372,6 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         "wq_b",
         "qnorm_insert",
         "compressor",
-        "insert_cache",
         "weights_proj",
         "produce_k",
         "forward_q",
@@ -3073,8 +3379,7 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     current = torch.cuda.current_stream()
     for name in ("wq_b", "qnorm_insert", "produce_k", "forward_q"):
         assert streams[name] == current, name
-    for name in ("compressor", "insert_cache"):
-        assert streams[name] == aux_streams[0], name
+    assert streams["compressor"] == aux_streams[0]
     assert streams["weights_proj"] == aux_streams[1]
 
 

@@ -22,9 +22,12 @@ __all__ = [
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
     "finish_reload",
+    "LoadPlan",
+    "check_plannable",
+    "load_planned",
+    "plan_loads",
     "start_reload",
-    "set_torchao_reload_attrs",
-    "support_quantized_model_reload_from_hp_weights",
+    "weight_update_active",
 ]
 
 from .layerwise import (
@@ -33,8 +36,5 @@ from .layerwise import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
-from .lifecycle import finish_reload, start_reload
-from .torchao_decorator import (
-    set_torchao_reload_attrs,
-    support_quantized_model_reload_from_hp_weights,
-)
+from .lifecycle import finish_reload, start_reload, weight_update_active
+from .plan import LoadPlan, check_plannable, load_planned, plan_loads

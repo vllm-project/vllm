@@ -250,6 +250,32 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
     assert delta_token_ids
 
 
+@pytest.mark.asyncio
+async def test_kv_transfer_prompt_token_ids_return_prompt_text(
+    client: openai.AsyncOpenAI,
+):
+    """`return_prompt_text` returns the rendered prompt, so the ids are
+    ignored and `messages` is rendered."""
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=1,
+        extra_body={"return_token_ids": True, "return_prompt_text": True},
+    )
+    assert baseline.model_extra["prompt_text"]
+
+    decode = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=1,
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": baseline.prompt_token_ids},
+            "return_prompt_text": True,
+        },
+    )
+    assert decode.model_extra["prompt_text"] == baseline.model_extra["prompt_text"]
+
+
 def _assert_complete_timing_metrics(metrics: object) -> None:
     assert isinstance(metrics, dict)
     timing_fields = {

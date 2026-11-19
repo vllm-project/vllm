@@ -16,9 +16,14 @@ import torch
 
 from vllm.model_executor.models.qwen2_5_omni_thinker import (
     check_interleaved_audio_video,
+    get_omni_modality_masks,
+    may_interleave_audio_video,
     merge_interleaved_embeddings,
 )
-from vllm.multimodal.utils import set_mm_embedding_modality
+from vllm.multimodal.utils import (
+    copy_mm_embedding_modality,
+    set_mm_embedding_modality,
+)
 
 # Fake token IDs
 AUDIO_TOKEN_ID = 1001
@@ -63,6 +68,80 @@ def _mm_embed(shape: tuple[int, ...], value: float, modality: str) -> torch.Tens
     return set_mm_embedding_modality(torch.full(shape, value), modality)
 
 
+@pytest.mark.parametrize(
+    "modalities, expected",
+    [
+        (["image"], False),
+        (["video", "image"], False),
+        (["audio", "image"], False),
+        (["video", "audio"], True),
+        # Untagged embeddings cannot rule interleaving out.
+        ([None, "image"], True),
+    ],
+)
+def test_may_interleave_audio_video(modalities, expected):
+    """Only batches with both audio and video embeddings need the host-side
+    input_ids check for audio-in-video, so others must skip it."""
+    embeds = [
+        torch.zeros(2, 4) if m is None else _mm_embed((2, 4), 0.0, m)
+        for m in modalities
+    ]
+    assert may_interleave_audio_video(embeds) is expected
+
+
+MASK_TOKEN_IDS = {
+    "video": VIDEO_TOKEN_ID,
+    "audio": AUDIO_TOKEN_ID,
+    "image": IMAGE_TOKEN_ID,
+}
+
+
+def _placed_omni_embeds() -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    """An image item followed by an audio-in-video span, tagged with the batch
+    placement the encoder gather attaches: the video and audio items share the
+    interleaved span and each picks its own tokens via `is_embed`."""
+    input_ids, is_multimodal = make_interleaved_seq([2, 1], [1, 2], text_prefix=4)
+    input_ids[1:3] = IMAGE_TOKEN_ID
+    is_multimodal[1:3] = True
+    span = input_ids[4:]
+    image = set_mm_embedding_modality(torch.zeros(2, 4), "image", (1, 3, None))
+    video = set_mm_embedding_modality(
+        torch.zeros(3, 4), "video", (4, 10, span == VIDEO_TOKEN_ID)
+    )
+    audio = set_mm_embedding_modality(
+        torch.zeros(3, 4), "audio", (4, 10, span == AUDIO_TOKEN_ID)
+    )
+    return input_ids, is_multimodal, [image, video, audio]
+
+
+def test_modality_masks_from_placement_skip_input_ids():
+    """Embeddings tagged by the encoder gather carry their batch placement, so
+    audio-in-video masks match the token-id masks without reading input_ids
+    (which may live on the GPU)."""
+    input_ids, is_multimodal, embeds = _placed_omni_embeds()
+    # Re-wrapped embeddings (deepstack split, EVS strip) keep the placement.
+    embeds[1] = copy_mm_embedding_modality(embeds[1], embeds[1][:, :2])
+
+    masks = get_omni_modality_masks(Mock(), embeds, is_multimodal, MASK_TOKEN_IDS)
+
+    for modality, token_id in MASK_TOKEN_IDS.items():
+        expected = is_multimodal & (input_ids == token_id)
+        assert torch.equal(masks[modality], expected), modality
+
+
+def test_modality_masks_without_placement_read_input_ids():
+    """An embedding without placement (e.g. re-wrapped without
+    copy_mm_embedding_modality) falls back to the token-id masks."""
+    input_ids, is_multimodal, embeds = _placed_omni_embeds()
+    embeds[2] = set_mm_embedding_modality(embeds[2].clone(), "audio")
+
+    masks = get_omni_modality_masks(input_ids, embeds, is_multimodal, MASK_TOKEN_IDS)
+
+    for modality, token_id in MASK_TOKEN_IDS.items():
+        expected = is_multimodal & (input_ids == token_id)
+        assert torch.equal(masks[modality], expected), modality
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -72,8 +151,10 @@ def make_token_seq(
     audio_n: int, image_n: int, video_n: int, text_prefix: int = 3, text_sep: int = 2
 ):
     """Build a flat token sequence:
-      [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
-      [text_sep] [VIDEO * video_n] [text_sep]
+
+        [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
+        [text_sep] [VIDEO * video_n] [text_sep]
+
     Returns (input_ids tensor, is_multimodal mask, positions dict).
     """
     tokens = (
@@ -97,8 +178,8 @@ def make_token_seq(
 def make_interleaved_seq(
     video_chunks: list[int], audio_chunks: list[int], text_prefix: int = 2
 ):
-    """Build an interleaved sequence like use_audio_in_video:
-    [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
+    """Build an interleaved sequence like `use_audio_in_video`:
+    `[text] [V*v0] [A*a0] [V*v1] [A*a1] ...`
     """
     tokens = [TEXT_TOKEN_ID] * text_prefix
     for v, a in zip(video_chunks, audio_chunks):
@@ -172,7 +253,7 @@ class TestCheckInterleavedAudioVideo:
         """Regression test for https://github.com/vllm-project/vllm/issues/35394.
 
         5 identical non-interleaved mixed-modality requests batched together:
-        each has [audio][image][video] in separate blocks with text between them.
+        each has `[audio][image][video]` in separate blocks with text between them.
         Across the batch, audio from request N falls between video blocks of
         request N and request N+1, causing the global ranges to overlap.
         check_interleaved_audio_video must return False (not a false positive).
@@ -229,8 +310,8 @@ def make_mock_model(hidden: int = 8):
     # _embed_text_input_ids: delegate to SupportsMultiModal's implementation
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
-    model._embed_text_input_ids = (
-        lambda *a, **kw: SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
+    model._embed_text_input_ids = lambda *a, **kw: (
+        SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
     )
 
     # super().embed_input_ids → use SupportsMultiModal.embed_input_ids
@@ -248,10 +329,8 @@ def make_mock_model(hidden: int = 8):
         )
 
     # Bind embed_input_ids as the real method
-    model.embed_input_ids = (
-        lambda *a, **kw: Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(
-            model, *a, **kw
-        )
+    model.embed_input_ids = lambda *a, **kw: (
+        Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(model, *a, **kw)
     )
 
     # Store super-embed for use inside the method
