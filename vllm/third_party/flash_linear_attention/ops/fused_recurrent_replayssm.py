@@ -9,6 +9,7 @@ import torch
 from vllm.model_executor.layers.mamba.ops.replayssm_config import (
     get_replayssm_config,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -50,6 +51,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
     MAX_CACHE_LEN: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    DOT_INPUT_PRECISION: tl.constexpr,
 ):
     i_v = tl.program_id(0)
     i_n = tl.program_id(1)
@@ -172,9 +174,9 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
         b_k_all_c = tl.load(
             p_k_c, mask=cache_valid[:, None] & mask_kt[None, :], other=0
         ).to(p_k_c.dtype.element_ty)
-        b_h_c = b_h0_c * b_total_decay + tl.dot(b_d_scaled_tc, b_k_all_c).to(
-            tl.float32
-        )  # [BV, BKT]
+        b_h_c = b_h0_c * b_total_decay + tl.dot(
+            b_d_scaled_tc, b_k_all_c, input_precision=DOT_INPUT_PRECISION
+        ).to(tl.float32)  # [BV, BKT]
 
         # Read the state with q and k (accumulated across K tiles).
         b_state_q += tl.sum(b_h_c * q_cs[None, :], axis=1)
@@ -231,9 +233,9 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
             b_k_all_c = tl.load(
                 p_k_c, mask=cache_valid[:, None] & mask_kt[None, :], other=0
             ).to(p_k_c.dtype.element_ty)
-            b_h_c = b_h0_c * b_total_decay + tl.dot(b_d_scaled_tc, b_k_all_c).to(
-                tl.float32
-            )
+            b_h_c = b_h0_c * b_total_decay + tl.dot(
+                b_d_scaled_tc, b_k_all_c, input_precision=DOT_INPUT_PRECISION
+            ).to(tl.float32)
             b_h_new_c = alpha_val * b_h_c + b_d_cur[:, None] * k_c[None, :]
             p_ht_c = (
                 ht
@@ -378,6 +380,9 @@ def fused_recurrent_gated_delta_rule_replayssm(
     # spilling.
     BV = block_v if block_v is not None else min(triton.next_power_of_2(V), 64)
     BC = max(16, triton.next_power_of_2(max_cache_len))
+    # AMD Triton does not support tf32x3, so use its backend default. CUDA
+    # keeps fp32 rings at fp32 parity with the elementwise baseline.
+    dot_input_precision = None if current_platform.is_rocm() else "tf32x3"
 
     grid = (triton.cdiv(V, BV), B, HV)
     fused_recurrent_gated_delta_rule_replayssm_kernel[grid](
@@ -417,6 +422,7 @@ def fused_recurrent_gated_delta_rule_replayssm(
         MAX_CACHE_LEN=max_cache_len,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        DOT_INPUT_PRECISION=dot_input_precision,
         num_warps=num_warps,
         num_stages=num_stages,
     )

@@ -62,10 +62,8 @@ def test_replayssm_flush_keeps_beta_in_fp32(act_dtype):
 
 
 def _output_tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
-    # Anchored on the baseline packed-decode kernel; same regime as the existing
-    # GDN test. The output has no fp32 drift (tight 1e-4); keyed off act dtype.
     if act_dtype == torch.float32:
-        return 1e-4, 1e-4
+        return 1e-5, 1e-5
     return 1e-2, 2e-2
 
 
@@ -75,12 +73,9 @@ def _state_tolerances(
     if state_dtype == torch.bfloat16:
         # The baseline rounds state every token; ReplaySSM rounds at flushes.
         return 2e-2, 2e-2
-    # The reconstructed checkpoint state vs the baseline's sequential state
-    # differs a bit more than the output at fp32 (~8e-4, an fp32 reconstruction
-    # vs recurrence difference, not a precision bug) -- same looser regime the
-    # existing GDN test uses for state.
+    # fp32 rings reconstruct with tf32x3 dots, so a TF32 regression fails here.
     if act_dtype == torch.float32:
-        return 1e-3, 2e-3
+        return 1e-5, 1e-5
     return 1e-2, 2e-2
 
 
