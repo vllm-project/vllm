@@ -43,8 +43,9 @@ def _step_ref(S, x, dt, A, B, C, D):
     ],
 )
 @pytest.mark.parametrize("num_spec,max_window", [(1, 4), (5, 16), (3, 4)])
+@pytest.mark.parametrize("strided_trackers", [False, True])
 def test_replayssm_spec_decode_matches_recurrence(
-    state_dtype, act_dtype, num_spec, max_window
+    state_dtype, act_dtype, num_spec, max_window, strided_trackers
 ):
     set_random_seed(0)
     device = "cuda"
@@ -72,6 +73,13 @@ def test_replayssm_spec_decode_matches_recurrence(
     ring_start = torch.randint(0, ring_len, (num_slots,), device=device)
     ring_start = ring_start.to(torch.int32)
     num_committed = torch.zeros(num_slots, device=device, dtype=torch.int32)
+    if strided_trackers:
+        # Like the in-page ring trackers: both live in one buffer with a
+        # non-unit slot stride.
+        trackers = torch.zeros(num_slots, 6, device=device, dtype=torch.int32)
+        trackers[:, 0] = ring_start
+        ring_start, num_committed = trackers[:, 0], trackers[:, 1]
+        assert ring_start.stride(0) == num_committed.stride(0) == 6
     true_state = {s: state[s].float() for s in slots[:batch].tolist()}
     pad_x = torch.randn(NHEADS, HEADDIM, device=device).to(act_dtype)
 
