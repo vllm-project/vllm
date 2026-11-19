@@ -3,11 +3,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 """Configuration for NVIDIA Nemotron-3.5-Transcribe.
 
-The checkpoint's ``config.json`` is a NeMo SpeechLM config: the decoder under
-``llm_config``, the speech front end under ``perception`` and the Parallel
+The checkpoint's `config.json` is a NeMo SpeechLM config: the decoder under
+`llm_config`, the speech front end under `perception` and the Parallel
 Expert Encoder (an ASR encoder plus a Sortformer speaker encoder) under
-``pe_encoder_config``. Everything the audio tower needs is resolved into one
-flat ``audio_config`` dict.
+`pe_encoder_config`. Everything the audio tower needs is resolved into one
+flat `audio_config` dict.
 """
 
 import math
@@ -26,7 +26,7 @@ _SUPPORTED_SPEAKER_FEATURE_MODES = ("thresholded", "continuous")
 
 
 def _encoder_config(cfg: dict[str, Any], name: str) -> dict[str, Any]:
-    """Resolve a NeMo ``TransformerEncoder`` config, applying its defaults."""
+    """Resolve a NeMo `TransformerEncoder` config, applying its defaults."""
     subsampling = cfg.get("subsampling", "feature_stacking")
     if subsampling != "feature_stacking":
         raise ValueError(
@@ -62,7 +62,7 @@ def _encoder_config(cfg: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _preprocessor_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a NeMo ``AudioToMelSpectrogramPreprocessor`` config."""
+    """Resolve a NeMo `AudioToMelSpectrogramPreprocessor` config."""
     sample_rate = int(cfg.get("sample_rate", 16000))
     # NeMo normalizes per feature when the key is missing.
     if cfg.get("normalize", "per_feature") not in (None, "", "NA"):
@@ -262,11 +262,11 @@ def _other_architecture_hint(
 class Nemotron3_5TranscribeConfig(PreTrainedConfig):
     """Configuration for Nemotron-3.5-Transcribe.
 
-    Reads the checkpoint's NeMo SpeechLM ``config.json`` (see the module
-    docstring). The decoder config becomes ``text_config``; the audio tower
-    settings become ``audio_config`` (see :func:`resolve_audio_config`).
+    Reads the checkpoint's NeMo SpeechLM `config.json` (see the module
+    docstring). The decoder config becomes `text_config`; the audio tower
+    settings become `audio_config` (see `resolve_audio_config`).
 
-    ``nemo_speechlm`` is NeMo's model type for all its SpeechLM checkpoints; the
+    `nemo_speechlm` is NeMo's model type for all its SpeechLM checkpoints; the
     architecture name selects Nemotron-3.5-Transcribe.
     """
 

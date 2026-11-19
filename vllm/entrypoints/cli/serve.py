@@ -138,7 +138,7 @@ class ServeSubcommand(CLISubcommand):
         # Elastic EP currently only supports running with at most one API server.
         if getattr(args, "enable_elastic_ep", False) and args.api_server_count > 1:
             logger.warning(
-                "Elastic EP only supports running with with at most one API server. "
+                "Elastic EP only supports running with at most one API server. "
                 "Capping api_server_count from %d to 1.",
                 args.api_server_count,
             )
@@ -367,6 +367,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 engine_count=expected_engine_count,
                 data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
+                model_config=vllm_config.model_config,
             )
         else:
             # Start API server(s).

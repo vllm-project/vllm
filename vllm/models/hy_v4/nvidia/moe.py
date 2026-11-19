@@ -69,14 +69,14 @@ class HYV4FeedForward(nn.Module):
 class HYV4MoEFused(nn.Module):
     """HY V4 MoE layer with optional SwiGLU clamp support.
 
-    When ``config.swiglu_limit > 0`` the routed experts use a clamped SwiGLU::
+    When `config.swiglu_limit > 0` the routed experts use a clamped SwiGLU::
 
         gate = clamp(gate, max=limit)
         up = clamp(up, -limit, limit)
         output = silu(gate) * up
 
     Dense layers and shared experts are NOT clamped. The clamp is forwarded to
-    ``FusedMoEFactory`` as ``swiglu_limit`` so it travels through the quant
+    `FusedMoEFactory` as `swiglu_limit` so it travels through the quant
     config to every expert backend instead of mutating global state.
 
     NOTE: The reference implementation additionally supports HPC gate kernels,
@@ -91,6 +91,7 @@ class HYV4MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        reduce_results: bool = True,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -167,7 +168,9 @@ class HYV4MoEFused(nn.Module):
             e_score_correction_bias=self.expert_bias,
             shared_experts=self.shared_experts,
             swiglu_limit=moe_swiglu_limit,
+            reduce_results=reduce_results,
         )
+        assert reduce_results or self.experts.moe_config.skip_final_all_reduce
         self.prefix = prefix
         if use_swiglu_clamp:
             logger.debug_once(

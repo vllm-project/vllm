@@ -3,6 +3,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
@@ -182,21 +183,37 @@ def compute_topk_scores(
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
     logits_mode: bool = False,
+    drop_sampled_from_topk: bool = True,
 ) -> LogprobsTensors:
+    """Logprobs of the sampled token, then its top-k or requested tokens.
+
+    By default the sampled token is dropped from the top-k columns, which
+    then hold the next-best tokens, and `selected_token_ranks` is
+    [batch_size, 1 + num_cols] with each column's vocab rank. With
+    `drop_sampled_from_topk=False` the top-k columns may repeat the sampled
+    token and `selected_token_ranks` is [batch_size], the sampled rank only:
+    the layout the diffusion models' per-slot logprobs stashes hold.
+    """
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
     topk_ranks: torch.Tensor | None = None
     topk_rows: torch.Tensor | None = None
 
+    def topk() -> torch.Tensor:
+        nonlocal topk_ranks
+        if not drop_sampled_from_topk:
+            return torch.topk(logits, num_logprobs, dim=-1).indices
+        k = min(num_logprobs + 1, vocab_size)
+        indices, topk_ranks = _drop_sampled_token_from_topk(
+            torch.topk(logits, k, dim=-1).indices, sampled_token_ids, num_logprobs
+        )
+        return indices
+
     if max_per_req_token_ids == 0:
         # Fast path: no request asked for custom logprob_token_ids.
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
         if num_logprobs > 0:
-            k = min(num_logprobs + 1, vocab_size)
-            topk_indices = torch.topk(logits, k, dim=-1).indices
-            topk_indices, topk_ranks = _drop_sampled_token_from_topk(
-                topk_indices, sampled_token_ids, num_logprobs
-            )
+            topk_indices = topk()
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
         if logits_mode:
             scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
@@ -211,12 +228,7 @@ def compute_topk_scores(
         assert expanded_idx_mapping is not None
 
         if num_logprobs > 0:
-            k = min(num_logprobs + 1, vocab_size)
-            topk_token_ids = torch.topk(logits, k, dim=-1).indices
-            topk_token_ids, topk_ranks = _drop_sampled_token_from_topk(
-                topk_token_ids, sampled_token_ids, num_logprobs
-            )
-            topk_token_ids = topk_token_ids.to(torch.int32)
+            topk_token_ids = topk().to(torch.int32)
             num_topk = topk_token_ids.shape[1]
         else:
             # This tensor just used as an int32 pointer, data not accessed.
@@ -241,7 +253,7 @@ def compute_topk_scores(
             NUM_TOPK=num_topk,
             PADDED_COLS=triton.next_power_of_2(num_cols),
         )
-        if num_logprobs > 0:
+        if topk_ranks is not None:
             num_custom = logprob_token_ids_state.num_token_ids.gpu[expanded_idx_mapping]
             topk_rows = num_custom == 0
         if logits_mode:
@@ -250,7 +262,7 @@ def compute_topk_scores(
             scores = compute_token_logprobs(logits, logprob_token_ids)
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
-    if max_per_req_token_ids == 0:
+    if not drop_sampled_from_topk or max_per_req_token_ids == 0:
         token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
         _ranks_kernel[(batch_size,)](
             token_ranks,
@@ -260,6 +272,9 @@ def compute_topk_scores(
             vocab_size,
             BLOCK_SIZE=8192,  # type: ignore
         )
+    if not drop_sampled_from_topk:
+        logprob_token_ranks = token_ranks
+    elif max_per_req_token_ids == 0:
         logprob_token_ranks = torch.empty_like(logprob_token_ids, dtype=torch.int64)
         logprob_token_ranks[:, 0] = token_ranks
         num_rank_cols = logprob_token_ids.shape[1] - 1
@@ -367,3 +382,51 @@ class LogprobTokenIdsState:
 
     def max_num_token_ids(self, idx_mapping_np: np.ndarray) -> int:
         return int(self.num_token_ids.np[idx_mapping_np].max(initial=0))
+
+
+def concat_logprob_stashes(
+    parts: list[LogprobsTensors], cu_num_generated_tokens: list[int]
+) -> LogprobsTensors:
+    """Join the logprobs stashed for the requests committing this step.
+
+    Each stash is as wide as the widest logprobs request in the batch at the
+    step that request converged, so stashes from different steps can differ
+    in width. Pad the narrow ones the way compute_topk_scores pads a mixed
+    batch: token id 0 at -inf, which the output processor never reports.
+    """
+    width = max(p.logprob_token_ids.shape[1] for p in parts)
+
+    def pad(t: torch.Tensor, value: float) -> torch.Tensor:
+        return F.pad(t, (0, width - t.shape[1]), value=value)
+
+    return LogprobsTensors(
+        logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
+        logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
+        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        cu_num_generated_tokens=cu_num_generated_tokens,
+    )
+
+
+def masked_stash_write(
+    stash: LogprobsTensors,
+    slots: torch.Tensor,
+    keep: torch.Tensor,
+    new: LogprobsTensors,
+) -> None:
+    """Write `new` ([n * W] rows) into the per-slot stash where `keep`.
+
+    The PyTorch counterpart of DiffusionGemma's `stash_converged_logprobs`.
+    """
+    n = slots.shape[0]
+    pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
+    ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
+    lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
+    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
+    W = ranks.shape[1]
+    for buf, rows in (
+        (stash.logprob_token_ids, ids.view(n, W, -1)),
+        (stash.logprobs, lps.view(n, W, -1)),
+        (stash.selected_token_ranks, ranks),
+    ):
+        mask = keep.view(n, *[1] * (rows.dim() - 1))
+        buf[slots, :W] = torch.where(mask, rows, buf[slots, :W])

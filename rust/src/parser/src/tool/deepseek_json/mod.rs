@@ -14,7 +14,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len, take_json_object};
-use super::{Result, ToolCallDelta, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParserError, ToolParserOutput};
 
 pub(super) const TOOL_CALLS_START: &str = "<｜tool▁calls▁begin｜>";
 pub(super) const TOOL_CALLS_END: &str = "<｜tool▁calls▁end｜>";
@@ -162,10 +162,9 @@ impl DeepSeekJsonToolParser {
             DeepSeekJsonMode::Text => output.push_text(&self.buffer),
             DeepSeekJsonMode::ToolBlock | DeepSeekJsonMode::Done => {}
             DeepSeekJsonMode::Header | DeepSeekJsonMode::Arguments { .. } => {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.format.parser_name()
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.format.parser_name(),
+                });
             }
         }
         let _ = self.reset();

@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use tracing::warn;
 use vllm_text::Prompt;
 
 use crate::error::Result;
@@ -29,7 +30,7 @@ pub use deepseek_v41::DeepSeekV41ChatRenderer;
 pub use glm5_next::Glm5NextChatRenderer;
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
-pub use kimi_k3::KimiK3ChatRenderer;
+pub use kimi_k3::{KimiK3ChatRenderer, KimiK3Variant};
 pub use selection::RendererSelection;
 
 /// Location of one multimodal content part in the source chat request.
@@ -53,6 +54,27 @@ pub struct RenderedPrompt {
     /// Effective chat-template kwargs visible to the renderer after applying
     /// server defaults, request overrides, and typed reasoning controls.
     pub effective_template_kwargs: HashMap<String, Value>,
+}
+
+/// Decode the `arguments` of an assistant tool call replayed in the history,
+/// coercing anything but a JSON object to an empty object.
+///
+/// The model produced this string in an earlier turn, and OpenAI carries it as
+/// a string, so rejecting it would fail every later turn of the conversation.
+/// Renderers whose reference encoding defines its own handling of such strings
+/// keep it instead of calling this.
+fn tool_call_arguments_or_empty(arguments: &str) -> Map<String, Value> {
+    let problem = match serde_json::from_str(arguments) {
+        Ok(Value::Object(arguments)) => return arguments,
+        Ok(Value::Null) => return Map::new(),
+        Ok(_) => "decoded to a non-object JSON value",
+        Err(_) => "are not valid JSON",
+    };
+    warn!(
+        bytes = arguments.len(),
+        "tool call arguments {problem}; coercing to an empty object so the conversation can continue"
+    );
+    Map::new()
 }
 
 /// Minimal chat-prompt renderer used by `vllm-chat`.

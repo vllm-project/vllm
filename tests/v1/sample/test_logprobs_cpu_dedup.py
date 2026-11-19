@@ -334,3 +334,24 @@ def test_compute_topk_scores_vocab_size_one() -> None:
     assert torch.equal(
         result.selected_token_ranks, torch.tensor([[1]], dtype=torch.int64)
     )
+
+
+@pytest.mark.cpu_test
+def test_compute_topk_scores_keeps_sampled_for_diffusion_stashes() -> None:
+    # The diffusion models' per-slot stashes hold the plain top-k and one rank
+    # per row.
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0, 5.0], [9.0, 8.0, 7.0, 6.0, 5.0]],
+        dtype=torch.float32,
+    )
+    sampled_token_ids = torch.tensor([0, 4], dtype=torch.int64)
+    result = compute_topk_scores(
+        logits, 2, sampled_token_ids, drop_sampled_from_topk=False
+    )
+    assert torch.equal(
+        result.logprob_token_ids,
+        torch.tensor([[0, 0, 1], [4, 0, 1]], dtype=torch.int64),
+    )
+    assert torch.equal(
+        result.selected_token_ranks, torch.tensor([1, 5], dtype=torch.int64)
+    )

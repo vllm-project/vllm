@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DPSyncState:
     """What a `dispatch_cg_and_sync_dp` call agreed across DP ranks.
 
@@ -263,9 +263,10 @@ def dispatch_cg_and_sync_dp(
         dp_size: Data-parallel world size. 1 skips all cross-rank work.
         dp_rank: This rank's index in the DP group.
         max_query_len: Upper bound on per-request query length, for selecting
-            varlen decode graphs. None, as for a batch with a prefill, keeps
-            the batch out of graphs that constrain it. Reusing a sync replaces
-            this with `dp_sync_state.max_query_len`, including when it is None.
+            varlen decode graphs. None, as for a batch that is not decode-graph
+            eligible, keeps the batch out of graphs that constrain it. Reusing a
+            sync replaces this with `dp_sync_state.max_query_len`, including
+            when it is None.
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
@@ -314,6 +315,22 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
+        # all-reduce-overlap: the split is a local decision; a split step runs eager.
+        if (
+            allow_ubatching
+            and parallel_config is not None
+            and parallel_config.dbo_schedule == "all-reduce-overlap"
+            and check_ubatch_thresholds(
+                parallel_config, num_tokens, uniform_decode=uniform_decode
+            )
+        ):
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=get_num_ubatches(parallel_config),
+            )
         return batch_desc, None
 
     if dp_sync_state is not None:
