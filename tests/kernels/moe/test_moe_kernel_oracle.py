@@ -47,6 +47,8 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
     Int8MoEKernelOracle,
     make_int8_moe_kernel,
+    map_int8_backend,
+    select_int8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
@@ -93,6 +95,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kInt4Static,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -102,6 +106,12 @@ from vllm.platforms import current_platform
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
 # the "moe_backend=... is not supported for <name> MoE" error).
 SELECT_CASES = {
+    "int8": (
+        lambda cfg: select_int8_moe_backend(cfg),
+        map_int8_backend,
+        "triton",
+        "Int8",
+    ),
     "fp8": (
         lambda cfg: select_fp8_moe_backend(cfg, None, None),
         map_fp8_backend,
@@ -395,6 +405,83 @@ def test_activation_format_is_derived_from_config() -> None:
     # BATCHED_TRITON in select_unquantized_moe_backend.
     moe_config.moe_backend = "batched_triton"
     assert moe_config.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+
+
+def test_int8_oracle_defaults_to_w8a8():
+    """Direct construction uses the module selector's default INT8 scheme."""
+    oracle = Int8MoEKernelOracle(make_dummy_moe_config())
+    assert oracle.weight_key == kInt8StaticChannelSym
+    assert oracle.activation_key == kInt8DynamicTokenSym
+
+
+@pytest.mark.parametrize("entrypoint", ["function", "oracle"])
+@pytest.mark.parametrize("requested", ["auto", "triton", "humming"])
+@pytest.mark.parametrize(
+    ("weight_key", "activation_key"),
+    [
+        (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+        (kInt8StaticChannelSym, None),
+        (kInt8StaticChannelSym, kInt4Static),
+    ],
+    ids=["int8-w8a8", "int8-w8a16", "unsupported-activation-quantization"],
+)
+def test_int8_selection_preserves_candidate_priority(
+    entrypoint, requested, weight_key, activation_key
+):
+    """Moving selection to the base preserves the first supported candidate."""
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        ArmCPUExpertsInt8,
+        CPUExpertsInt8,
+        PowerCPUExpertsInt8,
+        ZenCPUExpertsInt8,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
+        HummingGroupedExperts,
+        HummingIndexedExperts,
+    )
+
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+    config.moe_backend = requested
+    candidates: list[tuple[Int8MoeBackend, list[type[mk.FusedMoEExperts]]]] = [
+        (Int8MoeBackend.TRITON, [TritonExperts]),
+        (
+            Int8MoeBackend.HUMMING,
+            [
+                BatchedHummingGroupedExperts,
+                HummingGroupedExperts,
+                HummingIndexedExperts,
+            ],
+        ),
+        (
+            Int8MoeBackend.CPU,
+            [ZenCPUExpertsInt8, PowerCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8],
+        ),
+    ]
+    expected = next(
+        (
+            (backend, candidate)
+            for backend, classes in candidates
+            if requested == "auto" or requested == backend.value.lower()
+            for candidate in classes
+            if candidate.is_supported_config(
+                candidate, config, weight_key, activation_key, config.activation_format
+            )[0]
+        ),
+        None,
+    )
+
+    def select():
+        if entrypoint == "function":
+            return select_int8_moe_backend(config, weight_key, activation_key)
+        return Int8MoEKernelOracle(config, weight_key, activation_key).select_backend()
+
+    if expected is None:
+        error_type = NotImplementedError if requested == "auto" else ValueError
+        with pytest.raises(error_type, match="Int8 MoE backend"):
+            select()
+    else:
+        assert select() == expected
 
 
 @pytest.mark.parametrize("unknown", [False, True], ids=["explicit", "unknown"])
