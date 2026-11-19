@@ -384,7 +384,8 @@ class TestNCCLEngineParsing:
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
         )
         model = _module_with(("w", torch.arange(6.0).view(2, 3)))
-        record_checkpoint_layout(model)
+        if refusal == "eplb":  # a layerwise cold start records no layout
+            record_checkpoint_layout(model)
         model.w.data = model.w.data.t()  # post-load processing re-laid it out
         if refusal == "eplb":
             parallel = SimpleNamespace(enable_eplb=True)

@@ -32,12 +32,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import (
-    direct_reload_active,
-    layerwise_reason,
-    mark_loaded,
-    reloads_directly,
-)
+from .direct import direct_reload_active, mark_loaded, reloads_directly
 from .geometry import (
     Box,
     Fallback,
@@ -229,8 +224,8 @@ def check_plannable(model: torch.nn.Module) -> None:
     """
     if not reloads_directly(model):
         raise RuntimeError(
-            "load plan: requires direct reload, but this rank reloads layerwise: "
-            f"{layerwise_reason(model)} (see the startup log)"
+            "load plan: requires direct reload; this rank reloads layerwise "
+            "(see its startup log)"
         )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)

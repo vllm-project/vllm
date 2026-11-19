@@ -29,7 +29,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, get_current_vllm_config_or_none
-from vllm.config.vllm import direct_reload_refusal
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -45,7 +44,6 @@ __all__ = [
     "direct_reload_enabled",
     "finish_direct_reload",
     "follow_target_reload_mode",
-    "layerwise_reason",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
@@ -72,18 +70,11 @@ _LOADER_ATTRS = (
 
 def direct_reload_enabled() -> bool:
     """Whether a model loaded now records its checkpoint layout to reload directly."""
-    return _config_refusal() is None
-
-
-def _config_refusal() -> str | None:
-    """Why the current config reloads layerwise, if it does."""
     if envs.VLLM_RELOAD_MODE != "auto":
-        return (
-            None if envs.VLLM_RELOAD_MODE == "direct" else "VLLM_RELOAD_MODE=layerwise"
-        )
+        return envs.VLLM_RELOAD_MODE == "direct"
     config = get_current_vllm_config_or_none()
     if config is None or config.weight_transfer_config is None:
-        return "no weight_transfer_config"
+        return False
     reason: str | None
     if config.weight_transfer_config.backend == "sparse_nccl":
         # it writes runtime tensors in place, never through start/finish_reload
@@ -92,41 +83,24 @@ def _config_refusal() -> str | None:
         # a LoRA model's lm_head is not loaded again by every update
         reason = "LoRA"
     else:
-        reason = direct_reload_refusal(config)
+        reason = config.direct_reload_refusal()
     if reason:
         logger.info_once(
             "Direct reload does not support %s: weight updates reload layerwise.",
             reason,
         )
-    return reason
+    return reason is None
 
 
 def reloads_directly(model: torch.nn.Module) -> bool:
     """Whether `model`'s updates reload directly: its cold start recorded a layout."""
-    return envs.VLLM_RELOAD_MODE != "layerwise" and hasattr(model, "_ckpt_param_names")
+    return hasattr(model, "_ckpt_param_names")
 
 
 def follow_target_reload_mode(draft: torch.nn.Module, target: torch.nn.Module) -> None:
     """A draft reloads layerwise whenever its target does: they may share tensors."""
     if reloads_directly(draft) and not reloads_directly(target):
         del draft._ckpt_param_names
-        _refuse(draft, "a draft whose target reloads layerwise")
-
-
-def layerwise_reason(model: torch.nn.Module) -> str:
-    """Why `model`'s updates reload layerwise, for error messages."""
-    if envs.VLLM_RELOAD_MODE == "layerwise":
-        return "VLLM_RELOAD_MODE=layerwise"
-    return model.__dict__.get("_layerwise_reason", "no checkpoint layout was recorded")
-
-
-def _refuse(model: torch.nn.Module, reason: str) -> None:
-    """Mark `model` to reload layerwise."""
-    model._layerwise_reason = reason
-    model.__dict__.pop("_loaded_params", None)
-    logger.info(
-        "Direct reload does not support %s: weight updates reload layerwise.", reason
-    )
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -252,18 +226,18 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     no other model recorded first), and which parameter names hold checkpoint
     tensors.
     Runs once; reloads reuse the cold-start record."""
-    if hasattr(model, "_ckpt_param_names") or hasattr(model, "_layerwise_reason"):
+    if hasattr(model, "_ckpt_param_names"):
         return
-    if reason := _config_refusal():
-        model._layerwise_reason = reason  # applies to every model: logged once
-        model.__dict__.pop("_loaded_params", None)
-        return
+    reason: str | None
     if is_weights_pre_processed():
         reason = "pre-processed weights"  # already in runtime layout
     elif (reason := _module_refusal(model)) and envs.VLLM_RELOAD_MODE == "direct":
         raise RuntimeError(f"direct reload: {reason} is not supported")
     if reason:
-        _refuse(model, reason)
+        logger.info(
+            "Direct reload does not support %s: weight updates reload layerwise.",
+            reason,
+        )
         return
     # what cold start loaded, every update must load again; after a dummy
     # start (nothing loaded) the first update sets it

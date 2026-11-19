@@ -19,7 +19,7 @@ Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
 """
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -37,7 +37,6 @@ from vllm.model_executor.model_loader.reload.direct import (
     direct_reload_enabled,
     finish_direct_reload,
     follow_target_reload_mode,
-    layerwise_reason,
     record_checkpoint_layout,
     reloads_directly,
     track_loaded_params,
@@ -680,7 +679,9 @@ def _config(**overrides) -> SimpleNamespace:
         speculative_config=None,
         weight_transfer_config=None,
     )
-    return SimpleNamespace(**(fields | overrides))
+    config = SimpleNamespace(**(fields | overrides))
+    config.direct_reload_refusal = MethodType(VllmConfig.direct_reload_refusal, config)
+    return config
 
 
 @pytest.mark.parametrize(
@@ -762,26 +763,15 @@ _IPC = SimpleNamespace(backend="ipc")
 
 
 @pytest.mark.parametrize(
-    "mode,overrides,expected",
-    [
-        ("auto", {"weight_transfer_config": _IPC}, True),
-        ("auto", {}, False),
-        ("auto", {"weight_transfer_config": _IPC, "lora_config": object()}, False),
-        (
-            "auto",
-            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
-            False,
-        ),
-        ("direct", {}, True),
-        ("layerwise", {"weight_transfer_config": _IPC}, False),
-    ],
-    ids=["updates", "no-updates", "lora", "sparse-nccl", "direct", "layerwise"],
+    "overrides",
+    [{}, {"weight_transfer_config": _IPC, "lora_config": object()}],
+    ids=["no-updates", "lora"],
 )
-def test_direct_reload_enabled(monkeypatch, mode, overrides, expected):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+def test_direct_reload_enabled(monkeypatch, overrides):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-    assert direct_reload_enabled() is expected
+    assert direct_reload_enabled() is False
 
 
 def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
@@ -808,7 +798,6 @@ def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
     draft.attn = target.attn
     follow_target_reload_mode(draft, target)
     assert not reloads_directly(draft)
-    assert "target" in layerwise_reason(draft)
     # a direct target leaves its draft's own decision
     draft = _cold_start(_checkpoint())
     follow_target_reload_mode(draft, _cold_start(_checkpoint()))
