@@ -60,6 +60,7 @@ KNOWN_PP_DEFECTS: dict[str, str] = {
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
     "GPTBigCodeForCausalLM": "Later stages add position embeddings again; see #66290",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
+    "NemotronLabsDiffusionModel": "Prompt logprobs arrive on a step with no output",
 }
 # The reduced configs keep each model's leading dense layers, which can fill a
 # whole stage; these models expect an MoE layer on every stage, as real configs
@@ -78,21 +79,25 @@ SPLIT_KV_SHARING: dict[str, tuple[int, str]] = {
     "Gemma4ForCausalLM": (4, "3,1"),
 }
 
-# Sparse MLA backends need Hopper or newer, as in test_initialization.py.
+# Sparse MLA backends need Hopper or newer, as in test_initialization.py, or
+# AITER on ROCm.
 SPARSE_MLA_ARCHS = (
     "DeepseekV32ForCausalLM",
     "Glm5NextForCausalLM",
     "GlmMoeDsaForCausalLM",
+    "HYV4ForCausalLM",
 )
+# Architectures whose model raises on ROCm.
+CUDA_ONLY_ARCHS = {"HYV4FlashForCausalLM": "HYV4 Flash requires NVIDIA CUDA"}
 
 
 def _sparse_mla_supported() -> bool:
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.platforms.rocm import on_gfx950
 
-        # The ROCm sparse attention indexer has no other path.
-        return rocm_aiter_ops.is_enabled() or on_gfx950()
+        # Without AITER the ROCm sparse attention indexer either raises
+        # (gfx942) or reads back to the host (gfx950).
+        return rocm_aiter_ops.is_enabled()
     return current_platform.has_device_capability(90)
 
 
@@ -279,8 +284,12 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
             pytest.mark.skipif(
                 not _sparse_mla_supported(),
                 reason="Sparse MLA needs compute capability 9.0 or newer, "
-                "or AITER or gfx950 on ROCm",
+                "or AITER on ROCm",
             )
+        )
+    if arch in CUDA_ONLY_ARCHS:
+        marks.append(
+            pytest.mark.skipif(current_platform.is_rocm(), reason=CUDA_ONLY_ARCHS[arch])
         )
     return marks
 
