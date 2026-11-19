@@ -7,7 +7,12 @@ import torch
 
 from vllm.config import ModelConfig
 
-from .direct import begin_direct_reload, direct_reload_enabled, finish_direct_reload
+from .direct import (
+    abort_direct_reload,
+    begin_direct_reload,
+    direct_reload_enabled,
+    finish_direct_reload,
+)
 from .layerwise import (
     abort_layerwise_reload,
     finalize_layerwise_reload,
@@ -58,5 +63,7 @@ def abort_reload(model: torch.nn.Module) -> None:
     """
     global _weight_update_active
     _weight_update_active = False
-    if not direct_reload_enabled():
+    if direct_reload_enabled():
+        abort_direct_reload(model)
+    else:
         abort_layerwise_reload(model)
