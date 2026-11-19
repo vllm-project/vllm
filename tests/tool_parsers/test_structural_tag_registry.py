@@ -2327,6 +2327,45 @@ def test_parallel_tool_calls_false_does_not_enable_calls_with_response_format(
     assert _tool_calling_grammar("hermes", sample_tools, request) is None
 
 
+def test_max_repeated_tool_calls_drops_tool_grammar_once_reached(
+    sample_tools_strict,
+):
+    # Strict tools + response_format under auto gets the tool-call OR answer
+    # grammar. Once the history shows the same call `max_repeated_tool_calls`
+    # times in a row, the request is served without tool calls, so only the
+    # answer format is left.
+    call = {
+        "id": "call_0",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+    }
+    step = [
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
+    ]
+
+    def request(repeats: int) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="m",
+            messages=[{"role": "user", "content": "weather?"}] + step * repeats,
+            tools=[t.model_dump() for t in sample_tools_strict],
+            tool_choice="auto",
+            max_repeated_tool_calls=2,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+        )
+
+    below = request(1)
+    assert below.tool_choice == "auto"
+    assert _tool_calling_grammar("hermes", sample_tools_strict, below) is not None
+
+    reached = request(2)
+    assert reached.tool_choice == "none"
+    assert _tool_calling_grammar("hermes", sample_tools_strict, reached) is None
+
+
 def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     # The Responses API has no post-hoc filter, so the grammar is the only limit.
     request = ResponsesRequest.model_validate(
