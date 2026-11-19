@@ -518,6 +518,14 @@ class Glm5NextDecoderLayer(nn.Module):
             from vllm.triton_utils.tp_synced_autotune import install
 
             install()
+        if replicate and self.layer_kind == "mla":
+            # A sort fixes the order of the selected indices, not which ties
+            # the atomic top-k keeps: replicated ranks need the canonical set.
+            from vllm.model_executor.layers.canonical_topk import (
+                require_deterministic_sparse_topk,
+            )
+
+            require_deterministic_sparse_topk("VLLM_GLM5NEXT_REPLICATE_MIXER")
         pc = get_current_vllm_config().parallel_config
         if replicate and (
             self.is_sequence_parallel
