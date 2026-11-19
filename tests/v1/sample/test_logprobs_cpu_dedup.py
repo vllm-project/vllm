@@ -355,3 +355,32 @@ def test_compute_topk_scores_keeps_sampled_for_diffusion_stashes() -> None:
     assert torch.equal(
         result.selected_token_ranks, torch.tensor([1, 5], dtype=torch.int64)
     )
+
+
+@pytest.mark.cpu_test
+def test_flat_logprobs_append_rows_keeps_per_slot_ranks() -> None:
+    import numpy as np
+
+    from vllm.logprobs import FlatLogprobs
+
+    container = FlatLogprobs()
+    # Row 0: sampled token was rank 2, so the deduped top-k holds ranks 1, 3.
+    # Row 1: sampled token was outside the top-k, so ranks stay canonical.
+    container.append_rows(
+        np.array([[7, 5, 9], [4, 1, 2]], dtype=np.int32),
+        np.array([[-1.0, -0.5, -2.0], [-6.0, -0.1, -0.2]], dtype=np.float32),
+        np.array([[2, 1, 3, 4], [9, 1, 2, 3]], dtype=np.int64),
+    )
+    assert {t: lp.rank for t, lp in container[0].items()} == {7: 2, 5: 1, 9: 3}
+    assert {t: lp.rank for t, lp in container[1].items()} == {4: 9, 1: 1, 2: 2}
+    assert container.rows() is None
+
+    canonical = FlatLogprobs()
+    canonical.append_rows(
+        np.array([[4, 1, 2]], dtype=np.int32),
+        np.array([[-6.0, -0.1, -0.2]], dtype=np.float32),
+        np.array([[9, 1, 2]], dtype=np.int64),
+    )
+    rows = canonical.rows()
+    assert rows is not None
+    assert rows[2].tolist() == [9]

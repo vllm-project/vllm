@@ -129,6 +129,7 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
             self.prims_ts_swa = Step5PrimsTSSWA(
                 cast(VllmConfig, config).model_config.max_model_len,
                 self.sliding_window[0] + 1,
+                self.num_speculative_tokens,
             )
             self.supports_quant_query_input = False
 
