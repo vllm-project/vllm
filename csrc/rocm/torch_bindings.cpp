@@ -162,6 +162,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def("mxfp4_moe_fold_base_rdna4(Tensor b_scales) -> Tensor");
   rocm_ops.impl("mxfp4_moe_fold_base_rdna4", torch::kCUDA,
                 &mxfp4_moe_fold_base_rdna4);
+  rocm_ops.def(
+      "mxfp4_moe_block_size_rdna4(int num_tokens, int top_k, "
+      "int num_experts) -> int",
+      &mxfp4_moe_block_size_rdna4);
 #endif
 
 #ifdef VLLM_ROCM_GFX115X

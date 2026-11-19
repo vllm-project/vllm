@@ -623,6 +623,19 @@ torch::Tensor mxfp4_moe_repack_rdna4(torch::Tensor const& b_q) {
 
 // Per-column E5M2 fold base for the hybrid kernel: base = max_g(e8m0) - 13,
 // clamped to >= 1, as uint8 [E, N] from scales [E, K/32, N].
+// block_size_m by average routed slots per expert (num_tokens * top_k /
+// num_experts), measured at gpt-oss-20b shapes on gfx1201: the skinny WMMA
+// kernels up to 8 slots/expert, 32/64-row tiles through 96, the hybrid LDS-B
+// kernel beyond (its 256-row blocks pad too much below that).
+int64_t mxfp4_moe_block_size_rdna4(int64_t num_tokens, int64_t top_k,
+                                   int64_t num_experts) {
+  const double per_e = (double)(num_tokens * top_k) / (double)num_experts;
+  if (per_e <= 8) return 16;
+  if (per_e <= 32) return 32;
+  if (per_e <= 96) return 64;
+  return 256;
+}
+
 torch::Tensor mxfp4_moe_fold_base_rdna4(torch::Tensor const& b_scales) {
   TORCH_CHECK(b_scales.dim() == 3 && b_scales.scalar_type() == at::kByte,
               "mxfp4_moe_fold_base_rdna4: expected uint8 [E, K/32, N]");
