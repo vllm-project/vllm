@@ -263,6 +263,20 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
     )
 
 
+@pytest.mark.parametrize(
+    ("rust_frontend", "expected_cache_type"),
+    [(False, LruKeyReplicatedReceiverCache), (True, type(None))],
+)
+def test_engine_receiver_cache_with_rust_frontend(
+    monkeypatch, rust_frontend, expected_cache_type
+):
+    """vllm-rs always sends the item data, so an engine LRU cache never hits."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", str(int(rust_frontend)))
+    vllm_config = _create_vllm_config(mm_processor_cache_gb=4, enable_ipc=True)
+
+    assert type(engine_receiver_cache_from_config(vllm_config)) is expected_cache_type
+
+
 class _StubModelConfig:
     """Minimal model-config stand-in: the cache classes only call
     get_multimodal_config(), so this lets us construct them directly without a

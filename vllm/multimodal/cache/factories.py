@@ -3,6 +3,7 @@
 from multiprocessing.synchronize import Lock as LockType
 from typing import Literal
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 
 from .base import (
@@ -43,6 +44,10 @@ def _get_cache_type(
         return "processor_only"
 
     mm_config = model_config.get_multimodal_config()
+    # The Rust frontend has no LRU sender cache and always sends the item data.
+    if mm_config.mm_processor_cache_type == "lru" and envs.VLLM_USE_RUST_FRONTEND:
+        return "processor_only"
+
     return mm_config.mm_processor_cache_type
 
 
