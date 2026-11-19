@@ -84,7 +84,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease
     SelectiveLookupLease,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.store_service import (
+    MOONCAKE_MASTER_METRICS_PORT,
     MooncakeStoreService,
+    StagePlacement,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
@@ -1659,13 +1661,28 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
-        self.store_service = MooncakeStoreService(self.store)
         setup_mooncake_store(
             self.store, store_config, local_hostname, engine=shared_engine
         )
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
+        # A pipeline-parallel chunk is one object per stage; keep the stages on
+        # one segment so they are evicted together (StagePlacement).
+        placement = None
+        if (
+            self.pp_size > 1
+            and preferred_segment is None
+            and extra_config.get("colocate_pipeline_stages", True)
+        ):
+            master_host = store_config.master_server_address.rpartition(":")[0]
+            placement = StagePlacement(
+                extra_config.get(
+                    "master_metrics_url",
+                    f"http://{master_host}:{MOONCAKE_MASTER_METRICS_PORT}/metrics",
+                )
+            )
+        self.store_service = MooncakeStoreService(self.store, placement)
         self.store_replicate_config = ReplicateConfig()
         self.enable_group_semantics = (
             str(extra_config.get("enable_group_semantics", "False")).strip().lower()
