@@ -2,20 +2,37 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import replace
+from unittest.mock import MagicMock
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
+from vllm.entrypoints.anthropic.api_router import (
+    attach_router as attach_anthropic_router,
+)
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.common.cli_args import BaseFrontendArgs
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
+from vllm.entrypoints.serve.exception_handling.register import (
+    init_exception_handler,
+)
+from vllm.entrypoints.serve.tokenize.api_router import (
+    attach_router as attach_tokenize_router,
+)
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
 )
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.exceptions import VLLMValidationError
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import (
     apply_max_tokenize_tokens,
     resolve_max_tokenize_tokens,
@@ -144,3 +161,104 @@ def test_tokenize_request_rejects_over_limit_requests():
     error = response.json()["error"]
     assert error["param"] == "input_tokens"
     assert "maximum context length" in error["message"]
+
+
+def _build_harmony_online_renderer() -> OnlineRenderer:
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "gpt_oss"
+    model_config.model = "openai/gpt-oss-20b"
+    model_config.served_model_name = "gpt-oss"
+    model_config.multimodal_config = None
+    model_config.max_model_len = 8192
+    model_config.max_tokenize_tokens = None
+
+    renderer = MagicMock()
+    renderer.tokenizer = MagicMock()
+    renderer.get_tokenizer.return_value = renderer.tokenizer
+
+    return OnlineRenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+def test_harmony_tokenize_and_count_tokens_max_limit():
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "gpt_oss"
+    model_config.model = "openai/gpt-oss-20b"
+    model_config.served_model_name = "gpt-oss"
+    model_config.multimodal_config = None
+    model_config.max_model_len = 8192
+    model_config.max_tokenize_tokens = None
+
+    renderer = MagicMock()
+    renderer.tokenizer = MagicMock()
+    renderer.get_tokenizer.return_value = renderer.tokenizer
+
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    assert online_renderer.use_harmony is True
+
+    models = OpenAIModelRegistry(
+        model_config=model_config,
+        base_model_paths=[
+            BaseModelPath(name="gpt-oss", model_path="openai/gpt-oss-20b")
+        ],
+    )
+
+    serving_tok = ServingTokenization(
+        models=models,
+        online_renderer=online_renderer,
+        chat_template=None,
+        chat_template_content_format="auto",
+        max_tokenize_tokens=3,
+    )
+
+    engine_client = MagicMock()
+    engine_client.errored = False
+
+    serving_anthropic = AnthropicServingMessages(
+        engine_client=engine_client,
+        models=models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        max_tokenize_tokens=3,
+    )
+
+    parser = FlexibleArgumentParser()
+    BaseFrontendArgs.add_cli_args(parser)
+
+    app = FastAPI()
+    init_exception_handler(app)
+    app.state.args = parser.parse_args([])
+    app.state.serving_tokenization = serving_tok
+    app.state.anthropic_serving_messages = serving_anthropic
+    attach_tokenize_router(app)
+    attach_anthropic_router(app)
+
+    client = TestClient(app)
+    payload = {
+        "model": "gpt-oss",
+        "messages": [
+            {"role": "user", "content": "Hello world, testing harmony limit."}
+        ],
+    }
+
+    tok_resp = client.post("/tokenize", json=payload)
+    assert tok_resp.status_code == 400
+    assert "maximum context length is 3 tokens" in tok_resp.text
+
+    count_resp = client.post("/v1/messages/count_tokens", json=payload)
+    assert count_resp.status_code == 400
+    assert "maximum context length is 3 tokens" in count_resp.text

@@ -332,7 +332,9 @@ class OnlineRenderer:
             self.adjust_harmony_request(request)
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request,
+                should_include_tools,
+                tok_params=tok_params,
             )
 
         observe_request_render_duration(
@@ -564,6 +566,7 @@ class OnlineRenderer:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        tok_params: TokenizeParams | None = None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         reuse_ids = _reused_prompt_token_ids(request, self.renderer)
@@ -610,8 +613,17 @@ class OnlineRenderer:
         messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
+
+        prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
+        tok_params.apply_post_tokenization(
+            self.renderer.tokenizer,
+            prompt,
+        )
+        engine_input = tokens_input(
+            prompt["prompt_token_ids"], cache_salt=request.cache_salt
+        )
 
         return messages, [engine_input]
 
