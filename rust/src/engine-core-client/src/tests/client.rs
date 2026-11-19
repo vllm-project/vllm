@@ -37,7 +37,7 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
-    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+    RequestBatchOutputs, UtilityCallOutput,
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
@@ -655,6 +655,47 @@ where
     T: serde::Serialize,
 {
     UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
+}
+
+/// A request may reach any engine, so prompt logprobs are supported only when
+/// every engine reports them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_logprobs_support_requires_every_engine() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let mut engines = Vec::new();
+    for (engine_id, supports_prompt_logprobs) in [([0x00, 0x00], true), ([0x01, 0x00], false)] {
+        engines.push(spawn_mock_engine_task_with_ready(
+            ipc.handshake_endpoint(),
+            engine_id.to_vec(),
+            EngineCoreReadyResponse {
+                supports_prompt_logprobs,
+                ..default_ready_response()
+            },
+            |_, _| Box::pin(async {}),
+        ));
+    }
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    assert!(client.ready_response().supports_prompt_logprobs);
+    assert!(!client.supports_prompt_logprobs());
+
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4010,7 +4051,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(python_mm_features, rust_mm_features);
 
     let decoded_sampling_mask_outputs =
-        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
+        EngineCoreOutputs::from_frames(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
@@ -4025,7 +4066,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         hex::decode(extended_outputs_hex).unwrap(),
     )];
     assert_eq!(
-        decode_engine_core_outputs(&extended_frames).unwrap(),
+        EngineCoreOutputs::from_frames(&extended_frames).unwrap(),
         decoded_outputs
     );
     expect_test::expect![[r#"
@@ -4106,7 +4147,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     };
 
     let inline_logprobs =
-        decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(inline_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         inline_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4115,7 +4156,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_logprobs =
-        decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         multipart_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4123,7 +4164,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             .expect("multipart logprobs decoded"),
     );
 
-    let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
+    let inline_prompt =
+        EngineCoreOutputs::from_frames(&decode_frames(inline_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         inline_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4132,7 +4174,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_prompt =
-        decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         multipart_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4297,9 +4339,11 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
     legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
+    legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
+    assert!(legacy_ready.supports_prompt_logprobs);
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -4311,6 +4355,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
+    assert!(!ready_response.supports_prompt_logprobs);
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

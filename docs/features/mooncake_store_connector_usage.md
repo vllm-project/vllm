@@ -232,8 +232,8 @@ Lookup reports a reusable prefix only when every required cache group is
 present. For each Attention page, this includes every Store chunk covering its
 reusable tokens, across all Store shards.
 
-Attention groups are planned from their per-layer cache specs, including specs
-wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count
+Attention groups are planned from their per-layer cache specs, including groups
+that pack layers with different layouts. The Store TP and global head-slot count
 must divide one another; MQA and replicated GQA use the smaller head-slot count
 as the physical Store shard count. `MambaSpec` state segments map in complete
 state units; a replicated local unit can serve multiple Store shards. All
@@ -297,6 +297,10 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
+
+To free the pool's host memory while the engine sleeps, stop the external
+`mooncake_client`; see
+[Sleep Mode](sleep_mode.md#free-a-kv-connectors-host-memory).
 
 ### Tenant Isolation
 

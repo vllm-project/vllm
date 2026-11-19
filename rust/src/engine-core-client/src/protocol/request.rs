@@ -297,7 +297,7 @@ mod tests {
         let Value::Array(wire) = &array[1] else {
             panic!("expected ndarray tuple");
         };
-        assert_eq!(wire[0], Value::from("=u4"));
+        assert_eq!(wire[0], Value::from("uint32"));
         assert_eq!(wire[1], Value::from(vec![Value::from(3)]));
         let decoded: EngineCoreRequest = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, request);

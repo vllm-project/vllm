@@ -15,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     init_distributed_environment,
@@ -170,7 +171,8 @@ def test_routing_strategy_integration(monkeypatch, device):
             )
 
 
-def test_simulated_bias_is_nonpersistent_buffer(monkeypatch, dist_init):
+@override_parallel_groups(SingleRankGroup())
+def test_simulated_bias_is_nonpersistent_buffer(monkeypatch):
     import vllm.envs as envs
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
 
