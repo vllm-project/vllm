@@ -185,6 +185,11 @@ class SecondaryTierManager(ABC):
     # the tier tolerates those calls off the scheduler thread.
     tolerates_off_thread_polling: ClassVar[bool] = False
 
+    # Direction(s) in which this tier may transfer data. The default keeps an
+    # instance built without __init__ (a stub, a test double) readable as
+    # readwrite instead of raising; __init__ overrides it from config.
+    access_mode: OffloadAccessMode = OffloadAccessMode.READWRITE
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
