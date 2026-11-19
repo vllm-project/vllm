@@ -628,11 +628,18 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
-    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+    qwen_multimodal_model_info_with_options(Default::default(), Default::default())
 }
 
 fn qwen_multimodal_model_info_with_limits(
     limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
+    qwen_multimodal_model_info_with_options(limit_mm_per_prompt, Default::default())
+}
+
+fn qwen_multimodal_model_info_with_options(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+    mm_processor_kwargs: std::collections::HashMap<String, serde_json::Value>,
 ) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
@@ -652,6 +659,7 @@ fn qwen_multimodal_model_info_with_limits(
         },
         Arc::new(fake_chat_tokenizer()),
         limit_mm_per_prompt,
+        &mm_processor_kwargs,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -708,6 +716,7 @@ fn step5_vl_multimodal_model_info_with_limits(
         },
         Arc::new(step5_vl_chat_tokenizer()),
         limit_mm_per_prompt,
+        &std::collections::HashMap::new(),
     )
     .expect("load multimodal info")
     .expect("step5_vl multimodal info is registered");
@@ -5676,6 +5685,48 @@ fn multimodal_render_app() -> axum::Router {
         chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
         ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
     }))
+}
+
+/// Startup options must affect rendered tensors and placeholders.
+#[tokio::test]
+async fn render_startup_mm_processor_kwargs_control_engine_features() {
+    let mut features = Vec::new();
+    for pixels in [12544, 3136] {
+        let kwargs = serde_json::from_value(json!({
+            "min_pixels": 3136,
+            "max_pixels": 12544,
+            "images_kwargs": {"min_pixels": pixels, "max_pixels": pixels},
+        }))
+        .unwrap();
+        let backend = Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_options(Default::default(), kwargs),
+        ));
+        let mut app = build_render_router(Arc::new(RenderState {
+            text: TextRequestProcessor::new(backend.clone(), u32::MAX),
+            chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
+            ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
+        }));
+        let (status, result) = post_json(&mut app, "/v1/chat/completions/render", json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": [{
+                "type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "same-image",
+            }]}],
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        features.push(result["features"].clone());
+    }
+    let lengths: Vec<_> = features
+        .iter()
+        .map(|feature| feature["mm_placeholders"]["image"][0]["length"].as_u64().unwrap())
+        .collect();
+    expect_test::expect![[r#"
+        [
+            16,
+            4,
+        ]
+    "#]]
+    .assert_debug_eq(&lengths);
+    assert_ne!(features[0]["kwargs_data"], features[1]["kwargs_data"]);
 }
 
 async fn render_image_chat(mm_payload: Option<&str>, uuid: Option<&str>) -> axum::body::Bytes {
