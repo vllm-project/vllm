@@ -82,6 +82,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         config_hash: None,
         enable_expert_parallel: false,
         supports_prompt_logprobs: true,
+        enable_chunked_prefill: true,
     }
 }
 
