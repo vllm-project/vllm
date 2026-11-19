@@ -35,10 +35,7 @@ from vllm.distributed.aux_output_connector.connector import (
     PackedBlockHashes,
     retained_objects,
 )
-from vllm.distributed.aux_output_connector.object_store import (
-    AuxObjectStoreFullError,
-    read_aux_rows,
-)
+from vllm.distributed.aux_output_connector.object_store import read_aux_rows
 from vllm.distributed.aux_output_connector.session_objects import (
     SessionObjectWriter,
     aux_owned_keys,
@@ -2773,18 +2770,26 @@ def test_worker_writes_the_session_tail_object_when_the_request_finishes(
     )
 
 
-def test_worker_step_fails_after_a_session_object_write_failed():
-    client, store = fake_store(-1)
+def test_worker_keeps_stepping_after_a_session_object_write_failed():
+    client, store = fake_store(-800)
     worker = _session_worker(store)
     pending = _session_step(
         worker, _position_rows(0, _BLOCK_SIZE), 0, _BLOCK_SIZE, _HASHES[:1]
     )
     worker.process_output(pending)
-    with pytest.raises(BlockObjectStoreError, match="write failed"):
-        for _ in range(500):
-            _begin_step(worker, _metadata(0, [], {}))
-            time.sleep(0.01)
+    deadline = time.monotonic() + 0.8
+    while time.monotonic() < deadline:
+        _begin_step(worker, _metadata(0, [], {}))
+        time.sleep(0.01)
+    worker._object_writer.drain(timeout_s=10)
+    assert len(client.writes) > 1 and not client.objects
+    client.code = 0
+    rows = _position_rows(0, 2 * _BLOCK_SIZE)
+    pending = _session_step(worker, rows, _BLOCK_SIZE, 2 * _BLOCK_SIZE, _HASHES[1:2])
+    worker.process_output(pending)
+    worker._object_writer.drain(timeout_s=10)
     worker.close()
+    assert list(client.objects) == [f"job/s/{_HASHES[1].hex()}"]
     assert client.closed and worker._store is None
 
 
@@ -2803,25 +2808,18 @@ def _writer_with_a_queued_write(code, release):
     return client, writer
 
 
-@pytest.mark.parametrize(
-    "code,blocked,match",
-    [(-1, False, "write failed"), (0, True, "not written in time")],
-    ids=["failed-write", "deadline"],
-)
-def test_session_object_writer_drain_raises(code, blocked, match):
+def test_session_object_writer_drain_raises_past_its_timeout():
     release = threading.Event()
-    if not blocked:
-        release.set()
-    _, writer = _writer_with_a_queued_write(code, release)
+    _, writer = _writer_with_a_queued_write(0, release)
     try:
-        with pytest.raises(BlockObjectStoreError, match=match):
-            writer.drain(timeout_s=0.05 if blocked else 60.0)
+        with pytest.raises(BlockObjectStoreError, match="not written in time"):
+            writer.drain(timeout_s=0.05)
     finally:
         release.set()
         assert _run_within(writer.close) is None
 
 
-def test_session_object_writer_fails_a_write_its_full_queue_cannot_take():
+def test_session_object_writer_drops_writes_its_queue_cannot_take_behind_a_hang():
     release = threading.Event()
     client, store = fake_store()
     put_batch = client.put_batch
@@ -2840,16 +2838,16 @@ def test_session_object_writer_fails_a_write_its_full_queue_cannot_take():
             writer.add_tail(f"job/s/tail/{index}", rows, {})
 
     try:
-        raised = _run_within(produce)
-        assert isinstance(raised, BlockObjectStoreError)
-        assert "not written in time" in str(raised.__cause__)
+        assert _run_within(produce) is None
+        assert _run_within(writer.drain) is None
+        writer.check()
         release.set()
-        with pytest.raises(BlockObjectStoreError):
-            writer.drain()
+        writer.drain(timeout_s=10)
     finally:
         release.set()
         assert _run_within(writer.close) is None
-    assert list(client.objects) == ["job/s/tail/0"]
+    assert list(client.objects) == ["job/s/tail/0", "job/s/tail/1"]
+    assert writer._dropped == 0
 
 
 @pytest.mark.parametrize("failures", [3, None], ids=["store-recovers", "store-stalls"])
@@ -2876,16 +2874,9 @@ def test_session_object_writer_retries_refused_puts_until_the_stall_deadline(
     )
     writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
 
-    def outcome():
-        if failures is None:
-            return pytest.raises(BlockObjectStoreError)
-        return nullcontext()
-
     try:
-        with outcome():
-            writer.drain(timeout_s=10)
-        with outcome():
-            writer.check()
+        writer.drain(timeout_s=10)
+        writer.check()
     finally:
         assert _run_within(writer.close) is None
     if failures is None:
@@ -3020,8 +3011,7 @@ def test_session_object_writer_backs_off_retrying_refused_removals():
     writer.remove(["job/s/a"])
     writer._put((["job/s/b"], [b"b"]))
     try:
-        with pytest.raises(BlockObjectStoreError):
-            writer.drain(timeout_s=30)
+        writer.drain(timeout_s=30)
     finally:
         assert _run_within(writer.close) is None
     assert 1 < len(removals) <= 6
@@ -3158,20 +3148,13 @@ def test_session_object_writer_waits_for_a_full_store_until_the_stall_deadline(
         writer.drain(timeout_s=30)
 
     try:
-        raised = _run_within(produce)
-        if written:
-            assert raised is None
-        else:
-            assert isinstance(raised, BlockObjectStoreError)
+        assert _run_within(produce) is None
         assert time.monotonic() - start < stall_s + 5
+        writer.check()
     finally:
         release.set()
         assert _run_within(writer.close) is None
     assert list(client.objects) == keys[:written]
-    if hang:
-        with pytest.raises(BlockObjectStoreError) as raised:
-            writer.check()
-        assert "not written in time" in str(raised.value.__cause__)
 
 
 def test_session_object_writer_drain_waits_while_writes_progress(monkeypatch):
@@ -3202,21 +3185,37 @@ def test_session_object_writer_drain_waits_while_writes_progress(monkeypatch):
     assert now[0] == 70.0 * len(keys)
 
 
-@pytest.mark.parametrize("code", [-600, -900], ids=["invalid-params", "master-gone"])
-def test_session_object_writer_retries_only_a_store_without_memory(code):
-    attempts = []
-    client, writer = _timed_writer(lambda keys: attempts.append(keys), 600.0, 1)
+@pytest.mark.parametrize(
+    "code", [-200, -800, -900], ids=["no-memory", "holder-gone", "master-gone"]
+)
+def test_session_object_writer_drops_what_the_store_refuses_and_recovers(code):
+    attempts: list[str] = []
+    client, writer = _timed_writer(lambda keys: attempts.append(keys[0]), 1.0, 1)
+    rows = np.zeros((1, 1), dtype=np.uint8)
     client.code = code
-    writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
     try:
-        with pytest.raises(BlockObjectStoreError):
-            writer.drain(timeout_s=10)
+        writer.add_tail("job/s/tail/0", rows, {})
+        writer.drain(timeout_s=10)
+        writer.add_tail("job/s/tail/1", rows, {})
+        writer.drain(timeout_s=0.5)
+        client.code = 0
+        writer.add_tail("job/s/tail/2", rows, {})
+        writer.drain(timeout_s=10)
+        client.code = code
+        writer.add_tail("job/s/tail/3", rows, {})
+        while attempts.count("job/s/tail/3") < 2:
+            time.sleep(0.01)
+        client.code = 0
+        writer.drain(timeout_s=10)
+        writer.check()
     finally:
         assert _run_within(writer.close) is None
-    assert len(attempts) == 1
+    assert attempts.count("job/s/tail/0") > 1 and attempts.count("job/s/tail/1") == 1
+    assert list(client.objects) == ["job/s/tail/2", "job/s/tail/3"]
+    assert writer._dropped == 0
 
 
-def test_session_object_writer_check_raises_once_a_hanging_put_passes_the_deadline():
+def test_session_object_writer_drain_stops_waiting_once_a_put_hangs():
     entered = threading.Event()
     release = threading.Event()
 
@@ -3225,18 +3224,20 @@ def test_session_object_writer_check_raises_once_a_hanging_put_passes_the_deadli
         release.wait(30)
         return 0
 
-    client, writer = _timed_writer(put, 3.0, 4)
+    client, writer = _timed_writer(put, 1.0, 4)
     try:
         writer.add_tail("job/s/tail/0", np.zeros((1, 1), dtype=np.uint8), {})
         assert entered.wait(10)
+        with pytest.raises(BlockObjectStoreError, match="not written in time"):
+            writer.drain(timeout_s=0.5)
+        start = time.monotonic()
+        writer.drain(timeout_s=10)
+        assert time.monotonic() - start < 1.5
         writer.check()
-        time.sleep(3.5)
-        with pytest.raises(BlockObjectStoreError) as raised:
-            writer.check()
-        assert "not written in time" in str(raised.value.__cause__)
     finally:
         release.set()
         assert _run_within(writer.close) is None
+    assert list(client.objects) == ["job/s/tail/0"]
 
 
 def test_session_object_writer_close_stops_retrying():
@@ -3251,10 +3252,8 @@ def test_session_object_writer_close_stops_retrying():
         assert attempts
     finally:
         assert _run_within(writer.close, 5) is None
-    with pytest.raises(BlockObjectStoreError) as raised:
-        writer.check()
-    assert isinstance(raised.value.__cause__.__cause__, AuxObjectStoreFullError)
-    assert client.closed and not client.objects
+    writer.check()
+    assert client.closed and not client.objects and writer._dropped == 1
 
 
 @pytest.mark.parametrize("idle_s", [601.0, 6000.0], ids=["past-deadline", "long-idle"])
