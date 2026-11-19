@@ -42,7 +42,7 @@ class Inkling2QuantConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        return 90
 
     @staticmethod
     def get_config_filenames() -> list[str]:
