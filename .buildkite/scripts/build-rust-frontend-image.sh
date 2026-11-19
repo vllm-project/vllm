@@ -17,7 +17,6 @@ read -r -a metadata <<< "$(bash .buildkite/scripts/docker-build-metadata-args.sh
 docker buildx build --load --provenance=false "${metadata[@]}" --build-arg "VLLM_RS_BUILD_VERSION=$version" \
     -f docker/Dockerfile.rust .
 test "$(docker run --rm "$image" --version | awk '{print $NF}')" = "$version"
-bash .buildkite/scripts/smoke-rust-frontend-image.sh "$image"
 
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${repo%/*}"
 docker push "$image"

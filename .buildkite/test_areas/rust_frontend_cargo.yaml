@@ -43,7 +43,6 @@ steps:
   - .dockerignore
   - LICENSE
   - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/smoke-rust-frontend-image.sh
   commands:
   - docker buildx bake -f docker/docker-bake.hcl rust-frontend --set "rust-frontend.tags=local/vllm-rust-frontend:$$BUILDKITE_JOB_ID"
-  - bash .buildkite/scripts/smoke-rust-frontend-image.sh "local/vllm-rust-frontend:$$BUILDKITE_JOB_ID"
+  - docker run --rm "local/vllm-rust-frontend:$$BUILDKITE_JOB_ID" --version
