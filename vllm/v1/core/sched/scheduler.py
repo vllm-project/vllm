@@ -3744,6 +3744,7 @@ class Scheduler(SchedulerInterface):
             self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.
+        freed_on_receive: set[str] = set()
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
             assert req_id in self.requests
@@ -3754,9 +3755,12 @@ class Scheduler(SchedulerInterface):
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._aborted_kv_loads.discard(req_id)
-                self._free_blocks(self.requests[req_id])
+                self._free_blocks(req)
+                freed_on_receive.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
+            if req_id in freed_on_receive:
+                continue
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 

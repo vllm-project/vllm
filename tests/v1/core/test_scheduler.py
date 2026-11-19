@@ -6683,7 +6683,8 @@ def test_fcfs_mixed_blocked_types_remote_load_drains_first():
     scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
 
 
-def test_abort_request_waiting_for_remote_kvs():
+@pytest.mark.parametrize("also_finished_sending", [False, True])
+def test_abort_request_waiting_for_remote_kvs(also_finished_sending):
     scheduler = create_scheduler(use_kv_connector=True)
 
     # add a single request
@@ -6702,7 +6703,10 @@ def test_abort_request_waiting_for_remote_kvs():
     scheduler_output = scheduler.schedule()
     model_runner_output = ModelRunnerOutput(
         req_ids=[],
-        kv_connector_output=KVConnectorOutput(finished_recving={request.request_id}),
+        kv_connector_output=KVConnectorOutput(
+            finished_recving={request.request_id},
+            finished_sending={request.request_id} if also_finished_sending else None,
+        ),
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
