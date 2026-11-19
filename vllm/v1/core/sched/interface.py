@@ -273,6 +273,10 @@ class SchedulerInterface(ABC):
         Fixed for the scheduler's life and the same on every rank."""
         return False
 
+    def prepare_dp_row(self) -> None:  # noqa: B027
+        """Called while the GPU runs a step, before the engine core blocks on
+        its output, to do `dp_row()`'s heavy work off the critical path."""
+
     def dp_row(self) -> list[float]:
         """This rank's row for the next DP state sync, if `shares_dp_row`."""
         raise NotImplementedError

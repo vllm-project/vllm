@@ -3089,6 +3089,10 @@ class Scheduler(SchedulerInterface):
     def shares_dp_row(self) -> bool:
         return self.prefill_hold is not None
 
+    def prepare_dp_row(self) -> None:
+        if self.prefill_hold is not None:
+            self.prefill_hold.prepare_row()
+
     def dp_row(self) -> list[float]:
         assert self.prefill_hold is not None
         return self.prefill_hold.local_row()

@@ -175,6 +175,19 @@ class PrefillQueueState(NamedTuple):
     num_cached_tokens: Callable[["Request"], int]
 
 
+class _QueueScan(NamedTuple):
+    """`local_row`'s fields read off the prefill queue at monotonic time `at`,
+    with `num_inflight` and `num_waiting` requests queued."""
+
+    at: float
+    num_inflight: int
+    num_waiting: int
+    x: int
+    x_attn: float
+    queued: int
+    slack: float
+
+
 class PrefillHold:
     """Decides, once per step and identically on every DP rank, whether all
     ranks hold their prefills on the next step. The DP engine core feeds every
@@ -234,6 +247,7 @@ class PrefillHold:
         # their output, and those of the last finished step not yet reported.
         self._pending: deque[tuple[SchedulerOutput, int, float]] = deque()
         self._done: tuple[int, float] | None = None
+        self._scan: _QueueScan | None = None
 
     def reset(self) -> None:
         """Called when all ranks go idle; the rate estimates decay over it."""
@@ -286,12 +300,25 @@ class PrefillHold:
                 self._done = (tokens, attn)
                 return
 
+    def prepare_row(self) -> None:
+        """Scans the prefill queue ahead of the next `local_row`. The engine
+        core calls this while the GPU runs a step, off the critical path."""
+        _, inflight, waiting, _, probe = self._queue_state()
+        at = time.monotonic()
+        self._scan = (
+            self._scan_queue(inflight, waiting, probe, at, self._held(at))
+            if inflight or waiting
+            else None
+        )
+
     def local_row(self) -> list[float]:
         """This rank's row for the next all-gather."""
         running, inflight, waiting, max_active, probe = self._queue_state()
         now = time.monotonic()
+        held = self._held(now)
         period = 0.0 if self._last_sync is None else now - self._last_sync
         self._last_sync = now
+        scan, self._scan = self._scan, None
         row = [0.0] * ROW_SIZE
         row[_PERIOD] = period
         row[_SLACK] = self.ttft_target
@@ -318,9 +345,36 @@ class PrefillHold:
             row[_BLOCKED] = 1.0
             return row
 
-        held = 0.0
-        if self._hold_start is not None:
-            held = self._clock - self._hold_start + period
+        # Aborts and the finished step may have changed the queue since the
+        # prepared scan.
+        if scan is None or (scan.num_inflight, scan.num_waiting) != (
+            len(inflight),
+            len(waiting),
+        ):
+            scan = self._scan_queue(inflight, waiting, probe, now, held)
+        row[_X] = scan.x
+        row[_X_ATTN] = scan.x_attn
+        row[_QUEUED] = scan.queued
+        # Every allowance shrinks at rate 1 while holding and at most 1 if not,
+        # so this is exact while holding and a lower bound otherwise.
+        row[_SLACK] = scan.slack - (now - scan.at)
+        return row
+
+    def _held(self, at: float) -> float:
+        """How long the current hold has lasted at monotonic time `at`."""
+        if self._hold_start is None:
+            return 0.0
+        since_sync = 0.0 if self._last_sync is None else at - self._last_sync
+        return self._clock - self._hold_start + since_sync
+
+    def _scan_queue(
+        self,
+        inflight: Collection["Request"],
+        waiting: "RequestQueue",
+        probe: Callable[["Request"], int],
+        at: float,
+        held: float,
+    ) -> _QueueScan:
         wall = time.time()
         budget = self.budget
         target = self.ttft_target
@@ -340,11 +394,7 @@ class PrefillHold:
             if slack <= 0:
                 # Releases whatever the rest of the queue is.
                 break
-        row[_X] = x
-        row[_X_ATTN] = x_attn
-        row[_QUEUED] = queued
-        row[_SLACK] = slack
-        return row
+        return _QueueScan(at, len(inflight), len(waiting), x, x_attn, queued, slack)
 
     def _prefill_queue(
         self,

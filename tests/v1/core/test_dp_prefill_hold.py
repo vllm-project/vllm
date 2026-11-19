@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -10,6 +11,7 @@ from vllm.config import ModelConfig
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.cpu_test
 
@@ -185,6 +187,65 @@ def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():
     assert row[dph._X_ATTN] == 500 * 250
     assert row[dph._QUEUED] == 1
     assert row[dph._SLACK] == pytest.approx(10.0 / 3, abs=0.1)
+
+
+class _Clock:
+    """Stands in for `time` in the hold module."""
+
+    def __init__(self) -> None:
+        self.wall = time.time()
+        self.mono = 0.0
+
+    def time(self) -> float:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.mono
+
+
+@pytest.mark.parametrize("holding", [True, False])
+def test_prepared_scan_matches_a_fresh_one(monkeypatch, holding: bool):
+    """The engine core scans the queue while the GPU runs a step. By the sync,
+    every allowance has shrunk by the time since while holding and by at most
+    that otherwise, so the prepared slack is exact or a lower bound."""
+    clock = _Clock()
+    monkeypatch.setattr(dph, "time", clock)
+    scheduler, hold = _hold_scheduler(
+        10.0, max_num_batched_tokens=100, max_model_len=1024
+    )
+    reqs = create_requests(num_requests=3, num_tokens=150)
+    for req, age in zip(reqs, (2.0, 1.0, 0.1)):
+        req.arrival_time = clock.wall - age
+        scheduler.add_request(req)
+    hold._last_sync = clock.mono
+    if holding:
+        # Held for 0.5 s: the first two requests waited all of it.
+        hold._hold_start, hold._clock = 0.0, 0.5
+
+    scheduler.prepare_dp_row()
+    clock.wall += 0.2
+    clock.mono += 0.2
+    prepared = hold.local_row()
+    hold._last_sync = 0.0
+    fresh = hold.local_row()
+
+    for field in (dph._X, dph._X_ATTN, dph._QUEUED):
+        assert prepared[field] == fresh[field]
+    if holding:
+        assert prepared[dph._SLACK] == pytest.approx(fresh[dph._SLACK])
+    else:
+        assert fresh[dph._SLACK] - 0.2 <= prepared[dph._SLACK] < fresh[dph._SLACK]
+
+
+def test_queue_change_after_prepare_is_rescanned():
+    """A request aborted while the GPU runs is gone from the row at the sync."""
+    scheduler, hold = _hold_scheduler()
+    reqs = create_requests(num_requests=2, num_tokens=8)
+    for req in reqs:
+        scheduler.add_request(req)
+    scheduler.prepare_dp_row()
+    scheduler.finish_requests(reqs[1].request_id, RequestStatus.FINISHED_ABORTED)
+    assert hold.local_row()[dph._QUEUED] == 1
 
 
 def test_finished_step_reports_prefill_chunks_only():
