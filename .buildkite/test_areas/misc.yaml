@@ -152,6 +152,29 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (H200) EC Filesystem Tiering"
+  key: ec-filesystem-tiering
+  device: h200
+  num_devices: 1
+  timeout_in_minutes: 45
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - .buildkite/test_areas/misc.yaml
+    - vllm/config/
+    - vllm/distributed/ec_transfer/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/v1/
+    - tests/utils.py
+    - tests/v1/ec_connector/integration/test_filesystem_tiering.py
+  env:
+    PYTHONUNBUFFERED: "1"
+    VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+  commands:
+    - pytest -v -s v1/ec_connector/integration/test_filesystem_tiering.py
+
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
@@ -360,6 +383,7 @@ steps:
 
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
+  automatic_shard: true
   depends_on:
     - image-build-cpu
   source_file_dependencies:
@@ -787,6 +811,7 @@ steps:
 
 - label: ":computer: (CPU) Multimodal + Config"
   key: cpu-multimodal-config
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -893,6 +918,7 @@ steps:
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -904,6 +930,7 @@ steps:
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
