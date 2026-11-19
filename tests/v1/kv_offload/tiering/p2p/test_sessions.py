@@ -1286,6 +1286,180 @@ class TestLookupFlow:
         assert len(fresh) == 1
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
+    def test_cached_miss_survives_fetch_and_load(self):
+        """A MISS answer outlives the round its fetch closes, so a partial
+        hit's next lookup doesn't re-probe the missing key: the producer
+        pins nothing for a miss, and re-probing costs a whole round."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA", b"hB"],
+                LookupRespMsg.HITS: [True, False],
+            }
+        )
+        session.poll()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
+        )
+        # The load completing must not prune the answer either.
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        session.poll()
+
+        assert session.register_lookup("req-1", b"hB") is False
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
+        ] == []
+
+    def test_probe_registered_before_fetch_is_sent_in_next_round(self):
+        """A key registered but not yet flushed when a fetch closes the
+        round is sent under the next round, and its answer is applied
+        rather than dropped as unknown."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        # Registered in the same pass that issues the fetch, e.g. a
+        # partial-tail boundary key.
+        assert session.register_lookup("req-1", b"hC") is None
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
+        )
+
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        sent = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(sent) == 1
+        assert sent[0][LookupMsg.KEYS] == [b"hC"]
+        assert sent[0][LookupMsg.ROUND_SEQ] == 1
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hC"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        assert session.register_lookup("req-1", b"hC") is True
+
+    def test_probe_sent_under_closed_round_is_reprobed(self):
+        """An unanswered probe already sent under the round a fetch closes
+        is re-probed under the next round: the producer closed its round."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
+        )
+
+        assert session.register_lookup("req-1", b"hB") is None
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        sent = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(sent) == 1
+        assert sent[0][LookupMsg.KEYS] == [b"hB"]
+        assert sent[0][LookupMsg.ROUND_SEQ] == 1
+
+    def test_cached_miss_is_not_live_lookup_state(self):
+        """A carried-over MISS holds no state on the peer: it neither keeps
+        the terminal empty fetch back nor survives the request's finish."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA", b"hB"],
+                LookupRespMsg.HITS: [True, False],
+            }
+        )
+        session.poll()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
+        )
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        session.poll()
+
+        assert session._client.can_send_terminal_fetch("req-1")
+        assert not session._client.close().failed_req_ids
+
+    def test_finish_drops_cached_misses(self):
+        """Finishing a request drops its carried-over MISS answers."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA", b"hB"],
+                LookupRespMsg.HITS: [True, False],
+            }
+        )
+        session.poll()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"hA")], block_ids=[0]
+        )
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        session.poll()
+
+        session.finish_request("req-1")
+        assert "req-1" not in session._client._requests
+
     def test_flush_uses_work_list_not_full_scan(self):
         """Flush drains a work-list rather than scanning every live request.
 
