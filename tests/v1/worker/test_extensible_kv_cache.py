@@ -117,6 +117,54 @@ def test_views_stay_valid_across_commits(vmm, layout):
         kv_cache.free()
 
 
+@pytest.mark.parametrize("is_rocm", [True, False], ids=["rocm", "other"])
+@pytest.mark.parametrize("extensible", [False, True], ids=["default", "extensible"])
+def test_allocate_kv_cache_warms_up_wvsplitkrc_before_backing(
+    monkeypatch, is_rocm, extensible
+):
+    """On ROCm, wvSplitKrc's workspace pool is created before the KV backing,
+    whether `allocate_kv_cache` allocates the backing itself or the caller does.
+
+    The extensible KV cache passes its own `allocate`, which bypasses
+    `_allocate_kv_cache_buffer`. A warmup kept there never runs on that path, so
+    the pool is first created lazily by a GEMM, possibly inside a CUDA graph
+    capture, where wvSplitKrc cannot create it.
+    """
+    from vllm.v1.worker import utils as worker_utils
+
+    config, _ = _make_config(KVCacheLayout.LBNHC)
+    device = torch.device("cpu")
+    events: list = []
+    monkeypatch.setattr(worker_utils.current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(
+        worker_utils,
+        "warmup_rocm_skinny_gemm_workspaces",
+        lambda dev: events.append(("warmup", dev)),
+    )
+
+    if extensible:
+
+        def allocate(raw_size: int) -> torch.Tensor:
+            events.append("backing")
+            return torch.zeros(raw_size, dtype=torch.int8, device=device)
+
+        allocate_kv_cache(config, device, KVCacheLayout.LBNHC, allocate=allocate)
+    else:
+        default_allocate = worker_utils._allocate_kv_cache_buffer
+
+        def recording_allocate(raw_size: int, dev: torch.device) -> torch.Tensor:
+            buf = default_allocate(raw_size, dev)
+            events.append("backing")
+            return buf
+
+        monkeypatch.setattr(
+            worker_utils, "_allocate_kv_cache_buffer", recording_allocate
+        )
+        allocate_kv_cache(config, device, KVCacheLayout.LBNHC)
+
+    assert events == ([("warmup", device)] if is_rocm else []) + ["backing"]
+
+
 def test_measure_kv_cache_bytes():
     gib = 1 << 30
     # 10 GiB were free at startup; 3 GiB of non-KV memory is now resident and
