@@ -78,7 +78,7 @@ from .utils import (
     get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
-    load_layer_expert_weight,
+    load_layer_expert_weights,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -361,6 +361,8 @@ class Glm4MoeLiteModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Expert tensors load per layer, not through a model-wide expert mapping.
+        weights = load_layer_expert_weights(self, weights, loaded_params)
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -368,13 +370,6 @@ class Glm4MoeLiteModel(nn.Module):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
-
-            if "mlp.experts." in name:
-                # Per layer, not through a model-wide expert mapping.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
-                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers.

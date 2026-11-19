@@ -130,7 +130,7 @@ from .utils import (
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
-    load_layer_expert_weight,
+    load_layer_expert_weights,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -1573,6 +1573,8 @@ class DeepseekV2Model(nn.Module):
         indexer_present_prefixes = {
             n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
         }
+        # Expert tensors load per layer, not through a model-wide expert mapping.
+        weights = load_layer_expert_weights(self, weights, loaded_params)
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1585,13 +1587,6 @@ class DeepseekV2Model(nn.Module):
                 name.rsplit(".indexer.", 1)[0] not in indexer_present_prefixes
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
-
-            if "mlp.experts." in name:
-                # Per layer, not through a model-wide expert mapping.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
-                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers.

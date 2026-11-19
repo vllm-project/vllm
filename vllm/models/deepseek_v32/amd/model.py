@@ -31,7 +31,7 @@ from vllm.model_executor.models.utils import (
     copy_pp_buffers,
     get_fused_shared_expert_layers,
     is_pp_missing_parameter,
-    load_layer_expert_weight,
+    load_layer_expert_weights,
     make_empty_intermediate_tensors_factory,
     make_layers,
     pp_topk_buffers,
@@ -251,16 +251,12 @@ class DeepseekV32Model(torch.nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Expert tensors load per layer, not through a model-wide expert mapping.
+        weights = load_layer_expert_weights(self, weights, loaded_params)
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
-                continue
-            if "mlp.experts." in name:
-                # Per layer, not through a model-wide expert mapping.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

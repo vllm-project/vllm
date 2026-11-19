@@ -88,7 +88,7 @@ from vllm.model_executor.models.utils import (
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
-    load_layer_expert_weight,
+    load_layer_expert_weights,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -1114,6 +1114,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
+        if not self.use_mega_moe:
+            # Expert tensors load per layer, not through a model-wide mapping.
+            weights = load_layer_expert_weights(self, weights, loaded_params)
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
@@ -1132,12 +1135,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 loaded_params.add(
                     mlp.experts.load_shared_expert_weight(name, loaded_weight)
                 )
-                continue
-            if not self.use_mega_moe and "mlp.experts." in name:
-                # Per layer, not through a model-wide expert mapping.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
                 continue
 
             name, loaded_weight = _mla_proj_checkpoint_tensor(

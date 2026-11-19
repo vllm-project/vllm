@@ -569,36 +569,58 @@ def get_fused_shared_expert_layers(
     return frozenset(fused_layers)
 
 
-def load_layer_expert_weight(
+# TODO: Remove once all models move to AutoWeightsLoader.
+def load_layer_expert_weights(
     model: nn.Module,
-    name: str,
-    loaded_weight: torch.Tensor,
+    weights: Iterable[tuple],
+    loaded_params: set[str],
     experts_prefix: str = "mlp.experts",
-) -> set[str]:
-    """Load an expert tensor through the experts loader of its own layer.
+) -> Iterable[tuple]:
+    """Load expert tensors through the experts loader of their own layer, and
+    yield the other tensors.
 
     For hand-written `load_weights` loops, which `AutoWeightsLoader` does not
     descend into. The layer's `RoutedExperts.load_weights` resolves that layer's
     parameters, e.g. the online quantization staging parameters of fused shared
     experts, which differ per layer under per-layer quantization: a model-wide
-    expert mapping cannot.
+    expert mapping cannot. As in `AutoWeightsLoader`, each run of consecutive
+    tensors of a layer's experts is loaded in one call.
 
     Args:
-        model: Module `name` is relative to.
-        name: Expert tensor name, e.g. `layers.3.mlp.experts.0.gate_proj.weight`.
-        loaded_weight: The checkpoint tensor.
+        model: Module the weight names are relative to.
+        weights: Checkpoint `(name, tensor, ...)` tuples.
+        loaded_params: Updated with the names of the loaded expert parameters.
         experts_prefix: Module name of the routed experts in a layer.
 
-    Returns:
-        The names of the loaded parameters, relative to `model`.
+    Yields:
+        The tensors that are not routed expert tensors of a layer of `model`,
+        e.g. those of speculative decoding layers, in their original order.
 
     """
-    layer_prefix, expert_name = name.split(f"{experts_prefix}.", 1)
-    experts = model.get_submodule(f"{layer_prefix}{experts_prefix}")
-    return {
-        f"{layer_prefix}{experts_prefix}.{loaded}"
-        for loaded in experts.load_weights([(expert_name, loaded_weight)])
-    }
+    marker = f"{experts_prefix}."
+
+    def layer_prefix(item: tuple) -> str | None:
+        return item[0].split(marker, 1)[0] if marker in item[0] else None
+
+    for prefix, group in itertools.groupby(weights, key=layer_prefix):
+        if prefix is None:
+            yield from group
+            continue
+        experts_name = f"{prefix}{experts_prefix}"
+        if is_pp_missing_parameter(experts_name, model):
+            continue
+        try:
+            experts = model.get_submodule(experts_name)
+        except AttributeError:
+            # Not a layer of this model; left to the caller.
+            yield from group
+            continue
+        loaded_params.update(
+            f"{experts_name}.{loaded}"
+            for loaded in experts.load_weights(
+                (name.split(marker, 1)[1], weight) for name, weight, *_ in group
+            )
+        )
 
 
 def maybe_fuse_shared_experts(
