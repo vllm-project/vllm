@@ -23,7 +23,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -172,10 +172,6 @@ pub struct RenderArgs {
         default_value = "0"
     )]
     skip_model_name_validation: bool,
-    /// Upper bound on a request's `n` (default 16384). Like Python, it is set
-    /// only through `VLLM_MAX_N_SEQUENCES`.
-    #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
-    max_n_sequences: Option<i64>,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -244,14 +240,18 @@ pub struct RenderArgs {
     dtype: DtypeArg,
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
-    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
-    /// unlimited.
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities
+    /// default to 999 items.
     ///
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
     /// applies to rendering.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Multimodal processor options as JSON, merged into each modality's
+    /// checkpoint configuration before its processor is constructed.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    mm_processor_kwargs: HashMap<String, Value>,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -265,6 +265,7 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
         } = self.model.file_sources();
 
         RenderConfig {
@@ -273,10 +274,10 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
-            max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
             grpc_port: self.grpc_port,
@@ -296,6 +297,7 @@ impl RenderArgs {
             language_model_only: self.language_model_only,
             dtype: self.dtype.model_dtype(),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             tls,
         }
     }
@@ -360,6 +362,20 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub generation_config: GenerationConfigMode,
+
+    /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
+    /// used with `--generation-config auto`, the override parameters will be
+    /// merged with the default config from the model. If used with
+    /// `--generation-config vllm`, only the override parameters are used.
+    /// `max_new_tokens` here also caps every request's `max_tokens`.
+    #[arg(
+        long,
+        value_parser = parse_json::<Map<String, Value>>,
+        default_value = "{}",
+        value_name = "JSON"
+    )]
+    #[serde(default)]
+    pub override_generation_config: Map<String, Value>,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -473,10 +489,17 @@ pub struct SharedRuntimeArgs {
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
     /// profiling options are forwarded to the engine untouched.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to 999 items.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// Arguments to be forwarded to the model's processor for multi-modal data,
+    /// e.g., image processor.
+    /// Merged into the checkpoint processor configuration at startup.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub mm_processor_kwargs: HashMap<String, Value>,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -484,6 +507,15 @@ pub struct SharedRuntimeArgs {
     #[arg(long, num_args = 1.., value_name = "MODULE")]
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
+
+    /// Default LoRA adapter per modality, as a JSON object mapping a modality
+    /// to an adapter path or repo id (e.g. `{"audio": "org/speech-lora"}`).
+    /// Each adapter is loaded at startup under its modality's name and serves
+    /// chat requests that name no adapter but carry that modality. Requires
+    /// `--enable-lora`.
+    #[arg(long, value_parser = parse_json::<DefaultMmLoras>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub default_mm_loras: DefaultMmLoras,
 
     /// The format to render message content within a chat template.
     ///
@@ -598,6 +630,20 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_tokenizer_info_endpoint: bool,
+
+    /// If set to True, only enable the Tokens In<>Out endpoint.
+    /// This is intended for use in a Disaggregated Everything setup.
+    ///
+    /// Implies `--enable-scale-out` and `--skip-tokenizer-init`. Unlike Python,
+    /// it does not serve the unauthenticated legacy `/abort_requests`; use
+    /// `/inference/v1/abort_requests`.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub tokens_only: bool,
 
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
@@ -929,6 +975,15 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// Return the multimodal processor kwargs as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    pub fn mm_processor_kwargs_json(&self) -> Option<String> {
+        (!self.mm_processor_kwargs.is_empty()).then(|| {
+            serde_json::to_string(&self.mm_processor_kwargs)
+                .expect("mm-processor-kwargs serialization should not fail")
+        })
+    }
+
     /// Apply fallback logic for configuration from env variables, using
     /// `lookup` to read the environment.
     fn apply_env_fallbacks(
@@ -1006,7 +1061,8 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
-        } = self.model.file_sources();
+            hf_token,
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -1026,8 +1082,10 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
+            override_generation_config: self.override_generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
@@ -1043,7 +1101,9 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1096,7 +1156,8 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
-        } = self.model.file_sources();
+            hf_token,
+        } = self.model_args().file_sources();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -1115,8 +1176,10 @@ impl SharedRuntimeArgs {
             tokenizer,
             hf_config,
             skip_tokenizer_init,
+            hf_token,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
+            override_generation_config: self.override_generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             grpc_listener_mode,
@@ -1132,7 +1195,9 @@ impl SharedRuntimeArgs {
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_kwargs: self.mm_processor_kwargs,
             lora_modules: self.lora_modules,
+            default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1155,6 +1220,15 @@ impl SharedRuntimeArgs {
         }
     }
 
+    /// The model arguments with `--tokens-only` applied, which implies
+    /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
+    fn model_args(&self) -> ModelArgs {
+        ModelArgs {
+            skip_tokenizer_init: self.model.skip_tokenizer_init || self.tokens_only,
+            ..self.model.clone()
+        }
+    }
+
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
@@ -1172,7 +1246,8 @@ impl SharedRuntimeArgs {
             force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
-            enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            enable_scale_out: self.tokens_only
+                || self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
@@ -1518,13 +1593,33 @@ impl ServeArgs {
         let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
             serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
         });
+        // The engine reads it too, e.g. Llama 4 attention temperature tuning.
+        let override_generation_config = (!self.runtime.override_generation_config.is_empty())
+            .then(|| {
+                serde_json::to_string(&self.runtime.override_generation_config)
+                    .expect("JSON object serializes")
+            });
 
         let mut managed_engine = self.managed_engine.clone();
-        managed_engine.python_args.extend(self.runtime.model.python_args());
+        managed_engine.python_args.extend(self.runtime.model_args().python_args());
         if let Some(logging_config) = self.runtime.logging_config_json() {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        if let Some(mm_processor_kwargs) = self.runtime.mm_processor_kwargs_json() {
+            managed_engine
+                .python_args
+                .extend(["--mm-processor-kwargs".to_string(), mm_processor_kwargs]);
+        }
+        // The engine checks the adapters against the model at startup, as it
+        // does under the Python frontend.
+        if !self.runtime.default_mm_loras.is_empty() {
+            let default_mm_loras = serde_json::to_string(&self.runtime.default_mm_loras)
+                .expect("default-mm-loras serialization should not fail");
+            managed_engine
+                .python_args
+                .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),
@@ -1537,6 +1632,7 @@ impl ServeArgs {
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
+            override_generation_config,
             self.runtime.structured_outputs_config_json(),
             topology,
             client_handshake_address,

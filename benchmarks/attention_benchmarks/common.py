@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from vllm.triton_utils import triton
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
@@ -188,7 +189,9 @@ class MockLayer(AttentionLayerBase):
     in get_layers_from_vllm_config when FlashInfer prefill is enabled.
     """
 
-    def __init__(self, device: torch.device, impl=None, kv_cache_spec=None):
+    def __init__(
+        self, device: torch.device, impl=None, kv_cache_spec=None, attn_backend=None
+    ):
         # Don't call super().__init__() as AttentionLayerBase doesn't have __init__
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
@@ -201,11 +204,11 @@ class MockLayer(AttentionLayerBase):
         self.impl = impl
         # KV cache spec for get_kv_cache_config
         self._kv_cache_spec = kv_cache_spec
+        self._attn_backend = attn_backend
 
     def get_attn_backend(self):
         """Get the attention backend class (required by AttentionLayerBase)."""
-        # Return None as this is just a mock layer for benchmarking
-        return None
+        return self._attn_backend
 
     def get_kv_cache_config(self, vllm_config=None):
         """Get the KV cache config (required by AttentionLayerBase)."""
@@ -214,7 +217,7 @@ class MockLayer(AttentionLayerBase):
         return FullAttentionManager.layer_config(self._kv_cache_spec)
 
 
-@dataclass
+@dataclass(slots=True)
 class ParameterSweep:
     """Configuration for sweeping a backend parameter."""
 
@@ -230,7 +233,7 @@ class ParameterSweep:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelParameterSweep:
     """Configuration for sweeping model configuration parameter(s).
 
@@ -264,7 +267,7 @@ class ModelParameterSweep:
             raise ValueError("param_name must be set if sweep values are not dicts")
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkConfig:
     """Configuration for a single benchmark run."""
 
@@ -301,15 +304,14 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
-    sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
-    sparse_mla_mha_mode: str = "auto"  # "auto", "dense", or "masked"
+    sparse_mla_route: SparseMLAPrefillRoute | None = None
     sparse_mla_dense_mha_max_seq_len: int | None = None
     sparse_mla_masked_mha_max_seq_len: int | None = None
     sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkResult:
     """Results from a single benchmark run."""
 
@@ -323,6 +325,7 @@ class BenchmarkResult:
     memory_allocated_mb: float | None = None
     memory_reserved_mb: float | None = None
     error: str | None = None
+    actual_sparse_mla_route: SparseMLAPrefillRoute | None = None
 
     @property
     def success(self) -> bool:
@@ -342,6 +345,11 @@ class BenchmarkResult:
             "memory_allocated_mb": self.memory_allocated_mb,
             "memory_reserved_mb": self.memory_reserved_mb,
             "error": self.error,
+            "actual_sparse_mla_route": (
+                self.actual_sparse_mla_route.name
+                if self.actual_sparse_mla_route is not None
+                else None
+            ),
         }
 
 
@@ -418,7 +426,10 @@ class ResultsFormatter:
                 if backend in spec_results:
                     r = spec_results[backend]
                     if r.success:
-                        row.append(f"{r.mean_time:.6f}")
+                        timing = f"{r.mean_time:.6f}"
+                        if r.actual_sparse_mla_route is not None:
+                            timing += f"\n{r.actual_sparse_mla_route.name}"
+                        row.append(timing)
                         if multi and compare_to_fastest:
                             pct = (
                                 (r.mean_time / best_time * 100) if best_time > 0 else 0
@@ -456,6 +467,7 @@ class ResultsFormatter:
                     "batch_spec",
                     "num_layers",
                     "kv_cache_dtype",
+                    "actual_sparse_mla_route",
                     "mean_time",
                     "std_time",
                     "throughput",
@@ -470,6 +482,11 @@ class ResultsFormatter:
                         "batch_spec": r.config.batch_spec,
                         "num_layers": r.config.num_layers,
                         "kv_cache_dtype": r.config.kv_cache_dtype,
+                        "actual_sparse_mla_route": (
+                            r.actual_sparse_mla_route.name
+                            if r.actual_sparse_mla_route is not None
+                            else ""
+                        ),
                         "mean_time": r.mean_time,
                         "std_time": r.std_time,
                         "throughput": r.throughput_tokens_per_sec or 0,

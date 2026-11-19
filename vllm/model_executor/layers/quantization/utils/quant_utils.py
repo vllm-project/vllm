@@ -145,7 +145,7 @@ GroupShape.PER_TOKEN = GroupShape(1, -1)
 GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScaleDesc:
     """Class for describing a single quantization scaling factor.
     dtype: data type of the scale
@@ -171,7 +171,7 @@ class ScaleDesc:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuantKey:
     """Class for identifying the type of quantization.
     dtype: quantized data type
@@ -564,6 +564,9 @@ def get_and_maybe_dequant_weights(
 ):
     """Return layer's unquantized weights in [out, in] layout."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.quantization.dequant_linear import (
+        DequantLinearMethod,
+    )
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
     from vllm.model_executor.layers.quantization.online.fp8 import (
         Fp8PerTensorOnlineLinearMethod,
@@ -577,9 +580,9 @@ def get_and_maybe_dequant_weights(
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
-    # Unquantized layer: just return base weights
+    # Unquantized layer (or one dequantized after loading): its weights
     if layer.quant_method is None or isinstance(
-        layer.quant_method, UnquantizedLinearMethod
+        layer.quant_method, (UnquantizedLinearMethod, DequantLinearMethod)
     ):
         return weight.to(out_dtype)
 

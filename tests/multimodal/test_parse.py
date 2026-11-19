@@ -117,6 +117,32 @@ def test_image_size_hwc_chw(image):
     assert items.get_image_size(0) == (W, H)
 
 
+@pytest.mark.parametrize("axis", [0, 1, 2])
+@pytest.mark.skip_global_cleanup
+def test_parse_image_normalizes_negative_strides(axis):
+    """Flipped NumPy images are contiguous before reaching HF processors."""
+    image = np.arange(H * W * 3, dtype=np.uint8).reshape(H, W, 3)
+    flipped = np.flip(image, axis=axis)
+
+    items = MultiModalDataParser().parse_mm_data({"image": flipped})["image"]
+    parsed = items.get(0)
+
+    assert all(stride >= 0 for stride in parsed.strides)
+    assert parsed.flags.c_contiguous
+    np.testing.assert_array_equal(parsed, flipped)
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_image_preserves_positive_stride_numpy_array():
+    """Positive-stride arrays remain zero-copy through image parsing."""
+    image = np.zeros((H, W, 3), dtype=np.uint8)
+    view = image[:, ::2]
+
+    items = MultiModalDataParser().parse_mm_data({"image": view})["image"]
+
+    assert items.get(0) is view
+
+
 @pytest.mark.parametrize(
     "frame",
     [
