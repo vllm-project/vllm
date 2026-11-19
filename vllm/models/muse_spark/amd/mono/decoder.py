@@ -36,7 +36,10 @@ LAST_LAYER = 60
 ROWS_PER_REQUEST = 8
 K3_ROWS = (8, 16)
 K5_ROWS = (32, 64, 96, 128)
-WORLD_SIZE = 8
+# TP = EP sizes the builds cover: K3 and the 32 / 64-row HA + HM + HB at both,
+# the larger HA + HM + HB builds and the fused attention at 8.
+WORLD_SIZES = (4, 8)
+MAX_ROWS = {4: 64, 8: K5_ROWS[-1]}
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
@@ -44,6 +47,8 @@ HEALTH_POLL_INTERVAL = 64
 # Other builds and layer 1 run vLLM's attention op.
 FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
 SLIDING_WINDOW = (2047, 0)
+BF16_KV_DTYPES = ("auto", "bfloat16")
+FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 # Other launches' health checks (the DSpark drafter's), run by poll_health.
 _HEALTH_CHECKS: dict[int, Callable[[], None]] = {}
 
@@ -242,8 +247,8 @@ def deployment_refusals(
     """Parallel layout and server features the monokernel does not support."""
     reasons = []
     parallel = vllm_config.parallel_config
-    if tp_size != WORLD_SIZE:
-        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZE})")
+    if tp_size not in WORLD_SIZES:
+        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZES})")
     for name in (
         "pipeline_parallel_size",
         "data_parallel_size",
@@ -281,8 +286,8 @@ def deployment_refusals(
     cache = vllm_config.cache_config
     if getattr(cache, "kv_offloading_size", None):
         reasons.append("KV offloading on")
-    if cache.cache_dtype not in ("auto", "bfloat16"):
-        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16)")
+    if cache.cache_dtype not in BF16_KV_DTYPES + FP8_KV_DTYPES:
+        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16, fp8_e4m3)")
     if vllm_config.model_config.dtype != torch.bfloat16:
         reasons.append(f"model dtype {vllm_config.model_config.dtype}")
     return reasons
@@ -333,6 +338,10 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
             bad(f"layer {i}: RoPE cache {_shape(rope.cos_sin_cache)}")
         if not layer.self_attn.pre_qkv_proj_norm.has_weight:
             bad(f"layer {i}: weightless pre_qkv_proj_norm")
+        for name in ("_k_scale", "_v_scale"):
+            scale = getattr(attn.attn, name, None)
+            if scale is None or scale.dtype != torch.float32 or scale.numel() != 1:
+                bad(f"layer {i}: {name} {_shape(scale)}")
         if i > LAST_LAYER:
             continue
         check_bf16(i, "o_proj", attn.o_proj.weight, (h, dims.q_rows))
@@ -380,11 +389,13 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
     return reasons
 
 
-def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
-    """K3 writes bf16 LBHNC pages: `[block][kv head][16 tokens][K | V]`."""
+def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int, kv_fp8: bool) -> str | None:
+    """K3 writes LBHNC pages `[block][kv head][16 tokens][K | V]`: bf16, or
+    e4m3 (uint8 storage) with `kv_fp8`."""
     if kv_cache.numel() == 0:
         return "kv:unbound"
-    if kv_cache.dtype != torch.bfloat16:
+    dtypes = (torch.uint8, torch.float8_e4m3fn) if kv_fp8 else (torch.bfloat16,)
+    if kv_cache.dtype not in dtypes:
         return f"kv:{kv_cache.dtype}"
     want_shape = (kv_heads, KV_BLOCK_SIZE, 2 * 64)
     if tuple(kv_cache.shape[1:]) != want_shape:
@@ -408,13 +419,14 @@ def attention_type(layer: nn.Module) -> str | None:
 
 
 def fused_attention_layers(
-    layers: Sequence[nn.Module], max_model_len: int, max_keys: int
+    layers: Sequence[nn.Module], max_model_len: int, max_keys: int, world_size: int = 8
 ) -> dict[int, str]:
     """Layers whose attention the launches can fuse: `{i: type}`.
 
-    Empty when a request may hold more keys than a build stages block ids for.
+    Empty when a request may hold more keys than a build stages block ids for,
+    and at TP 4 (the fragment is built for 2 kv heads a rank).
     """
-    if max_model_len > max_keys:
+    if max_model_len > max_keys or world_size != 8:
         return {}
     fused = {}
     for i in range(FIRST_LAYER + 1, LAST_LAYER + 1):
@@ -464,12 +476,14 @@ def batch_refusal(
 
 @dataclass(frozen=True, slots=True)
 class MonoKernels:
-    """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`)."""
+    """The FlyDSL kernel modules (`kernels.k3`, `k5`, `k5m`, `attn_frag`,
+    `attn_frag_bnd`)."""
 
     k3: ModuleType
     k5: ModuleType
     k5m: ModuleType
     attn_frag: ModuleType
+    attn_frag_bnd: ModuleType
 
 
 class _FusedAttention:
@@ -515,7 +529,7 @@ class _FusedAttention:
         """The descriptor table of this step; `q_of(i)` = layer i's q."""
         rows = {}
         for i in self.layers:
-            md, _, kv_cache, _ = get_attention_context(
+            md, attn, kv_cache, _ = get_attention_context(
                 layers[i].self_attn.attn.layer_name
             )
             rows[i] = self.af.vllm_desc(
@@ -527,6 +541,8 @@ class _FusedAttention:
                 self.part,
                 num_reqs,
                 self.scales[i],
+                attn._k_scale,
+                attn._v_scale,
             )
         key = tuple((i, *w) for i, w in rows.items())
         table = self.tables.get(key)
@@ -556,6 +572,111 @@ class _FusedAttention:
         return table.data_ptr() + i * self.af.DESC_WORDS * table.element_size()
 
 
+class _BoundaryAttention:
+    """The verify attention of `FIRST_LAYER` and `LAST_LAYER + 1` (both full
+    attention) as standalone fragment launches of a one-request build, in place
+    of vLLM's attention op.
+
+    Eager steps reuse one descriptor table a layer, rewritten when its
+    contents change (q is copied to a new tensor every step). A CUDA graph
+    capture writes its own table once, keyed by its contents.
+    """
+
+    def __init__(
+        self,
+        kernels: MonoKernels,
+        scales: dict[int, float],
+        rows: int,
+        dims: MonoDims,
+        device: torch.device,
+        kv_fp8: bool,
+    ) -> None:
+        af = kernels.attn_frag
+        self.af = af
+        self.launch = kernels.attn_frag_bnd.standalone(
+            af.make(rows // ROWS_PER_REQUEST, False, kv_fp8=kv_fp8)
+        )
+        self.scales = scales
+        self.out = torch.zeros(rows, dims.q_rows, dtype=torch.bfloat16, device=device)
+        self.part = torch.zeros(af.part_bytes() // 4, dtype=torch.int32, device=device)
+        self.health = torch.zeros(
+            kernels.attn_frag_bnd.HEALTH_WORDS, dtype=torch.int32, device=device
+        )
+        self.device = device
+        self.eager: dict[int, tuple[tuple, torch.Tensor]] = {}
+        self.captured: dict[tuple, torch.Tensor] = {}
+        # Pinned sources of the table copies captured in CUDA graphs.
+        self._pinned = [
+            torch.zeros(af.DESC_WORDS, dtype=torch.int64, pin_memory=True)
+            for _ in range(8)
+        ]
+        self._keep: list[torch.Tensor] = []
+
+    def _table(self, layers: Sequence[nn.Module], i: int, q: torch.Tensor):
+        md, attn, kv_cache, _ = get_attention_context(
+            layers[i].self_attn.attn.layer_name
+        )
+        words = self.af.vllm_desc(
+            q,
+            kv_cache,
+            md.block_table,
+            md.seq_lens,
+            self.out,
+            self.part,
+            q.shape[0] // ROWS_PER_REQUEST,
+            self.scales[i],
+            attn._k_scale,
+            attn._v_scale,
+        )
+        key = tuple(words)
+        host = torch.tensor(words, dtype=torch.int64)
+        if torch.cuda.is_current_stream_capturing():
+            table = self.captured.get(key)
+            if table is None:
+                if not self._pinned:
+                    raise RuntimeError(
+                        "Muse Spark monokernel: more boundary-attention tables "
+                        "than pinned buffers"
+                    )
+                pinned = self._pinned.pop()
+                pinned.copy_(host)
+                self._keep.append(pinned)
+                table = torch.empty_like(host, device=self.device)
+                table.copy_(pinned, non_blocking=True)
+                self.captured[key] = table
+            return table
+        slot = self.eager.get(i)
+        if slot is None:
+            table = host.to(self.device)
+        else:
+            table = slot[1]
+            if slot[0] != key:
+                table.copy_(host)
+        self.eager[i] = (key, table)
+        return table
+
+    def attend(
+        self,
+        layers: Sequence[nn.Module],
+        i: int,
+        q: torch.Tensor,
+        epoch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Layer i's attention output, `[rows, q_rows]` bf16."""
+        # The fragment reads q rows at a stride of q_rows; layer 1's q is a
+        # column slice of the QKV output.
+        q = q.contiguous()
+        table = self._table(layers, i, q)
+        self.launch(
+            table.data_ptr(),
+            self.health.data_ptr(),
+            epoch.data_ptr(),
+            i,
+            stream=torch.cuda.current_stream(),
+        )
+        return self.out
+
+
 class _Bucket:
     """Launchers and persistent buffers of one kernel build (row count)."""
 
@@ -579,13 +700,19 @@ class _Bucket:
         )
         self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
         self.fa: _FusedAttention | None = None
+        self.fa_bnd: _BoundaryAttention | None = None
+
+    def _peer_slots(self) -> list[int]:
+        """The launch signatures take 8 peer slots; a smaller group leaves 0s."""
+        peers = self.peers.pointers
+        return [*peers, *([0] * (8 - len(peers)))]
 
     def _common(self) -> tuple[int, ...]:
         return (
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
         )
 
     def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
@@ -606,7 +733,13 @@ class _Bucket:
             _, _, kv_cache, slots = get_attention_context(nxt.attn.layer_name)
             rope = nxt.rotary_emb
             cos_sin = rope.cos_sin_cache if rope is not None else self.no_rope
-            ptrs = (slots.data_ptr(), cos_sin.data_ptr(), positions.data_ptr())
+            ptrs = (
+                slots.data_ptr(),
+                cos_sin.data_ptr(),
+                positions.data_ptr(),
+                nxt.attn._k_scale.data_ptr(),
+                nxt.attn._v_scale.data_ptr(),
+            )
             # The kernels take the block stride (elements) in the V slot.
             kv = (kv_cache.data_ptr(), kv_cache.stride(0), *ptrs)
             stream, q, g = self.layer(mono, i, kind, attn_o, g, stream, kv, aux_layers)
@@ -631,19 +764,22 @@ class _K3Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[tuple[bool, str]] = (),
+        kv_fp8: bool = False,
     ) -> None:
         w = dims.world_size
         super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
-        self.launchers = {
-            next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
-            for next_rope in (True, False)
-        }
+
+        def build(next_rope: bool, attn: str = ""):
+            return k3.build(
+                k3.build_vllm(
+                    S=rows, W=w, next_rope=next_rope, attn=attn, kv_fp8=kv_fp8
+                )
+            )
+
+        self.launchers = {next_rope: build(next_rope) for next_rope in (True, False)}
         self.fa = fa
         self.fused_launchers = {
-            (next_rope, kind): k3.build(
-                k3.build_vllm(S=rows, W=w, next_rope=next_rope, attn=kind)
-            )
-            for next_rope, kind in fused_kinds
+            (next_rope, kind): build(next_rope, kind) for next_rope, kind in fused_kinds
         }
         self.scratch = torch.zeros(
             k3.scratch_layout(rows, w)[1] // 4 + 64, dtype=torch.int32, device=device
@@ -710,9 +846,10 @@ class _K5Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[str] = (),
+        kv_fp8: bool = False,
     ) -> None:
         w = dims.world_size
-        key = k5.build_vllm(S=rows, W=w, next_rope=True)
+        key = k5.build_vllm(S=rows, W=w, next_rope=True, kv_fp8=kv_fp8)
         super().__init__(k5, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group)
         self.bnd = key.bnd
         self.launch_a, launch_b = k5.build(key)
@@ -723,7 +860,7 @@ class _K5Bucket(_Bucket):
         self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
         self.fa = fa
         self.fused_launch_a = {
-            kind: k5.build(k5.build_vllm(S=rows, W=w, next_rope=True, attn=kind))[0]
+            kind: k5.build(dataclasses.replace(key, attn=kind))[0]
             for kind in fused_kinds
         }
         i32, f32, bf16 = torch.int32, torch.float32, torch.bfloat16
@@ -784,7 +921,7 @@ class _K5Bucket(_Bucket):
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline_m.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
             i,
             mono.rank,
             nrows,
@@ -815,14 +952,15 @@ class _K5Bucket(_Bucket):
         return self.sfull[:nrows], q_out[:nrows], g_out[:nrows]
 
 
-def built_buckets(max_num_seqs: int) -> list[int]:
-    """The builds a server with `max_num_seqs` requests can use."""
-    max_rows = min(max_num_seqs, K5_ROWS[-1] // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
+def built_buckets(max_num_seqs: int, world_size: int = 8) -> list[int]:
+    """The builds a server with `max_num_seqs` requests can use (TP 4: <= 64 rows)."""
+    top = MAX_ROWS[world_size]
+    max_rows = min(max_num_seqs, top // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
     return sorted(
         {
             b
             for rows in range(ROWS_PER_REQUEST, max_rows + 1, ROWS_PER_REQUEST)
-            if (b := bucket_of(rows)) is not None
+            if (b := bucket_of(rows)) is not None and b <= top
         }
     )
 
@@ -840,9 +978,12 @@ class MuseSparkMono:
         dims: MonoDims,
         buckets: Sequence[int],
         fused_attention: dict[int, str],
+        kv_fp8: bool = False,
+        boundary_attention: bool = False,
     ) -> None:
         self.rank = rank
         self.dims = dims
+        self.kv_fp8 = kv_fp8
         self.refresh_weights(model)
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
@@ -859,7 +1000,7 @@ class MuseSparkMono:
                     {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
-                    kernels.k3, b, dims, device, group, fa, k3_kinds
+                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8
                 )
             else:
                 self.buckets[b] = _K5Bucket(
@@ -871,6 +1012,22 @@ class MuseSparkMono:
                     group,
                     fa,
                     sorted(set(layers.values())),
+                    kv_fp8,
+                )
+            if boundary_attention and self._fuses_boundary(model, b, fused_attention):
+                boundary = (FIRST_LAYER, LAST_LAYER + 1)
+                scales = {
+                    i: float(model.layers[i].self_attn.attn.impl.scale)
+                    for i in boundary
+                }
+                self.buckets[b].fa_bnd = _BoundaryAttention(
+                    kernels, scales, b, dims, device, kv_fp8
+                )
+                logger.info(
+                    "Muse Spark monokernel: layers %d and %d attention as "
+                    "fragment launches at S=%d",
+                    *boundary,
+                    b,
                 )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
@@ -880,7 +1037,29 @@ class MuseSparkMono:
             b: torch.zeros_like(buf.health, device="cpu").pin_memory()
             for b, buf in self.buckets.items()
         }
+        self._health_host_bnd = {
+            b: torch.zeros_like(buf.fa_bnd.health, device="cpu").pin_memory()
+            for b, buf in self.buckets.items()
+            if buf.fa_bnd is not None
+        }
         self._health_event: torch.cuda.Event | None = None
+
+    @staticmethod
+    def _fuses_boundary(
+        model: nn.Module, rows: int, fused_attention: dict[int, str]
+    ) -> bool:
+        """Whether build `rows` runs the boundary layers' attention as fragment
+        launches: one-request builds only (the standalone launch leaves the
+        rows of a second request zero), both boundary layers full attention,
+        and a deployment the fused attention covers."""
+        return (
+            rows == ROWS_PER_REQUEST
+            and bool(fused_attention)
+            and all(
+                attention_type(model.layers[i]) == "full"
+                for i in (FIRST_LAYER, LAST_LAYER + 1)
+            )
+        )
 
     def refresh_weights(self, model: nn.Module) -> None:
         """Re-take the views, e.g. after a weight reload replaced parameters."""
@@ -902,13 +1081,16 @@ class MuseSparkMono:
         reason = batch_refusal(rows, get_forward_context(), names)
         if reason is not None:
             return reason
-        if bucket_of(rows) not in self.buckets:
+        b = bucket_of(rows)
+        bucket = None if b is None else self.buckets.get(b)
+        if bucket is None:
             return f"rows:{rows}"
         if positions.dtype != torch.int64 or positions.shape != (rows,):
             return "positions"
-        for name in names[1:]:
+        # The boundary fragment reads layer 1's cache too.
+        for name in names[0 if bucket.fa_bnd is not None else 1 :]:
             _, _, kv_cache, slots = get_attention_context(name)
-            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
+            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, self.kv_fp8)
             if reason is not None:
                 return reason
             if (
@@ -957,14 +1139,20 @@ class MuseSparkMono:
         )
         qkv, _ = attn.qkv_proj(attn_input)
         q, _, _, g = attn._qk_norm_rope_kv_insert(qkv, positions)
-        o = attn.attn(q, None, None)
+        if bucket.fa_bnd is not None:
+            o = bucket.fa_bnd.attend(layers, FIRST_LAYER, q, bucket.epoch)
+        else:
+            o = attn.attn(q, None, None)
         self._validate(o, g, stream)
         stream, q, g = bucket.run(
             self, layers, positions, o, g, stream, aux_layers, aux_hidden_states
         )
 
         last = layers[LAST_LAYER + 1]
-        o = last.self_attn.attn(q, None, None)
+        if bucket.fa_bnd is not None:
+            o = bucket.fa_bnd.attend(layers, LAST_LAYER + 1, q, bucket.epoch)
+        else:
+            o = last.self_attn.attn(q, None, None)
         y = last.after_attention(stream, last.self_attn.back(o, g))
         if LAST_LAYER + 2 in aux_layers:
             aux_hidden_states.append(norm_then_gated_residual(y))
@@ -1016,9 +1204,17 @@ class MuseSparkMono:
                         f"Muse Spark monokernel: rank {self.rank}, S={b}: a launch "
                         f"timed out waiting for a peer rank {stuck}"
                     )
+            for b, host in self._health_host_bnd.items():
+                if int(host[0]) != 0:
+                    raise RuntimeError(
+                        f"Muse Spark monokernel: rank {self.rank}, S={b}: a "
+                        "boundary attention launch timed out"
+                    )
         if self._health_event is None and self._steps % HEALTH_POLL_INTERVAL == 0:
             for b, buf in self.buckets.items():
                 self._health_host[b].copy_(buf.health, non_blocking=True)
+                if buf.fa_bnd is not None:
+                    self._health_host_bnd[b].copy_(buf.fa_bnd.health, non_blocking=True)
             self._health_event = torch.cuda.Event()
             self._health_event.record()
 
