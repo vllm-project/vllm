@@ -1272,6 +1272,19 @@ def test_failed_load_skips_store_lookup_until_finished(report):
     assert scheduler._load_failed_req_ids == set()
 
 
+def test_failed_load_of_aborted_request_is_not_tracked():
+    # An abort cleans the request up before its in-flight load reports the
+    # failure; the late report must not leave a stale entry behind.
+    scheduler = _make_bare_scheduler()
+    finished_output = _make_preemption_scheduler_output()
+    finished_output.preempted_req_ids = set()
+    finished_output.finished_req_ids = {"req-0"}
+    scheduler.build_connector_meta(finished_output)
+
+    scheduler.update_connector_output(KVConnectorOutput(failed_recving={"req-0"}))
+    assert scheduler._load_failed_req_ids == set()
+
+
 def test_disabled_lookup_reports_no_hit_without_querying_client():
     # With enable_lookup=False the connector reports no external hit without
     # consulting the lookup client, so admission is never deferred on a store
