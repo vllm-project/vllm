@@ -89,6 +89,13 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
             prefill_width,
         )
 
+    if indexer.index_head_dim == 128:
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_prefill_deepgemm import (
+            warmup_deepgemm_prefill,
+        )
+
+        warmup_deepgemm_prefill(k_cache, indexer.index_n_heads)
+
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,
     )

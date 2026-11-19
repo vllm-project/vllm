@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernels for Qwen4Exp QSA index selection."""
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -12,6 +14,9 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_topk_varlen_gvr2
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from .qsa_prefill_deepgemm import QSADeepGEMMPrefillPlan
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -713,6 +718,8 @@ def qsa_select_paged_prefill(
     block_indices: torch.Tensor,
     max_seq_len: int,
     topk_backend: str = "auto",
+    *,
+    deepgemm_prefill: "QSADeepGEMMPrefillPlan | None" = None,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -730,6 +737,7 @@ def qsa_select_paged_prefill(
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
         topk_backend: One of QSA_TOPK_BACKENDS.
+        deepgemm_prefill: DeepGEMM prefill plan from the metadata builder.
 
     """
     assert token_topk % compress_ratio == 0
@@ -739,6 +747,42 @@ def qsa_select_paged_prefill(
     logits_width = qsa_prefill_logits_width(
         max_seq_len, compress_ratio, page_table.shape[1] * k_cache.shape[1]
     )
+
+    from .qsa_prefill_deepgemm import (
+        can_use_deepgemm_prefill,
+        deepgemm_prefill_logits,
+        gather_prefill_keys,
+    )
+
+    plan = deepgemm_prefill
+    if plan is not None and can_use_deepgemm_prefill(q, k_cache):
+        # Padding rows past the last query token belong to no chunk; their
+        # zero visible blocks keep expand_qsa_block_indices from reading them.
+        topk_workspace = torch.empty(
+            (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
+        )
+        packed = None
+        for chunk in plan.chunks:
+            if chunk.gather:
+                # The budget covers one group's keys: free the last group's
+                # before gathering the next.
+                del packed
+                packed = gather_prefill_keys(k_cache, page_table, plan, chunk)
+            assert packed is not None
+            logits = deepgemm_prefill_logits(q, packed, chunk)
+            chunk_rows = slice(chunk.row_start, chunk.row_end)
+            _topk(
+                logits,
+                visible_blocks[chunk_rows],
+                token_topk,
+                compress_ratio,
+                block_indices[chunk_rows],
+                topk_workspace,
+                topk_backend,
+                prefill=True,
+            )
+            del logits
+        return
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     # always allocate the worst case to avoid memory fragmentation.

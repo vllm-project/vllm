@@ -401,6 +401,8 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
+  - vllm/utils/deep_gemm.py
   - tests/models/qwen4_exp/
   commands:
     - >-
@@ -433,13 +435,8 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - csrc/qwen4_exp/
-  - vllm/models/qwen4_exp/nvidia/hyperconnection.py
-  - vllm/models/qwen4_exp/nvidia/mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/models/qwen4_exp/nvidia/
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
-  - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
