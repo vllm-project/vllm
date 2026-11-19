@@ -344,7 +344,7 @@ class VLLMServer:
                 continue
             pid = int(entry.name)
             with contextlib.suppress(OSError):
-                if os.getpgid(pid) == pgid:
+                if os.getpgid(pid) == pgid and VLLMServer._process_exists(pid):
                     members.append(pid)
         return members
 
@@ -362,7 +362,19 @@ class VLLMServer:
             os.kill(pid, 0)
         except OSError:
             return False
-        return True
+        # ignore zombies, which are still in /proc but not alive
+        return VLLMServer._process_state(pid) != "Z"
+
+    @staticmethod
+    def _process_state(pid: int) -> str | None:
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            return None
+        for line in status.splitlines():
+            if line.startswith("State:"):
+                return line.split()[1]
+        return None
 
     def _port_available(self) -> bool:
         try:
