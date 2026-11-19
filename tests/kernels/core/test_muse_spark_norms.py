@@ -149,6 +149,37 @@ def test_triton_matches_torch(cls, has_weight):
     torch.testing.assert_close(fused, native, rtol=2e-2, atol=0.0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="the specialized decode path requires SM100-family devices",
+)
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(batch * tokens, id=f"b{batch}-{phase}")
+        for phase, tokens in (("sampler", 1), ("draft-query", 7), ("verify", 8))
+        for batch in range(1, 9)
+    ],
+)
+@torch.inference_mode()
+def test_cute_draft_input_norm_matches_reference(rows):
+    """Sampler (`b`), draft-query (`7b`) and verify/context (`8b`) rows for
+    DSpark K=7 at batches 1..8."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.cutedsl.draft.input_norm import (  # noqa: E501
+        InputNorm,
+    )
+
+    torch.manual_seed(617 + rows)
+    norm = make_norm(MuseSparkRMSNorm, is_post_norm=False)
+    x = torch.randn(rows, HIDDEN, device="cuda", dtype=torch.bfloat16)
+
+    got = InputNorm(norm).run(x)
+
+    # BF16-relative rounding budget against FP64 math; stock equality is exact.
+    torch.testing.assert_close(got, reference(norm, x).bfloat16(), rtol=2**-7, atol=0)
+    torch.testing.assert_close(got, norm(x), rtol=0, atol=0)
+
+
 @requires_cuda
 def test_out_dtype_defaults_to_the_input_dtype():
     norm = make_norm(MuseSparkRMSNorm)
@@ -291,9 +322,9 @@ def test_postnorm_gated_residual_matches_triton(monkeypatch, mode):
     candidate = fused_rmsnorm_ops.postnorm_gated_residual
     calls = []
 
-    def tracked_candidate(*args):
+    def tracked_candidate(*args, **kwargs):
         calls.append(True)
-        return candidate(*args)
+        return candidate(*args, **kwargs)
 
     monkeypatch.setattr(fused_rmsnorm_ops, "postnorm_gated_residual", tracked_candidate)
     torch.manual_seed(1017 + 10 * mode)
@@ -373,3 +404,96 @@ def test_o_norm_gate_reads_the_strided_gate_slice(tokens):
 
     assert x.data_ptr() == output_ptr
     torch.testing.assert_close(x, expected, atol=0.015625, rtol=0.015625)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="the specialized decode's dual norm requires SM100-family devices",
+)
+@pytest.mark.parametrize("post", [True, False], ids=["post_weight", "no_post_weight"])
+@pytest.mark.parametrize("alpha_scalar", [None, 1.0, 0.75], ids=str)
+@torch.inference_mode()
+def test_cute_dual_norm_matches_fp64_reference(post, alpha_scalar):
+    """`DualNorm` at rows 1-8: `b = branch * (post_weight + 1)`, the stream
+    `alpha * stream + beta * b * rsqrt(mean(b**2) + 1e-6)` to FP32 accuracy and
+    its RMS norm times `next_weight + 1` to BF16 rounding, for a channel-wise,
+    a unit and a scalar stream gate."""
+    from vllm.models.muse_spark.nvidia.specialized_decode.cutedsl.common.dual_norm import (  # noqa: E501
+        DualNorm,
+        DualNormConstants,
+    )
+
+    gen = torch.Generator().manual_seed(7)
+
+    def rand(*shape, scale=1.0, dtype=torch.float32):
+        return (torch.randn(*shape, generator=gen) * scale).to("cuda", dtype)
+
+    alpha = rand(HIDDEN).abs() * 0.5 + 0.5
+    if alpha_scalar is not None:
+        alpha.fill_(alpha_scalar)
+    beta = rand(HIDDEN).abs() * 0.5 + 0.5
+    post_w = rand(HIDDEN, scale=0.1, dtype=torch.bfloat16) if post else None
+    next_w = rand(HIDDEN, scale=0.1, dtype=torch.bfloat16)
+    constants = DualNormConstants(
+        post_eps=1e-6,
+        next_eps=EPS,
+        next_gain_center=1.0,
+        post_gain_center=1.0 if post else None,
+        alpha_scalar=alpha_scalar,
+    )
+    kernel = DualNorm(constants, router=True)
+    for m in range(1, 9):
+        for scale in (1.0, 1e-2, 30.0):
+            branch = rand(m, HIDDEN, scale=scale, dtype=torch.bfloat16)
+            stream = rand(m, HIDDEN, scale=scale)
+            b = branch.double()
+            if post_w is not None:
+                b = b * (post_w.double() + 1)
+            terms = (
+                alpha.double() * stream.double(),
+                beta.double() * b * torch.rsqrt(b.square().mean(-1, True) + 1e-6),
+            )
+            want_stream = terms[0] + terms[1]
+            gain = torch.rsqrt(want_stream.square().mean(-1, True) + EPS) * (
+                next_w.double() + 1
+            )
+            # FP32 error of the kernel: a few 1e-7 of the summed magnitudes.
+            slack = 4e-6 * (terms[0].abs() + terms[1].abs())
+            out = torch.empty(m, HIDDEN, dtype=torch.bfloat16, device="cuda")
+            router = torch.empty(m, HIDDEN, dtype=torch.float32, device="cuda")
+            kernel.run(
+                branch,
+                stream,
+                post_w,
+                alpha if alpha_scalar is None else alpha_scalar,
+                beta,
+                next_w,
+                out,
+                router,
+            )
+            assert ((stream.double() - want_stream).abs() <= slack).all()
+            want_out = want_stream * gain
+            out_slack = 2.0**-8 * want_out.abs() + slack * gain.abs()
+            assert ((out.double() - want_out).abs() <= out_slack).all()
+            assert torch.equal(router.bfloat16(), out)
+
+
+@pytest.mark.parametrize(
+    "cake_state, expected",
+    [("absent", "auto"), ("missing_manifest", "cute"), ("manifest_present", "auto")],
+)
+def test_norm_backend_requires_the_cake_manifest(tmp_path, cake_state, expected):
+    """An importable but incomplete Cake package must not break norm launches."""
+    from vllm.models.muse_spark.nvidia.flashinfer_norm_backend import (
+        select_norm_backend,
+    )
+
+    package_dir = tmp_path / "flashinfer"
+    package_dir.mkdir()
+    if cake_state != "absent":
+        cake_dir = package_dir / "cake_muse_spark_norm_backend"
+        cake_dir.mkdir()
+        (cake_dir / "__init__.py").touch()
+        if cake_state == "manifest_present":
+            (cake_dir / "build.json").write_text("{}")
+    assert select_norm_backend([str(package_dir)]) == expected

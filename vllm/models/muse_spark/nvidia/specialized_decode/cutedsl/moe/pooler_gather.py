@@ -31,9 +31,11 @@ full `[b, P]` rows from every rank straight into the expert input:
   the sign of zero: publishers store BF16 -0.0 as +0.0 (-0.0 is the mailbox
   sentinel).
 
-The pooler GEMM is vLLM's in-tree skinny GEMM (BF16 in and out, FP32
-accumulation) at the launch shape `POOLER_GEMM`. One mailbox serves every
-layer; calls must run in the same order on every rank.
+The pooler GEMM is the unpooler's cluster split-K GEMM (`gemm.unpooler`, BF16
+in and out, FP32 accumulation) at the launch shape `POOLER`; its epilogue
+publishes the block into the mailbox (zero-copy), the bytes and stage word the
+mailbox's own publisher would write. One mailbox serves every layer; calls must
+run in the same order on every rank.
 """
 
 from collections.abc import Sequence
@@ -45,15 +47,26 @@ import cutlass
 import cutlass.cute as cute
 import torch
 import torch.distributed as dist
-from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32
-from cutlass._mlir.dialects import llvm
+from cutlass import (
+    BFloat16,
+    Float4E2M1FN,
+    Float8E4M3FN,
+    Float32,
+    Int32,
+    Int64,
+    Uint8,
+    Uint16,
+    Uint32,
+)
+from cutlass._mlir import ir
+from cutlass._mlir.dialects import llvm, vector
 from cutlass.cute.runtime import make_fake_compact_tensor
 from cutlass.cutlass_dsl import T, dsl_user_op
 
 from ..common.dual_norm import cluster_row_sum
 from ..common.host import assert_not_capturing
 from ..common.mailbox import LamportMailbox, poll_owned_fragment
-from ..common.policy import MAILBOX_CAPACITY
+from ..common.policy import MAILBOX_CAPACITY, POOLER
 from ..common.primitives import (
     VEC_BF16,
     WARP_SIZE,
@@ -66,6 +79,7 @@ from ..common.primitives import (
     to_cute,
     to_cute_dynamic,
 )
+from ..gemm.unpooler import Unpooler
 from .expert_norm import ExpertNorm, rows_view
 
 HIDDEN = 8192
@@ -74,96 +88,22 @@ _THREADS = 128
 _NVFP4_BLOCK = 16
 
 
-class PoolerGemmShape(NamedTuple):
-    """Launch shape of the pooler GEMM (the in-tree skinny GEMM): `block_size`
-    threads per CTA over K, `outputs_per_block` columns per CTA, the K loop
-    unrolled `k_unroll` times."""
-
-    block_size: int
-    outputs_per_block: int
-    k_unroll: int
-
-
-# The in-tree skinny GEMM's own heuristic for M 2-16, used for the shard
-# N = POOLED / tp of every TP size in POOLER_TPS.
-POOLER_TPS = (4, 8, 16)
-POOLER_GEMM = PoolerGemmShape(block_size=128, outputs_per_block=2, k_unroll=2)
-
-
 # --------------------------------------------------------------------------
-# FP4 helpers, copied unchanged (the PTX decides the bits).
-
-
-@dsl_user_op
-def rcp_approx_ftz(a: Float32, *, loc=None, ip=None) -> Float32:
-    """Fast reciprocal using PTX rcp.approx.ftz.f32."""
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(loc=loc, ip=ip)],
-            "rcp.approx.ftz.f32 $0, $1;",
-            "=f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
-    )
-
-
-@dsl_user_op
-def fmax_f32(a: Float32, b: Float32, *, loc=None, ip=None) -> Float32:
-    """Compute max of two float32 values using PTX max.f32."""
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(loc=loc, ip=ip), Float32(b).ir_value(loc=loc, ip=ip)],
-            "max.f32 $0, $1, $2;",
-            "=f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
-    )
-
-
-@dsl_user_op
-def fabs_f32(a: Float32, *, loc=None, ip=None) -> Float32:
-    """Compute absolute value of float32 using PTX abs.f32."""
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(loc=loc, ip=ip)],
-            "abs.f32 $0, $1;",
-            "=f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
-    )
+# FP4 helpers. The E4M3 widening of the output scale has no CuTe DSL form.
 
 
 @dsl_user_op
 def cvt_f32_to_e4m3(a: Float32, *, loc=None, ip=None) -> Uint32:
-    """Convert float32 to E4M3 using native cvt.rn.satfinite.e4m3x2.f32."""
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [Float32(a).ir_value(loc=loc, ip=ip)],
-            """
-            {
-                .reg .b16 fp8_pair;
-                .reg .f32 zero;
-                mov.f32 zero, 0f00000000;
-                cvt.rn.satfinite.e4m3x2.f32 fp8_pair, zero, $1;
-                cvt.u32.u16 $0, fp8_pair;
-            }
-            """,
-            "=r,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+    """`a` as a saturated E4M3 byte (round to nearest even), zero-extended."""
+    pair = vector.from_elements(
+        ir.VectorType.get([2], T.f32(), loc=loc),
+        [Float32(a).ir_value(loc=loc, ip=ip), Float32(0.0).ir_value(loc=loc, ip=ip)],
+        loc=loc,
+        ip=ip,
     )
+    fp8 = cute.TensorSSA(pair, 2, Float32).to(Float8E4M3FN)
+    bits = llvm.bitcast(T.i16(), fp8.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    return Uint32(Uint16(bits))
 
 
 @dsl_user_op
@@ -209,49 +149,17 @@ def nvfp4_compute_output_scale(
 
 
 @dsl_user_op
-def cvt_e2m1x8_f32(
-    v0: Float32,
-    v1: Float32,
-    v2: Float32,
-    v3: Float32,
-    v4: Float32,
-    v5: Float32,
-    v6: Float32,
-    v7: Float32,
-    *,
-    loc=None,
-    ip=None,
-) -> Uint32:
-    """Convert eight float32 values to eight E2M1 (4-bit) values packed into uint32."""
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [
-                Float32(v0).ir_value(loc=loc, ip=ip),
-                Float32(v1).ir_value(loc=loc, ip=ip),
-                Float32(v2).ir_value(loc=loc, ip=ip),
-                Float32(v3).ir_value(loc=loc, ip=ip),
-                Float32(v4).ir_value(loc=loc, ip=ip),
-                Float32(v5).ir_value(loc=loc, ip=ip),
-                Float32(v6).ir_value(loc=loc, ip=ip),
-                Float32(v7).ir_value(loc=loc, ip=ip),
-            ],
-            """
-            {
-                .reg .b8 byte0, byte1, byte2, byte3;
-                cvt.rn.satfinite.e2m1x2.f32 byte0, $2, $1;
-                cvt.rn.satfinite.e2m1x2.f32 byte1, $4, $3;
-                cvt.rn.satfinite.e2m1x2.f32 byte2, $6, $5;
-                cvt.rn.satfinite.e2m1x2.f32 byte3, $8, $7;
-                mov.b32 $0, {byte0, byte1, byte2, byte3};
-            }
-            """,
-            "=r,f,f,f,f,f,f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+def cvt_e2m1x8_f32(*values: Float32, loc=None, ip=None) -> Uint32:
+    """Eight FP32 values as saturated E2M1 codes (round to nearest even), the
+    first in the low nibble."""
+    vec = vector.from_elements(
+        ir.VectorType.get([8], T.f32(), loc=loc),
+        [Float32(v).ir_value(loc=loc, ip=ip) for v in values],
+        loc=loc,
+        ip=ip,
     )
+    codes = cute.TensorSSA(vec, 8, Float32).to(Float4E2M1FN)
+    return Uint32(llvm.bitcast(T.i32(), codes.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
 # --------------------------------------------------------------------------
@@ -352,7 +260,7 @@ class _AllGatherNormQuantDeviceKernel:
             self.enable_pdl,
         )
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         slots = smem.allocate_array(Float32, self.cluster_size * self.warps)
         x = packed_u32x4_to_bf16x8(packed.load()).to(Float32)
         cute.arch.cluster_wait()
@@ -378,9 +286,9 @@ class _AllGatherNormQuantDeviceKernel:
         # A 16-column scale block spans this lane and its neighbour.
         amax = Float32(0.0)
         for i in cutlass.range_constexpr(VEC_BF16):
-            amax = fmax_f32(amax, fabs_f32(values[i]))
-        amax = fmax_f32(amax, cute.arch.shuffle_sync_bfly(amax, offset=1))
-        sf = cvt_f32_to_e4m3(scale * (amax * rcp_approx_ftz(Float32(6.0))))
+            amax = cute.arch.fmax(amax, cute.math.abs(values[i]))
+        amax = cute.arch.fmax(amax, cute.arch.shuffle_sync_bfly(amax, offset=1))
+        sf = cvt_f32_to_e4m3(scale * (amax * cute.arch.rcp_approx(Float32(6.0))))
         output_scale = nvfp4_compute_output_scale(sf, scale)
         store_global_u32(
             packed_output.iterator
@@ -531,48 +439,6 @@ def compile_gather(
     )
 
 
-def compile_pooler_gemm(
-    rows: int, shape: PoolerGemmShape, *, enable_pdl: bool = True
-) -> Any:
-    """The in-tree skinny GEMM `c [rows, N] = a [rows, K] @ b [N, K].T` (BF16,
-    N and K dynamic), compiled as the in-tree wrapper compiles it but called
-    with a caller-owned output. Call: (a, b, residual, c, stream) with torch
-    tensors; `residual` is ignored (pass `c`)."""
-    from quack.compile_utils import make_fake_tensor
-
-    from vllm.model_executor.kernels.linear.cute_dsl._skinny_gemm import (
-        CuteSkinnyGemm,
-    )
-
-    assert_not_capturing("the pooler GEMM")
-    vector_width = 8
-    n = cute.sym_int(divisibility=shape.outputs_per_block)
-    k = cute.sym_int(divisibility=shape.block_size * vector_width)
-    a = make_fake_tensor(BFloat16, (rows, k), divisibility=vector_width)
-    b = make_fake_tensor(BFloat16, (n, k), divisibility=vector_width)
-    c = make_fake_tensor(BFloat16, (rows, n), divisibility=1)
-    residual = make_fake_tensor(BFloat16, (rows, n), divisibility=1)
-    kernel = CuteSkinnyGemm(
-        element_type=BFloat16,
-        num_rows=rows,
-        block_size=shape.block_size,
-        outputs_per_block=shape.outputs_per_block,
-        vector_width=vector_width,
-        k_unroll=shape.k_unroll,
-        has_residual=False,
-        use_pdl=enable_pdl,
-    )
-    return cute.compile(
-        kernel,
-        a,
-        b,
-        residual,
-        c,
-        current_cu_stream(),
-        options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
-    )
-
-
 # --------------------------------------------------------------------------
 # The provider piece.
 
@@ -647,8 +513,6 @@ class Pooler:
     ) -> None:
         if not 1 <= min(batches) <= max(batches) <= capacity:
             raise ValueError(f"batches must lie in [1, {capacity}]")
-        if tp not in POOLER_TPS:
-            raise ValueError(f"no pooler GEMM shape for TP{tp}")
         self.group, self.tp, self.rank, self.capacity = group, tp, rank, capacity
         self.layers = tuple(layers)
         shard = POOLED // tp
@@ -664,13 +528,17 @@ class Pooler:
         self.mailbox = LamportMailbox(
             group, tp=tp, rank=rank, capacity=capacity, width=shard, device=device
         )
-        self._publisher = self.mailbox.compile_publish(
-            threads=_THREADS, release_before_store=False, enable_pdl=enable_pdl
+        self.batches = tuple(sorted(set(batches)))
+        self._gemms = tuple(
+            Unpooler(
+                layer.weight,
+                self.mailbox,
+                enable_pdl=enable_pdl,
+                shape=POOLER,
+                rows=self.batches,
+            )
+            for layer in self.layers
         )
-        self._gemms = {
-            b: compile_pooler_gemm(b, POOLER_GEMM, enable_pdl=enable_pdl)
-            for b in set(batches)
-        }
         nvfp4 = {
             (spec.eps, spec.gain_center)
             for spec in self.layers
@@ -715,8 +583,6 @@ class Pooler:
         # CuTe views bound once; the kernels read only the first m rows.
         self._mailbox_view = self.mailbox.view
         self._stage_view = self.mailbox.stage_view
-        self._multicast = Int64(self.mailbox.multicast)
-        self._shard_view = to_cute_dynamic(self.shard.flatten(), 16, divisibility=shard)
         self._packed_view = to_cute_dynamic(
             self.packed.flatten(), 16, divisibility=POOLED // 2
         )
@@ -734,21 +600,9 @@ class Pooler:
         )
 
     def project(self, layer: int, x: torch.Tensor) -> torch.Tensor:
-        """The pooler GEMM: this rank's `[b, P / tp]` columns into scratch."""
-        b = x.shape[0]
-        out = self.shard[:b]
-        self._gemms[b](x, self.layers[layer].weight, out, out, current_cu_stream())
-        return out
-
-    def publish(self, b: int) -> None:
-        """Multicast the first `b` rows of the projected block."""
-        self._publisher(
-            self._shard_view,
-            self._stage_view,
-            self._multicast,
-            Int32(b),
-            current_cu_stream(),
-        )
+        """The pooler GEMM: this rank's `[b, P / tp]` columns into scratch,
+        multicast into the mailbox."""
+        return self._gemms[layer].run(x, self.shard[: x.shape[0]])
 
     def gather(
         self, layer: int, b: int
@@ -782,10 +636,8 @@ class Pooler:
         self, layer: int, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
         """`x` BF16 [b, H] (the pre_ffn_norm output) -> the expert input."""
-        b = x.shape[0]
         self.project(layer, x)
-        self.publish(b)
-        return self.gather(layer, b)
+        return self.gather(layer, x.shape[0])
 
     def warm_up(self) -> None:
         """One call of each form per batch on zero rows, before capture (every
@@ -797,7 +649,7 @@ class Pooler:
         for index, layer in enumerate(self.layers):
             key = None if layer.global_scale is None else (layer.eps, layer.gain_center)
             forms.setdefault(key, index)
-        for b in sorted(self._gemms):
+        for b in self.batches:
             x = torch.zeros(b, HIDDEN, dtype=torch.bfloat16, device=self.shard.device)
             for index in forms.values():
                 self.run(index, x)

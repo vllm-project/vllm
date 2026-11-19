@@ -40,7 +40,6 @@ from typing import NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 from cutlass import BFloat16, Float32, Int32, Int64, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
@@ -151,16 +150,33 @@ def _warp_sum4(v0, v1, v2, v3):
 
 
 @cute.jit
+def _exchange4(w0, w1, w2, w3, buf, mbar, tidx, lane, warp, rank):
+    """One cluster round's exchange: the warp's four sums go into slot
+    `rank * NWARPS + warp` of `buf` in every CTA of the cluster, counted on
+    `mbar`, and the round waits until every slot of this CTA's is written."""
+    if tidx == 0:
+        cute.arch.mbarrier_arrive_and_expect_tx(mbar, NSLOT * 16)
+    if lane < CLUSTER_N:
+        _store4_remote(
+            buf[(None, rank * NWARPS + warp)].iterator, mbar, lane, w0, w1, w2, w3
+        )
+    cute.arch.mbarrier_wait(mbar, 0)
+
+
+def _halves(buf):
+    """The two `[4, NSLOT]` rounds of `buf` (`[4, 2 * NSLOT]` FP32 SMEM)."""
+    layout = cute.make_layout((4, NSLOT), stride=(1, 4))
+    return (
+        cute.make_tensor(buf.iterator, layout),
+        cute.make_tensor(buf.iterator + 4 * NSLOT, layout),
+    )
+
+
+@cute.jit
 def _row_sum4(v0, v1, v2, v3, buf, mbar, tidx, lane, warp, rank):
     w0, w1, w2, w3 = _warp_sum4(v0, v1, v2, v3)
     if const_expr(CLUSTER_N > 1):
-        if tidx == 0:
-            cute.arch.mbarrier_arrive_and_expect_tx(mbar, NSLOT * 16)
-        slot = rank * NWARPS + warp
-        if lane < CLUSTER_N:
-            p = buf[(None, slot)].iterator
-            _store4_remote(p, mbar, lane, w0, w1, w2, w3)
-        cute.arch.mbarrier_wait(mbar, 0)
+        _exchange4(w0, w1, w2, w3, buf, mbar, tidx, lane, warp, rank)
         f = cute.make_fragment_like(buf[(None, lane)])
         cute.autovec_copy(buf[(None, lane)], f)
         x = f.load()
@@ -201,8 +217,7 @@ def cluster_row_sum(
     cluster barrier before the first call (a remote store to a peer CTA that
     has not started faults).
     """
-    for offset in (16, 8, 4, 2, 1):
-        value = value + cute.arch.shuffle_sync_bfly(value, offset=offset)
+    value = cute.arch.warp_reduction_sum(value)
     if lane < cluster_size:
         remote_slot = map_shared_to_peer(slots + (cluster_rank * warps + warp), lane)
         store_shared_cluster_f32(remote_slot, value)
@@ -218,13 +233,9 @@ def tree_row_sum(buf, mbar, tidx, lane, warp, rank):
     """The row reduction of the standalone kernel: two cluster rounds through
     halves of `buf` ([4, 2 * NSLOT] FP32 SMEM) and mbarriers `mbar` and
     `mbar + 1`. Before round 0: the mbarriers initialized and fenced and one
-    cluster barrier completed; after round 1: one more cluster barrier."""
-    halves = (
-        cute.make_tensor(buf.iterator, cute.make_layout((4, NSLOT), stride=(1, 4))),
-        cute.make_tensor(
-            buf.iterator + 4 * NSLOT, cute.make_layout((4, NSLOT), stride=(1, 4))
-        ),
-    )
+    cluster barrier completed; after round 1 no barrier is needed (a CTA
+    leaves a round with every slot written)."""
+    halves = _halves(buf)
     zero = Float32(0.0)
 
     def row_sum(value, round_index):
@@ -245,14 +256,33 @@ def tree_row_sum(buf, mbar, tidx, lane, warp, rank):
     return row_sum
 
 
-def serial_row_sum(post_slots, next_slots, cluster_rank, warp, lane):
-    """The row reduction of the boundary all-gathers: `cluster_row_sum` into
-    `post_slots` then `next_slots` (NSLOT FP32 each, SMEM)."""
-    slots = (post_slots, next_slots)
+@cute.jit
+def _slot_sum(value, half, mbar, tidx, lane, warp, rank):
+    """One cluster round of `serial_row_sum`: the warp sum goes into slot
+    `rank * NWARPS + warp` of every CTA of the cluster, then the 32 slots are
+    added in order."""
+    value = cute.arch.warp_reduction_sum(value)
+    zero = Float32(0.0)
+    _exchange4(value, zero, zero, zero, half, mbar, tidx, lane, warp, rank)
+    total = Float32(0.0)
+    for slot in cutlass.range_constexpr(NSLOT):
+        total = total + half[(0, slot)]
+    return total
+
+
+def serial_row_sum(buf, mbar, tidx, lane, warp, rank):
+    """The row reduction of the boundary all-gathers: the 32 warp sums added
+    in order, as `cluster_row_sum`, exchanged through the two mbarriers `mbar`
+    and `mbar + 1` and the halves of `buf` ([4, 2 * NSLOT] FP32 SMEM, as in
+    `tree_row_sum`) instead of a cluster barrier per round. Before round 0:
+    the mbarriers initialized and fenced and one cluster barrier completed.
+    No barrier is needed after round 1: a CTA leaves a round with every slot
+    written, so nothing is in flight to its shared memory."""
+    halves = _halves(buf)
 
     def row_sum(value, round_index):
-        return cluster_row_sum(
-            value, slots[round_index], NWARPS, CLUSTER_N, cluster_rank, warp, lane
+        return _slot_sum(
+            value, halves[round_index], mbar + round_index, tidx, lane, warp, rank
         )
 
     return row_sum
@@ -355,7 +385,7 @@ class _DualNormKernel:
         constants = self.constants
         tidx, _, _ = cute.arch.thread_idx()
         token, cy, _ = cute.arch.block_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         mbar = smem.allocate_array(cutlass.Int64, num_elems=2)
         buf = smem.allocate_tensor(
             Float32, cute.make_layout((4, NSLOT * 2), stride=(1, 4)), byte_alignment=16
@@ -405,9 +435,6 @@ class _DualNormKernel:
             constants.next_eps,
             tree_row_sum(buf, mbar, tidx, lane, warp, rank),
         )
-        # No CTA may exit while a peer still reads its shared memory.
-        cute.arch.cluster_arrive()
-        cute.arch.cluster_wait()
         store_f32x8(stream_out, row_element, res)
         store_global_u32x4(
             Int64((out.iterator + row_element).toint()),

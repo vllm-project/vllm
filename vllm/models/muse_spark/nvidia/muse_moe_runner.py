@@ -5,6 +5,7 @@
 Every expert backend stops after GEMM2 and hands its rows to the finalizer.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -92,6 +93,9 @@ from vllm.models.muse_spark.nvidia.ops.cute_dsl.moe_finalize_rmsnorm import (
 from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     maybe_create_moe_finalize_all_reduce,
     tp_group_spans_nodes,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime.quantize_experts import (
+    load_quantized,
 )
 from vllm.platforms import current_platform
 
@@ -877,6 +881,10 @@ class MuseSparkFp8FusedMoE(Fp8PtpcOnlineMoEMethod):
 class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
     """Consolidated-tensor experts with the NVFP4 / FP8 / BF16 quant methods."""
 
+    # Set by MuseSparkMoE: NVFP4 parameters that load the checkpoint's BF16
+    # experts, quantized as they load (`quantize_bf16_experts`).
+    quantizes_at_load = False
+
     def _get_quant_method(
         self,
         prefix: str,
@@ -894,6 +902,17 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
         # MuseSpark NVFP4 keeps layers 0 and 61 in BF16.
         return MuseSparkUnquantizedFusedMoE(moe_config)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        """Loads the consolidated tensors; with `quantizes_at_load`, the BF16
+        expert weights are quantized as they load."""
+        for name, tensor in weights:
+            if self.quantizes_at_load and name in ("w13_weight", "w2_weight"):
+                yield from load_quantized(self, name, tensor)
+            else:
+                yield from super().load_weights([(name, tensor)])
 
 
 class MuseMoERunner(MoERunner):

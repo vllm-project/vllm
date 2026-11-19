@@ -44,7 +44,16 @@ from vllm.models.muse_spark.nvidia.model import (
     MuseSparkDecoderLayer,
     gather_columns,
 )
-from vllm.models.muse_spark.nvidia.specialized_decode.runtime import decode_backend
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    MuseOptions,
+    muse_options,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime.draft_fp4_mlp import (
+    DraftMlpNvfp4Setup,
+)
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime.nvfp4_lm_head import (
+    use_nvfp4_lm_head,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.muse_spark import MuseSparkDSparkConfig
 
@@ -95,13 +104,6 @@ def _keep_column_parallel_fc(fc: ColumnParallelLinear) -> bool:
         return False
     logger.info_once("Using the column-parallel DSpark draft fc.", scope="process")
     return True
-
-
-def _uses_specialized_decode(vllm_config: VllmConfig) -> bool:
-    """Whether the deployment selects the Muse Spark specialized decode
-    (`additional_config={"decode_backend": "latency_specialized"}`) for the
-    draft."""
-    return decode_backend(vllm_config) == "latency_specialized"
 
 
 def _draft_logits_values(speculator: "DSparkSpeculator") -> torch.Tensor | None:
@@ -163,6 +165,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         vllm_config: VllmConfig,
         start_layer_id: int = 0,
         prefix: str = "",
+        options: MuseOptions,
     ) -> None:
         nn.Module.__init__(self)
         # The parent compile wrapper is inherited, but its init is skipped.
@@ -177,6 +180,7 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         if not isinstance(config, MuseSparkDSparkConfig):
             raise TypeError("MuseSparkDSparkModel requires MuseSparkDSparkConfig")
         self.config = config
+        specialized = options.specialized
         self.default_dtype = torch.get_default_dtype()
         self.vocab_size = config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
@@ -201,7 +205,6 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         self.has_separate_mask_embedding = False
         fc_input_size = config.target_hidden_size * len(self.target_layer_ids)
         self.fc: ReplicatedLinear | ColumnParallelLinear
-        specialized = _uses_specialized_decode(vllm_config)
         column_parallel_fc = _use_column_parallel_fc(
             specialized,
             config.hidden_size,
@@ -468,16 +471,30 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        options = muse_options(vllm_config)
+        # draft_mlp_nvfp4: checked, and its scales read, before the layers.
+        self._mlp_nvfp4 = (
+            None
+            if options.draft_mlp_nvfp4 is None
+            else DraftMlpNvfp4Setup.build(vllm_config, options.draft_mlp_nvfp4)
+        )
+        self._max_model_len = vllm_config.model_config.max_model_len
         self.model = MuseSparkDSparkModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
+            options=options,
         )
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
+        if options.nvfp4_lm_head:
+            use_nvfp4_lm_head(self.lm_head)
+        self._wants_bias_table = options.markov_bias_table
+        # Built at weight load (before the memory profile), with the opt-in.
+        self._bias_table: torch.Tensor | None = None
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size)
         self.target_vocab_size = vllm_config.model_config.get_vocab_size()
         self.draft_id_to_target_id = nn.Parameter(
@@ -624,6 +641,7 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             sample_from_anchor=speculator.sample_from_anchor,
             max_num_reqs=speculator.max_num_reqs,
             num_steps=speculator.num_speculative_steps,
+            bias_table=self._bias_table,
         )
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -679,8 +697,15 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             )
 
             self.model.specialized_draft = build_draft_decode(
-                self.model, self.model._compilation_mode
+                self.model,
+                self.model._compilation_mode,
+                self._max_model_len,
+                self._mlp_nvfp4,
             )
+            if self._wants_bias_table:
+                from .specialized_decode.runtime.markov import load_bias_table
+
+                self._bias_table = load_bias_table(self)
         elif (
             current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)

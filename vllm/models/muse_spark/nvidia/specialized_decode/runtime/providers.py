@@ -215,15 +215,11 @@ class QkvAttention:
         qkv: torch.Tensor,
         out: torch.Tensor,
         partial: torch.Tensor,
-        max_context: int,
-        window: int,
-        num_splits: int,
-        workspace: torch.Tensor | None,
+        attn2: Any,
     ):
         self.attn = attn
         self.layer_name = attn.attn.layer_name
-        self.max_context, self.window = max_context, window
-        self.num_splits, self.workspace = num_splits, workspace
+        self.attn2 = attn2
         self.weight = attn.qkv_proj.weight
         self.cos_sin_cache = attn.rotary_emb.cos_sin_cache if attn.use_rope else None
         self.eps = attn.rms_norm_eps
@@ -251,9 +247,7 @@ class QkvAttention:
             attn
         )
         reason = reason or cute_ops.unsupported_kv_cache(attn.attn)
-        if reason is None and (
-            attn.use_attn_temperature_tuning or not attn.fused_qk_norm_rope_kv_insert
-        ):
+        if reason is None and not attn.fused_qk_norm_rope_kv_insert:
             reason = "attention without the stock fused QK-norm/RoPE/KV insert"
         if reason is not None:
             raise ValueError(f"layer {layer.layer_idx}: {reason}")
@@ -266,38 +260,15 @@ class QkvAttention:
             torch.bfloat16,
         )
         partial = _scratch(ctx, "partial", (PREPARED_MAX, HIDDEN), torch.bfloat16)
-        # attn2 splits a long context over a fixed number of clusters (the
-        # deployment's, so the captured launch fits every step); the split
-        # merge's workspace is shared by the layers, which run in order, sized
-        # for the full-attention layers' splits (a window only lowers them)
-        # and zeroed once (every launch leaves its counters zero). Both
-        # kernels compile once the cache is bound (prepare_kv): its page size
-        # is the KV cache manager's.
-        window = cute_ops.attn2_window(attn.attn.sliding_window, ctx.max_context)
-        num_splits = cute_ops.attn2_splits(ctx.max_context, window, attn.num_kv_heads)
-        workspace = None
-        if cute_ops.attn2_split_kernel(ctx.max_context, window):
-            size = cute_ops.attn2_workspace_bytes(
-                PREPARED_MAX // cute_ops.QUERY_LEN,
-                attn.num_kv_heads,
-                cute_ops.attn2_splits(ctx.max_context, 0, attn.num_kv_heads),
-            )
-            workspace = ctx.buffers.get("attn2_workspace")
-            if workspace is None:
-                workspace = torch.zeros(size, dtype=torch.uint8, device=ctx.device)
-                ctx.buffers["attn2_workspace"] = workspace
-            assert workspace.shape == (size,), "attn2_workspace"
-        return cls(
+        # Both kernels compile once the cache is bound (prepare_kv): its page
+        # size is the KV cache manager's.
+        attn2 = cute_ops.bind_attn2(
             attn,
-            OProjection.build(ctx, layer),
-            qkv,
-            out,
-            partial,
             ctx.max_context,
-            window,
-            num_splits,
-            workspace,
+            PREPARED_MAX // cute_ops.QUERY_LEN,
+            ctx.buffers.get("attn2_workspace"),
         )
+        return cls(attn, OProjection.build(ctx, layer), qkv, out, partial, attn2)
 
     def prepare_kv(self) -> None:
         from . import cute_ops
@@ -315,13 +286,7 @@ class QkvAttention:
             )
         layout = cute_ops.kv_layout(attention, kv_cache)
         cute_ops.prepare_qkv_front(self.weight.shape[0], BATCHES, layout)
-        cute_ops.prepare_attn2(
-            self.max_context,
-            self.window,
-            self.num_kv_heads,
-            self.num_splits,
-            fmt=layout,
-        )
+        cute_ops.prepare_bound_attn2(self.attn2, layout)
 
     def front_call(
         self, step: Step, x: torch.Tensor
@@ -366,34 +331,21 @@ class QkvAttention:
         kv_cache, slot_mapping = call
         # Read at the call: the scales are loaded after the build.
         kv_quant = cute_ops.kv_quant(self.attn.attn)
-        qkv = self.qkv[:b]
-        cute_ops.launch_qkv_front(
+        qkv, out = self.qkv[:b], self.out[:b]
+        cute_ops.run_front_attn2(
+            self.attn2,
             x,
             self.weight,
             step.positions,
             self.cos_sin_cache,
             slot_mapping,
             kv_cache,
-            qkv,
             self.eps,
-            kv_quant,
-        )
-        q, gate = cute_ops.split_qkv(qkv, self.num_kv_heads)
-        decode = metadata.decode
-        out = self.out[:b]
-        cute_ops.attn2(
-            q,
-            kv_cache,
-            decode.block_tables,
-            decode.seq_lens,
-            gate,
+            qkv,
+            qkv,
+            metadata.decode,
             out,
-            self.num_kv_heads,
-            max_seq_len=self.max_context,
-            window=self.window,
-            num_splits=self.num_splits,
-            workspace=self.workspace,
-            kv_quant=kv_quant,
+            kv_quant,
         )
         return self.oproj.run(out, self.partial[:b])
 
@@ -420,7 +372,8 @@ class RoutedMoE:
     unpooler GEMM, which publishes this rank's column block zero-copy into the
     next boundary's mailbox.
 
-    With the short tail, the router and the routing run on an aux stream while the
+    With the short tail, the router logits on tensor cores (`MmaRouter`, its K-split
+    partials, which the routing sums) and the routing run on an aux stream while the
     pooler runs on the current one, joined before the routed experts. The fork and
     join are issued directly, not through `maybe_execute_in_parallel`, which runs
     both sides in series under this model's breakable CUDA graph capture. The BF16
@@ -436,17 +389,22 @@ class RoutedMoE:
         pooler_index: int,
         tail: Any,
         unpooler: Any,
-        routing: Any,
+        router: tuple[Any, Any] | None,
         buffers: dict[str, torch.Tensor],
         aux_stream: torch.cuda.Stream,
     ):
         self.index, self.moe, self.ops = index, moe, ops
+        # With the short tail: (`MmaRouter`, `MuseRouting`).
+        self.router = router
         self.pooler, self.pooler_index = pooler, pooler_index
-        self.tail, self.unpooler, self.routing = tail, unpooler, routing
+        self.tail, self.unpooler = tail, unpooler
         self.ids, self.weights = buffers["topk_ids"], buffers["topk_weights"]
         self.moe_out, self.columns = buffers["moe_out"], buffers["columns"]
         self.aux_stream = aux_stream
         self.forked, self.routed = torch.cuda.Event(), torch.cuda.Event()
+        self.warm: Any = None
+        self.warm_stream: torch.cuda.Stream | None = None
+        self.expert_done = torch.cuda.Event()
 
     @classmethod
     def unsupported(cls, vllm_config) -> str | None:
@@ -475,6 +433,7 @@ class RoutedMoE:
         from vllm.utils.torch_utils import aux_stream
 
         from ..cutedsl.gemm.unpooler import Unpooler
+        from ..cutedsl.moe.router_mma import MmaRouter
         from .cute_ops import MuseRouting
 
         moe = layer.feed_forward
@@ -489,7 +448,16 @@ class RoutedMoE:
             raise ValueError(
                 f"layer {layer.layer_idx}: an fp32 router input at the decode batch"
             )
-        routing = None if ops.is_bf16(layer.layer_idx) else MuseRouting(moe.moe_router)
+        router = None
+        if not ops.is_bf16(layer.layer_idx):
+            reason = MmaRouter.unsupported(moe.router.weight, BATCHES)
+            if reason is not None:
+                raise ValueError(f"layer {layer.layer_idx}: MMA router: {reason}")
+            mma_router = MmaRouter(moe.router.weight)
+            router = (
+                mma_router,
+                MuseRouting(moe.moe_router, splits=mma_router.splits),
+            )
         buffers = {
             "topk_ids": _scratch(ctx, "topk_ids", (PREPARED_MAX, TOP_K), torch.int32),
             "topk_weights": _scratch(
@@ -502,10 +470,6 @@ class RoutedMoE:
         }
         unpooler = Unpooler.from_moe(moe, ctx.tp, ctx.rank, mailbox=mailbox)
         tail_layer = tail.bind(moe.post_expert_norm)
-        # The router's kernel for the decode batch, before capture.
-        moe.router(
-            torch.zeros(BATCHES[0], HIDDEN, dtype=torch.bfloat16, device=ctx.device)
-        )
         provider = cls(
             layer.layer_idx,
             moe,
@@ -514,7 +478,7 @@ class RoutedMoE:
             pooler_index,
             tail_layer,
             unpooler,
-            routing,
+            router,
             buffers,
             aux_stream(),
         )
@@ -522,29 +486,38 @@ class RoutedMoE:
         return provider
 
     def warm_up(self) -> None:
-        """One eager pass, before capture, of the NVFP4 experts path a captured
-        step runs: the plan, the routing, the experts and the tail, so that
-        every first launch and first-use compile happens before capture. The
-        routes spread over all experts, so every EP rank runs its GEMMs.
-        Collective (the tail): every rank warms the same layers in the same
-        order."""
-        if self.routing is None:
-            return
+        """One eager pass, before capture, of the path a captured step runs, so
+        that every first launch and first-use compile happens before capture:
+        the router, and for the NVFP4 experts the MMA router, the plan, the
+        routing, the experts and the tail. The routes spread over all experts,
+        so every EP rank runs its GEMMs. Collective (the tail): every rank warms
+        the same layers in the same order."""
         b = BATCHES[0]
         device = self.ids.device
+        x = torch.zeros(b, HIDDEN, dtype=torch.bfloat16, device=device)
+        if self.router is None:
+            self.logits(x)
+            return
+        mma_router, routing = self.router
+        mma_router.partials(x)
         inputs = ExpertsInput(
             torch.zeros((b, POOLED // 2), dtype=torch.uint8, device=device),
             torch.zeros((b, POOLED // 16), device=device).to(torch.float8_e4m3fn),
         )
         topk = RoutedTopk(self.ids[:b], self.weights[:b])
         plan = self.ops.nvfp4_plan(self.index, inputs, topk)
-        # Sigmoid scores of 1 for b * TOP_K experts evenly apart, 0 elsewhere.
+        # In the router's split partials, logits that give sigmoid scores of 1
+        # for b * TOP_K experts evenly apart and 0 elsewhere.
         stride = NUM_EXPERTS // (b * TOP_K)
         chosen = torch.arange(b * TOP_K, device=device).view(b, TOP_K) * stride
-        logits = torch.full((b, NUM_EXPERTS), -30.0, device=device)
-        logits.scatter_(1, chosen, 30.0)
-        self.routing(
-            logits, topk.ids, topk.weights, None if plan is None else plan.metadata
+        partials = mma_router.split_partials()
+        partials.zero_()
+        partials[0, :b].fill_(-30.0).scatter_(1, chosen, 30.0)
+        routing(
+            partials[0, :b],
+            topk.ids,
+            topk.weights,
+            None if plan is None else plan.metadata,
         )
         experts = self.ops.routed_experts(self.index, inputs, topk, plan)
         self.tail.run(experts, self.moe_out[:b])
@@ -552,17 +525,23 @@ class RoutedMoE:
     def prepare_kv(self) -> None:
         pass
 
+    def warm_next(self, warm: Any, stream: torch.cuda.Stream) -> None:
+        """Beside the tail, `warm` (the next layer's `QkvWarm`) runs on
+        `stream`, which the caller joins before the step ends."""
+        self.warm, self.warm_stream = warm, stream
+
     def logits(self, x: torch.Tensor):
         logits = self.moe.router(x)
         return logits[0] if isinstance(logits, tuple) else logits
 
     def run(self, x: torch.Tensor) -> None:
         b = x.shape[0]
-        if self.routing is None:
+        if self.router is None:
             logits = self.logits(x)
             rows = self.pooler.run(self.pooler_index, x)
             experts = self.ops.routed_experts_bf16(self.index, rows, logits)
         else:
+            mma_router, routing = self.router
             self.forked.record()
             a, a_sf = self.pooler.run(self.pooler_index, x)
             inputs = ExpertsInput(a, a_sf)
@@ -572,8 +551,8 @@ class RoutedMoE:
             plan = self.ops.nvfp4_plan(self.index, inputs, topk)
             with torch.cuda.stream(self.aux_stream):
                 self.forked.wait()
-                self.routing(
-                    self.logits(x),
+                routing(
+                    mma_router.partials(x),
                     topk.ids,
                     topk.weights,
                     None if plan is None else plan.metadata,
@@ -582,5 +561,11 @@ class RoutedMoE:
             self.routed.wait()
             experts = self.ops.routed_experts(self.index, inputs, topk, plan)
         moe_out = self.moe_out[:b]
+        if self.warm is not None:
+            # From the experts' end, beside the tail: after it, it is too late.
+            self.expert_done.record()
+            with torch.cuda.stream(self.warm_stream):
+                self.expert_done.wait()
+                self.warm.run(b)
         self.tail.run(experts, moe_out)
         self.unpooler.run(moe_out, self.columns[:b])

@@ -32,7 +32,6 @@ from typing import Any, NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 from cutlass import BFloat16, Float16, Float32, Int32, Int64, const_expr
 from cutlass.cute.runtime import make_fake_compact_tensor
@@ -49,8 +48,6 @@ from .primitives import (
     mul_rn,
     pack_bf16x8_rn,
     regs,
-    round_bf16,
-    rsqrt_approx_ftz,
     store_f32x8,
     store_global_u32x4,
     to_cute,
@@ -216,7 +213,11 @@ def boundary_fragments(
         constants.pre_weight_fp32,
         constants.pre_weight_fp16,
     )
-    r1 = rsqrt_approx_ftz(fma_rn(post_sum, Float32(INV_H), Float32(constants.post_eps)))
+    r1 = cute.math.rsqrt(
+        fma_rn(post_sum, Float32(INV_H), Float32(constants.post_eps)),
+        approx=True,
+        ftz=True,
+    )
     z = []
     for k, (f, g) in enumerate(zip(x, gates)):
         y = [mul_rn(f[i], r1) for i in range(VEC_BF16)]
@@ -227,9 +228,9 @@ def boundary_fragments(
         for i in range(VEC_BF16):
             res[i] = add_rn(
                 mul_rn(g.alpha[i], stream[k][i]),
-                mul_rn(g.beta[i], round_bf16(y[i])),
+                mul_rn(g.beta[i], Float32(BFloat16(y[i]))),
             )
-            zk.append(round_bf16(res[i]))
+            zk.append(Float32(BFloat16(res[i])))
         z.append(zk)
         if store_stream is not None:
             store_stream(k, res.load())
@@ -239,7 +240,11 @@ def boundary_fragments(
             for f, g in zip(z, gates)
         ]
     pre_sum = row_sum(z, pre_fused, 1)
-    r2 = rsqrt_approx_ftz(fma_rn(pre_sum, Float32(INV_H), Float32(constants.pre_eps)))
+    r2 = cute.math.rsqrt(
+        fma_rn(pre_sum, Float32(INV_H), Float32(constants.pre_eps)),
+        approx=True,
+        ftz=True,
+    )
     out = []
     for f, g in zip(z, gates):
         o = [mul_rn(f[i], r2) for i in range(VEC_BF16)]
@@ -336,7 +341,7 @@ class _DraftBoundaryKernel:
         token, _, _ = cute.arch.block_idx()
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         # One round of warp sums per norm.
         sums = smem.allocate_array(Float32, 2 * WARPS)
         columns = [Int64(tidx) * VEC_BF16 + Int64(k * CHUNK) for k in range(FRAGMENTS)]

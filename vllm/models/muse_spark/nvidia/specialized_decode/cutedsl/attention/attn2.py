@@ -55,44 +55,31 @@ from cutlass.cute.runtime import make_fake_stream, make_fake_tensor
 
 from ..common.host import assert_not_capturing, fp32
 from ..common.primitives import (
+    LOG2E,
     add_ftz_f32,
-    atomic_add1_u32_address,
-    atomic_exch_zero_u32_address,
     bf16x2_to_f32x2,
-    cluster_arrive_relaxed_aligned,
-    cluster_wait_aligned,
     cp_async_cg_16,
-    cp_async_commit,
-    cp_async_wait,
     e4m3x4_to_bf16x4,
     ex2_approx_ftz,
-    fence_mbarrier_init_cluster,
-    fma_ftz_f32,
-    load_global_cg_f32_address,
+    global_ptr,
     load_global_cg_f32x2_address,
     load_global_nc_s32_or,
     load_global_nc_u32x4_address,
     load_global_u32_address,
-    load_shared_f32_address,
     load_shared_f32_or,
     load_shared_f32x2_address,
     load_shared_f32x4_address,
     load_shared_u32x4_unpacked,
     map_shared_address_to_peer,
     max_ftz_f32,
-    mbarrier_arrive_expect_tx_address,
-    mbarrier_init_address,
-    mbarrier_try_wait_phase0_cluster,
+    mbarrier_wait_cluster_address,
     membar_gl,
     mma_m16n8k16_bf16,
     movmatrix_trans_b16,
     mul_ftz_f32,
     pack_bf16x2_rn,
-    rcp_approx_ftz,
-    round_bf16,
-    rsqrt_approx_ftz,
     scale_or_neg_inf,
-    shuffle_sync_idx_u32,
+    shared_ptr,
     store_async_cluster_f32x2,
     store_async_cluster_f32x4,
     store_global_f32_address,
@@ -148,7 +135,6 @@ PUSH_BYTES = 4 * (HEAD_DIM + 2)
 # layer with other values).
 SM_SCALE = 0.6841258108
 EPS = 1e-5
-LOG2E = 1.4426950408889634
 NEG_BIG = -1e30
 NEG_INF = float("-inf")
 
@@ -164,11 +150,18 @@ S_RECV = S_L + WARPS * ROWS * 4
 S_MBAR = S_RECV + CLUSTER * SLOT_BYTES
 S_BAR = S_MBAR + 8
 SMEM_ONE_CLUSTER = S_BAR
-S_RING = (S_BAR + 8 + 127) // 128 * 128
-S_LONG_RECV = S_RING + RING_STAGES * PAGE_BYTES
-SMEM_SPLIT = S_LONG_RECV + CLUSTER * WARPS * SLOT_BYTES
+# The long-context path overlays the one-cluster layout (a cluster takes one
+# path): its page ring shares the bytes of the warp partials and the pushed
+# partials [CLUSTER][WARPS][SLOT] follow them. A CTA stashes its partials
+# only after its warps left the ring, and a peer pushes only after the
+# cluster's second barrier, i.e. after every warp's last read of the ring.
+S_RING = 0
+S_LONG_RECV = S_RECV
+S_LONG_BAR = max(RING_STAGES * PAGE_BYTES, S_LONG_RECV + CLUSTER * WARPS * SLOT_BYTES)
+SMEM_SPLIT = S_LONG_BAR + 8
 
 assert QUERY_ROWS * HEADS == GROUPS * ROWS and CLUSTER == ROWS
+assert S_LONG_BAR % 8 == 0 and SMEM_SPLIT >= SMEM_ONE_CLUSTER
 assert WARPS * 32 * 2 * 16 == PAGE_BYTES  # two 16-byte copies a thread per page
 
 
@@ -211,6 +204,17 @@ def _split_ref(ref, fmt: kvf.KvLayout):
 # kernel reads them).
 SCALE_LOG2 = fp32(fp32(SM_SCALE) * fp32(LOG2E))
 EPS_F32 = fp32(EPS)
+
+
+# FP32 FMA rounded to nearest even, subnormals flushed.
+fma_ftz = functools.partial(
+    cute.math.fma, rounding=cute.math.RoundingMode.NEAREST_EVEN, ftz=True
+)
+
+
+def lds_f32(address: Int32) -> Float32:
+    """The FP32 at the shared-memory `address`."""
+    return cute.arch.load(shared_ptr(Float32, address), Float32)
 
 
 def _qf(qr) -> list:
@@ -312,9 +316,8 @@ def _online_step(s0: list, s1: list, state, o: cute.Tensor):
     for x0, x1 in zip(s0, s1):
         mx0 = max_ftz_f32(mx0, x0)
         mx1 = max_ftz_f32(mx1, x1)
-    for offset in (1, 2):
-        mx0 = max_ftz_f32(mx0, cute.arch.shuffle_sync_bfly(mx0, offset=offset))
-        mx1 = max_ftz_f32(mx1, cute.arch.shuffle_sync_bfly(mx1, offset=offset))
+    mx0 = cute.arch.warp_reduction(mx0, max_ftz_f32, threads_in_group=4)
+    mx1 = cute.arch.warp_reduction(mx1, max_ftz_f32, threads_in_group=4)
     mn0 = max_ftz_f32(m0, mx0)
     mn1 = max_ftz_f32(m1, mx1)
     a0 = ex2_approx_ftz(sub_ftz_f32(m0, mn0))
@@ -327,8 +330,8 @@ def _online_step(s0: list, s1: list, state, o: cute.Tensor):
         p1.append(ex2_approx_ftz(sub_ftz_f32(x1, mn1)))
         ps0 = add_ftz_f32(ps0, p0[-1])
         ps1 = add_ftz_f32(ps1, p1[-1])
-    l0 = fma_ftz_f32(l0, a0, ps0)
-    l1 = fma_ftz_f32(l1, a1, ps1)
+    l0 = fma_ftz(l0, a0, ps0)
+    l1 = fma_ftz(l1, a1, ps1)
     for j in range(8):
         o[4 * j] = mul_ftz_f32(a0, o[4 * j])
         o[4 * j + 1] = mul_ftz_f32(a0, o[4 * j + 1])
@@ -407,7 +410,7 @@ def _merge_warps_and_push(smem, mbar, tid, rank) -> None:
     [4 i8, 4 i8 + 4) and [32 + 4 i8, ...)) and push row r to CTA r."""
     row = tid >> 3
     i8 = tid & 7
-    ms = [load_shared_f32_address(smem + S_M + 64 * w + 4 * row) for w in range(WARPS)]
+    ms = [lds_f32(smem + S_M + 64 * w + 4 * row) for w in range(WARPS)]
     big = Float32(NEG_BIG)
     m = big
     for w in range(WARPS):
@@ -417,16 +420,16 @@ def _merge_warps_and_push(smem, mbar, tid, rank) -> None:
     xb = [Float32(0.0)] * 4
     for w in range(WARPS):
         sc = ex2_approx_ftz(sub_ftz_f32(ms[w], m))
-        ls = fma_ftz_f32(sc, load_shared_f32_address(smem + S_L + 64 * w + 4 * row), ls)
+        ls = fma_ftz(sc, lds_f32(smem + S_L + 64 * w + 4 * row), ls)
         src = smem + S_O + w * ROWS * SLOT_BYTES + row * SLOT_BYTES + 16 * i8
         a = load_shared_f32x4_address(src)
         c = load_shared_f32x4_address(src + 128)
-        xa = [fma_ftz_f32(sc, a[i], xa[i]) for i in range(4)]
-        xb = [fma_ftz_f32(sc, c[i], xb[i]) for i in range(4)]
+        xa = [fma_ftz(sc, a[i], xa[i]) for i in range(4)]
+        xb = [fma_ftz(sc, c[i], xb[i]) for i in range(4)]
     dst = map_shared_address_to_peer(smem + S_RECV + rank * SLOT_BYTES + 16 * i8, row)
     remote_bar = map_shared_address_to_peer(mbar, row)
-    store_async_cluster_f32x4(dst, xa, remote_bar)
-    store_async_cluster_f32x4(dst + 128, xb, remote_bar)
+    store_async_cluster_f32x4(dst, xa, remote_bar, clobber_memory=True)
+    store_async_cluster_f32x4(dst + 128, xb, remote_bar, clobber_memory=True)
     store_async_cluster_f32x2(
         dst + 256, m, ls, remote_bar, Int32(i8 == 0), clobber_memory=True
     )
@@ -439,30 +442,27 @@ def _finish_row(ox, oy, ls, gate2, eps, out_row, lane, v_scale=None) -> None:
     gx, gy = bf16x2_to_f32x2(gate2)
     neg_log2e = Float32(-LOG2E)
     one = Float32(1.0)
-    sgx = rcp_approx_ftz(add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gx, neg_log2e)), one))
-    sgy = rcp_approx_ftz(add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gy, neg_log2e)), one))
-    inv = rcp_approx_ftz(ls)
+    sgx = cute.arch.rcp_approx(
+        add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gx, neg_log2e)), one)
+    )
+    sgy = cute.arch.rcp_approx(
+        add_ftz_f32(ex2_approx_ftz(mul_ftz_f32(gy, neg_log2e)), one)
+    )
+    inv = cute.arch.rcp_approx(ls)
     if v_scale is not None:
         inv = mul_ftz_f32(inv, v_scale)
-    ox = round_bf16(mul_ftz_f32(ox, inv))
-    oy = round_bf16(mul_ftz_f32(inv, oy))
-    ss = fma_ftz_f32(ox, ox, mul_ftz_f32(oy, oy))
-    for offset in (16, 8, 4, 2, 1):
-        ss = add_ftz_f32(ss, cute.arch.shuffle_sync_bfly(ss, offset=offset))
-    rinv = rsqrt_approx_ftz(fma_ftz_f32(ss, Float32(1.0 / HEAD_DIM), eps))
-    cute.arch.griddepcontrol_launch_dependents()
+    ox = Float32(BFloat16(mul_ftz_f32(ox, inv)))
+    oy = Float32(BFloat16(mul_ftz_f32(inv, oy)))
+    ss = fma_ftz(ox, ox, mul_ftz_f32(oy, oy))
+    ss = cute.arch.warp_reduction(ss, add_ftz_f32)
+    rinv = cute.math.rsqrt(
+        fma_ftz(ss, Float32(1.0 / HEAD_DIM), eps),
+        approx=True,
+        ftz=True,
+    )
     x = mul_ftz_f32(mul_ftz_f32(ox, rinv), sgx)
     y = mul_ftz_f32(sgy, mul_ftz_f32(oy, rinv))
     store_global_u32_address(out_row + 4 * Int64(lane), pack_bf16x2_rn(x, y))
-
-
-@cute.jit
-def _wait_phase0(mbar: Int32) -> None:
-    """Spin until the mbarrier's phase 0 completes (cluster-scope acquire),
-    one bounded wait per iteration."""
-    done = Int32(0)
-    while done == Int32(0):
-        done = mbarrier_try_wait_phase0_cluster(mbar)
 
 
 @cute.jit
@@ -483,12 +483,10 @@ def _merge_cluster_one(recv: Int32, n_active: Int32, lane: Int32):
     for k in cutlass.range_constexpr(CLUSTER):
         if k < n_active:
             sc = ex2_approx_ftz(sub_ftz_f32(mk[k], m))
-            ls = fma_ftz_f32(
-                sc, load_shared_f32_address(recv + k * SLOT_BYTES + 260), ls
-            )
+            ls = fma_ftz(sc, lds_f32(recv + k * SLOT_BYTES + 260), ls)
             vx, vy = load_shared_f32x2_address(recv + k * SLOT_BYTES + 8 * lane)
-            ox = fma_ftz_f32(sc, vx, ox)
-            oy = fma_ftz_f32(sc, vy, oy)
+            ox = fma_ftz(sc, vx, ox)
+            oy = fma_ftz(sc, vy, oy)
     return ls, ox, oy
 
 
@@ -608,16 +606,16 @@ def _short_path(
 
     mbar = smem + S_MBAR
     if tid == Int32(0):
-        mbarrier_init_address(mbar, 1, clobber_memory=True)
-        fence_mbarrier_init_cluster()
-    cluster_arrive_relaxed_aligned()
+        cute.arch.mbarrier_init(shared_ptr(Int64, mbar), 1)
+        cute.arch.mbarrier_init_fence()
+    cute.arch.cluster_arrive_relaxed(aligned=True)
 
     n_active = cutlass.min(Int32(CLUSTER), (num_pages + (WARPS - 1)) >> 2)
     if tid == Int32(0):
         # The pushes of the active CTAs complete this many bytes (the
         # transaction count may go negative before this arrive).
-        mbarrier_arrive_expect_tx_address(
-            mbar, n_active * PUSH_BYTES, clobber_memory=True
+        cute.arch.mbarrier_arrive_and_expect_tx(
+            shared_ptr(Int64, mbar), n_active * PUSH_BYTES
         )
     lim0 = seq_len - QUERY_ROWS + (r0 >> 3)
     lim1 = seq_len - QUERY_ROWS + (r1 >> 3)
@@ -737,13 +735,13 @@ def _short_path(
         )
         cute.arch.barrier()
         # The peers' mbarriers are initialized.
-        cluster_wait_aligned()
+        cute.arch.cluster_wait()
         _merge_warps_and_push(smem, mbar, tid, rank)
     else:
-        cluster_wait_aligned()
+        cute.arch.cluster_wait()
 
     if warp == Int32(0):
-        _wait_phase0(mbar)
+        mbarrier_wait_cluster_address(mbar, Int32(0))
         ls, ox, oy = _merge_cluster_one(smem + S_RECV, n_active, lane)
         out_row = (
             out_base + (out_token * out_stride + Int64(HEAD_DIM * (owned & 7))) * 2
@@ -896,14 +894,19 @@ def _push_rows(smem, mbar, warp, lane, rank) -> None:
             smem + S_LONG_RECV + (rank * WARPS + warp) * SLOT_BYTES + 16 * i8, r
         )
         remote_bar = map_shared_address_to_peer(mbar, r)
-        store_async_cluster_f32x4(dst, load_shared_f32x4_address(src), remote_bar)
         store_async_cluster_f32x4(
-            dst + 128, load_shared_f32x4_address(src + 128), remote_bar
+            dst, load_shared_f32x4_address(src), remote_bar, clobber_memory=True
+        )
+        store_async_cluster_f32x4(
+            dst + 128,
+            load_shared_f32x4_address(src + 128),
+            remote_bar,
+            clobber_memory=True,
         )
         store_async_cluster_f32x2(
             dst + 256,
-            load_shared_f32_address(smem + S_M + 64 * warp + 4 * r),
-            load_shared_f32_address(smem + S_L + 64 * warp + 4 * r),
+            lds_f32(smem + S_M + 64 * warp + 4 * r),
+            lds_f32(smem + S_L + 64 * warp + 4 * r),
             remote_bar,
             Int32(i8 == 0),
             clobber_memory=True,
@@ -918,18 +921,19 @@ def _merge_cluster_long(recv: Int32, n_active: Int32, lane: Int32):
     m = Float32(NEG_BIG)
     for k in range(n_active):
         m = max_ftz_f32(
-            m, load_shared_f32_address(recv + k * (WARPS * SLOT_BYTES) + 256)
+            m,
+            lds_f32(recv + k * (WARPS * SLOT_BYTES) + 256),
         )
     ls = Float32(0.0)
     ox = Float32(0.0)
     oy = Float32(0.0)
     for k in range(n_active):
         row = recv + k * (WARPS * SLOT_BYTES)
-        sc = ex2_approx_ftz(sub_ftz_f32(load_shared_f32_address(row + 256), m))
-        ls = fma_ftz_f32(sc, load_shared_f32_address(row + 260), ls)
+        sc = ex2_approx_ftz(sub_ftz_f32(lds_f32(row + 256), m))
+        ls = fma_ftz(sc, lds_f32(row + 260), ls)
         vx, vy = load_shared_f32x2_address(row + 8 * lane)
-        ox = fma_ftz_f32(sc, vx, ox)
-        oy = fma_ftz_f32(sc, vy, oy)
+        ox = fma_ftz(sc, vx, ox)
+        oy = fma_ftz(sc, vy, oy)
     return m, ls, ox, oy
 
 
@@ -941,18 +945,28 @@ def _merge_rows(row_partials: Int64, active: Int32, lane: Int32):
     for z in range(active):
         mz = max_ftz_f32(
             mz,
-            load_global_cg_f32_address(row_partials + Int64(z) * SLOT_BYTES + 256),
+            cute.arch.load(
+                global_ptr(Float32, row_partials + Int64(z) * SLOT_BYTES + 256),
+                Float32,
+                cop="cg",
+            ),
         )
     rl = Float32(0.0)
     rx = Float32(0.0)
     ry = Float32(0.0)
     for z in range(active):
         part = row_partials + Int64(z) * SLOT_BYTES
-        sc = ex2_approx_ftz(sub_ftz_f32(load_global_cg_f32_address(part + 256), mz))
-        rl = fma_ftz_f32(sc, load_global_cg_f32_address(part + 260), rl)
+        sc = ex2_approx_ftz(
+            sub_ftz_f32(
+                cute.arch.load(global_ptr(Float32, part + 256), Float32, cop="cg"), mz
+            ),
+        )
+        rl = fma_ftz(
+            sc, cute.arch.load(global_ptr(Float32, part + 260), Float32, cop="cg"), rl
+        )
         vx, vy = load_global_cg_f32x2_address(part + 8 * Int64(lane))
-        rx = fma_ftz_f32(sc, vx, rx)
-        ry = fma_ftz_f32(sc, vy, ry)
+        rx = fma_ftz(sc, vx, rx)
+        ry = fma_ftz(sc, vy, ry)
     return rl, rx, ry
 
 
@@ -969,7 +983,7 @@ def _merge_rows_m(
     ms = []
     for z in cutlass.range_constexpr(slots):
         part = row_partials + Int64(cutlass.min(Int32(z), active - 1)) * SLOT_BYTES
-        ms.append(load_global_cg_f32_address(part + 256))
+        ms.append(cute.arch.load(global_ptr(Float32, part + 256), Float32, cop="cg"))
     mz = Float32(NEG_BIG)
     for z in cutlass.range_constexpr(slots):
         if Int32(z) < active:
@@ -979,11 +993,17 @@ def _merge_rows_m(
     ry = Float32(0.0)
     for z in range(active):
         part = row_partials + Int64(z) * SLOT_BYTES
-        sc = ex2_approx_ftz(sub_ftz_f32(load_global_cg_f32_address(part + 256), mz))
-        rl = fma_ftz_f32(sc, load_global_cg_f32_address(part + 260), rl)
+        sc = ex2_approx_ftz(
+            sub_ftz_f32(
+                cute.arch.load(global_ptr(Float32, part + 256), Float32, cop="cg"), mz
+            ),
+        )
+        rl = fma_ftz(
+            sc, cute.arch.load(global_ptr(Float32, part + 260), Float32, cop="cg"), rl
+        )
         vx, vy = load_global_cg_f32x2_address(part + 8 * Int64(lane))
-        rx = fma_ftz_f32(sc, vx, rx)
-        ry = fma_ftz_f32(sc, vy, ry)
+        rx = fma_ftz(sc, vx, rx)
+        ry = fma_ftz(sc, vy, ry)
     return rl, rx, ry
 
 
@@ -1013,9 +1033,9 @@ def _merge_rows_batched(
     for z in cutlass.range_constexpr(slots):
         if Int32(z) < active:
             sc = ex2_approx_ftz(sub_ftz_f32(ml[z][0], mz))
-            rl = fma_ftz_f32(sc, ml[z][1], rl)
-            rx = fma_ftz_f32(sc, vo[z][0], rx)
-            ry = fma_ftz_f32(sc, vo[z][1], ry)
+            rl = fma_ftz(sc, ml[z][1], rl)
+            rx = fma_ftz(sc, vo[z][0], rx)
+            ry = fma_ftz(sc, vo[z][1], ry)
     return rl, rx, ry
 
 
@@ -1050,8 +1070,8 @@ def _merge_partials(
     counter = counters + row_id * 4
     arrived = Uint32(0)
     if lane == Int32(0):
-        arrived = atomic_add1_u32_address(counter)
-    arrived = shuffle_sync_idx_u32(arrived, Int32(0))
+        arrived = cute.arch.atomic_add(global_ptr(Uint32, counter), Uint32(1))
+    arrived = cute.arch.shuffle_sync(arrived, Int32(0))
     last = Int32(arrived == Uint32(active - 1))
     rl = ls
     rx = ox
@@ -1065,7 +1085,7 @@ def _merge_partials(
         else:
             rl, rx, ry = _merge_rows(row_partials, active, lane)
         if lane == Int32(0):
-            atomic_exch_zero_u32_address(counter)
+            cute.arch.atomic_exch(global_ptr(Uint32, counter), Uint32(0))
     return last, rl, rx, ry
 
 
@@ -1216,18 +1236,17 @@ def _long_cluster(
     steps = (cnt + GROUP_PAGES - 1) >> 2
     ring = smem + S_RING
     _issue_step(ring, Int32(0), cnt, cbeg, bt_row, kv_base, kv_page_stride, tid, fmt)
-    cp_async_commit()
+    cute.arch.cp_async_commit_group()
 
-    mbar = smem + S_BAR
+    mbar = smem + S_LONG_BAR
     if tid == Int32(0):
-        mbarrier_init_address(mbar, 1, clobber_memory=True)
-        fence_mbarrier_init_cluster()
-    cluster_arrive_relaxed_aligned()
+        cute.arch.mbarrier_init(shared_ptr(Int64, mbar), 1)
+        cute.arch.mbarrier_init_fence()
     qf_frag = cute.make_rmem_tensor(cute.make_layout((16,)), Uint32)
     _store_qf(qf_frag, _qf(qr))
     if tid == Int32(0):
-        mbarrier_arrive_expect_tx_address(
-            mbar, n_active * (WARPS * PUSH_BYTES), clobber_memory=True
+        cute.arch.mbarrier_arrive_and_expect_tx(
+            shared_ptr(Int64, mbar), n_active * (WARPS * PUSH_BYTES)
         )
     lim0 = seq_len - QUERY_ROWS + (r0 >> 3)
     lim1 = seq_len - QUERY_ROWS + (r1 >> 3)
@@ -1248,7 +1267,7 @@ def _long_cluster(
     for k in range(steps):
         # Step k landed and is visible to every thread, and every warp is
         # done with step k - 1, whose slots are refilled.
-        cp_async_wait(RING_GROUPS - 2)
+        cute.arch.cp_async_wait_group(RING_GROUPS - 2)
         cute.arch.barrier()
         if k + RING_GROUPS - 1 < steps:
             _issue_step(
@@ -1262,7 +1281,7 @@ def _long_cluster(
                 tid,
                 fmt,
             )
-        cp_async_commit()
+        cute.arch.cp_async_commit_group()
         m0, m1, l0, l1 = _attend_group(
             ring + (k & (RING_GROUPS - 1)) * (GROUP_PAGES * PAGE_BYTES),
             cutlass.min(Int32(GROUP_PAGES), cnt - k * GROUP_PAGES),
@@ -1284,7 +1303,9 @@ def _long_cluster(
             window > 0,
             fmt,
         )
-    cp_async_wait(0)
+    cute.arch.cp_async_wait_group(0)
+    # Every warp is done with the ring, whose bytes the partials take.
+    cute.arch.barrier()
 
     if cnt > Int32(0):
         _stash_partial(
@@ -1300,11 +1321,12 @@ def _long_cluster(
             l1,
         )
     cute.arch.sync_warp()
-    cluster_wait_aligned()
+    cute.arch.cluster_arrive(aligned=True)
+    cute.arch.cluster_wait()
     if cnt > Int32(0):
         _push_rows(smem, mbar, warp, lane, rank)
 
-    _wait_phase0(mbar)
+    mbarrier_wait_cluster_address(mbar, Int32(0))
     m, ls, ox, oy = _merge_cluster_long(
         smem + S_LONG_RECV + warp * SLOT_BYTES, n_active, lane
     )
@@ -1471,6 +1493,9 @@ class _Attn2Kernel:
         kv_base = kv + Int64(kvh) * (subs * page_bytes(self.fmt))
 
         cute.arch.griddepcontrol_wait()
+        # The successor (the o_proj GEMM) stages its weights while this kernel
+        # runs; it still waits for this grid's completion before reading.
+        cute.arch.griddepcontrol_launch_dependents()
 
         # Every load that does not depend on the length first: the length and
         # this warp's first two block-table entries (dereferenced below only

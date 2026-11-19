@@ -625,7 +625,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | T + A | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
 | `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `MuseGlimmerForCausalLM`, `MuseGlimmerForConditionalGeneration` | Muse Glimmer | T + I<sup>+</sup> + V<sup>+</sup> | `meta-models/Muse-Glimmer-30B` | ✅︎ | ✅︎ |
-| `MuseSparkForConditionalGeneration` | Muse Spark Open | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`, etc. | ✅︎ | ✅︎ |
+| `MuseSparkForConditionalGeneration` | [Muse Spark Open](muse_spark.md) | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `meta-models/Muse-Spark-Open-816B-A42B-NVFP4`, etc. | ✅︎ | ✅︎ |
 | `Nemotron3_5TranscribeForConditionalGeneration` | Nemotron-3.5-Transcribe | T + A | `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8`, `nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4` | | ✅︎ |
 | `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Nano_VL_V2` | Nemotron Nano 3 Omni, Nemotron Nano V2 VL | T + I<sup>E+</sup> + V<sup>+</sup> + A<sup>*</sup> | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` | ✅︎ | |
 | `NemotronH_Omni_Reasoning_V3` | Nemotron 3.5 Super VL | T + I<sup>E+</sup> + V<sup>+</sup> | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4`, etc. | ✅︎ | |
@@ -756,6 +756,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     vision-less checkpoints run as a text-only model. Speculative decoding uses the
     `meta-models/Muse-Glimmer-30B-assistant` checkpoint, which vLLM serves through
     its [DFlash](../features/speculative_decoding/README.md) path.
+
+!!! note
+    Muse Spark Open on NVIDIA uses FlashInfer fused normalization kernels. If
+    FlashInfer includes its Cake norm package without the required `build.json`
+    manifest, vLLM selects the CuTe backend for those kernels at initialization.
+    Installations with the manifest retain FlashInfer's automatic backend selection.
 
 !!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to

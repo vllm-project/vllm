@@ -43,28 +43,39 @@ PACKAGE_GEMM_TPS = (8,)
 assert set(PACKAGE_GEMM_TPS) <= set(FUSED_TPS)
 # The TP sizes whose NVFP4 layers run expert TP (every expert at 1/tp of the
 # intermediate width on every rank, resharded at build from the stock EP
-# experts). Other sizes, and BF16 layers, keep the stock EP experts.
+# experts), and so do their BF16 layers (the edge layers: EP leaves the busiest
+# rank with ~1.65x the experts a balanced one reads). Other sizes keep the
+# stock EP experts.
 EXPERT_TP_TPS = (8,)
 
 
 class UnpoolerShape(NamedTuple):
     """Launch shape of the unpooler GEMM: K split over `splits` CTAs of one
     cluster, `kw` consecutive K per warp, `accs` accumulators per warp, and
-    the token tile per batch."""
+    the token tile per batch. With `pace_ns`, a warp issues the weight loads
+    of K block b no earlier than b x `pace_ns` after its first."""
 
     splits: int
     kw: int
     accs: int
     token_tile: dict[int, int]
+    pace_ns: int = 0
 
 
-# The MoE unpooler's column block ([hidden / tp, 4096] per rank).
+# The MoE unpooler's column block ([hidden / tp, 4096] per rank): one CTA of 16
+# warps per 16 features (no cluster: the exposed time after its predecessor is
+# the shortest of the splits). Every split sums the same 16 K chunks in the
+# same order.
 UNPOOLER = UnpoolerShape(
-    splits=4, kw=256, accs=4, token_tile=batch_table("1-8:8,9-16:16")
+    splits=1, kw=256, accs=4, token_tile=batch_table("1-8:8,9-16:16")
 )
 # The o_proj partial at TP8 ([8192, 1024] per rank): one CTA of 4 warps per 16
 # features.
 OPROJ = UNPOOLER._replace(splits=1)
+# The MoE pooler's column block ([4096 / tp, 8192] per rank): K split over a
+# cluster of 4 CTAs of 4 warps per 16 features, 512 K per warp. Its weight
+# loads are paced: all 8 MB at once slow the all-reduce the GEMM overlaps.
+POOLER = UNPOOLER._replace(splits=4, kw=512, pace_ns=300)
 # The DSpark draft's branch partials at TP8 by role (o_proj [8192, 1024] and
 # down_proj [8192, 2048] per rank), publishing into the draft boundary's mailbox.
 DRAFT_DOWN = OPROJ._replace(kw=128)

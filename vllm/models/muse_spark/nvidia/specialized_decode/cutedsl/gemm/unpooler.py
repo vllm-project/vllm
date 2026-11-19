@@ -20,7 +20,8 @@ Grid (N / 16, S), cluster (1, S, 1) when S > 1. CTA (t, s) owns output features
 owns K / (S * warps) consecutive K. Operands are loaded straight into registers
 and fed to mma.sync.m16n8k16 (A = 16 weight rows, B = 8 tokens).
 
-Weights are loaded before griddepcontrol.wait, activations after it. Each warp's
+Weights are loaded before griddepcontrol.wait (K block b at `pace_ns` x b
+after the first when paced), activations after it. Each warp's
 FP32 partial goes to cluster rank 0's shared memory, which sums the partials in
 a fixed order, rounds to BF16 and stores y. The summation order depends only on
 the launch shape, so runs are bitwise reproducible.
@@ -47,27 +48,28 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
 from ..common.host import assert_not_capturing
-from ..common.mailbox import LamportMailbox
+from ..common.mailbox import LamportMailbox, load_ticket_stage
 from ..common.policy import UNPOOLER, UnpoolerShape
 from ..common.primitives import (
     ACTIVE_STAGE,
+    LAMPORT_GENERATIONS,
     NEXT_STAGE,
     WARP_SIZE,
     current_cu_stream,
     load_global_u32x4,
-    load_volatile_u32,
     make_fake_dynamic_compact_tensor,
     map_shared_to_peer,
     mma_m16n8k16_bf16,
+    paced_ready,
     pack_bf16x2_rn,
     sanitize_negative_zero_u32x4,
-    shuffle_sync_idx_u32,
     stmc_bf16x8,
     store_global_u32,
     store_global_u32x4,
     store_shared_cluster_f32,
     to_cute,
     to_cute_dynamic,
+    trap,
 )
 
 TILE_N = 16  # output features per CTA (the MMA's M)
@@ -114,6 +116,7 @@ class UnpoolerKernel:
         capacity_m: int = 1,
         hidden_local: int = 0,
         ticket_stage: bool = False,
+        pace_ns: int = 0,
     ) -> None:
         reason = launch_unsupported(n, k, splits, kw, accs)
         if reason is None and token_tile not in TOKEN_TILES:
@@ -137,6 +140,7 @@ class UnpoolerKernel:
         if ticket_stage and not zerocopy:
             raise ValueError("a ticket stage needs the zero-copy publish")
         self.ticket_stage = ticket_stage
+        self.pace_ns = pace_ns
 
     def smem_bytes(self) -> int:
         return self.parts * self.tt * TILE_N * 4
@@ -188,7 +192,7 @@ class UnpoolerKernel:
         g = lane // 4
         q = lane % 4
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         partials = smem.allocate_array(Float32, self.parts * self.tt * TILE_N)
         if cutlass.const_expr(self.splits > 1):
             # Peers store into rank 0's shared memory; the matching wait precedes
@@ -200,7 +204,11 @@ class UnpoolerKernel:
         # Weight rows g and g + 8 of this tile, 32 bytes per block: independent of
         # the predecessor grid.
         wreg = cute.make_rmem_tensor(cute.make_layout((self.blocks, 2, 8)), Uint32)
+        start = Int64(0)
+        if cutlass.const_expr(self.pace_ns > 0):
+            start = cute.arch.globaltimer()
         for b in cutlass.range_constexpr(self.blocks):
+            ready = paced_ready(start, b, self.pace_ns)
             for h in cutlass.range_constexpr(2):
                 row = Int64(tile * TILE_N + h * 8) + Int64(g)
                 for v in cutlass.range_constexpr(2):
@@ -211,7 +219,7 @@ class UnpoolerKernel:
                         cute.AddressSpace.gmem,
                         assumed_align=16,
                     )
-                    words = load_global_u32x4(wp)
+                    words = load_global_u32x4(wp, ready)
                     for i in cutlass.range_constexpr(4):
                         wreg[b, h, v * 4 + i] = words[i]
 
@@ -222,9 +230,14 @@ class UnpoolerKernel:
         # used only in the epilogue.
         if cutlass.const_expr(self.zerocopy) and split == 0:
             if cutlass.const_expr(self.ticket_stage):
-                stage = load_volatile_u32(stage_state.iterator) >> Uint32(16)
+                stage = load_ticket_stage(stage_state.iterator)
             else:
-                stage = load_volatile_u32(stage_state.iterator + NEXT_STAGE)
+                stage = cute.arch.load(
+                    stage_state.iterator + NEXT_STAGE,
+                    Uint32,
+                    sem="relaxed",
+                    scope="sys",
+                )
 
         xreg = cute.make_rmem_tensor(
             cute.make_layout((self.n_iters, self.blocks, 8)), Uint32
@@ -249,6 +262,12 @@ class UnpoolerKernel:
                         for i in cutlass.range_constexpr(4):
                             xreg[ni, b, v * 4 + i] = words[i]
         if cutlass.const_expr(self.enable_pdl):
+            if cutlass.const_expr(self.ticket_stage):
+                # The consumer advances the ticket once every CTA released it:
+                # resolve every thread's stage load before the release.
+                if stage >= Uint32(LAMPORT_GENERATIONS):
+                    trap()
+                cute.arch.barrier()
             cute.arch.griddepcontrol_launch_dependents()
 
         acc = cute.make_rmem_tensor(
@@ -336,7 +355,7 @@ class UnpoolerKernel:
                 lead = lane - q
                 packed = cute.make_rmem_tensor(cute.make_layout((4,)), Uint32)
                 for i in cutlass.range_constexpr(4):
-                    packed[i] = shuffle_sync_idx_u32(word, lead + i)
+                    packed[i] = cute.arch.shuffle_sync(word, lead + i)
                 if q == 0 and token < m:
                     column = Int64(tile * TILE_N) + Int64((j // 4) * 8)
                     destination = out.iterator + (Int64(token) * self.n + column)
@@ -368,6 +387,7 @@ def compile_unpooler(
     capacity_m: int = 1,
     hidden_local: int = 0,
     ticket_stage: bool = False,
+    pace_ns: int = 0,
 ):
     """The compiled kernel for weight [n, k] and one token tile; called as
     fn(weight, x, out, stage_state, mailbox_multicast_address, m, stream) with
@@ -388,6 +408,7 @@ def compile_unpooler(
         capacity_m=capacity_m,
         hidden_local=hidden_local,
         ticket_stage=ticket_stage,
+        pace_ns=pace_ns,
     )
     return cute.compile(
         kernel,
@@ -436,7 +457,11 @@ class Unpooler:
         self.n, self.k, self.weight = n, k, weight
         self.mailbox = mailbox
         options: dict[str, Any] = dict(
-            splits=shape.splits, kw=shape.kw, accs=shape.accs, enable_pdl=enable_pdl
+            splits=shape.splits,
+            kw=shape.kw,
+            accs=shape.accs,
+            enable_pdl=enable_pdl,
+            pace_ns=shape.pace_ns,
         )
         if mailbox is not None:
             if mailbox.width != n:

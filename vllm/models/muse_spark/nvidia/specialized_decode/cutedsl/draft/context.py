@@ -31,7 +31,6 @@ from typing import NamedTuple
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils as cu_utils
 import torch
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32, const_expr
 
@@ -56,8 +55,6 @@ from ..common.primitives import (
     mul_rn,
     pack_bf16x2_rn,
     regs,
-    round_bf16,
-    rsqrt_approx_ftz,
     store_bf16x8_rn,
     store_global_u32_address,
 )
@@ -149,7 +146,7 @@ class _ContextNormsKernel:
         row, layer, _ = cute.arch.block_idx()
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         lane = cute.arch.lane_idx()
-        smem = cu_utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
         # One buffer of warp sums per norm.
         sums = smem.allocate_array(Float32, 16)
         columns = [Int64(tidx) * VEC_BF16 + k * CHUNK for k in range(FRAGMENTS)]
@@ -199,7 +196,7 @@ class _ContextNormsKernel:
             lane,
         )
         # The stock chain stores the hidden norm's output in BF16.
-        values = [round_bf16(v) for v in normed]
+        values = [Float32(BFloat16(v)) for v in normed]
         o = rms_norm_row(
             values,
             pre_gamma,
@@ -352,10 +349,9 @@ def _sum_squares_64(k0: Float32, k1: Float32) -> Float32:
     added, then the 32 sums folded by halves (a lane butterfly, then even +
     odd). Every lane gets it (traced inline)."""
     s0, s1 = mul_rn(k0, k0), mul_rn(k1, k1)
-    for offset in (16, 8, 4, 2, 1):
-        s0 = add_rn(s0, cute.arch.shuffle_sync_bfly(s0, offset=offset))
-        s1 = add_rn(s1, cute.arch.shuffle_sync_bfly(s1, offset=offset))
-    return add_rn(s0, s1)
+    return add_rn(
+        cute.arch.warp_reduction(s0, add_rn), cute.arch.warp_reduction(s1, add_rn)
+    )
 
 
 def _rope(x: Float32, y: Float32, c: Float32, s: Float32) -> tuple:
@@ -530,10 +526,12 @@ class _ContextKvStoreKernel:
             k0, k1 = bf16x2_to_f32x2(k_words[h])
             # torch: x.pow(2).mean(-1) (the mean's factor 1/64 is exact), + eps,
             # rsqrt, x * rsqrt, then the bf16 copy.
-            r = rsqrt_approx_ftz(
-                fma_rn(_sum_squares_64(k0, k1), Float32(INV_HEAD_DIM), eps)
+            r = cute.math.rsqrt(
+                fma_rn(_sum_squares_64(k0, k1), Float32(INV_HEAD_DIM), eps),
+                approx=True,
+                ftz=True,
             )
-            n0, n1 = round_bf16(mul_rn(k0, r)), round_bf16(mul_rn(k1, r))
+            n0, n1 = Float32(BFloat16(mul_rn(k0, r))), Float32(BFloat16(mul_rn(k1, r)))
             if const_expr(self.rope):
                 n0, n1 = _rope(n0, n1, c, s)
             k_out.append(pack_bf16x2_rn(n0, n1))

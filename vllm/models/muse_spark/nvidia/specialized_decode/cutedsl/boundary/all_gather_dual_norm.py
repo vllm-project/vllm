@@ -274,9 +274,8 @@ class _AllGatherDualNormKernel:
         self.enable_pdl = enable_pdl
         self.early_trigger = enable_pdl and early_trigger
         self.timeout_ns = timeout_ns
-        # Tree: two mbarriers and a [4, 2 * NSLOT] FP32 buffer; serial: one
-        # FP32 slot per (CTA, warp) for each of the two row statistics.
-        self.smem_bytes = SMEM_BYTES if tree else 2 * NSLOT * 4
+        # Two mbarriers and a [4, 2 * NSLOT] FP32 buffer for both reductions.
+        self.smem_bytes = SMEM_BYTES
 
     @cute.jit
     def __call__(
@@ -335,23 +334,21 @@ class _AllGatherDualNormKernel:
         column = Int64(fragment) * VEC_BF16
         row_element = Int64(token) * HIDDEN + column
 
-        smem = cutlass.utils.SmemAllocator()
+        smem = cutlass.memory.SmemAllocator()
+        mbar = smem.allocate_array(cutlass.Int64, num_elems=2)
+        buf = smem.allocate_tensor(
+            Float32,
+            cute.make_layout((4, NSLOT * 2), stride=(1, 4)),
+            byte_alignment=16,
+        )
+        if tidx == 0:
+            cute.arch.mbarrier_init(mbar, 1)
+            cute.arch.mbarrier_init(mbar + 1, 1)
+        cute.arch.mbarrier_init_fence()
         if const_expr(self.tree):
-            mbar = smem.allocate_array(cutlass.Int64, num_elems=2)
-            buf = smem.allocate_tensor(
-                Float32,
-                cute.make_layout((4, NSLOT * 2), stride=(1, 4)),
-                byte_alignment=16,
-            )
-            if tidx == 0:
-                cute.arch.mbarrier_init(mbar, 1)
-                cute.arch.mbarrier_init(mbar + 1, 1)
-            cute.arch.mbarrier_init_fence()
             row_sum = tree_row_sum(buf, mbar, tidx, lane, warp, cluster_rank)
         else:
-            post_slots = smem.allocate_array(Float32, NSLOT)
-            next_slots = smem.allocate_array(Float32, NSLOT)
-            row_sum = serial_row_sum(post_slots, next_slots, cluster_rank, warp, lane)
+            row_sum = serial_row_sum(buf, mbar, tidx, lane, warp, cluster_rank)
         # Every peer must have started before the row sums store into its
         # shared memory; the matching wait sits just before the first one.
         cute.arch.cluster_arrive_relaxed()
@@ -414,10 +411,6 @@ class _AllGatherDualNormKernel:
                 constants.next_eps,
                 row_sum,
             )
-        if const_expr(self.tree):
-            # No CTA may exit while a peer still reads its shared memory.
-            cute.arch.cluster_arrive()
-            cute.arch.cluster_wait()
         store_f32x8(stream_rows, row_element, updated)
         if const_expr(self.aux):
             store_f32x8(aux, row_element, updated)

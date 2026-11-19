@@ -60,7 +60,7 @@ class OProjection:
     GEMM (`Unpooler` with the `OPROJ` launch shape), which also multicasts
     the partial into this rank's slot of the mailbox. Not bitwise to cuBLAS
     (summation order); the boundary bound with `published` then runs its
-    consumer alone.
+    consumer alone, staged by `ticket` (`AllReduceDualNorm.ticket`).
     """
 
     def __init__(
@@ -68,6 +68,7 @@ class OProjection:
         weight: torch.Tensor,
         rows: Sequence[int] = ROWS,
         mailbox: LamportMailbox | None = None,
+        ticket: torch.Tensor | None = None,
     ) -> None:
         assert_not_capturing("OProjection")
         if weight.dtype != torch.bfloat16 or weight.dim() != 2:
@@ -78,7 +79,9 @@ class OProjection:
         self.weight = weight
         self.gemm: Unpooler | None = None
         if mailbox is not None:
-            self.gemm = Unpooler(weight, mailbox, shape=OPROJ, rows=rows)
+            if ticket is None:
+                raise ValueError("the zero-copy o_proj needs the boundary's ticket")
+            self.gemm = Unpooler(weight, mailbox, shape=OPROJ, rows=rows, ticket=ticket)
             return
         # cuBLAS's handle and workspace for this stream, before capture (the
         # stock o_proj may run another backend eagerly).
@@ -99,14 +102,16 @@ class OProjection:
         if o_proj.bias is not None:
             raise RuntimeError("the specialized decode needs a bias-free o_proj")
         mailbox = producer_mailbox(ctx)
+        ticket = None
         if mailbox is not None:
+            ticket = fused_all_reduce(ctx).ticket
             logger.info_once(
                 "Muse Spark o_proj at TP%d: package GEMM %s, partial "
                 "published zero-copy into the attention boundary mailbox",
                 ctx.tp,
                 tuple(OPROJ[:3]),
             )
-        return cls(o_proj.weight, rows, mailbox)
+        return cls(o_proj.weight, rows, mailbox, ticket)
 
     def run(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         """The partial, in `out` (and in the mailbox with the package GEMM:

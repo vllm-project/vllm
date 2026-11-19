@@ -31,7 +31,6 @@ import cutlass
 import cutlass.cute as cute
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Int32, Int64, Uint32
 from cutlass.cute.runtime import make_fake_compact_tensor
 
@@ -45,15 +44,12 @@ from .primitives import (
     current_cu_stream,
     f32_to_bf16_bits,
     fragment_has_negative_zero,
-    global_timer_ns,
     load_global_bf16_as_f32,
     load_global_u32x2,
     load_global_u32x4,
-    load_volatile_u32,
     make_fake_dynamic_compact_tensor,
     sanitize_negative_zero_u32x2,
     sanitize_negative_zero_u32x4,
-    shuffle_sync_idx_u32,
     stmc_bf16x2,
     stmc_bf16x4,
     stmc_bf16x8,
@@ -63,6 +59,7 @@ from .primitives import (
     to_cute_dynamic,
     trap,
 )
+from .symmetric import symmetric_buffer
 
 # A poll that has seen no data for this long traps. Every rank launches the
 # same step within milliseconds; the bound only turns a divergence into an error.
@@ -92,18 +89,15 @@ class LamportMailbox:
         if width % VEC_BF16:
             raise ValueError("width must be a multiple of 8 BF16 elements")
         self.tp, self.rank, self.capacity, self.width = tp, rank, capacity, width
-        self.tensor = symm_mem.empty(
-            (LAMPORT_GENERATIONS, tp, capacity, width),
-            dtype=torch.bfloat16,
-            device=device,
+        buffer = symmetric_buffer(
+            group, (LAMPORT_GENERATIONS, tp, capacity, width), torch.bfloat16, device
         )
-        handle = symm_mem.rendezvous(self.tensor, group)
-        self.multicast = int(handle.multicast_ptr or 0)
+        self.tensor, self.peers = buffer.tensor, buffer.peers
+        self.multicast = buffer.multicast
         if not self.multicast or self.multicast % 16:
             raise RuntimeError(
                 "Muse Spark specialized decode needs NVLink multicast memory"
             )
-        self.peers = tuple(int(pointer) for pointer in handle.buffer_ptrs)
         # Every slot starts as the sentinel, BF16 negative zero.
         self.tensor.view(torch.int16).fill_(-32768)
         self.stage_state = torch.zeros(2, dtype=torch.int32, device=device)
@@ -147,12 +141,34 @@ class LamportMailbox:
 def spin_deadline(deadline: Int64, timeout_ns: cutlass.Constexpr[int]) -> Int64:
     """Call once per poll that found no data: arms the deadline on the first
     call (zero means unarmed) and traps once it has passed."""
-    now = global_timer_ns()
+    now = cute.arch.globaltimer()
     if deadline == Int64(0):
         deadline = now + Int64(timeout_ns)
     elif now > deadline:
         trap()
     return deadline
+
+
+@cute.jit
+def take_ticket_stage(
+    ticket: cute.Pointer, ctas: Uint32, generations: cutlass.Constexpr[int]
+) -> Uint32:
+    """Take one CTA's ticket from the `stage << 16 | taken` word at `ticket`
+    (one thread per CTA) and return its stage; the last of the call's `ctas`
+    advances the stage, modulo `generations`, and resets the count."""
+    word = cute.arch.atomic_add(ticket, Uint32(1), sem="acq_rel", scope="gpu")
+    taken = word >> Uint32(16)
+    if (word & Uint32(0xFFFF)) == ctas - Uint32(1):
+        store_global_u32(
+            ticket, ((taken + Uint32(1)) % Uint32(generations)) << Uint32(16)
+        )
+    return taken
+
+
+@cute.jit
+def load_ticket_stage(ticket: cute.Pointer) -> Uint32:
+    """The current stage of the ticket word at `ticket` (`take_ticket_stage`)."""
+    return cute.arch.load(ticket, Uint32, sem="relaxed", scope="sys") >> Uint32(16)
 
 
 @cute.jit
@@ -162,14 +178,24 @@ def rearm(pointer: cute.Pointer) -> None:
 
 
 @cute.jit
-def fetch(values: cute.Tensor, i: cutlass.Constexpr[int], pointer: cute.Pointer):
-    """Load fragment `i` into `values[i]`; returns its dirty flag at bit `i`."""
-    got = load_global_u32x4(pointer, volatile=True)
-    for k in cutlass.range_constexpr(4):
-        values[i, k] = got[k]
+def fetch_all(
+    values: cute.Tensor,
+    base: cute.Pointer,
+    stride: Int64,
+    offsets: cutlass.Constexpr[tuple],
+):
+    """Load every fragment into `values`, then check them: no branch between
+    the loads, so they issue back to back (one load latency per round, where a
+    check after each load serializes them). Returns the dirty flags, fragment
+    `i` at bit `i`."""
+    for i in cutlass.range_constexpr(len(offsets)):
+        got = load_global_u32x4(base + Int64(offsets[i]) * stride, volatile=True)
+        for k in cutlass.range_constexpr(4):
+            values[i, k] = got[k]
     dirty = Uint32(0)
-    if fragment_has_negative_zero(got):
-        dirty = Uint32(1 << i)
+    for i in cutlass.range_constexpr(len(offsets)):
+        if fragment_has_negative_zero(values[i, None].load()):
+            dirty = dirty | Uint32(1 << i)
     return dirty
 
 
@@ -181,22 +207,16 @@ def _poll(
     timeout_ns: cutlass.Constexpr[int],
 ):
     """Lamport-poll the 16-byte fragments at base + offsets[i] * stride
-    (elements) into a [len(offsets), 4] u32 register tensor. All loads issue
-    before any check and only dirty fragments re-poll; traps after
-    `timeout_ns` without data."""
+    (elements) into a [len(offsets), 4] u32 register tensor. Each round loads
+    every fragment before checking any (a fragment, once written, stays until
+    its reader re-arms it); traps after `timeout_ns` without data."""
     count = len(offsets)
     values = cute.make_rmem_tensor(cute.make_layout((count, 4)), Uint32)
-    pending = Uint32(0)
-    for i in cutlass.range_constexpr(count):
-        pending = pending | fetch(values, i, base + Int64(offsets[i]) * stride)
+    pending = fetch_all(values, base, stride, offsets)
     deadline = Int64(0)
     while pending != Uint32(0):
         deadline = spin_deadline(deadline, timeout_ns)
-        again = Uint32(0)
-        for i in cutlass.range_constexpr(count):
-            if ((pending >> Uint32(i)) & Uint32(1)) != Uint32(0):
-                again = again | fetch(values, i, base + Int64(offsets[i]) * stride)
-        pending = again
+        pending = fetch_all(values, base, stride, offsets)
     return values
 
 
@@ -240,7 +260,9 @@ def poll_owned_fragment(
     stage. Releases PDL dependents after the poll when `release_dependents`
     (a kernel that triggers earlier passes False)."""
     local_fragments = hidden_local // VEC_BF16
-    active_stage = load_volatile_u32(stage_state.iterator + ACTIVE_STAGE)
+    active_stage = cute.arch.load(
+        stage_state.iterator + ACTIVE_STAGE, Uint32, sem="relaxed", scope="sys"
+    )
     source_rank = fragment // local_fragments
     local_fragment = fragment % local_fragments
     source_element = (
@@ -347,10 +369,7 @@ class _SharedOnlyPublishDeviceKernel:
                 )
                 if bits == Uint32(NEGATIVE_ZERO_BF16_BITS):
                     bits = Uint32(0)
-            partner_bits = shuffle_sync_idx_u32(
-                bits,
-                Int32(cute.arch.lane_idx() | Int32(1)),
-            )
+            partner_bits = cute.arch.shuffle_sync(bits, cute.arch.lane_idx() | Int32(1))
             packed_word = bits | (partner_bits << Uint32(16))
         elif cutlass.const_expr(self.elements_per_thread == QUAD_BF16):
             packed_words = cute.make_rmem_tensor(cute.make_layout((2,)), Uint32)
@@ -381,7 +400,9 @@ class _SharedOnlyPublishDeviceKernel:
                     sanitize_negative_zero_u32x4(load_global_u32x4(pointer))
                 )
 
-        stage = load_volatile_u32(stage_state.iterator + NEXT_STAGE)
+        stage = cute.arch.load(
+            stage_state.iterator + NEXT_STAGE, Uint32, sem="relaxed", scope="sys"
+        )
         if cutlass.const_expr(self.release_before_store):
             if block == 0 and tidx == 0:
                 store_global_u32(
