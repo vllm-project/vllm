@@ -32,6 +32,7 @@ from vllm.v1.metrics.stats import (
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
+    SchedulerIterationDetails,
     SchedulerStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -165,7 +166,6 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
-        self.num_preemptions += iteration_stats.num_preempted_reqs
         self.num_finished_reqs += len(iteration_stats.finished_requests)
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
@@ -187,21 +187,28 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        details = scheduler_stats.iteration_details
-        if details is None:
-            return
+        for record in scheduler_stats.iteration_records:
+            self._log_iteration(record, scheduler_stats, engine_idx)
 
+    def _log_iteration(
+        self,
+        details: SchedulerIterationDetails,
+        scheduler_stats: SchedulerStats,
+        engine_idx: int,
+    ) -> None:
         encoder_msg = ""
         if details.num_encoder_inputs:
             encoder_msg = (
                 f", encoder inputs: {details.num_encoder_inputs}, "
                 f"encoder output embeddings: {details.num_encoder_output_tokens}"
             )
+        elapsed_msg = ""
+        if details.elapsed_ms is not None:
+            elapsed_msg = f", iteration elapsed time: {details.elapsed_ms:.2f} ms"
 
         logger.info(
             "%sIteration(%d): %d context requests, %d context tokens, "
-            "%d generation requests, %d generation tokens, "
-            "iteration elapsed time: %.2f ms%s, "
+            "%d generation requests, %d generation tokens%s%s, "
             "%s KV cache usage: %.1f%%%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
@@ -209,7 +216,7 @@ class LoggingStatLogger(StatLoggerBase):
             details.num_ctx_tokens,
             details.num_generation_requests,
             details.num_generation_tokens,
-            details.elapsed_ms,
+            elapsed_msg,
             " (dummy)" if details.is_dummy else "",
             self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
@@ -228,6 +235,7 @@ class LoggingStatLogger(StatLoggerBase):
             self._track_iteration_stats(iteration_stats)
 
         if scheduler_stats is not None:
+            self.num_preemptions += scheduler_stats.num_preempted_reqs
             self._log_iteration_details(scheduler_stats, engine_idx)
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -1150,6 +1158,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            self.counter_num_preempted_reqs[engine_idx].inc(
+                scheduler_stats.num_preempted_reqs
+            )
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
@@ -1262,9 +1273,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_watermark["not_watermarked"][engine_idx].inc(
                 iteration_stats.num_not_watermarked_reqs
             )
-        self.counter_num_preempted_reqs[engine_idx].inc(
-            iteration_stats.num_preempted_reqs
-        )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
         # Labeled prompt token counters by source
         pts = iteration_stats.prompt_token_stats

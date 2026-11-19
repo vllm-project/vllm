@@ -1471,10 +1471,51 @@ def test_batch_sharded_sampling_rejects_return_sampling_mask():
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
         speculative_config=None,
+        lora_config=None,
     )
 
     with pytest.raises(ValueError, match="sampling masks"):
         VllmConfig._validate_batch_sharded_sampling(config)
+
+
+@pytest.mark.parametrize(
+    "target_modules",
+    [None, ["lm_head"], ["language_model.lm_head"]],
+)
+def test_batch_sharded_sampling_rejects_lora(target_modules):
+    """compute_logits_local() skips the TP logits gather, which cannot apply
+    the lm_head LoRA delta; the combination must fail at startup instead of
+    raising NotImplementedError at the first sampling step."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(target_modules=target_modules),
+    )
+
+    with pytest.raises(ValueError, match="LoRA"):
+        VllmConfig._validate_batch_sharded_sampling(config)
+
+
+@pytest.mark.parametrize("target_modules", [["o_proj"], ["language_model.o_proj"]])
+def test_batch_sharded_sampling_allows_lora_without_lm_head_target(target_modules):
+    """LoRA restricted to modules other than lm_head never wraps the logits
+    processor, so batch-sharded sampling still works and must not be
+    rejected."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=False),
+        speculative_config=None,
+        lora_config=SimpleNamespace(target_modules=target_modules),
+    )
+
+    VllmConfig._validate_batch_sharded_sampling(config)
 
 
 @pytest.mark.skip_global_cleanup
@@ -1605,6 +1646,35 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("pp", "depth", "expected"), [(1, 2, 2), (1, 6, 6), (2, 2, 3), (2, 4, 5)]
+)
+def test_async_scheduling_depth_sets_concurrent_batches(pp, depth, expected):
+    """Async scheduling keeps `async_scheduling_depth` steps in flight, plus one
+    per extra pipeline stage; the default depth 2 keeps the previous count."""
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+            async_scheduling_depth=depth,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pp,
+            distributed_executor_backend="mp",
+            nnodes=pp,
+        ),
+    )
+    assert cfg.max_concurrent_batches == expected
+
+
+def test_async_scheduling_depth_below_two_is_rejected():
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            max_model_len=8192, is_encoder_decoder=False, async_scheduling_depth=1
+        )
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
@@ -4860,6 +4930,24 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     )
 
 
+@pytest.mark.parametrize("model_type", ["gemma4_assistant", "gemma4_unified_assistant"])
+def test_gemma4_assistant_needs_no_eagle_block_drop(model_type):
+    # The Gemma-4 MTP drafter reads the target's KV and writes none of its own.
+    from transformers import PreTrainedConfig
+
+    hf_config = PreTrainedConfig(architectures=["Gemma4AssistantForCausalLM"])
+    hf_config.model_type = model_type
+    hf_config = SpeculativeConfig.hf_config_override(hf_config)
+    speculative_config = SpeculativeConfig(method="ngram", num_speculative_tokens=3)
+    speculative_config.method = "mtp"
+    speculative_config.draft_model_config = SimpleNamespace(hf_config=hf_config)
+
+    assert speculative_config.use_gemma4_mtp()
+    assert speculative_config.use_eagle()
+    assert not speculative_config.needs_eagle_block_drop()
+    assert not speculative_config.use_eagle_block_drop()
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
@@ -5162,7 +5250,7 @@ def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, con
     with pytest.raises(ValidationError, match="decimal integer") as error:
         WatermarkConfig(key_file=str(key_file))
 
-    assert content not in str(error.value)
+    assert content not in str(error.value).replace(str(key_file), "")
 
 
 def test_missing_watermark_key_file_is_rejected(tmp_path):
