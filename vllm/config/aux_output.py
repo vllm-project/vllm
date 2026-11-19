@@ -57,9 +57,10 @@ class AuxOutputConfig:
 
     object_put_stall_timeout_s: float = Field(default=600.0, gt=0)
     """Seconds object writes may be pending without a successful put before
-    the engine stops. A write the store refuses for lack of memory is retried
-    every 0.2 s: it may fit once the store has offloaded to SSD or a
-    release has freed memory."""
+    the engine drops them. A write the store refuses is retried every 0.2 s:
+    it may fit once the store has offloaded to SSD or a release has freed
+    memory, or once a lost store process is replaced. Dropped objects are
+    missing from the store; the engine keeps running."""
 
     @model_validator(mode="after")
     def _check_object_key_prefix(self) -> Self:

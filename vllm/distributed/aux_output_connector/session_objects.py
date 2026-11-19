@@ -15,7 +15,6 @@ import numpy as np
 from safetensors.numpy import save
 
 from vllm.distributed.aux_output_connector.object_store import (
-    AuxObjectStoreFullError,
     MooncakeAuxObjectStore,
 )
 from vllm.distributed.aux_output_connector.store import BlockObjectStoreError
@@ -159,11 +158,14 @@ _PUT_RETRY_INTERVAL_S = 0.2
 
 class SessionObjectWriter:
     """Write the objects of session requests in the background, one array per
-    output field. A put the store refuses for lack of memory is retried every
+    output field. A put the store refuses is retried every
     `_PUT_RETRY_INTERVAL_S`, and queuing and draining wait while it is. Once
     writes have been pending for `put_stall_timeout_s` without a successful
-    put, or a put fails otherwise, `check` raises from then on and later
-    writes are dropped."""
+    put, the batch is dropped, and later batches get one attempt each until a
+    put succeeds again. A dropped object is absent from the store; the
+    responses that list it are not changed. While a put does not return for
+    `put_stall_timeout_s`, queuing drops new batches and draining does not
+    wait."""
 
     def __init__(
         self,
@@ -179,6 +181,8 @@ class SessionObjectWriter:
         self._fields = fields
         self._put_stall_timeout_s = put_stall_timeout_s
         self._last_progress = time.monotonic()
+        self._busy_since: float | None = None
+        self._dropped = 0
         self._closed = threading.Event()
         self._queue: queue.Queue[tuple[list[str], list[bytes]] | None] = queue.Queue(
             maxsize=max_pending_batches
@@ -213,28 +217,48 @@ class SessionObjectWriter:
     def _stalled(self) -> bool:
         return time.monotonic() - self._last_progress >= self._put_stall_timeout_s
 
+    def _hung(self) -> bool:
+        busy_since = self._busy_since
+        return (
+            busy_since is not None
+            and time.monotonic() - busy_since >= self._put_stall_timeout_s
+        )
+
+    def _drop(self, keys: list[str], reason: object) -> None:
+        if not self._dropped:
+            logger.error(
+                "Dropping auxiliary output writes from %s on: %s", keys[:1], reason
+            )
+        self._dropped += len(keys)
+
     def _write(self, batch: tuple[list[str], list[bytes]]) -> None:
         while True:
+            self._busy_since = time.monotonic()
             try:
                 self._store.put_batch(*batch)
-            except AuxObjectStoreFullError as error:
-                if self._stalled() or self._closed.wait(_PUT_RETRY_INTERVAL_S):
-                    raise BlockObjectStoreError(
-                        "auxiliary output objects were not written in time"
-                    ) from error
+            except BlockObjectStoreError as error:
+                self._busy_since = None
+                if (
+                    self._dropped
+                    or self._stalled()
+                    or self._closed.wait(_PUT_RETRY_INTERVAL_S)
+                ):
+                    self._drop(batch[0], error)
+                    return
             else:
+                self._busy_since = None
                 self._last_progress = time.monotonic()
+                if self._dropped:
+                    logger.warning(
+                        "Auxiliary output objects are written again; %d were dropped.",
+                        self._dropped,
+                    )
+                    self._dropped = 0
                 return
 
     def check(self) -> None:
-        """Raise `BlockObjectStoreError` if a write failed, or if writes have
-        been pending for `put_stall_timeout_s` without a successful put."""
-        if self._error is None and self._queue.unfinished_tasks and self._stalled():
-            self._fail(
-                BlockObjectStoreError(
-                    "auxiliary output objects were not written in time"
-                )
-            )
+        """Raise `BlockObjectStoreError` if writing failed other than in the
+        store."""
         if self._error is not None:
             raise BlockObjectStoreError(
                 "auxiliary output object write failed"
@@ -249,19 +273,25 @@ class SessionObjectWriter:
                 return
             except queue.Full:
                 self.check()
+                if self._hung():
+                    self._drop(batch[0], "a put hangs")
+                    return
 
     def drain(self, timeout_s: float | None = None) -> None:
-        """Wait until the queued writes are done, or raise
-        `BlockObjectStoreError` if a write failed, writes stalled, or
-        `timeout_s` passed."""
+        """Wait until the queued writes are written or dropped, unless a put
+        hangs; raise `BlockObjectStoreError` if writing failed other than in
+        the store, or `timeout_s` passed."""
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         with self._queue.all_tasks_done:
-            while self._queue.unfinished_tasks and self._error is None:
+            while (
+                self._queue.unfinished_tasks
+                and self._error is None
+                and not self._hung()
+            ):
                 if deadline is not None and time.monotonic() >= deadline:
                     raise BlockObjectStoreError(
                         "auxiliary output objects were not written in time"
                     )
-                self.check()
                 self._queue.all_tasks_done.wait(_PUT_RETRY_INTERVAL_S)
         self.check()
 
