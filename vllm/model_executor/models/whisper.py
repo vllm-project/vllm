@@ -742,7 +742,18 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
-    skip_decoder_start_token: bool = True
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        # A prompted decoder input opens with `<|startofprev|>`, ahead of the
+        # SOT sequence (reference layout), so nothing may be prepended to it.
+        tokenizer = self.info.ctx.tokenizer
+        if tokenizer is None or not decoder_prompt_token_ids:
+            return False
+
+        startofprev_id = tokenizer.convert_tokens_to_ids("<|startofprev|>")
+        return decoder_prompt_token_ids[0] == startofprev_id
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
