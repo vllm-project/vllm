@@ -22,6 +22,7 @@ from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -2339,6 +2340,11 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if kv_connector_output and kv_connector_output.mrope_position_deltas:
+            # Record before the loop below can finish (and free) a request.
+            for req_id, delta in kv_connector_output.mrope_position_deltas.items():
+                if (request := self.requests.get(req_id)) is not None:
+                    request.mrope_position_delta = delta
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -3530,6 +3536,11 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+        if kv_xfer_params is not None and request.mrope_position_delta is not None:
+            kv_xfer_params = {
+                **kv_xfer_params,
+                MROPE_POSITION_DELTA_KEY: request.mrope_position_delta,
+            }
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
