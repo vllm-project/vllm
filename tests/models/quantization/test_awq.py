@@ -5,7 +5,9 @@
 import pytest
 import torch
 
+from vllm import SamplingParams
 from vllm.multimodal.image import rescale_image_size
+from vllm.platforms import current_platform
 
 from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
@@ -132,6 +134,44 @@ def test_awq_load(
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts[:2], max_tokens=32)
     assert len(outputs) == 2
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="SenseNova Loop AWQ regression covers the CUDA backend",
+)
+def test_sensenova_loop_awq(vllm_runner: type[VllmRunner]) -> None:
+    with vllm_runner(
+        "sensenova/SenseNova-Loop-9B-AWQ",
+        revision="64bd16eae9966636cbd1c060b9854b5c849fb4e3",
+        trust_remote_code=False,
+        dtype="bfloat16",
+        max_model_len=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=2 << 30,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+    ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        prompts = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": question}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            for question in (
+                "Reply with just the number. What is 13 times 7?",
+                "Name the capital of France in one word.",
+            )
+        ]
+        outputs = vllm_model.llm.generate(
+            prompts, SamplingParams(temperature=0, max_tokens=8)
+        )
+    assert [output.outputs[0].text.strip().rstrip(".") for output in outputs] == [
+        "91",
+        "Paris",
+    ]
 
 
 @pytest.mark.parametrize(

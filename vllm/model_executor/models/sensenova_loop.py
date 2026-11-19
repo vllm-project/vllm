@@ -6,15 +6,19 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.sensenova_loop_mhc import MHCRouter
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsMRoPE
@@ -25,6 +29,65 @@ from .qwen3_5 import (
     Qwen3_5RMSNorm,
 )
 from .utils import AutoWeightsLoader, maybe_prefix
+
+
+class SenseNovaLoopAWQEmbeddingMethod(QuantizeMethodBase):
+    """Decode the row-major INT4 embedding for the requested tokens."""
+
+    def __init__(self, group_size: int) -> None:
+        self.group_size = group_size
+
+    def create_weights(
+        self,
+        layer: nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        if input_size % (8 * self.group_size):
+            raise ValueError("SenseNova Loop AWQ embedding dimensions are misaligned")
+        num_rows = sum(output_partition_sizes)
+        num_groups = input_size // self.group_size
+        for name, width, dtype in (
+            ("qweight", input_size // 8, torch.int32),
+            ("qzeros", num_groups // 8, torch.int32),
+            ("scales", num_groups, torch.float32),
+        ):
+            param = nn.Parameter(
+                torch.empty(num_rows, width, dtype=dtype), requires_grad=False
+            )
+            set_weight_attrs(param, {"output_dim": 0, **extra_weight_attrs})
+            layer.register_parameter(name, param)
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        shifts = torch.arange(0, 32, 4, device=input_.device, dtype=torch.int32)
+
+        def unpack(packed: torch.Tensor, width: int) -> torch.Tensor:
+            words = F.embedding(input_, packed)
+            return ((words.unsqueeze(-1) >> shifts) & 15).reshape(*input_.shape, width)
+
+        groups = layer.embedding_dim // self.group_size
+        weights = unpack(layer.qweight, layer.embedding_dim).unflatten(
+            -1, (groups, self.group_size)
+        )
+        zeros = unpack(layer.qzeros, groups)
+        scales = F.embedding(input_, layer.scales)
+        return (
+            ((weights - zeros.unsqueeze(-1)) * scales.unsqueeze(-1))
+            .flatten(-2)
+            .to(layer.params_dtype)
+        )
+
+    def apply(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("SenseNova Loop AWQ embeddings are lookup-only")
 
 
 class SenseNovaLoopDecoderLayer(Qwen3_5DecoderLayer):
@@ -77,11 +140,27 @@ class SenseNovaLoopModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_text_config
-        self.quant_config = None
+        self.quant_config = vllm_config.quant_config
+        embedding_method = None
+        if isinstance(self.quant_config, AutoAWQConfig):
+            embedding = self.quant_config.full_config.get("embedding")
+            if embedding is not None:
+                group_size = embedding.get("group_size")
+                if (
+                    embedding.get("layout") != "row_major"
+                    or embedding.get("bits") != 4
+                    or embedding.get("zero_point") is not True
+                    or type(group_size) is not int
+                    or group_size <= 0
+                    or self.config.tie_word_embeddings
+                ):
+                    raise ValueError("Unsupported SenseNova Loop AWQ embedding config")
+                embedding_method = SenseNovaLoopAWQEmbeddingMethod(group_size)
         self.vocab_size = self.config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             self.config.hidden_size,
+            quant_method=embedding_method,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.layers = nn.ModuleList(
@@ -131,6 +210,8 @@ class SenseNovaLoopModel(nn.Module):
 class SenseNovaLoopForConditionalGeneration(
     nn.Module, HasInnerState, IsHybrid, SupportsMRoPE
 ):
+    packed_modules_mapping = Qwen3_5ForCausalLMBase.packed_modules_mapping
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
@@ -158,16 +239,19 @@ class SenseNovaLoopForConditionalGeneration(
         self.config = self.model_config.hf_text_config
         if (
             vllm_config.parallel_config.pipeline_parallel_size != 1
-            or vllm_config.quant_config is not None
             or vllm_config.speculative_config is not None
             or vllm_config.lora_config is not None
             or getattr(self.config, "layer_scale", False)
         ):
             raise ValueError(
-                "SenseNova Loop currently requires unquantized text inference "
+                "SenseNova Loop currently requires text inference "
                 "without pipeline parallelism, LoRA, speculation or layer_scale"
             )
-        self.quant_config = None
+        self.quant_config = vllm_config.quant_config
+        if self.quant_config is not None and not isinstance(
+            self.quant_config, AutoAWQConfig
+        ):
+            raise ValueError("SenseNova Loop supports only unquantized and AWQ weights")
         self.scheduler_config = vllm_config.scheduler_config
         self.model = SenseNovaLoopModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -175,6 +259,7 @@ class SenseNovaLoopForConditionalGeneration(
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:

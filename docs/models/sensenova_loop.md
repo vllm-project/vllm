@@ -7,7 +7,13 @@ checkpoint and compatible `sensenova_loop` checkpoints. It uses a fixed
 attention and recurrent caches for every execution of a layer. Optional mHC
 routers retain FP32 weights and use log-space Sinkhorn normalization.
 
-The implementation requires unquantized weights. On NVIDIA GPUs, it defaults to
+The implementation supports unquantized weights and the official
+[SenseNova-Loop-9B-AWQ](https://huggingface.co/sensenova/SenseNova-Loop-9B-AWQ)
+checkpoint for text generation. The AWQ loader keeps the decoder projections,
+token embedding and output head packed in 4-bit weights. The checkpoint's
+DeltaNet gates and mHC routers retain their original precision.
+
+On NVIDIA GPUs, the implementation defaults to
 full decode CUDA Graphs without Torch compilation; prefill executes eagerly.
 Explicit compilation settings and `--enforce-eager` take precedence.
 It supports tensor parallelism, but not pipeline parallelism, vision, audio,
@@ -41,8 +47,17 @@ and weights are published under Apache 2.0. The checkpoint includes vision and
 MTP weights; this implementation loads the text backbone and mHC routers and
 ignores those additional weights. Image inputs and MTP remain unsupported.
 
+To serve the official AWQ checkpoint, let vLLM detect AWQ from its config:
+
+```bash
+vllm serve sensenova/SenseNova-Loop-9B-AWQ \
+  --dtype bfloat16 \
+  --max-model-len 4096
+```
+
 Native loading expects the following top-level fields in `config.json`, alongside
-the checkpoint's text, loop and mHC settings:
+the checkpoint's text, loop and mHC settings. The published AWQ architecture
+name `Qwen3_5LoopForConditionalGeneration` is also accepted.
 
 ```json
 {
