@@ -1215,21 +1215,25 @@ def test_weight_loading_requantization_moe(
         quant_config_args(moe="fp8_per_tensor")
     )
     prefix = "model.layers.0.mlp.experts"
-    layer = RoutedExperts(
-        prefix,
-        torch.bfloat16,
-        config,
-        quant_config,
-        expert_map_manager=SimpleNamespace(
-            local_num_experts=2,
-            num_fused_shared_experts=0,
-            placement_strategy="linear",
-            expert_map=None,
-            expert_mask=None,
-            routing_tables=None,
-            map_global_to_local=lambda index: index,
-        ),
-    )
+
+    def make_layer() -> RoutedExperts:
+        return RoutedExperts(
+            prefix,
+            torch.bfloat16,
+            config,
+            quant_config,
+            expert_map_manager=SimpleNamespace(
+                local_num_experts=2,
+                num_fused_shared_experts=0,
+                placement_strategy="linear",
+                expert_map=None,
+                expert_mask=None,
+                routing_tables=None,
+                map_global_to_local=lambda index: index,
+            ),
+        )
+
+    layer = make_layer()
     _materialize_requantization_source(layer)
     target = layer.quant_method
     # Construction must select the override, not execute the checkpoint method.
@@ -1252,17 +1256,12 @@ def test_weight_loading_requantization_moe(
         torch.tensor([128.0, 56.0]),
     )
     # Distinct input scales expose gate/up overwrites independently of dequantization.
-    # Quark's existing input-scale loader broadcasts each shard across both slots.
     input_name = {
         "compressed_tensors": "w13_input_global_scale",
         "modelopt": "w13_input_scale",
         "quark": "w13_input_scale_2",
     }[source_format]
-    tensors[input_name] = torch.tensor(
-        [[0.25, 0.25], [0.75, 0.75]]
-        if source_format == "quark"
-        else [[0.25, 0.5], [0.75, 1.0]]
-    )
+    tensors[input_name] = torch.tensor([[0.25, 0.5], [0.75, 1.0]])
     checkpoint = []
     for name, tensor in tensors.items():
         stem, suffix = name.split("_", 1)
@@ -1273,6 +1272,18 @@ def test_weight_loading_requantization_moe(
             )
             for projection, part in zip(projections, parts, strict=True):
                 checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    # Input scales first: a loader counting them more than once would complete
+    # the layerwise element count before the last checkpoint tensor.
+    checkpoint.sort(key=lambda item: "input" not in item[0])
+
+    # Serialized sources are exactly sized: an unmaterialized layer must wait
+    # for its last checkpoint tensor before it is requantized.
+    meta_layer = make_layer()
+    meta_info = get_layerwise_info(meta_layer)
+    list(meta_layer.load_weights(checkpoint[:-1]))
+    assert meta_info.load_numel_total is not None
+    assert 0 < meta_info.load_numel < meta_info.load_numel_total
+
     loaded = set(layer.load_weights(checkpoint))
 
     # Every source parameter must be reached through checkpoint-name mapping.
