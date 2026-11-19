@@ -39,6 +39,62 @@ def get_drafter_hidden_states(
 
 
 @dataclass(slots=True)
+class RejectedTokens:
+    """Rejected draft tokens of one verify step, per batch row (fixed width)."""
+
+    # [num_rows, width] packed target row of each rejected token (0 if invalid)
+    rows: torch.Tensor
+    # [num_rows, width] original target position (0 if invalid)
+    positions: torch.Tensor
+    # [num_rows, width]
+    valid: torch.Tensor
+    # [num_rows] number of rejected tokens
+    num_rejected: torch.Tensor
+    # [num_rows] request state index, -1 for padding rows
+    req_state_idx: torch.Tensor
+    # [num_rows, width, num_layers, hidden_size] raw aux hidden states, or None
+    features: torch.Tensor | None
+
+
+def gather_rejected_tokens(
+    query_start_loc: torch.Tensor,
+    num_rejected: torch.Tensor,
+    positions: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_reqs: int,
+    width: int,
+    aux_hidden_states: list[torch.Tensor] | None = None,
+) -> RejectedTokens:
+    """Gather the rejected draft tokens of a verify batch without a host sync.
+
+    Batch row i owns target rows [query_start_loc[i], query_start_loc[i + 1])
+    and its rejected drafts are the last num_rejected[i] of them
+    (num_rejected = num_logits - num_sampled, 0 while chunked-prefilling).
+    Features are the target's aux hidden states as captured, before any
+    drafter-side combine or norm.
+    """
+    qsl = query_start_loc.long()
+    num_rows = qsl.numel() - 1
+    device = qsl.device
+    # num_rejected has num_reqs entries; padding rows get none.
+    rejected = torch.zeros(num_rows, dtype=torch.long, device=device)
+    rejected[:num_reqs] = num_rejected[:num_reqs]
+    offsets = torch.arange(width, device=device)
+    valid = offsets[None, :] < rejected[:, None]
+    rows = torch.where(valid, (qsl[1:] - rejected)[:, None] + offsets[None, :], 0)
+    token_positions = torch.where(valid, positions.long()[rows], 0)
+    req_state_idx = torch.full((num_rows,), -1, dtype=torch.long, device=device)
+    req_state_idx[:num_reqs] = idx_mapping[:num_reqs]
+    features = None
+    if aux_hidden_states:
+        features = torch.stack([h[rows] for h in aux_hidden_states], dim=2)
+        features = features * valid[..., None, None].to(features.dtype)
+    return RejectedTokens(
+        rows, token_positions, valid, rejected, req_state_idx, features
+    )
+
+
+@dataclass(slots=True)
 class _PendingCopy:
     # Cleared once synchronized, to skip redundant driver calls.
     event: torch.Event | None
