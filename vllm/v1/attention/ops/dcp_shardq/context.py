@@ -20,7 +20,9 @@ of the new tokens); the MLA layer then writes the new tokens' MLA rows, which
 every rank computes for all tokens, into its own workspace.
 
 A step runs this way when ShardQ splits its tokens (build_shardq_split) and
-its prefill rows fit the workspace. Its leading
+its prefill rows fit the workspace (`max_model_len` tokens of context, plus a
+page per request); a step whose prefill rows need more takes the DCP path
+whole. Its leading
 decode rows (rows of at most `1 + num_speculative_tokens` tokens, which the
 indexer scores on its decode path) keep the DCP path within the step; its
 other rows are sharded, including the short prefill pieces that the sparse
@@ -42,7 +44,6 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -133,61 +134,6 @@ def workspace_max_tokens(vllm_config: "VllmConfig") -> int:
 def capacity_pages(max_tokens: int, max_reqs: int) -> int:
     """Workspace pages for `max_tokens` tokens, each request rounded up."""
     return -(-max_tokens // PAGE_TOKENS) + max_reqs
-
-
-def scheduler_context_pages(vllm_config: "VllmConfig") -> int | None:
-    """The workspace pages the scheduler keeps each step's prefill rows
-    within (the sum over them of `ceil(seq_len / 64)`), or None when DCP
-    ShardQ steps cannot run under this configuration.
-
-    With the cap, no step finds the workspace full, so the DCP path only runs
-    a step's leading decode rows and steps of fewer than
-    `sparse_mla_shard_q_min_tokens` prefill tokens, and the memory profile
-    reserves those (`dcp_fallback_max_tokens`) instead of a whole
-    `max_num_batched_tokens` step. These are the configuration-level and
-    platform conditions of SparseMLAShardQ's DCP ShardQ; when its layer-level
-    ones fail the cap merely keeps a step's prefill context within
-    `max_model_len`.
-    """
-    parallel_config = vllm_config.parallel_config
-    kv_transfer_config = vllm_config.kv_transfer_config
-    dcp = parallel_config.decode_context_parallel_size
-    if (
-        not vllm_config.attention_config.sparse_mla_shard_q
-        or dcp <= 1
-        or dcp != parallel_config.tensor_parallel_size
-        or parallel_config.cp_kv_cache_interleave_size != 1
-        or parallel_config.use_ubatching
-        or not current_platform.is_device_capability_family(100)
-        or parallel_config.prefill_context_parallel_size != 1
-        or (
-            kv_transfer_config is not None
-            and kv_transfer_config.kv_role == "kv_consumer"
-        )
-    ):
-        return None
-    return capacity_pages(
-        workspace_max_tokens(vllm_config), vllm_config.scheduler_config.max_num_seqs
-    )
-
-
-def dcp_fallback_max_tokens(vllm_config: "VllmConfig", decode_query_len: int) -> int:
-    """Most tokens of a step that keeps the DCP path under DCP ShardQ, given
-    the scheduler's context cap: its leading decode rows plus fewer than
-    `sparse_mla_shard_q_min_tokens` prefill tokens, or a padded step of at
-    most the DCP workspace's tokens."""
-    from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
-
-    scheduler_config = vllm_config.scheduler_config
-    few_tokens = (
-        scheduler_config.max_num_seqs * decode_query_len
-        + vllm_config.attention_config.sparse_mla_shard_q_min_tokens
-        - 1
-    )
-    return min(
-        scheduler_config.max_num_batched_tokens,
-        max(few_tokens, get_dcp_workspace_max_num_tokens(vllm_config)),
-    )
 
 
 @dataclass
@@ -685,13 +631,8 @@ class DcpShardQPlanner:
         rank: int,
         device: torch.device,
         label: str = "",
-        max_fallback_tokens: int | None = None,
     ) -> None:
         self.layout = layout
-        # Most tokens of a DCP-path step the memory profile reserved.
-        self.max_fallback_tokens = (
-            max_fallback_tokens if max_fallback_tokens is not None else 1 << 62
-        )
         self.max_pages = max_pages
         self.max_indexer_keys = max_indexer_keys
         self.max_logits_bytes = max_logits_bytes
@@ -721,7 +662,6 @@ class DcpShardQPlanner:
             )
             if num_prefills:
                 self.stats.record(NO_SPLIT, num_prefill_tokens)
-                self._check_fallback(num_tokens, NO_SPLIT)
             return None
         context = build_dcp_shardq_context(
             common_attn_metadata,
@@ -738,16 +678,4 @@ class DcpShardQPlanner:
         self.stats.record(
             SHARDQ if context is not None else WORKSPACE, num_prefill_tokens
         )
-        if context is None:
-            self._check_fallback(num_tokens, WORKSPACE)
         return context
-
-    def _check_fallback(self, num_tokens: int, path: str) -> None:
-        if num_tokens > self.max_fallback_tokens:
-            logger.warning_once(
-                "A %d-token step keeps the DCP path (%s), more than the %d "
-                "tokens the memory profile reserved for it.",
-                num_tokens,
-                path,
-                self.max_fallback_tokens,
-            )

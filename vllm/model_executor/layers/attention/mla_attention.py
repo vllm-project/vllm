@@ -1450,9 +1450,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         """Reserve the gathered-context workspace of DCP ShardQ steps (see
         ShardQMetadata.gathered_context) in the memory profile, and warm up
         the DCP path that their other steps keep."""
-        from vllm.v1.attention.backends.mla.indexer import (
-            DeepseekV32IndexerMetadataBuilder,
-        )
         from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
         from vllm.v1.attention.ops.dcp_shardq.context import (
             ContextLayout,
@@ -1475,16 +1472,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         # The first DCP-path step may come late, once the KV cache and the
         # caching allocator hold the memory that its NCCL collectives allocate
-        # on first use. The scheduler keeps steps within the workspace, so the
-        # DCP path runs decode rows and short prefills only
-        # (dcp_fallback_max_tokens), not whole prefill steps.
+        # on first use. A step whose prefill rows do not fit the workspace
+        # takes the DCP path whole, so reserve a full step.
         assert self.dcp_manager is not None
         shardq_context.warm_up_dcp_fallback(
-            self.dcp_manager,
-            shardq_context.dcp_fallback_max_tokens(
-                vllm_config,
-                DeepseekV32IndexerMetadataBuilder.get_decode_threshold(vllm_config),
-            ),
+            self.dcp_manager, scheduler_config.max_num_batched_tokens
         )
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:

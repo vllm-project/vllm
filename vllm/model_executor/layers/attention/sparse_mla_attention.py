@@ -334,7 +334,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             ContextLayout,
             DcpShardQPlanner,
             capacity_pages,
-            dcp_fallback_max_tokens,
             register_warmup,
         )
 
@@ -371,7 +370,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             get_dcp_group().rank_in_group,
             self.device,
             label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
-            max_fallback_tokens=dcp_fallback_max_tokens(vllm_config, decode_query_len),
         )
         register_warmup(layout, self.dcp_world_size, self.topk_tokens)
         return True
