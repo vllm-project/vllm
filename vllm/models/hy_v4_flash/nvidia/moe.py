@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.hy_v4.nvidia.moe import HYV4FeedForward, HYV4MoEFused
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
@@ -62,6 +62,8 @@ class HYV4FlashMoE(HYV4MoEFused):
                 quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
+            # Bias-free unquantized up-proj commutes with TP partial sum (Nemotron-H).
+            up.reduce_commutative = isinstance(up.quant_method, UnquantizedLinearMethod)
         super().__init__(
             config,
             quant_config=quant_config,
