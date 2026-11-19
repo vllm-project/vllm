@@ -265,6 +265,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         seq_length, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(hidden_states)
@@ -279,6 +280,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         attn_output = attn_output.view(seq_length, -1)
@@ -324,6 +326,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
         hidden_states: Input tensor of shape (seq_len, hidden_size)
@@ -337,6 +340,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         hidden_states = residual + hidden_states
 
@@ -382,6 +386,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if config.encoder_attention_heads % self.tp_size != 0:
+            self.tp_size = 1
 
         # Position embedding
         self.positional_embedding = SinusoidsPositionEmbedding(
@@ -545,16 +552,25 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             cu_chunk_lens.extend([window_aftercnn] * num_full_chunks)
             if remainder:
                 cu_chunk_lens.append(remainder)
-        cu_seqlens = async_tensor_h2d(
-            cu_chunk_lens, dtype=torch.int32, device=device
-        ).cumsum(-1, dtype=torch.int32)
-
-        max_seqlen = None
-        if self.attn_backend in _MAX_SEQLEN_BACKENDS:
-            # Kept on the host: the attention wrappers read it with `.item()`.
-            max_seqlen = torch.tensor(
-                max(cu_chunk_lens), dtype=torch.int32, device="cpu"
-            )
+        # The helpers only add metadata for backends that need it (FlashInfer:
+        # bucketed max, padded segment lengths and element offsets).
+        cu_seqlens_np = np.cumsum(cu_chunk_lens, dtype=np.int32)
+        # Kept on the host: the attention wrappers read it with `.item()`.
+        max_seqlen = torch.tensor(
+            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens_np),
+            dtype=torch.int32,
+            device="cpu",
+        )
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens_np, device
+        )
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens_np,
+            hidden_states.shape[-1],
+            self.tp_size,
+            device,
+        )
 
         # Apply transformer layers
         for encoder_layer in self.layers:
@@ -562,6 +578,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 hidden_states,
                 cu_seqlens,
                 max_seqlen,
+                sequence_lengths,
             )
 
         # Apply output layers
