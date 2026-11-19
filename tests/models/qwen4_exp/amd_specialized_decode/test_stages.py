@@ -1759,7 +1759,7 @@ def test_qsa_sparse_attention(rows):
 
 @pytest.mark.parametrize("q", [2, 4])
 def test_qsa_sparse_attention_verify(q):
-    """An MTP verify step's rows through ``per_row``: each row of a request
+    """An MTP verify step's rows through `per_row`: each row of a request
     attends up to its own position (a causal tail inside the request's
     drafts), against float64 softmax attention; the requests' contexts end
     inside a block, on a block edge and past the 2048-token budget."""

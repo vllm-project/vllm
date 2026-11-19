@@ -216,7 +216,7 @@ def model_reasons(model, tp: int) -> list[str]:
 
 def cache_reasons(model, tp: int, q: int = 1) -> list[str]:
     """Every reason the kernels cannot update the GDN states vLLM bound (with
-    MTP, ``q`` > 1, the conv state also keeps the drafts' entries)."""
+    MTP, `q` > 1, the conv state also keeps the drafts' entries)."""
     by_reason: dict[str, list[int]] = {}
     if is_conv_state_dim_first():
         return ["conv states stored dim-first"]

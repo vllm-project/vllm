@@ -28,9 +28,9 @@ plain state.
 With MTP every planned step is a verify step of whole requests,
 num_speculative_tokens + 1 consecutive tokens each. A GDN layer runs gdn_front
 (attn mix -> x), vLLM's in_proj, GDN core (on the spec-decode metadata) and
-gated norm (``gdn_verify_core``), then gdn_back (out_proj onwards); a QSA
+gated norm (`gdn_verify_core`), then gdn_back (out_proj onwards); a QSA
 layer runs vLLM's prepare and attends causally within each request
-(``qsa_core``). The drafter's input, the state before the final mixer, goes
+(`qsa_core`). The drafter's input, the state before the final mixer, goes
 to the buffer the stock forward fills."""
 
 from typing import Any, NamedTuple

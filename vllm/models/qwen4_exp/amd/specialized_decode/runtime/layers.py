@@ -232,7 +232,7 @@ class Launcher:
 
 
 def gdn_verify_core(a, x) -> torch.Tensor:
-    """``QwenGatedDeltaNetAttention.forward_hip`` up to out_proj's input on an
+    """`QwenGatedDeltaNetAttention.forward_hip` up to out_proj's input on an
     MTP verify step (vLLM's GDN core applies the spec-decode metadata: each
     draft's state slot, the accepted-token offsets) -> core [S, NV HD] bf16,
     the gdn_back launch's input; the gated norm as the stock forward runs it."""
@@ -372,9 +372,9 @@ def qsa_core(
     selects them (the decode top-k's set; a row within the budget takes all
     of its blocks unscored), and `wide.attention` attends their tokens in
     place (other cache formats run vLLM's whole QSA; other ropes or metadata
-    vLLM's prepare). ``verify``: an MTP verify step, which runs vLLM's
+    vLLM's prepare). `verify`: an MTP verify step, which runs vLLM's
     prepare and whose rows attend causally within their request
-    (``per_row``)."""
+    (`per_row`)."""
     from vllm.models.qwen4_exp.amd import qsa
 
     n = x.shape[0]
