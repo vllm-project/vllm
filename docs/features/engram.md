@@ -235,28 +235,14 @@ another's decode fetches only slightly while prefill fetches keep their rate.
 The DP ranks of one engine step together, so it does not matter within one
 engine.
 
-Two more `rdma` settings:
-
-- `peer_group_rdma_owner_loopback`: traffic between two GPUs of one node
-  stays on the owner's NIC (loopback) instead of crossing from one NIC to
-  another. Needed on rail-optimized fabrics, where the NICs of one node sit
-  on separate rails that cannot reach each other.
-- `peer_group_thp_dir` (with `cpu_offload`): places host shards on
-  transparent huge pages. NICs gather rows at random, so a large shard on
-  base pages misses the NIC's address-translation cache on nearly every row,
-  which can make large fetches several times slower. Give it a directory on
-  a tmpfs mounted with `huge=always`, sized to hold this node's shards:
-
-```bash
-# As root (or in a container started with
-# --tmpfs /engram-thp:huge=always,size=<size>):
-mount -t tmpfs -o huge=always,size=<size> none /engram-thp
-# Without root: mount it in a user and mount namespace for the server.
-unshare -Urm sh -c 'mount -t tmpfs -o huge=always,size=<size> none /engram-thp && exec vllm serve ...'
-```
-
-The files are unlinked as soon as they are created, so the memory is freed
-when the engines exit.
+On rail-optimized fabrics, where the NICs of one node cannot reach each
+other, set `peer_group_rdma_owner_loopback` so traffic between two GPUs of a
+node stays on one NIC. With `cpu_offload`, point `peer_group_thp_dir` at a
+tmpfs mounted with `huge=always` to put host shards on huge pages: NICs gather
+rows at random and miss their address-translation cache on nearly every 4 KB
+page. Mount it with
+`mount -t tmpfs -o huge=always,size=<size> none <dir>`, or inside
+`unshare -Urm` without root.
 
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
