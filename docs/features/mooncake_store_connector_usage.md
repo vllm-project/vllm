@@ -351,6 +351,30 @@ This bounds the scheduler's wait for prefix lookup. It does not cancel a master
 RPC already running inside the worker or apply to KV loads and saves. Store
 reset waits at most 60 seconds.
 
+### KV load failure policy and repair evidence
+
+`kv_load_failure_policy` in `kv_transfer_config` controls what happens when
+a load fails. Under the default `"fail"` (and `"recompute"`) this connector
+behaves exactly as before: failed blocks surface through the flat
+`invalid_block_ids` channel and the policy handles them.
+
+Under `"repair"`, with exactly one prefix-cacheable KV-cache group in a
+non-HMA layout, this connector additionally produces the structured evidence
+the repair policy consumes, driven by the actual per-key store GET outcomes:
+
+- A failed GET of any store object (any negative return code) fails its whole
+  logical block across every KV-cache layer: one store object packs all layers
+  of a group's block, so no per-layer precision is claimed beyond that.
+- Every load attempt — including fully healthy ones — ends in one terminal
+  per-rank attestation with the attempt's complete expected/loaded/failed
+  accounting, identified by the scheduler-assigned transfer generation. Late
+  artifacts of an older attempt cannot affect a newer delivery.
+
+In multi-group or HMA layouts, where store block ids cannot be mapped to one
+scheduler group unambiguously, the evidence channels stay off and the flat
+channel keeps working: the deployment fails closed to recompute/fail rather
+than report ambiguous evidence.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
@@ -367,6 +391,16 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `evidence_certification` (str): The integrity level reported in the
+  transfer attestations under `kv_load_failure_policy="repair"`. `"content"`
+  (default) claims content-addressed store keys under the store-trust
+  assumption: a successful GET returned the bytes stored under the block's
+  chained token-hash key, which is correct content iff the store's
+  key-to-data binding is trustworthy. `"none"` reports no verification
+  beyond GET success (publication then fails closed to recomputation).
+  `"sha256"` is rejected: the GET path performs no payload digest check.
+  Ignored under every other policy. See
+  [KV load failure policy and repair evidence](#kv-load-failure-policy-and-repair-evidence).
 
 #### Automatic cache prefix
 
