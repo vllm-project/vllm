@@ -1057,6 +1057,26 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
+            # Without chunked prefill, a request cut for encoder limits is
+            # deferred whole. While earlier batches are in flight, later
+            # requests could keep taking the encoder space it needs.
+            hold_after_encoder_deferral = (
+                not self.scheduler_config.enable_chunked_prefill
+                and not self.is_mm_encoder_only
+                and not self.is_encoder_decoder
+                and self.vllm_config.max_concurrent_batches > 1
+            )
+            # A deferred request holds later ones only if all its multimodal
+            # items fit the configured encoder cache at once. Otherwise it may
+            # never be scheduled, and the hold would never end. The check errs
+            # toward not holding: it counts repeated items and items inside the
+            # prefix hit, and the built-in manager may have more room than
+            # configured. A custom manager with less room is not covered.
+            configured_encoder_cache_size = (
+                self.scheduler_config.encoder_cache_size
+                or self.scheduler_config.max_num_batched_tokens
+            )
+            encoder_deferred = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1423,6 +1443,21 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
+                        if encoder_deferred and self._has_encoder_embeds_in_window(
+                            request,
+                            num_computed_tokens,
+                            num_computed_tokens
+                            + num_new_tokens
+                            + self.num_prefill_lookahead,
+                        ):
+                            # Leave the encoder cache and budget to the
+                            # earlier request deferred in this step. A request
+                            # needing no embeddings goes on, and as on main it
+                            # can still take a reference to a cached image,
+                            # which keeps the deferred request from evicting it.
+                            skip_request(request_queue)
+                            continue
+                        num_tokens_before_encoder = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1435,6 +1470,16 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=self.num_prefill_lookahead,
+                        )
+                        encoder_deferred |= (
+                            hold_after_encoder_deferral
+                            and num_new_tokens < num_tokens_before_encoder
+                            and request_id not in self.encoder_cache_mismatch_reqs
+                            and sum(
+                                feature.mm_position.get_num_embeds()
+                                for feature in request.mm_features
+                            )
+                            <= configured_encoder_cache_size
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
@@ -2079,6 +2124,21 @@ class Scheduler(SchedulerInterface):
 
         for input_id in duplicate_input_ids:
             self.encoder_cache_manager.check_and_update_cache(request, input_id)
+
+    @staticmethod
+    def _has_encoder_embeds_in_window(request: Request, start: int, end: int) -> bool:
+        """Whether a multimodal item of the request has embeddings at token
+        positions in [start, end), counted as in `_try_schedule_encoder_inputs`."""
+        lo, hi = get_mm_features_in_window(request.mm_features, start=start, end=end)
+        for mm_feature in request.mm_features[lo:hi]:
+            mm_position = mm_feature.mm_position
+            embeds_start, embeds_end = mm_position.get_embeds_indices_in_range(
+                max(0, start - mm_position.offset),
+                min(mm_position.length, end - mm_position.offset),
+            )
+            if embeds_end > embeds_start:
+                return True
+        return False
 
     def _try_schedule_encoder_inputs(
         self,
