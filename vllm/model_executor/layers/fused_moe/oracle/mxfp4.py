@@ -567,8 +567,7 @@ def _aiter_mxfp4_activation(
 ) -> torch.dtype | None:
     """`quant_dtype_a` honouring the request on interleaved AITER MXFP4 MoE.
 
-    AITER otherwise computes with BF16 below `AITER_BF16_FP8_MOE_BOUND` tokens
-    and MXFP8 at or above it (gfx950 only).
+    Without it, AITER picks BF16 or MXFP8 from the token count (gfx950 only).
     """
     if not current_platform.is_rocm():
         return None
@@ -1989,7 +1988,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             and moe_config.aiter_mxfp4_activation is None
         ):
             # Without an activation request, this path historically forced MXFP8
-            # activations (`AITER_BF16_FP8_MOE_BOUND=0`) on gfx950.
+            # activations on gfx950.
             moe_config.aiter_mxfp4_activation = _aiter_mxfp4_activation(
                 kMxfp8Dynamic, False
             )

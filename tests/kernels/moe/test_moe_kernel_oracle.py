@@ -864,8 +864,7 @@ def test_aiter_mxfp4_activation_follows_the_layer_request(
             id="gpt-oss-request",
         ),
         # Without a request, each path keeps main's behaviour: the general path
-        # forces MXFP8 (main's AITER_BF16_FP8_MOE_BOUND=0), gpt-oss keeps AITER's
-        # default.
+        # forces MXFP8, gpt-oss keeps AITER's token-count default.
         pytest.param(
             mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
             {},
