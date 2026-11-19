@@ -756,26 +756,14 @@ notes:
     when:
       hardware: ["arch:gfx942"]
     body: |
-      This command keeps the checkpoint's block-FP8 experts and serves them
-      with AITER at TP8 on one 8-GPU node. MXFP4 requant was not part of the
-      MI325X run. The FP8 checkpoint is about 1.06 TB (~128 GiB resident per
-      GPU with the drafter). Validated on 8× MI325X with greedy DSpark
-      (depth 3) and without it. GSM8K, 1,319 questions, 5-shot: 96.7% / 96.4%
-      flexible / strict with DSpark and 96.7% / 96.8% without; the two runs
-      agree on 1,300 questions. Draft acceptance was 80–86% (about 3.4 of 4
-      tokens per step). A single greedy request decoded at 136–187 tok/s
-      with DSpark and 60–71 tok/s without. Stop strings must not include
-      `Question:` — the model restates the problem inside its reasoning and
-      the default GSM8K stop cuts the answer off. The server was started at
-      64k context and profiled 1,947,840 KV tokens with DSpark, enough for 7
-      sequences of 262144, so the recipe keeps that context length. Long
-      prompts at 262144 were not scored. Probabilistic drafting was not run.
-      MI300X is the same path and has not been smoke-tested. The measured
-      run had prefix caching off and `--mm-encoder-tp-mode data`; this
-      command uses the vLLM defaults for both. At startup vLLM warns that
-      `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` is ignored on gfx942; that is
-      expected. Shared-expert fusion, tuned AITER GEMM tables and the gfx942
-      specialized decode kernel are not part of this command.
+      - Block-FP8 experts on AITER at TP8, one 8-GPU node (~128 GiB of
+        weights per GPU). MXFP4 requant was not tested on gfx942.
+      - Validated on 8× MI325X: GSM8K 96.7% with and without greedy DSpark,
+        80–86% draft acceptance, 136–187 vs 60–71 tok/s for one request.
+      - Not tested: probabilistic drafting, MI300X, and prompts near 262144
+        (the KV pool holds 7 such sequences).
+      - The startup warning that `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` is
+        ignored on gfx942 is expected.
   - title: "MI350 Series: TP8 with DSpark not yet validated"
     when:
       hardware: [mi350x, mi355x]
