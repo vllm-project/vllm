@@ -120,7 +120,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
-            # MarlinFP8ScaledMMLinearKernel uses "weight_scale_inv" for block
+            # MarlinFp8LinearKernel uses "weight_scale_inv" for block
             # quant, while CT registers the scale as "weight_scale". Alias the
             # loaded parameter (same object) under both names.
             layer.weight_scale_inv = layer.weight_scale

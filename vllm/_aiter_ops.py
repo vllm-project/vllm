@@ -905,7 +905,7 @@ def _rocm_aiter_w8a8_gemm_impl(
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
     # a to be [M, K]
     # b to be [N, K]
-    # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+    # prepare_int8_scaled_mm_weights leaves weight `w_q` in [K, N] format
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
@@ -1144,7 +1144,7 @@ def _rocm_aiter_triton_per_tensor_fp8_gemm_impl(
             A, B.t(), x_scale_vec, w_scale_vec, dtype=out_dtype, backend="triton"
         )
 
-    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
+    from vllm.model_executor.kernels.linear.fp8.rocm import (
         rocm_per_tensor_float_w8a8_scaled_mm_impl,
     )
 

@@ -425,7 +425,7 @@ pull_request_rules:
       - files=vllm/model_executor/layers/fused_moe/experts/xpu_moe.py
       - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
       - files=vllm/model_executor/kernels/linear/mxfp8/xpu.py
-      - files=vllm/model_executor/kernels/linear/scaled_mm/xpu.py
+      - files=vllm/model_executor/kernels/linear/fp8/xpu.py
       - files=vllm/distributed/device_communicators/xpu_communicator.py
       - files=vllm/v1/attention/backends/mla/xpu_mla_sparse.py
       - files=vllm/v1/attention/ops/xpu_mla_sparse.py

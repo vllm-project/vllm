@@ -23,14 +23,14 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .block_base import (
+    Fp8BlockLinearKernel,
+    Fp8LinearLayerConfig,
 )
 
 
-class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+class DeepGemmFp8BlockLinearKernel(Fp8BlockLinearKernel):
+    def __init__(self, config: Fp8LinearLayerConfig):
         super().__init__(config)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         act_scale_descriptor = config.activation_quant_key.scale

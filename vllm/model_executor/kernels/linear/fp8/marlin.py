@@ -21,13 +21,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
 )
 
 
-class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class MarlinFp8LinearKernel(Fp8LinearKernel):
     """FP8 Marlin kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
     """
@@ -52,11 +52,11 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c, layer_param_names)
         self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}

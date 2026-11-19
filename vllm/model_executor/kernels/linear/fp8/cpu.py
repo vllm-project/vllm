@@ -13,225 +13,21 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
-from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
 )
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+from .block_base import (
+    Fp8BlockLinearKernel,
+    Fp8LinearLayerConfig,
 )
 
 # BLOCK_K in csrc/cpu/sgl-kernels/gemm.h — the AMX kernel's fixed K-block size.
 _BLOCK_SIZE_K = 128
 
 
-class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
-    @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
-        if not current_platform.is_cpu():
-            return False, "requires CPU."
-        return True, None
-
-    @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        return True, None
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_q_name, _, _, _, _ = self.layer_param_names
-        weight = getattr(layer, w_q_name)
-        dtype = weight.dtype
-        N, K = weight.size()
-        if (
-            current_platform.get_cpu_architecture() == CpuArchEnum.X86
-            and self.config.input_symmetric
-            and check_cpu_sgl_kernel(N, K, dtype)
-        ):
-            self.linear_method = self._apply_weights_sgl
-            self.process_weights_for_sgl(layer)
-        else:
-            self.linear_method = self._apply_weights_onednn
-            self.process_weights_for_onednn(layer)
-
-    def process_weights_for_onednn(self, layer: torch.nn.Module) -> None:
-        # WEIGHT
-        # Transpose to [K, N] for convenience
-        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
-        weight = getattr(layer, w_q_name)
-        replace_parameter(
-            layer,
-            w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False),
-        )
-
-        # WEIGHT SCALE
-        # oneDNN kernels support only per-tensor and per-channel.
-        # If we have a fused module (QKV, MLP) with per tensor scales (thus N
-        # scales being passed to the kernel), convert to the per-channel case.
-        is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
-        replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
-        )
-
-        # INPUT SCALE
-        if self.config.is_static_input_scheme:
-            input_scale = getattr(layer, i_s_name)
-
-            if self.config.input_symmetric:
-                replace_parameter(
-                    layer,
-                    i_s_name,
-                    torch.nn.Parameter(input_scale.max(), requires_grad=False),
-                )
-            else:
-                input_zero_point = getattr(layer, i_zp_name)
-
-                # reconstruct the ranges
-                int8_traits = torch.iinfo(torch.int8)
-                azps = input_zero_point.to(dtype=torch.int32)
-                range_max = (input_scale * (int8_traits.max - azps)).max()
-                range_min = (input_scale * (int8_traits.min - azps)).min()
-
-                scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
-                replace_parameter(
-                    layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
-                )
-
-                azp = (
-                    (int8_traits.min - range_min / scale).round().to(dtype=torch.int32)
-                )
-                replace_parameter(
-                    layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
-                )
-
-        # Different from cutlass, oneDNN kernels only need the AZP adjustment
-        # term for dynamic quantization. And s_b should be folded into the
-        # term. Such as:
-        # s_a * s_b * [(A - zp_a)B] + bias =
-        # s_a * (s_b * AB) - s_a * s_b * zp_a * B + bias =
-        # s_a * GEMM_output - s_a * zp_a * adj + bias
-        if not (self.config.input_symmetric and self.config.is_static_input_scheme):
-            weight = getattr(layer, w_q_name)
-            weight_scale = getattr(layer, w_s_name)
-            azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.float32)
-            azp_adj = azp_adj * weight_scale.squeeze()
-            setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
-
-        weight = getattr(layer, w_q_name)
-        self.dnnl_handler = ops.create_onednn_scaled_mm(
-            weight,
-            getattr(layer, w_s_name),
-            torch.get_default_dtype(),
-            getattr(layer, i_s_name) is None,
-            not self.config.input_symmetric,
-            32,
-        )
-        # weight is prepacked and maintained by the dnnl_handler,
-        # release the original weight storage
-        replace_parameter(layer, w_q_name, weight.new_empty(0))
-        del weight
-
-    def process_weights_for_sgl(self, layer: torch.nn.Module) -> None:
-        w_q_name, w_s_name, _, _, _ = self.layer_param_names
-        # WEIGHT
-        weight = getattr(layer, w_q_name)
-        packed_weight = torch.ops._C.convert_weight_packed(weight)
-        replace_parameter(
-            layer, w_q_name, torch.nn.Parameter(packed_weight, requires_grad=False)
-        )
-
-        if layer.bias is not None:
-            bias = layer.bias
-            layer.register_parameter(
-                "bias_fp32", torch.nn.Parameter(bias.float().data, requires_grad=False)
-            )
-
-        # WEIGHT SCALE
-        # CPU SGL kernels only support per-channel.
-        # For per-tensor quant, convert to the per-channel case.
-        weight_scale = getattr(layer, w_s_name)
-        if not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
-        replace_parameter(
-            layer,
-            w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
-        )
-
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.linear_method(
-            layer,
-            x,
-            bias,
-        )
-
-    def _apply_weights_onednn(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        x_shape = x.shape
-        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
-
-        # ops.scaled_int8_quant supports both dynamic and static quant:
-        # * dynamic, i_s is None and x_s computed from x.
-        # * static, i_s is scalar and x_s is i_s.
-        x_q, x_s, x_zp = ops.onednn_scaled_int8_quant(
-            x, i_s, i_zp, self.config.input_symmetric
-        )
-
-        m = x.size(0)
-        n = self.dnnl_handler.n
-        out = torch.empty((m, n), dtype=x.dtype)
-        ops.onednn_scaled_mm(self.dnnl_handler, x_q, out, x_s, x_zp, azp_adj, bias)
-        out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
-        return out
-
-    def _apply_weights_sgl(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        x_shape = x.shape
-        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
-        w_q, w_s, _, _, _ = self._get_layer_params(layer)
-        out = torch.ops._C.int8_scaled_mm_with_quant(
-            x,
-            w_q,
-            w_s,
-            layer.bias_fp32 if bias is not None else None,
-            x.dtype,
-            True,
-        )
-        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
-        return out
-
-
-class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class CPUFp8BlockLinearKernel(Fp8BlockLinearKernel):
     """FP8 W8A16 block-quantized GEMM via AMX BRGEMM on CPU."""
 
     # Input stays BF16 — no FP8 activation quantization.
@@ -256,9 +52,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         # Validate weight block shape
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col <= 0 or weight_gs.col != 128:
@@ -348,16 +142,16 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8BlockScaledMMKernel overrides apply_weights directly."
+            "CPUFp8BlockLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CPUFp8PerTensorLinearKernel(Fp8LinearKernel):
     """FP8 W8A16 per-tensor-scaled GEMM via AMX BRGEMM on CPU.
 
     Reuses the block-scaled AMX kernel (fp8_scaled_mm_cpu) with a single
     synthetic block spanning the whole weight, so activations stay BF16/FP32
-    — no FP8 activation quantization, unlike PerTensorTorchFP8ScaledMMLinearKernel.
+    — no FP8 activation quantization, unlike PerTensorTorchFp8LinearKernel.
     """
 
     @classmethod
@@ -379,7 +173,7 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if not c.weight_quant_key.scale.group_shape.is_per_tensor():
             return False, "requires a per-tensor weight scale."
         if not c.activation_quant_key.scale.group_shape.is_per_tensor():
@@ -450,11 +244,11 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8PerTensorScaledMMLinearKernel overrides apply_weights directly."
+            "CPUFp8PerTensorLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel):
+class CPUFp8ChannelWiseLinearKernel(CPUFp8PerTensorLinearKernel):
     """FP8 W8A16 per-channel-scaled GEMM via AMX BRGEMM on CPU.
 
     fp8_scaled_mm_cpu only supports block scales whose N extent is a multiple
@@ -464,7 +258,7 @@ class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel)
     """
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if not c.weight_quant_key.scale.group_shape.is_per_channel():
             return False, "requires a per-channel weight scale."
         if c.out_dtype != torch.bfloat16:
@@ -515,7 +309,7 @@ class CPUFp8ChannelWiseScaledMMLinearKernel(CPUFp8PerTensorScaledMMLinearKernel)
         return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
 
-class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class CPUFp8W8A8BlockLinearKernel(Fp8BlockLinearKernel):
     """FP8 W8A8 block-quantized GEMM with dynamic per-token activation quant on CPU."""
 
     # Activation quant is done inside fp8_scaled_mm_with_quant;
@@ -533,14 +327,12 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not ops.cpu_has_amx_fp8():
             return False, (
                 "requires native AMX-FP8 hardware; falls back "
-                "to CPUFp8BlockScaledMMKernel (W8A16) otherwise."
+                "to CPUFp8BlockLinearKernel (W8A16) otherwise."
             )
         return True, None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         # Same block-shape requirements as the W8A16 sibling kernel.
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col <= 0 or weight_gs.col != 128:
@@ -672,11 +464,11 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "CPUFp8W8A8BlockScaledMMKernel overrides apply_weights directly."
+            "CPUFp8W8A8BlockLinearKernel overrides apply_weights directly."
         )
 
 
-class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class CPUFp8W8A8LinearKernel(Fp8LinearKernel):
     """FP8 W8A8 GEMM with dynamic per-token activation quantization on CPU."""
 
     @classmethod
@@ -695,12 +487,10 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         if config.out_dtype not in (torch.bfloat16, torch.float16, torch.float32):
             return False, "Only bfloat16/float16/float32 output dtype supported."
-        # Reject block-quantized weights — those go to CPUFp8BlockScaledMMKernel
+        # Reject block-quantized weights — those go to CPUFp8BlockLinearKernel
         weight_gs = config.weight_quant_key.scale.group_shape
         if weight_gs.col > 0 and weight_gs.row > 0:
             return False, "Block-quantized weights not handled by FP8 W8A8 kernel."
@@ -801,6 +591,4 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
     def apply_scaled_mm(self, A, B, out_dtype, As, Bs, bias=None, **kwargs):
-        raise NotImplementedError(
-            "CPUFP8W8A8ScaledMMLinearKernel uses apply_weights directly."
-        )
+        raise NotImplementedError("CPUFp8W8A8LinearKernel uses apply_weights directly.")

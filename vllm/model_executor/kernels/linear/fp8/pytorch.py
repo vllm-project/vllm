@@ -14,11 +14,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .base import (
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
 )
+from .block_base import Fp8BlockLinearKernel
 
 
 def _get_num_tokens(output_shape: list) -> int:
@@ -49,7 +49,7 @@ def _supports_torch_fp8_scaled_mm() -> bool:
     return current_platform.supports_fp8()
 
 
-class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class TorchFp8LinearKernel(Fp8LinearKernel):
     """Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
     specific device capabilities and torch versions.
@@ -79,9 +79,9 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return 17 if pad_output else None
 
 
-class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class PerTensorTorchFp8LinearKernel(TorchFp8LinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -125,7 +125,7 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
 
 
-class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class RowWiseTorchFp8LinearKernel(TorchFp8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -139,7 +139,7 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -196,9 +196,9 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, num_tokens).view(*output_shape)
 
 
-class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class ChannelWiseTorchFp8LinearKernel(TorchFp8LinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -266,7 +266,7 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return output.to(out_dtype).view(*output_shape)
 
 
-class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+class BlockWiseTorchFp8LinearKernel(Fp8BlockLinearKernel):
     """FP8 block-scaled linear kernel using `torch._scaled_mm`.
 
     Implements the block-scaled path of `torch._scaled_mm`, which
@@ -277,7 +277,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
       * 128x128 weight:   `scale_b = [ceil(K / 128), ceil(N / 128)]`
     """
 
-    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+    def __init__(self, config: Fp8LinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
@@ -315,9 +315,7 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(
-        cls, config: FP8ScaledMMLinearLayerConfig
-    ) -> tuple[bool, str | None]:
+    def can_implement(cls, config: Fp8LinearLayerConfig) -> tuple[bool, str | None]:
         can_implement_base, reason = super().can_implement(config)
         if not can_implement_base:
             return can_implement_base, reason

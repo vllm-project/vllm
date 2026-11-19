@@ -209,15 +209,15 @@ def test_shuffle_kv_cache_env_propagates_to_rocm_aiter_ops(enabled, monkeypatch)
 def test_skinny_gemm_env_controls_rocm_fp8_scaled_mm_support(enabled, monkeypatch):
     """VLLM_ROCM_USE_SKINNY_GEMM gates ROCm FP8 scaled-mm kernel eligibility."""
     import vllm.envs as envs
-    from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-        ROCmFP8ScaledMMLinearKernel,
+    from vllm.model_executor.kernels.linear.fp8.rocm import (
+        ROCmFp8LinearKernel,
     )
 
     monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "1" if enabled else "0")
     importlib.reload(envs)
     monkeypatch.setattr("vllm.platforms.rocm.on_mi3xx", lambda: True)
 
-    supported, reason = ROCmFP8ScaledMMLinearKernel.is_supported()
+    supported, reason = ROCmFp8LinearKernel.is_supported()
 
     assert supported is enabled
     if enabled:
