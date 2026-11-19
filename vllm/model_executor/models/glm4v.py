@@ -426,10 +426,6 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         grid_length = image_size // patch_size // 2
         return grid_length * grid_length
 
-    def get_num_image_feature_tokens(self) -> int:
-        # EVA2CLIPModel has embeddings for boi and eoi tokens as well
-        return self.get_num_image_tokens() + 2
-
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:

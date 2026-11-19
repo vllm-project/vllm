@@ -12,7 +12,8 @@ use std::num::NonZeroU32;
 use std::time::Instant;
 
 pub use backend::{
-    DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
+    DefaultMaxTokens, DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits,
+    TextBackend,
 };
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
@@ -284,15 +285,6 @@ impl TextLlm {
     /// token IDs and logits-domain sampling controls.
     pub fn model_vocab_size(&self) -> usize {
         self.processor.backend.model_vocab_size()
-    }
-
-    /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream. Like Python's token-in-token-out route, this records no
-    /// render duration.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
-        let prepared = self.processor.prepare(request)?;
-        let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
-        Ok(streams.pop().expect("one output stream per sample"))
     }
 
     /// Tokenize if needed, lower to a generate request, and stream

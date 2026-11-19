@@ -42,7 +42,7 @@ _ABORT_ACK_TIMEOUT_S = 5.0
 _LOOKUP_TIMEOUT_S = 8.0
 
 
-@dataclass
+@dataclass(slots=True)
 class _InboundLoadState:
     """Client-role state for a single in-flight load request.
 
@@ -65,7 +65,7 @@ class _InboundLoadState:
     pending_fetch: dict | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _ClientRequestState:
     """Per-kv_request_id client-side state.
 
@@ -85,7 +85,8 @@ class _ClientRequestState:
     unsent: list[OffloadKey] = field(default_factory=list)
     # Current lookup round. LookupMsgs carry it, each fetch closes it and
     # advances it, so every round's supply/demand/completion is isolated
-    # on the wire. PD clients never probe and stay on round 0.
+    # on the wire. PD clients never probe, but each nonempty fetch also
+    # advances the round; only the first PD fetch can be supplied.
     round_seq: int = 0
     # This id ran the symmetric lookup phase (register_lookup); a fetch
     # with keys then requires every key to be a confirmed probe. PD

@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 import torch
 
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 
@@ -72,6 +73,17 @@ def test_draft_tokens_follow_request_lifecycle() -> None:
         "b": [23, 24],
         "plain": [-1, -1],
     }
+
+    # Grammar validation only fetches the requests in the latest scheduler
+    # output.
+    deferred_output = SchedulerOutput.make_empty()
+    deferred_output.has_structured_output_spec_decode = True
+    deferred_output.scheduled_spec_decode_tokens = {"a": [-1, -1]}
+    handler.begin_step(deferred_output)
+    assert _get_draft_toks(handler) == {"a": [13, 14]}
+
+    # Without structured-output spec decode, all retained drafts are fetched.
+    handler.begin_step(SchedulerOutput.make_empty())
 
     # Requests finish independently, and the handler is empty once all are gone
     handler.discard("a")
