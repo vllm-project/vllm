@@ -1234,7 +1234,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_num_pages, dtype=torch.int32, device=device
         )
 
-        # Enable FlyDSL persistent MLA on gfx1250
         _enable_gfx1250_flydsl_ps1_decode()
 
         from aiter import dtypes, get_mla_metadata_info_v1
