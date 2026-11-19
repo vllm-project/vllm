@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
@@ -786,8 +787,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 break
 
             msg = notif.decode("utf-8")
-            if msg.startswith("HB:"):
-                self._handle_heartbeat(msg[3:])
+            if msg.startswith(HB_NOTIF_PREFIX):
+                self._handle_heartbeat(msg[len(HB_NOTIF_PREFIX) :])
                 continue
 
             req_id, tp_size = msg.rsplit(":", 1)
