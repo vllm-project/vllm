@@ -2460,6 +2460,9 @@ _THINK_THEN_ANSWER = "<think>\nThe user says hi.\n</think>\n\nHi there"
         ("deepseek_r1", _THINK_THEN_ANSWER, True, True),
         # Its extract_content_ids always returns [], so the logprobs are kept.
         ("olmo3", _THINK_THEN_ANSWER, True, False),
+        # A repeated </think> is dropped from the content, but the content ids
+        # only cover the text after the last one, so the logprobs are kept.
+        ("qwen3", "<think>\nr\n</think>\n\nA</think>B", True, False),
     ],
 )
 def test_output_text_logprobs_cover_only_content(
