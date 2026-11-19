@@ -348,9 +348,6 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     def get_default_audio_sampling_rate(self) -> int:
         return 16000
 
-    def get_chunk_length(self) -> int:
-        return self.get_hf_config().audio_chunk_length
-
     def get_max_audio_tokens_per_chunk(self) -> int:
         pool_step = self.get_default_audio_pool_step()
         fbank_feat_in_chunk = 100
