@@ -231,7 +231,7 @@ _GEOMETRIES = [
 @pytest.mark.parametrize("precision", _PRECISIONS)
 @pytest.mark.parametrize("geometry", _GEOMETRIES)
 @pytest.mark.parametrize("max_cache_len", [4, 16])
-def test_replayssm_teacher_decode_equivalence_gdn(
+def test_replayssm_prefill_decode_equivalence_gdn(
     precision: tuple[torch.dtype, torch.dtype],
     geometry: tuple[int, int, int, int],
     max_cache_len: int,
