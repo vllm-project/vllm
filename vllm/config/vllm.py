@@ -650,7 +650,7 @@ class VllmConfig:
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
-            return pp_size + 1
+            return pp_size + self.scheduler_config.async_scheduling_depth - 1
         return pp_size
 
     @property
