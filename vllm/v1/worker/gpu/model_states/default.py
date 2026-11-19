@@ -53,11 +53,9 @@ class DefaultModelState(ModelState):
                 self.vllm_config.parallel_config.pipeline_parallel_size == 1
                 or get_pp_group().is_first_rank
             )
-            max_num_rows = self.scheduler_config.max_num_prompt_embeds_tokens
-            assert max_num_rows is not None
             self.prompt_embeds_state = PromptEmbedsState(
                 self.max_num_reqs,
-                max_num_rows,
+                self.max_model_len,
                 self.inputs_embeds_size,
                 self.dtype,
                 self.device,

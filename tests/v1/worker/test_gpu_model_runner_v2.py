@@ -202,9 +202,8 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     vllm_config = SimpleNamespace(
         aux_output_config=SimpleNamespace(enabled=enabled),
         max_concurrent_batches=1,
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=8, max_num_prompt_embeds_tokens=None
-        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(enable_prompt_embeds=False),
     )
 
     def allocate(**kwargs):
