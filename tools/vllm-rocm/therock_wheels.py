@@ -137,7 +137,7 @@ def _project_files(index_url: str, project: str) -> list[str]:
     return [urljoin(page, href.split("#")[0]) for href in parser.hrefs]
 
 
-def _usable(url: str, version: str | None) -> bool:
+def _usable(url: str, version: str | None, python_tag: str) -> bool:
     name = unquote(url.rsplit("/", 1)[-1])
     if (
         version is not None
@@ -150,7 +150,7 @@ def _usable(url: str, version: str | None) -> bool:
     tags = name[: -len(".whl")].split("-")[-3:]
     return (
         name.endswith(".whl")
-        and tags[0] in ("cp312", "py3")
+        and tags[0] in (python_tag, "py3")
         and (tags[2] == "any" or ("x86_64" in tags[2] and "win" not in tags[2]))
     )
 
@@ -180,6 +180,7 @@ def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     index = args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]
     sdk = args["ROCM_SDK_VERSION"]
     vision_v, audio_v = args["TORCHVISION_VERSION"], args["TORCHAUDIO_VERSION"]
+    python_tag = "cp" + args["PYTHON_VERSION"].replace(".", "")
     arches = [a for a in args["PYTORCH_ROCM_ARCH"].split(";") if a]
     wanted: list[tuple[str, str | None]] = [
         ("rocm", sdk),
@@ -197,7 +198,9 @@ def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     wanted += torch_device_requirements(torch_wheel, arches)
     urls = []
     for project, version in wanted:
-        found = [u for u in _project_files(index, project) if _usable(u, version)]
+        found = [
+            u for u in _project_files(index, project) if _usable(u, version, python_tag)
+        ]
         if not found:
             raise SystemExit(f"no usable {project}=={version} files on {index}")
         urls += found
