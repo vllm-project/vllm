@@ -1400,8 +1400,6 @@ class ShardedRDTWeightTransferEngine(
                     # The stamp was ATTACHED to a param that had no loader
                     # (see _install_recording_stamps); leave none behind.
                     del tensor.weight_loader
-        if hasattr(model, "_original_do_torchao_reload"):
-            model._do_torchao_reload = model._original_do_torchao_reload
 
     # ---------------- Background post-processing (pull/process pipeline) -------
 
