@@ -25,6 +25,7 @@ from vllm.distributed.eplb.eplb_state import (
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
+from vllm.distributed.eplb.policy_process import EplbPolicyProcess
 from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.platforms import current_platform
@@ -280,6 +281,33 @@ def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_a
     assert isinstance(default_state.policy, DefaultEplbPolicy)
     expected = default_state.policy.rebalance_experts(published_stats, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+def test_async_policy_process_preserves_extended_cpu_stats(model_state):
+    """Async dispatch retains custom stats fields across the process boundary."""
+
+    @dataclass
+    class Stats(EplbStats):
+        metadata: tuple[int, ...] = ()
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            assert isinstance(stats, Stats)
+            assert stats.metadata == (3, 7)
+            assert stats.global_expert_load_window.device.type == "cpu"
+            return super().rebalance_experts(stats, old_global_expert_indices)
+
+    stats = Stats(torch.tensor([[13, 3, 4, 3]]), 6, 1, 1, 2, metadata=(3, 7))
+    current = torch.tensor([[0, 1, 2, 3, 0, 1]])
+    state = _State(Policy())
+    model_state.eplb_stats = stats
+    state.policy_process = EplbPolicyProcess(state.policy)
+    try:
+        actual = run_rebalance_experts(model_state, state, current, None)
+        expected = state.policy.rebalance_experts(stats, current)
+        assert torch.equal(actual, expected)
+    finally:
+        state.policy_process.close()
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])

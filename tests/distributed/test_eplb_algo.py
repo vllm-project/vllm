@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import threading
+from contextlib import closing
+from multiprocessing import get_context
+
 import numpy as np
+import psutil
 import pytest
 import torch
 
@@ -11,7 +17,106 @@ from vllm.distributed.eplb.eplb_state import (
 )
 from vllm.distributed.eplb.policy import EplbStats
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+from vllm.distributed.eplb.policy_process import (
+    EplbPolicyProcess,
+    EplbPolicyProcessError,
+)
 from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "layers, experts, replicas, groups, nodes, ranks",
+    [(2, 12, 16, 4, 2, 8), (4, 128, 132, 1, 1, 2), (58, 256, 288, 1, 2, 8)],
+)
+def test_policy_process_preserves_exact_placements(
+    layers, experts, replicas, groups, nodes, ranks
+):
+    """IPC preserves placement and local-slot retention across planning cycles."""
+    generator = torch.Generator().manual_seed(17)
+    policy = DefaultEplbPolicy()
+    old_map = None
+    with closing(EplbPolicyProcess(policy)) as process:
+        for load in (
+            torch.zeros(layers, experts),
+            torch.ones(layers, experts),
+            torch.randint(0, 1000, (layers, experts), generator=generator),
+        ):
+            stats = EplbStats(load, replicas, groups, nodes, ranks)
+            expected = policy.rebalance_experts(stats, old_map)
+            actual = process.rebalance_experts(stats, old_map)
+            assert torch.equal(actual, expected)
+            assert actual.device.type == "cpu"
+            old_map = actual
+
+
+class _CountingPolicy(DefaultEplbPolicy):
+    def __init__(self):
+        self.calls = 0
+
+    def rebalance_experts(self, stats, old_global_expert_indices=None):
+        self.calls += 1
+        return torch.tensor([os.getpid(), self.calls, torch.get_num_threads()])
+
+
+def _plan_from_daemon(connection):
+    try:
+        with closing(EplbPolicyProcess(_CountingPolicy())) as process:
+            stats = EplbStats(torch.ones(1, 4), 4, 1, 1, 1)
+            first = process.rebalance_experts(stats).tolist()
+            second = process.rebalance_experts(stats).tolist()
+        connection.send((os.getpid(), first, second, psutil.pid_exists(first[0])))
+    finally:
+        connection.close()
+
+
+def test_policy_process_runs_persistently_inside_daemon_worker():
+    """A daemon executor can reuse and reap its independently launched planner."""
+    context = get_context("spawn")
+    parent, child = context.Pipe()
+    worker = context.Process(target=_plan_from_daemon, args=(child,), daemon=True)
+    worker.start()
+    child.close()
+    try:
+        assert parent.poll(60), "daemon worker did not return a policy result"
+        worker_pid, first, second, child_alive = parent.recv()
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+        assert first == [second[0], 1, 1]
+        assert second == [first[0], 2, 1]
+        assert first[0] != worker_pid
+        assert not child_alive
+    finally:
+        parent.close()
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=10)
+
+
+def test_policy_process_reports_policy_exception():
+    """A failed policy is reported instead of leaving IPC waiting forever."""
+    with (
+        closing(EplbPolicyProcess(DefaultEplbPolicy())) as process,
+        pytest.raises(RuntimeError, match="AssertionError"),
+    ):
+        process.rebalance_experts(EplbStats(torch.ones(1, 4), 3, 1, 1, 1))
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_policy_process_reports_unresponsive_child(failure):
+    """Child death and a stuck policy both terminate the planning request."""
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            if failure == "exit":
+                os._exit(7)
+            threading.Event().wait()
+
+    message = "disconnected" if failure == "exit" else "timed out"
+    with (
+        closing(EplbPolicyProcess(Policy(), timeout=10)) as process,
+        pytest.raises(EplbPolicyProcessError, match=message),
+    ):
+        process.rebalance_experts(EplbStats(torch.ones(1, 4), 4, 1, 1, 1))
 
 
 def test_eplb_load_stats_reduce_across_ranks():

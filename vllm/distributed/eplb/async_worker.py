@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
+from .policy_process import EplbPolicyProcess, EplbPolicyProcessError
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -29,11 +30,14 @@ def start_async_worker(
     device_index = state.device_index
     assert state.is_async
 
+    if state.parallel_config.eplb_config.use_policy_process and not is_profile:
+        state.policy_process = EplbPolicyProcess(state.policy)
+
     def thread_target() -> None:
-        assert device_index is not None
-        torch.accelerator.set_device_index(device_index)
-        stream = torch.Stream(device=torch.accelerator.current_accelerator())
         try:
+            assert device_index is not None
+            torch.accelerator.set_device_index(device_index)
+            stream = torch.Stream(device=torch.accelerator.current_accelerator())
             transfer_run_periodically(
                 state=state,
                 stream=stream,
@@ -42,6 +46,9 @@ def start_async_worker(
         except Exception as exc:
             state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
+        finally:
+            if state.policy_process is not None:
+                state.policy_process.close()
 
     thread = threading.Thread(target=thread_target, daemon=True)
     thread.start()
@@ -63,7 +70,8 @@ def run_rebalance_experts(
             eplb_stats.global_expert_load_window.cpu()
         )
     # Compute new expert mappings for the model
-    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
+    policy = eplb_state.policy_process or eplb_state.policy
+    new_physical_to_logical_map = policy.rebalance_experts(
         eplb_stats,
         physical_to_logical_map_cpu,
     )
@@ -82,8 +90,10 @@ def transfer_run_periodically(
         try:
             state.rearrange_event.wait(stream=stream)
             _transfer_cycle(state, stream, is_profile)
-        except Exception:
-            if not state.parallel_config.enable_fault_tolerance:
+        except Exception as exc:
+            if isinstance(exc, EplbPolicyProcessError) or not (
+                state.parallel_config.enable_fault_tolerance
+            ):
                 raise
             # FT keeps the thread alive so EPLB can resume after a retry.
             logger.exception(
@@ -122,6 +132,8 @@ def _transfer_cycle(
         new_physical_to_logical_map = run_rebalance_experts(
             model_state, state, physical_to_logical_map_cpu, stream
         )
+        if state.ft_reset_epoch != reset_epoch:
+            return
 
         migration_batches_by_layer = None
         if state.parallel_config.eplb_config.migration_batching_enabled:

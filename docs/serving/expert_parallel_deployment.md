@@ -268,8 +268,19 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
+| `use_policy_process` | Run async policy computation in a persistent CPU subprocess per worker; synchronous and profiling calls stay in the worker | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
+
+To isolate async policy computation from the inference worker's Python GIL,
+set `"use_policy_process": true` in `--eplb-config`. This experimental option
+requires a serializable CPU policy and adds one persistent process per worker.
+Load collection, device-to-host copies, and expert migration retain their existing
+execution paths. The child limits native CPU thread pools to one thread; CPU core
+contention still depends on the deployment's CPU allocation. A failed or timed-out
+child reports an async worker error rather than recomputing on the inference
+thread. Policy state is copied at startup and subsequently owned by the child;
+synchronous and profiling calls continue using the original policy instance.
 
 For example:
 

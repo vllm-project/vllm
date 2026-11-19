@@ -55,6 +55,7 @@ from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, EplbStats
+from .policy_process import EplbPolicyProcess
 from .rebalance_execute import (
     AsyncEplbLayerResult,
     copy_rows,
@@ -331,6 +332,7 @@ class EplbState:
         """
         Selected EPLB algorithm
         """
+        self.policy_process: EplbPolicyProcess | None = None
         self.expert_load_window_step: int = 0
         """
         Current step in the sliding window.

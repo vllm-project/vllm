@@ -329,6 +329,7 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
         model_max_len=4096,
         use_async=True,
     )
+    model_args["eplb_config"]["use_policy_process"] = True
 
     results = lm_eval.simple_evaluate(
         model="vllm",
