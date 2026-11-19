@@ -473,7 +473,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
-    "csrc/topk.cu"
+    "csrc/attention/dsa/topk/top_k_per_row.cu"
+    "csrc/attention/dsa/topk/topk.cu"
     "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
@@ -648,9 +649,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/cooperative_topk.cu")
+        "csrc/attention/dsa/topk/cooperative_topk.cu")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/cooperative_topk.cu"
+        SRCS "csrc/attention/dsa/topk/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
     endif()
 
@@ -1253,7 +1254,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC "csrc/attention/dsa/fused_mqa_topk/fused_mqa_topk.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
