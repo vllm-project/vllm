@@ -33,6 +33,14 @@ class FlashInferSSUKernel(MambaSSUKernel):
         return True
 
     @classmethod
+    def supports_spec_decode(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_pipeline_parallel(cls) -> bool:
+        return True
+
+    @classmethod
     def is_available(cls) -> bool:
         try:
             from flashinfer.mamba import selective_state_update  # noqa: F401

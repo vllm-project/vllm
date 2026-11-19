@@ -22,6 +22,14 @@ class CPUSSUKernel(MambaSSUKernel):
     def supports_platform(cls, platform: PlatformEnum) -> bool:
         return platform == PlatformEnum.CPU
 
+    @classmethod
+    def supports_spec_decode(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_pipeline_parallel(cls) -> bool:
+        return True
+
     @staticmethod
     @cache
     def _fn():

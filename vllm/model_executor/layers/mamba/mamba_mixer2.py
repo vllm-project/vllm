@@ -23,6 +23,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
+    MambaSSUKernel,
+)
 from vllm.model_executor.layers.linear_attention.mamba2.decode.selector import (
     select_mamba_ssu_kernel,
 )
@@ -274,6 +277,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
     """
 
     # --8<-- [end:mamba_mixer2]
+
+    ssu_kernel: type[MambaSSUKernel]
 
     def __init__(
         self,
@@ -561,6 +566,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self._replayssm_rand_seeds: torch.Tensor | None = None
 
         self.num_spec = vllm_config.num_speculative_tokens
+        self.vllm_config = vllm_config
+        # The decode kernel's extra cache states shape the page, so they come
+        # from the config alone, before the layer's spec exists. Selecting
+        # again with the spec below can only pick a kernel with the same layout.
+        self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, None)
+        self.ssu_state = self.ssu_kernel.make_layer_state(vllm_config)
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -579,7 +590,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         if model_config is None:
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, None)
-            self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, None)
         else:
             layer_config = self.get_kv_cache_config(vllm_config)
             assert layer_config is not None
@@ -1017,10 +1027,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
+            base_dtype = MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype, self.model_config.dtype
             )
-        return base_dtype
+        return (
+            *base_dtype,
+            *self.ssu_kernel.extra_state_dtypes(self.model_config.dtype),
+        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -1034,9 +1047,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
+        shapes: tuple[tuple[int, ...], ...] = base_shape
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            return MambaStateShapeCalculator.append_replayssm_ring(
+            shapes = MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=self.n_groups,
                 tp_world_size=tp_world_size,
@@ -1044,7 +1058,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 backend=self.mamba_config.backend,
                 num_speculative_tokens=self.num_spec,
             )
-        return base_shape
+        return (
+            *shapes,
+            *self.ssu_kernel.extra_state_shapes(
+                self.vllm_config, base_shape, self.n_groups
+            ),
+        )
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
