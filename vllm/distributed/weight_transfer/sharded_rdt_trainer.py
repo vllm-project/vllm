@@ -943,6 +943,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             [m.name for m in self._meta],
             workers_per_replica=ii.workers_per_replica,
         )
+        router.validate()
         return len(router.consumers_of(self.rank))
 
     def _spawn_server(self) -> None:
@@ -1117,6 +1118,8 @@ class ShardedRDTTrainerWeightTransferEngine(
         except BaseException as e:
             with contextlib.suppress(Exception):
                 self._rpc("set_gather_error", repr(e), self._sync_idx)
+            # the other ranks' pulls would otherwise wait out the watchdog
+            self._fail_producers(f"trainer rank {self.rank} failed: {e!r}")
             self._inflight.clear()
             raise
         finally:

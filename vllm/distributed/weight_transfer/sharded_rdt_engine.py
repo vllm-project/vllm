@@ -372,6 +372,7 @@ class ShardedRDTWeightTransferEngine(
             self._send_buckets(buckets)
             self._pin_arena(buckets)
         except Exception as e:
+            self._drop_plan()
             e.add_note(
                 "Sharded RDT: planning failed after start_reload, so the model "
                 "is mid-reload; the next start_weight_update plans again"

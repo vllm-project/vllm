@@ -42,10 +42,8 @@ def validate_int(name: str, value: object, *, minimum: int) -> None:
 
 
 def check_ray_rdt_version() -> None:
-    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION`.
-
-    vLLM does not depend on Ray, so no pin carries this; without the check an
-    old Ray fails deep in the first pull.
+    """Refuse an installed Ray older than `RDT_MIN_RAY_VERSION`, which would
+    otherwise fail deep in the first pull.
 
     Raises:
         ValueError: the installed Ray is too old.
@@ -137,14 +135,8 @@ def gather_units(nbytes: Sequence[int], budget: int) -> list[int]:
 
 
 class RdtRouter:
-    """Which producer serves each name to each consumer. Pure: both sides
-    derive the same answers from the same wire tables.
-
-    Ownership is per name: `owner_sets` holds the distinct producer sets and
-    `name_owner_class[i]` indexes it for `names[i]`; empty tables mean every
-    producer holds everything. A pipeline stage is a set of names sharing an
-    owner set, an expert is a name whose owner set is one rank.
-    """
+    """Which producer serves each name to each consumer; both sides derive
+    the same answers from the same wire tables."""
 
     def __init__(
         self,
