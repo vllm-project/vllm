@@ -337,7 +337,7 @@ class NextTokenStrategy(ReadStrategy):
         return [{"type": "image_pil", "image_pil": image} for image in images]
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=None, labeled=False)
+        return DecisionLimits(max_questions=64, max_options=len(LABELS))
 
     def _read_request(
         self, chat_template_kwargs: dict[str, Any] | None, cache_salt: str | None = None
@@ -889,7 +889,7 @@ class JointSchemaStrategy(ReadStrategy):
         )
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        return DecisionLimits(max_questions=64, max_options=None, labeled=False)
 
     def render_state(self, state: Any) -> str:
         return self._render(state)
