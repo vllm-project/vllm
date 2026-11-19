@@ -1070,6 +1070,20 @@ def test_admission_lookup_is_discarded_on_preemption():
     assert scheduler.client.discarded == [request.request_id]
 
 
+def test_lookup_builds_load_spec_at_the_aux_output_ceiling():
+    scheduler = _make_bare_scheduler()
+    scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    request.aux_output_external_hit_limit = 32
+
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
+    assert scheduler.client.num_tokens == [33]
+    load_spec = scheduler.load_specs[request.request_id]
+    assert load_spec.vllm_cached_tokens == 16
+    assert load_spec.kvpool_cached_tokens == 32
+
+
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     # The worker re-derives a full external hit below the request end on an
     # existing boundary, so the scheduler receives the usable aligned hit.

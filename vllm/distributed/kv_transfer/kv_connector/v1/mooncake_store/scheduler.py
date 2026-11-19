@@ -241,12 +241,20 @@ class MooncakeStoreScheduler:
         if not self.enable_lookup:
             return 0, False
 
-        if request.num_tokens < self._lookup_align():
+        lookup_tokens = request.num_tokens
+        aux_limit = getattr(request, "aux_output_external_hit_limit", None)
+        if aux_limit is not None:
+            if aux_limit <= num_computed_tokens:
+                return 0, False
+            # The lookup worker leaves a final token to compute. Supply a
+            # shorter request to resolve group coverage and tail keys together.
+            lookup_tokens = min(lookup_tokens, aux_limit + 1)
+        if lookup_tokens < self._lookup_align():
             return 0, False
 
         lookup_result = self.client.lookup(
             request.request_id,
-            request.num_tokens,
+            lookup_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
