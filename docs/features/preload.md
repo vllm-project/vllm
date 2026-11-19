@@ -6,9 +6,9 @@ from scratch. The design is extensible to different kinds of artifacts; it
 currently supports **model weights** via the weight cache daemon.
 
 With weight preloading, a daemon process per GPU holds its rank's
-post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
-over a Unix domain socket, so a restarting engine maps the weights via
-zero-copy IPC instead of reloading them from disk.
+post-quantized, TP-sharded weights and serves local sharing handles to vLLM
+engines over a Unix domain socket, so a restarting engine maps the weights via
+zero-copy sharing instead of reloading them from disk.
 
 Key benefits:
 
@@ -70,8 +70,7 @@ vllm serve /path/to/model --load-format ipc_cache
 
 The `ipc_cache` loader does not configure the backend again through
 `--model-loader-extra-config`. It negotiates with the daemon and accepts the
-backend named in its response; a response from an older daemon without that
-field defaults to `torch_ipc`.
+backend named in its response.
 
 A backend mismatch follows the ordinary cache-mismatch policy: disk fallback
 when enabled, an error otherwise. New engines can connect to existing CUDA IPC
@@ -391,7 +390,7 @@ its cached weights remain resident until the daemon shuts down.
 
 ## Multi-node and data parallelism
 
-CUDA IPC handles are node-local, so each node serves only its local GPUs'
+Local backend handles are node-local, so each node serves only its local GPUs'
 shards. For multi-node tensor parallelism, run one `vllm preload` launcher per
 node with a shared rendezvous: reuse the `--nnodes` / `--node-rank` /
 `--master-addr` flags you pass the engine, plus a `--weight-cache-master-port`
@@ -496,8 +495,8 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   channel is authenticated by a shared token but unencrypted. Shared stores
   can serve autotune tables without a live source. Cache misses and errors
   fall back to local tuning or compilation.
-- **Weight seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC
-  handle is node-local; `rdma` requires Mooncake on both sides. A mirror
+- **Weight seeding**: `peer_ipc` cannot cross hosts, because local sharing
+  handles are node-local; `rdma` requires Mooncake on both sides. A mirror
   copies the weights into its own memory, so it does not depend on the
   source staying alive afterwards, and a mirror replica forms its own world
   group like a normal preload. Each outstanding copy holds a lease until the

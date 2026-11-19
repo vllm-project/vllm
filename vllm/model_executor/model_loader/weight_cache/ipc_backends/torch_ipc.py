@@ -21,7 +21,6 @@ class TensorEntry:
 
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
-    fd: int = -1
 
     @classmethod
     def from_storage(cls, storage: torch.UntypedStorage) -> "TensorEntry":

@@ -14,7 +14,7 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
     get_dp_group,
@@ -120,9 +120,6 @@ class IpcModelLoader(BaseModelLoader):
                 f"Unexpected extra config keys for load format "
                 f"{load_config.load_format}: {sorted(extra_config)}"
             )
-        # Fingerprint computed by load_model, reused by standalone
-        # load_weights so a reload keys on the same configuration.
-        self._cache_key: WeightCacheKey | None = None
 
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         total = self._daemon_memory()
@@ -175,30 +172,9 @@ class IpcModelLoader(BaseModelLoader):
         DefaultModelLoader(self._fallback_load_config()).download_model(model_config)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        """Best-effort in-place reload for an already-initialized model.
-
-        Copies daemon tensors into matching parameters/buffers. The model is
-        expected to already be in the post-quantized layout (e.g. previously
-        loaded through this loader).
-        """
-        device_index = torch.accelerator.current_device_index()
-        cache_key = self._cache_key
-        if cache_key is None:
-            vllm_config = get_current_vllm_config()
-            state = self._fetch_state(
-                vllm_config, model_config, device_index, is_reload=True
-            )
-        else:
-            state = self._request_state(cache_key, device_index, is_reload=True)
-        tensors, _ = self._rebuild_storages(state)
-        params = dict(model.named_parameters())
-        named_buffers = dict(model.named_buffers())
-        for name, source in tensors.items():
-            target = params.get(name, named_buffers.get(name))
-            if target is None or target.shape != source.shape:
-                logger.warning("Skipping mismatched cached tensor %s", name)
-                continue
-            target.data.copy_(source)
+        raise NotImplementedError(
+            "Standalone weight reload is not supported for load format 'ipc_cache'"
+        )
 
     @instrument(span_name="Load model")
     def load_model(
@@ -269,12 +245,7 @@ class IpcModelLoader(BaseModelLoader):
         self,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
-        device_index: int | None = None,
-        *,
-        is_reload: bool = False,
     ) -> WeightCacheState:
-        if device_index is None:
-            device_index = torch.accelerator.current_device_index()
         dp_group = get_dp_group()
         pp_group = get_pp_group()
         parallel_config = vllm_config.parallel_config
@@ -292,12 +263,7 @@ class IpcModelLoader(BaseModelLoader):
             expert_placement_strategy=parallel_config.expert_placement_strategy,
             kernel_config=vllm_config.kernel_config,
         )
-        # Recorded before model construction so that a later standalone
-        # load_weights reload keys on the same pre-construction values the
-        # daemon fingerprinted, unaffected by any cache_config mutation
-        # during model construction.
-        self._cache_key = cache_key
-        return self._request_state(cache_key, device_index, is_reload=is_reload)
+        return self._request_state(cache_key)
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;
@@ -323,31 +289,14 @@ class IpcModelLoader(BaseModelLoader):
                     )
                 )
 
-    def _request_state(
-        self, cache_key: WeightCacheKey, device_index: int, *, is_reload: bool = False
-    ) -> WeightCacheState:
+    def _request_state(self, cache_key: WeightCacheKey) -> WeightCacheState:
         if self.fallback:
-            return self._request_state_once(
-                cache_key, device_index, is_reload=is_reload
-            )
-        return self._with_startup_wait(
-            lambda: self._request_state_once(
-                cache_key, device_index, is_reload=is_reload
-            )
-        )
+            return self._request_state_once(cache_key)
+        return self._with_startup_wait(lambda: self._request_state_once(cache_key))
 
-    def _request_state_once(
-        self, cache_key: WeightCacheKey, device_index: int, *, is_reload: bool = False
-    ) -> WeightCacheState:
+    def _request_state_once(self, cache_key: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
-            send_msg(
-                conn,
-                {
-                    "cmd": "get_state",
-                    "cache_key": cache_key,
-                    "is_reload": is_reload,
-                },
-            )
+            send_msg(conn, {"cmd": "get_state", "cache_key": cache_key})
             response = recv_msg(conn)
         status = response.get("status")
         if status == "mismatch":
@@ -364,6 +313,7 @@ class IpcModelLoader(BaseModelLoader):
             raise CacheConfigMismatchError(
                 f"weight_cache_backend mismatch: unsupported backend {backend!r}"
             )
+        device_index = torch.accelerator.current_device_index()
         records = rebuild_entries(response["storages"], device_index)
         return WeightCacheState(
             manifest=response["manifest"],
