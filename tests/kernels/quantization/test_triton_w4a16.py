@@ -10,6 +10,8 @@ import importlib
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -30,26 +32,28 @@ triton_w4a16_gemm = triton_w4a16_module.triton_w4a16_gemm
 TritonW4A16LinearKernel = triton_w4a16_module.TritonW4A16LinearKernel
 
 
-def _pack_int4_along_n(w_int4_kn: torch.Tensor) -> torch.Tensor:
-    """Pack int4 values along N: [K, N] -> [K, N//8] int32."""
+def _pack_int4_along_n(w_int4_kn: torch.Tensor, bits: int = 4) -> torch.Tensor:
+    """Pack int4 (or int8) values along N: [K, N] -> [K, N//pack] int32."""
     assert w_int4_kn.dtype == torch.int32
+    pack, mask = 32 // bits, (1 << bits) - 1
     K, N = w_int4_kn.shape
-    assert N % 8 == 0
-    shifts = torch.arange(8, device=w_int4_kn.device, dtype=torch.int32) * 4
+    assert N % pack == 0
+    shifts = torch.arange(pack, device=w_int4_kn.device, dtype=torch.int32) * bits
     return torch.sum(
-        (w_int4_kn.view(K, N // 8, 8) & 0xF) << shifts,
+        (w_int4_kn.view(K, N // pack, pack) & mask) << shifts,
         dim=2,
         dtype=torch.int32,
     ).contiguous()
 
 
-def _unpack_int4_along_n(w_packed_kn8: torch.Tensor) -> torch.Tensor:
-    """Unpack int4 values along N: [K, N//8] -> [K, N] int32."""
+def _unpack_int4_along_n(w_packed_kn8: torch.Tensor, bits: int = 4) -> torch.Tensor:
+    """Unpack int4 (or int8) values along N: [K, N//pack] -> [K, N] int32."""
     assert w_packed_kn8.dtype == torch.int32
-    K, N8 = w_packed_kn8.shape
-    shifts = torch.arange(8, device=w_packed_kn8.device, dtype=torch.int32) * 4
-    nibbles = (w_packed_kn8.unsqueeze(-1) >> shifts) & 0xF
-    return nibbles.reshape(K, N8 * 8)
+    pack, mask = 32 // bits, (1 << bits) - 1
+    K, N_packed = w_packed_kn8.shape
+    shifts = torch.arange(pack, device=w_packed_kn8.device, dtype=torch.int32) * bits
+    values = (w_packed_kn8.unsqueeze(-1) >> shifts) & mask
+    return values.reshape(K, N_packed * pack)
 
 
 def _pack_int4_along_k_to_ckpt(w_int4_kn: torch.Tensor) -> torch.Tensor:
@@ -71,6 +75,7 @@ def _w4a16_reference(
     group_size: int,
     qzeros_gn8: torch.Tensor | None,
     zp_bias: int,
+    bits: int = 4,
 ) -> torch.Tensor:
     """Reference implementation for W4A16.
 
@@ -84,7 +89,7 @@ def _w4a16_reference(
     assert scales_gn.dtype == a_mk.dtype
 
     M, K = a_mk.shape
-    N = b_packed_kn8.shape[1] * 8
+    N = b_packed_kn8.shape[1] * (32 // bits)
     assert b_packed_kn8.shape[0] == K
 
     assert group_size > 0 and K % group_size == 0
@@ -92,12 +97,12 @@ def _w4a16_reference(
     num_groups = K // G
     assert scales_gn.shape == (num_groups, N)
 
-    w_int4 = _unpack_int4_along_n(b_packed_kn8)  # [K,N]
+    w_int4 = _unpack_int4_along_n(b_packed_kn8, bits)  # [K,N]
     if qzeros_gn8 is None:
         z_full = torch.full((K, N), zp_bias, dtype=torch.int32, device=a_mk.device)
     else:
-        assert qzeros_gn8.shape == (num_groups, N // 8)
-        z_gn = _unpack_int4_along_n(qzeros_gn8)  # [G,N] in groups
+        assert qzeros_gn8.shape == (num_groups, N // (32 // bits))
+        z_gn = _unpack_int4_along_n(qzeros_gn8, bits)  # [G,N] in groups
         z_full = z_gn.repeat_interleave(G, dim=0)  # [K,N]
 
     s_full = scales_gn.repeat_interleave(G, dim=0).to(torch.float32)  # [K,N]
@@ -107,35 +112,71 @@ def _w4a16_reference(
     return out.to(a_mk.dtype)
 
 
+def test_triton_w4a16_gemm_fake_impl():
+    with FakeTensorMode():
+        a = torch.empty((4, 256), device=device, dtype=torch.float16)
+        b_q = torch.empty((256, 64), device=device, dtype=torch.int32)
+        scales = torch.empty((2, 512), device=device, dtype=torch.float16)
+
+        out = triton_w4a16_gemm(
+            a=a,
+            b_q=b_q,
+            scales=scales,
+            qzeros=None,
+            group_size=128,
+        )
+
+        assert out.shape == (4, 512)
+        assert out.dtype == a.dtype
+        assert out.device == a.device
+
+        graph = make_fx(
+            lambda a, b_q, scales: triton_w4a16_gemm(
+                a, b_q, scales, qzeros=None, group_size=128
+            )
+        )(a, b_q, scales)
+
+        assert any(
+            node.op == "call_function"
+            and node.target == torch.ops.vllm.triton_w4a16_gemm.default
+            for node in graph.graph.nodes
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "M,K,N,G,has_zp",
+    "M,K,N,G,has_zp,bits",
     [
-        (1, 256, 256, 32, False),
-        (17, 256, 512, 32, False),
-        (32, 512, 256, 64, False),
-        (33, 512, 512, 128, False),
-        (64, 1024, 256, 256, False),
-        (128, 256, 1024, 32, True),
-        (64, 512, 512, 64, True),
+        (1, 256, 256, 32, False, 4),
+        (17, 256, 512, 32, False, 4),
+        (32, 512, 256, 64, False, 4),
+        (33, 512, 512, 128, False, 4),
+        (64, 1024, 256, 256, False, 4),
+        (128, 256, 1024, 32, True, 4),
+        (64, 512, 512, 64, True, 4),
+        (1, 256, 256, 16, False, 4),
+        (1, 256, 256, 16, False, 8),
+        (33, 512, 512, 32, False, 8),
+        (256, 1024, 512, 128, False, 8),
     ],
 )
-def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
+def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp, bits):
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
     if N % 8 != 0 or K % G != 0:
         pytest.skip("Invalid test shape")
 
     set_random_seed(0)
+    zp_bias = 1 << (bits - 1)
 
     a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
-    w_int4 = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
-    b_packed = _pack_int4_along_n(w_int4)
+    w_int4 = torch.randint(0, 1 << bits, (K, N), device=device, dtype=torch.int32)
+    b_packed = _pack_int4_along_n(w_int4, bits)
 
-    scales = (0.05 * torch.rand((K // G, N), device=device, dtype=torch.float32)).to(
-        dtype
-    )
+    # Keep outputs at the int4 magnitude so one tolerance fits both widths.
+    scale_max = 0.05 / (1 << (bits - 4))
+    scales = (scale_max * torch.rand((K // G, N), device=device)).to(dtype)
 
     qzeros = None
     if has_zp:
@@ -148,7 +189,8 @@ def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
         scales=scales,
         qzeros=qzeros,
         group_size=G,
-        zp_bias=8,
+        zp_bias=zp_bias,
+        bits=bits,
     )
     ref = _w4a16_reference(
         a,
@@ -156,7 +198,8 @@ def test_triton_w4a16_gemm_matches_reference(dtype, M, K, N, G, has_zp):
         scales,
         group_size=G,
         qzeros_gn8=qzeros,
-        zp_bias=8,
+        zp_bias=zp_bias,
+        bits=bits,
     )
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
@@ -240,14 +283,12 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
         act_type=torch.float16,
         group_size=G,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="weight_packed",
         w_s_param_name="weight_scale",
         w_zp_param_name="weight_zero_point",
-        w_gidx_param_name=None,
     )
 
     # Build dummy layer with vLLM parameter wrappers.
@@ -288,12 +329,14 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
         ),
     )
 
-    kernel.process_weights_after_loading(layer)
-
-    # Expected transformed layouts.
+    # Expected transformed layouts, taken before processing: `replace_parameter`
+    # writes a same-size result into the loaded parameter's own storage, which
+    # the checkpoint tensors above still alias.
     expected_w_kn8 = _pack_int4_along_n(w_int4_kn)  # [K, N//8]
     expected_scales_gn = scales_ckpt_nkg.t().contiguous()  # [K//G, N]
     expected_zeros_gn8 = zeros_ckpt_n8kg.t().contiguous()  # [K//G, N//8]
+
+    kernel.process_weights_after_loading(layer)
 
     assert tuple(layer.weight_packed.shape) == (K, N // 8)
     assert tuple(layer.weight_scale.shape) == (K // G, N)
@@ -306,6 +349,7 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
+    """AutoGPTQ qzeros are already [K//G, N//8] (output_dim=1): no transpose."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -350,14 +394,12 @@ def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
         act_type=torch.float16,
         group_size=G,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
 
     weight_loader = lambda *args, **kwargs: None
@@ -413,6 +455,7 @@ def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
+    """For symmetric (uint4b8) layers, apply_weights must pass qzeros=None."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
         MPLinearLayerConfig,
     )
@@ -426,14 +469,12 @@ def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
         act_type=torch.float16,
         group_size=G,
         zero_points=False,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
 
     class DummyLayer(torch.nn.Module):
@@ -446,7 +487,7 @@ def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
 
     captured = {}
 
-    def fake_gemm(*, a, b_q, scales, qzeros, group_size, zp_bias):
+    def fake_gemm(*, a, b_q, scales, qzeros, group_size, zp_bias, bits):
         captured["qzeros"] = qzeros
         captured["zp_bias"] = zp_bias
         return torch.empty((a.shape[0], N), device=a.device, dtype=a.dtype)
@@ -459,3 +500,34 @@ def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
     assert output.shape == (2, N)
     assert captured["qzeros"] is None
     assert captured["zp_bias"] == scalar_types.uint4b8.bias
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    M = 2**31 // max(K, N) + 128
+
+    set_random_seed(0)
+    G = 128
+    a = (0.25 * torch.randn((M, K), device=device)).to(torch.bfloat16)
+    w_int4 = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    b_packed = _pack_int4_along_n(w_int4)
+    scales = (0.05 * torch.rand((K // G, N), device=device)).to(torch.bfloat16)
+
+    out = triton_w4a16_gemm(
+        a=a, b_q=b_packed, scales=scales, qzeros=None, group_size=G, zp_bias=8
+    )
+    # Dequantize in bfloat16 as the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=0)
+    ref = (a[-64:].float() @ w.float()).to(torch.bfloat16)
+
+    torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=1e-2)

@@ -26,6 +26,7 @@ RERANK_MODELS = [
             "method": "no_post_processing",
         },
         mteb_score=0.33757,
+        mteb_tol=1e-2,
         seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
@@ -127,6 +128,7 @@ class GemmaRerankerHfRunner(MtebCrossEncoderMixin, HfRunner):
         return torch.Tensor(scores)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(

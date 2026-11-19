@@ -5,17 +5,18 @@ import gc
 import random
 import string
 import sys
-import weakref
 
 import pytest
 import torch
+from PIL import Image
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm import SamplingParams
 from vllm.platforms import current_platform
-from vllm.utils.mem_utils import KiB_bytes, MiB_bytes, format_mib
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_mib
 
 MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
 RANDOM_PREFIX_LEN = 100
@@ -29,6 +30,20 @@ WARMUP_ROUNDS = 2
 MEASURED_ROUNDS = 16
 GPU_GROWTH_THRESHOLD_MIB = 0
 CPU_PEAK_GROWTH_THRESHOLD_MIB = 0
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+
+    ATTENTION_BACKENDS = [
+        "TRITON_ATTN",
+        "ROCM_ATTN",
+        pytest.param(
+            "ROCM_AITER_FA",
+            marks=pytest.mark.skipif(not on_gfx9(), reason="AITER needs gfx9"),
+        ),
+    ]
+else:
+    ATTENTION_BACKENDS = [None]
 
 SAMPLING_PARAMS = SamplingParams(
     temperature=0.0,
@@ -81,10 +96,11 @@ def _ru_maxrss_bytes() -> int | None:
     return rss if sys.platform == "darwin" else rss * KiB_bytes
 
 
-def _gpu_used_bytes() -> int:
+def _gpu_memory_bytes() -> tuple[int, int]:
+    # Process-local: device-wide used memory also counts other processes on
+    # the GPU, and even a bare HIP context adds 2 MiB to it.
     torch.accelerator.synchronize()
-    free_bytes, total_bytes = torch.accelerator.get_memory_info()
-    return int(total_bytes - free_bytes)
+    return torch.accelerator.memory_allocated(), torch.accelerator.memory_reserved()
 
 
 def _format_mib(num_bytes: int | None) -> str:
@@ -94,35 +110,31 @@ def _format_mib(num_bytes: int | None) -> str:
     return f"{format_mib(num_bytes)} MiB"
 
 
+@pytest.fixture
+def attention_backend() -> str | None:
+    return None
+
+
 @pytest.fixture(scope="function")
-def llm(monkeypatch):
+def llm(vllm_runner, monkeypatch, attention_backend):
+    # In process, so the tests can measure memory and read the worker's state.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm_kwargs = dict(
-        model=MODEL_NAME,
+    with vllm_runner(
+        maybe_model_redirect(MODEL_NAME),
         enforce_eager=True,
+        enable_chunked_prefill=None,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=REQUESTS_PER_ROUND,
         limit_mm_per_prompt={"image": 1},
-        seed=0,
-        disable_log_stats=True,
         gpu_memory_utilization=0.8,
-    )
-    if current_platform.is_rocm():
-        llm_kwargs["attention_backend"] = "TRITON_ATTN"
-
-    llm = LLM(**llm_kwargs)
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        attention_backend=attention_backend,
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.core_model
+@pytest.mark.parametrize("attention_backend", ATTENTION_BACKENDS)
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_NAMES], indirect=True)
 def test_no_memory_leak(llm, image_urls: list[str]) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
@@ -140,10 +152,10 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         del outputs
 
     gc.collect()
-    warmup_gpu = _gpu_used_bytes()
+    warmup_gpu = _gpu_memory_bytes()
     warmup_cpu_peak = _ru_maxrss_bytes()
 
-    post_warmup_gpu_samples: list[int] = []
+    post_warmup_gpu_samples: list[tuple[int, int]] = []
     post_warmup_cpu_peak_samples: list[int] = []
 
     for _ in range(MEASURED_ROUNDS):
@@ -153,21 +165,23 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
         del outputs
 
         gc.collect()
-        post_warmup_gpu_samples.append(_gpu_used_bytes())
+        post_warmup_gpu_samples.append(_gpu_memory_bytes())
         cpu_peak = _ru_maxrss_bytes()
         if cpu_peak is not None:
             post_warmup_cpu_peak_samples.append(cpu_peak)
 
-    gpu_growth = max(post_warmup_gpu_samples) - warmup_gpu
     gpu_threshold = GPU_GROWTH_THRESHOLD_MIB * MiB_bytes
+    for i, kind in enumerate(("allocated", "reserved")):
+        samples = [sample[i] for sample in post_warmup_gpu_samples]
+        gpu_growth = max(samples) - warmup_gpu[i]
 
-    assert gpu_growth <= gpu_threshold, (
-        "Qwen3-VL GPU memory kept growing after warmup. "
-        f"warmup_baseline={_format_mib(warmup_gpu)}, "
-        f"post_warmup_samples={[_format_mib(x) for x in post_warmup_gpu_samples]}, "
-        f"gpu_growth={_format_mib(gpu_growth)}, "
-        f"gpu_threshold={GPU_GROWTH_THRESHOLD_MIB} MiB"
-    )
+        assert gpu_growth <= gpu_threshold, (
+            f"Qwen3-VL {kind} GPU memory kept growing after warmup. "
+            f"warmup_baseline={_format_mib(warmup_gpu[i])}, "
+            f"post_warmup_samples={[_format_mib(x) for x in samples]}, "
+            f"gpu_growth={_format_mib(gpu_growth)}, "
+            f"gpu_threshold={GPU_GROWTH_THRESHOLD_MIB} MiB"
+        )
 
     if warmup_cpu_peak is not None and post_warmup_cpu_peak_samples:
         cpu_peak_growth = max(post_warmup_cpu_peak_samples) - warmup_cpu_peak
@@ -180,3 +194,44 @@ def test_no_memory_leak(llm, image_urls: list[str]) -> None:
             f"cpu_peak_growth={_format_mib(cpu_peak_growth)}, "
             f"cpu_peak_threshold={CPU_PEAK_GROWTH_THRESHOLD_MIB} MiB"
         )
+
+
+def _live_mm_payloads(worker) -> dict[str, list[bool]]:
+    cache = worker.model_runner.encoder_cache
+    return {
+        req_id: [feature.data is not None for feature in features]
+        for req_id, features in cache.mm_features.items()
+    }
+
+
+@pytest.mark.core_model
+def test_consumed_cpu_inputs_released_during_generation(llm) -> None:
+    """An M-RoPE model must release pixels while its request is still decoding."""
+    engine = llm.llm_engine
+    engine.add_request(
+        "cpu-input-lifetime",
+        {
+            "prompt": (
+                "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+                "Describe the image.<|im_end|>\n<|im_start|>assistant\n"
+            ),
+            "multi_modal_data": {"image": Image.new("RGB", (64, 64), "red")},
+        },
+        SamplingParams(temperature=0, max_tokens=16, ignore_eos=True),
+    )
+    try:
+        for _ in range(3):
+            engine.step()
+        assert engine.has_unfinished_requests()
+        snapshots = llm.collective_rpc(_live_mm_payloads)
+        assert all(snapshot for snapshot in snapshots)
+        assert all(
+            payloads == [False]
+            for snapshot in snapshots
+            for payloads in snapshot.values()
+        ), snapshots
+        while engine.has_unfinished_requests():
+            outputs = engine.step()
+        assert len(outputs[0].outputs[0].token_ids) == 16
+    finally:
+        engine.abort_request(["cpu-input-lifetime"])

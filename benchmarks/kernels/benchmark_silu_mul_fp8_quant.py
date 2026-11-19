@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Comprehensive 3-way SiLU Benchmark Suite
+"""Comprehensive 3-way SiLU Benchmark Suite.
 
 This benchmark compares three SiLU implementations:
 1. SiLU V2 (CUDA) - Optimized CUDA kernel implementation
@@ -110,7 +109,7 @@ def silu_mul_fp8_quant_deep_gemm_triton(
     eps: float = 1e-10,
     expert_offsets: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
+    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales.
 
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
@@ -206,7 +205,7 @@ def benchmark(
     iterations_per_run: int = 20,
 ):
     def generate_data(seed_offset=0):
-        """Generate input data with given seed offset"""
+        """Generate input data with given seed offset."""
         set_random_seed(42 + seed_offset)
         y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
 
@@ -365,7 +364,7 @@ def create_combined_plot(all_results):
         all_silu_v2_results,
         all_triton_results,
         config_labels,
-        config_x_axis,
+        _,
     ) in enumerate(all_results):
         ax = axes[idx]
 
@@ -471,7 +470,7 @@ print(f"Configurations: {len(configs)} configs")
 all_results = []
 
 # Run benchmarks for each strategy
-for id, strategy in enumerate(strategies):
+for strategy in strategies:
     print(f"\n{'=' * 60}")
     print(f"Testing strategy: {strategy_descriptions[strategy]}")
     print(f"{'=' * 60}")

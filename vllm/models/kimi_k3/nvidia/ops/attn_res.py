@@ -186,16 +186,16 @@ def attn_res(
     assert norm_weight.stride(-1) == 1
     assert qk_weight.stride(-1) == 1
     assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
-    # The in-tree NVIDIA kernel covers the common fused-add + output-norm path;
-    # Triton handles block boundaries and final pre-norm output. The native op
-    # is only compiled for SM100 under CUDA >= 13, so a device check alone is
-    # not enough to know it exists.
+    # The native kernel covers every Kimi-K3 AttnRes variant on dense SM100
+    # inputs. The op is only compiled under CUDA >= 13, so a device check alone
+    # is not enough to know it exists.
     if (
         hidden_size == 7168
-        and delta is not None
-        and output_norm_weight is not None
-        and num_blocks > 0
-        and block_write_idx < 0
+        and prefix.stride(0) == hidden_size
+        and (delta is None or delta.stride(0) == hidden_size)
+        and 0 <= num_blocks <= 8
+        and num_blocks <= blocks.shape[1]
+        and -1 <= block_write_idx < blocks.shape[1]
         and current_platform.is_device_capability_family(100)
         and hasattr(torch.ops._C, "kimi_k3_attn_res")
     ):
@@ -207,6 +207,7 @@ def attn_res(
             qk_weight,
             output_norm_weight,
             num_blocks,
+            block_write_idx,
             eps,
             output_norm_eps,
         )

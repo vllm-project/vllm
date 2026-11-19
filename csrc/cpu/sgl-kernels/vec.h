@@ -204,7 +204,6 @@ inline std::tuple<__m512bh, __m512bh> cvt_mxfp4_e2m1_bf16_intrinsic_lut(__m256i 
   const __m512i lut = (__m512i)(_mm512_cvtne2ps_pbh(values, values));
 
   const __m512i abs_mask = _mm512_set1_epi16(0x7FFF);
-  const __m512i zero = _mm512_setzero_si512();
 
   // expand values to 16-bit integers
   __m512i x0 = _mm512_cvtepu8_epi16(a);
@@ -214,17 +213,23 @@ inline std::tuple<__m512bh, __m512bh> cvt_mxfp4_e2m1_bf16_intrinsic_lut(__m256i 
   x0 = _mm512_permutexvar_epi16(x0, lut);
   x1 = _mm512_permutexvar_epi16(x1, lut);
 
-  // check for zeros
-  __mmask32 mask0 = _mm512_cmp_epi16_mask(_mm512_and_si512(x0, abs_mask), zero, _MM_CMPINT_EQ);
-  __mmask32 mask1 = _mm512_cmp_epi16_mask(_mm512_and_si512(x1, abs_mask), zero, _MM_CMPINT_EQ);
+  // Emulate the bf16 multiply by the E8M0 scale as an integer add on the
+  // exponent field, forcing zeros to stay zero.
+  //
+  // vptestmw sets a lane's mask bit when (x & 0x7FFF) != 0, i.e. for the lanes
+  // that are not +0.0 or -0.0. That is the *complement* of the mask the old
+  // and/cmp/add/blend sequence built, which selected the zero lanes; the
+  // zero-masking form of vpaddw then writes 0 where the mask is clear, so the
+  // two agree lane by lane. That includes the LUT's -0.0 entry, which both
+  // versions turn into +0.0.
+  //
+  // 2 instructions per vector instead of 4, no extra ISA requirement:
+  // vptestmw is AVX512BW, which vpermw above already needs.
+  __mmask32 mask0 = _mm512_test_epi16_mask(x0, abs_mask);
+  __mmask32 mask1 = _mm512_test_epi16_mask(x1, abs_mask);
 
-  // emulate bf16 mul with scale factor
-  x0 = _mm512_add_epi16(x0, s0);
-  x1 = _mm512_add_epi16(x1, s1);
-
-  // blend with zero
-  x0 = _mm512_mask_blend_epi16(mask0, x0, zero);
-  x1 = _mm512_mask_blend_epi16(mask1, x1, zero);
+  x0 = _mm512_maskz_add_epi16(mask0, x0, s0);
+  x1 = _mm512_maskz_add_epi16(mask1, x1, s1);
 
   return std::make_tuple(__m512bh(x0), __m512bh(x1));
 }
@@ -607,6 +612,15 @@ inline __attribute__((always_inline)) __m512 _mm512_rcp14_sigmoid_glu_ps(__m512 
   return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(xa));
 }
 
+// gelu_tanh(x) = x * sigmoid(2z), z = sqrt(2/pi) * (x + 0.044715 * x^3)
+inline __attribute__((always_inline)) __m512 _mm512_rcp14_gelu_tanh_ps(__m512 x) {
+  const __m512 c0 = _mm512_set1_ps(1.5957691216057308f);   // 2 * sqrt(2/pi)
+  const __m512 c1 = _mm512_set1_ps(0.07135481627260025f);  // 2 * sqrt(2/pi) * 0.044715
+  __m512 x2 = _mm512_mul_ps(x, x);
+  __m512 z2 = _mm512_fmadd_ps(_mm512_mul_ps(c1, x2), x, _mm512_mul_ps(c0, x));  // c0*x + c1*x^3
+  return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(z2));
+}
+
 #endif
 
 inline at::vec::Vectorized<float> fast_sigmoid(const at::vec::Vectorized<float>& x) {
@@ -623,6 +637,26 @@ inline at::vec::Vectorized<float> fast_silu(const at::vec::Vectorized<float>& x)
   return at::vec::Vectorized<float>(_mm512_rcp14_silu_ps(x));
 #else
   return x * fast_sigmoid(x);
+#endif
+}
+
+// exact (erf) gelu, matching torch.nn.functional.gelu(approximate="none")
+inline at::vec::Vectorized<float> fast_gelu(const at::vec::Vectorized<float>& x) {
+  const auto half = at::vec::Vectorized<float>(0.5f);
+  const auto one = at::vec::Vectorized<float>(1.f);
+  const auto inv_sqrt2 = at::vec::Vectorized<float>(0.70710678118654752440f);
+  return half * x * (one + (x * inv_sqrt2).erf());
+}
+
+// tanh-approx gelu: x * sigmoid(2z), z = sqrt(2/pi) * (x + 0.044715 * x^3)
+inline at::vec::Vectorized<float> fast_gelu_tanh(const at::vec::Vectorized<float>& x) {
+#if defined(CPU_CAPABILITY_AVX512)
+  return at::vec::Vectorized<float>(_mm512_rcp14_gelu_tanh_ps(x));
+#else
+  const auto c0 = at::vec::Vectorized<float>(1.5957691216057308f);   // 2 * sqrt(2/pi)
+  const auto c1 = at::vec::Vectorized<float>(0.07135481627260025f);  // 2 * sqrt(2/pi) * 0.044715
+  const auto z2 = c0 * x + c1 * x * x * x;
+  return x * fast_sigmoid(z2);
 #endif
 }
 

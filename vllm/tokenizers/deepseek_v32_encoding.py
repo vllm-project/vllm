@@ -172,7 +172,7 @@ def render_message(
                 schema=to_json(response_format)
             )
 
-        content_developer += "\n\n# The user's message is: {}".format(content)
+        content_developer += f"\n\n# The user's message is: {content}"
 
         prompt += user_msg_template.format(content=content_developer)
         if index == last_user_idx and thinking_mode == "thinking":
@@ -258,7 +258,7 @@ def render_message(
                 tool_calls=tool_calls_content,
             )
     else:
-        raise NotImplementedError(f"Unknown role: {role}")
+        raise ValueError(f"Invalid role: {role}")
 
     return prompt
 

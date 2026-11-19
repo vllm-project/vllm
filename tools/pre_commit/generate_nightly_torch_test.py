@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generates specialized requirements files for nightly PyTorch testing.
+"""Generates specialized requirements files for nightly PyTorch testing.
 
 This script reads the main test requirements input file (`requirements/test/cuda.in`)
 and splits its content into two files:

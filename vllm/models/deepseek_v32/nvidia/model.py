@@ -8,15 +8,18 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fused_embed_norm import (
+    fused_embed_norm,
+    has_full_vocab_on_rank,
+    make_input_embedding,
+)
 from vllm.model_executor.layers.fused_moe import (
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -25,18 +28,19 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
-    get_pp_missing_layer_names,
+    copy_pp_buffers,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
@@ -44,6 +48,10 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
@@ -55,6 +63,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__()
 
@@ -68,16 +77,14 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
         )
 
         if (
@@ -93,7 +100,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=False,
+                routed_scale_mode=RoutedScaleMode.ROUTER,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -116,13 +123,22 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        attn_in: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
+        use_sequence_parallel = (
+            self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
+        )
 
         if residual is None:
+            # First layer: hidden_states is the embedding (the residual).
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        elif self.use_sequence_parallel:
+            # ``attn_in`` is input_layernorm(embedding) already computed fused
+            # with the embedding gather; otherwise apply it here.
+            hidden_states = (
+                attn_in if attn_in is not None else self.input_layernorm(hidden_states)
+            )
+        elif use_sequence_parallel:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         else:
             # The previous layer's MLP/MoE output is left un-reduced; fuse its
@@ -130,12 +146,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
@@ -145,7 +158,12 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_states, residual, self.post_attention_layernorm
             )
 
-        if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
+        if use_sequence_parallel and not self.use_sequence_parallel:
+            # These MLP/expert weights retain their existing TP/EP layout.
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = sp_reduce_scatter(hidden_states)
+        elif self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
         else:
             hidden_states = self.mlp(hidden_states)
@@ -167,46 +185,70 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
-        topk_indices_buffer = torch.empty(
+        # On the model, not a local: the MTP proposer shares it with the draft.
+        self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
             device=self.device,
         )
+        index_group_builder = SparseMLAIndexGroupBuilder(
+            self.topk_indices_buffer,
+            get_sparse_mla_index_group_max_rows(vllm_config),
+        )
 
         if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
+            self.embed_tokens = make_input_embedding(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
+                tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        # The fused embed+norm gather needs the full table on-rank.
+        self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV32DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
+                topk_indices_buffer=self.topk_indices_buffer,
+                index_group_builder=index_group_builder,
             ),
             prefix=f"{prefix}.layers",
+        )
+        speculative_config = vllm_config.speculative_config
+        # Preserve LoRA's global row mapping and auxiliary-state layouts.
+        self.shardq_sequence_parallel = (
+            parallel_config.pipeline_parallel_size == 1
+            and vllm_config.lora_config is None
+            and (
+                speculative_config is None
+                or not speculative_config.uses_aux_hidden_states
+            )
+            and not envs.VLLM_BATCH_INVARIANT
+            and all(layer.self_attn.use_shardq for layer in self.layers)
+        )
+        self.shardq_min_tokens = (
+            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
         )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, range(config.num_hidden_layers)
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size, self.pp_buffers
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -222,27 +264,51 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        full_num_tokens = positions.shape[0]
+        use_sequence_parallel = self.use_sequence_parallel or (
+            self.shardq_sequence_parallel
+            and is_sequence_parallel_active(
+                True, full_num_tokens, self.shardq_min_tokens
+            )
+        )
+        attn_in = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif self.replicated_embed:
+                assert input_ids is not None
+                # Full table on-rank: gather the embedding and the first layer's
+                # input_layernorm in one launch. ``attn_in`` is the pre-normed
+                # attention input; ``hidden_states`` is the (residual) embedding.
+                hidden_states, attn_in = fused_embed_norm(
+                    input_ids,
+                    self.embed_tokens.weight,
+                    chain_weight=self.layers[self.start_layer].input_layernorm.weight,
+                    eps=self.config.rms_norm_eps,
+                )
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
+        residual = None
 
-        full_num_tokens = positions.shape[0]
-        if self.use_sequence_parallel:
-            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        if use_sequence_parallel:
+            if (
+                self.use_sequence_parallel
+                and envs.VLLM_MOE_SKIP_PADDING
+                and is_forward_context_available()
+            ):
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding, hidden_states
                 )
             hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Currently, SP is not supported with PP"
+            if attn_in is not None:
+                attn_in = sp_shard(attn_in)
 
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -253,17 +319,26 @@ class DeepseekV32Model(torch.nn.Module):
                 aux_hidden_states.append(
                     hidden_states if residual is None else hidden_states + residual
                 )
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(positions, hidden_states, residual, attn_in)
+            attn_in = None
 
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
+            # PP send/recv needs full-token, TP-replicated tensors.
+            if self.use_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states + residual)
+                hidden_states = hidden_states[:full_num_tokens]
+            else:
+                hidden_states = residual + tensor_model_parallel_all_reduce(
+                    hidden_states
+                )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    **{k: v[:full_num_tokens] for k, v in self.pp_buffers.items()},
+                }
             )
 
-        if self.use_sequence_parallel:
+        if use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -286,15 +361,13 @@ class DeepseekV32Model(torch.nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
-        # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
+        # DSA-only: MLA (fused_qkv_a_proj) + routed experts. No MHA (qkv_proj)
+        # or ROCm shared-expert-fusion paths.
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            ("wk_weights_proj", "wk", 0),
-            ("wk_weights_proj", "weights_proj", 1),
         ]
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -305,24 +378,13 @@ class DeepseekV32Model(torch.nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
-                continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

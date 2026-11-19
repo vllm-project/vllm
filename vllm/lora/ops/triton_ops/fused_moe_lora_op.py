@@ -13,7 +13,7 @@ from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
-from .utils import supports_pdl, supports_tma
+from .utils import FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS, supports_pdl, supports_tma
 
 
 @triton.jit
@@ -25,7 +25,7 @@ def _get_lora_id(
     top_k_num,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns lora_id"""
+    """Returns lora_id."""
     if naive_block_assignment:
         token_idx = pid_m // top_k_num
         return tl.load(token_lora_mapping_ptr + token_idx)
@@ -42,7 +42,7 @@ def _get_expert_id(
     max_loras,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns expert_id"""
+    """Returns expert_id."""
     if naive_block_assignment:
         return tl.load(expert_ids_ptr + pid_m)
     else:
@@ -62,7 +62,7 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets"""
+    """Returns token offsets."""
     if naive_block_assignment:
         return tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
@@ -106,14 +106,18 @@ def _get_c_ptrs(
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
+# The one-shot kernel keeps the rank-dimension intermediate in registers.
+# Larger ranks require rank tiling, so route them through the two-kernel path.
+_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK = 128
+
 
 # ---------------------------------------------------------------------------
 # Fully-fused MoE-LoRA kernel (one-shot): shrink + expand combined into a single
 # launch with the rank-dim intermediate kept in registers. Used by the fast
-# path of `_fused_moe_lora` for `fully_sharded=False`. The legacy two-kernel
-# path (`_fused_moe_lora_kernel` above) is retained for `fully_sharded=True`
-# because that path needs to materialise the intermediate cache for an
-# all_reduce / all_gather between shrink and expand.
+# path of `_fused_moe_lora` for supported ranks with `fully_sharded=False`.
+# The legacy two-kernel path (`_fused_moe_lora_kernel` above) is retained for
+# larger ranks and for `fully_sharded=True`, where the intermediate cache must
+# be materialised for an all_reduce / all_gather between shrink and expand.
 # ---------------------------------------------------------------------------
 
 
@@ -132,6 +136,7 @@ def _fused_moe_lora_one_shot_kernel(
     token_lora_mapping_ptr,
     lora_ids_ptr,
     adapter_enabled_ptr,
+    row_map_ptr,
     # ---- dims ----
     N,
     K,
@@ -167,6 +172,7 @@ def _fused_moe_lora_one_shot_kernel(
     BLOCK_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
+    HAS_ROW_MAP: tl.constexpr,
 ):
     pid_full = tl.program_id(axis=0)
     pid_m = pid_full // NPID_FACTOR
@@ -217,6 +223,24 @@ def _fused_moe_lora_one_shot_kernel(
             other=num_valid_tokens,
         )
     token_mask = offs_token < num_valid_tokens
+    if HAS_ROW_MAP:
+        offs_out_row = tl.load(row_map_ptr + offs_token, mask=token_mask, other=-1).to(
+            tl.int64
+        )
+        token_mask = token_mask & (offs_out_row >= 0)
+        offs_x_row = (
+            offs_out_row if MUL_ROUTED_WEIGHT else offs_token // token_mapping_factor
+        )
+    else:
+        offs_out_row = offs_token
+        offs_x_row = offs_token // token_mapping_factor
+
+    # Loaded before the shrink loop: on XPU (Triton 3.8), loading it after
+    # the loop reads zeros when the output rows are offs_token.
+    if MUL_ROUTED_WEIGHT:
+        moe_w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0).to(
+            tl.float32
+        )
 
     # N range owned by this program. Splitting [0, N) into NPID_FACTOR
     # contiguous outer blocks lets us scale parallelism for small batches.
@@ -243,7 +267,6 @@ def _fused_moe_lora_one_shot_kernel(
     safe_offs_r = tl.where(rank_mask, offs_r, 0)
     offs_k = tl.arange(0, BLOCK_K)
 
-    offs_x_row = offs_token // token_mapping_factor
     x_ptrs = x_ptr + offs_x_row[:, None] * stride_xm + offs_k[None, :] * stride_xk
     a_ptrs = A_base + offs_k[:, None] * stride_A_k + safe_offs_r[None, :] * stride_A_r
 
@@ -271,11 +294,6 @@ def _fused_moe_lora_one_shot_kernel(
     # this program's [n_lo, n_hi). The (offs_n < n_hi) mask is required
     # whenever BLOCK_N > n_per_outer to keep adjacent outer blocks from
     # writing into each other's columns.
-    if MUL_ROUTED_WEIGHT:
-        moe_w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0).to(
-            tl.float32
-        )
-
     out_slice_base = out_ptr + slice_id * slice_n_offset
 
     for n_start in range(n_lo, n_hi, BLOCK_N):
@@ -293,7 +311,7 @@ def _fused_moe_lora_one_shot_kernel(
 
         out_ptrs = (
             out_slice_base
-            + offs_token[:, None] * stride_om
+            + offs_out_row[:, None] * stride_om
             + offs_n[None, :] * stride_on
         )
         out_mask = token_mask[:, None] & n_mask[None, :]
@@ -322,6 +340,7 @@ def _run_fused_moe_lora_one_shot(
     mul_routed_weight: bool,
     block_size_m: int,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
     """Fast-path wrapper: launches one fused shrink+expand kernel.
 
@@ -349,8 +368,9 @@ def _run_fused_moe_lora_one_shot(
     # regressed across all M (+8 to +40%): the (64,32) fp32 accumulator +
     # widened B tile pushed register count past spill threshold, lowering
     # occupancy by more than the MMA gain saved.
-    assert rank <= 128, (
-        f"fused_moe_lora_one_shot supports max_lora_rank<=128; got rank={rank}"
+    assert rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK, (
+        "fused_moe_lora_one_shot supports "
+        f"max_lora_rank<={_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK}; got rank={rank}"
     )
     BLOCK_R = max(triton.next_power_of_2(rank), 16)
 
@@ -420,6 +440,10 @@ def _run_fused_moe_lora_one_shot(
         npid = min(npid_occ, max_npid_by_budget)
     npid = max(1, min(npid, max(1, N_per_slice // 128)))
 
+    # see issue: https://github.com/intel/intel-xpu-backend-for-triton/issues/8121
+    if current_platform.is_xpu():
+        npid = 1
+
     # Robust defaults across the prefill regime (H100/H200/B200, bf16/fp16).
     # NPID > 1 is the small-M / under-saturated path -- more warps help
     # amortise the inner-N expand loop. ns=3 instead of 4: GB200 ncu showed
@@ -470,6 +494,7 @@ def _run_fused_moe_lora_one_shot(
         token_lora_mapping,
         lora_ids,
         adapter_enabled,
+        row_map,
         N_per_slice,
         K,
         topk_weights.numel(),
@@ -500,6 +525,7 @@ def _run_fused_moe_lora_one_shot(
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         ADD_INPUTS=add_inputs,
+        HAS_ROW_MAP=row_map is not None,
         num_warps=nw,
         num_stages=ns,
     )
@@ -523,6 +549,7 @@ def _fused_moe_lora_small_batch_kernel(
     expert_ids_ptr,  # (num_tokens * top_k_num,)
     token_lora_mapping_ptr,  # (num_tokens,)
     adapter_enabled_ptr,
+    row_map_ptr,
     # ---- dims ----
     N,
     K,
@@ -563,6 +590,7 @@ def _fused_moe_lora_small_batch_kernel(
     BLOCK_K: tl.constexpr,
     NUM_SLICES: tl.constexpr,
     EVEN_K: tl.constexpr,
+    HAS_ROW_MAP: tl.constexpr,
 ):
     """Persistent fused MoE-LoRA kernel for naive_block_assignment inputs.
 
@@ -612,6 +640,13 @@ def _fused_moe_lora_small_batch_kernel(
         valid = valid & (enabled != 0)
         expert_id = tl.load(expert_ids_ptr + pair_idx)
         valid = valid & (expert_id >= 0)
+        if HAS_ROW_MAP:
+            out_row = tl.load(row_map_ptr + pair_idx)
+            valid = valid & (out_row >= 0)
+            x_row = out_row if MUL_ROUTED_WEIGHT else pair_idx // token_mapping_factor
+        else:
+            out_row = pair_idx
+            x_row = pair_idx // token_mapping_factor
 
         if valid:
             cur_A_ptr = tl.load(A_ptrs + slice_id).to(
@@ -623,7 +658,6 @@ def _fused_moe_lora_small_batch_kernel(
             A_base = cur_A_ptr + lora_id * stride_A_lora + expert_id * stride_A_expert
             B_base = cur_B_ptr + lora_id * stride_B_lora + expert_id * stride_B_expert
 
-            x_row = pair_idx // token_mapping_factor
             x_row_ptr = x_ptr + x_row * stride_xm
 
             # SHRINK GEMV (once per program; reused across n_tiles_per_program
@@ -663,7 +697,7 @@ def _fused_moe_lora_small_batch_kernel(
             # tl.static_range) so a single compiled kernel handles every
             # chunk size — see the note on the kernel signature.
             n_tile_start = n_chunk_idx * n_tiles_per_program
-            out_row_ptr = out_ptr + slice_id * slice_n_offset + pair_idx * stride_om
+            out_row_ptr = out_ptr + slice_id * slice_n_offset + out_row * stride_om
 
             if MUL_ROUTED_WEIGHT:
                 moe_w = tl.load(topk_weights_ptr + pair_idx).to(tl.float32)
@@ -731,6 +765,7 @@ def _run_fused_moe_lora_small_batch(
     adapter_enabled: torch.Tensor,
     mul_routed_weight: bool,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
     """Small-batch GEMV-style wrapper. Naive-block-assignment inputs only.
 
@@ -817,6 +852,7 @@ def _run_fused_moe_lora_small_batch(
         expert_ids_flat,
         token_lora_mapping,
         adapter_enabled,
+        row_map,
         N_per_slice,
         K,
         top_k_num,
@@ -846,14 +882,14 @@ def _run_fused_moe_lora_small_batch(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         NUM_SLICES=num_slices,
+        HAS_ROW_MAP=row_map is not None,
         num_warps=nw,
         num_stages=ns,
     )
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_LORA_PTR_DICT` collects the required information during `profile_run`,
+    """`_LORA_PTR_DICT` collects the required information during `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
@@ -877,9 +913,7 @@ def _adjust_kernel_inputs(
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
-    """
-    helper function to adjust kernel inputs when sorted_token_ids is None
-    """
+    """Helper function to adjust kernel inputs when sorted_token_ids is None."""
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0
@@ -912,6 +946,7 @@ def _fused_moe_lora_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     token_lora_mapping_ptr,
+    row_map_ptr,
     # Matrix dimensions
     N,
     K,
@@ -957,6 +992,7 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
+    FP32_ADD_INPUTS: tl.constexpr,
     USE_TMA: tl.constexpr,
     # sort_c determines whether tokens are stored in C in the order determined
     # by sorted_token_ids to enable later TMA loads from this tensor.
@@ -969,6 +1005,10 @@ def _fused_moe_lora_kernel(
     #   yes     | no      | False  | expand kernel (num_slices>1)
     #   no      | no      | True   | shrink kernel (num_slices>1)
     sort_c: tl.constexpr,
+    # Remap A / C rows from flat (token, topk) pairs through row_map_ptr;
+    # pairs mapped to a negative row are skipped.
+    REMAP_A: tl.constexpr = False,
+    REMAP_C: tl.constexpr = False,
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
@@ -1044,6 +1084,13 @@ def _fused_moe_lora_kernel(
 
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     token_mask = offs_token < num_valid_tokens
+    if REMAP_A or REMAP_C:
+        offs_row = tl.load(row_map_ptr + offs_token, mask=token_mask, other=-1).to(
+            tl.int64
+        )
+        token_mask = token_mask & (offs_row >= 0)
+    offs_a_row = offs_row if REMAP_A else offs_token // token_mapping_factor
+    offs_c_row = offs_row if REMAP_C else offs_token
 
     if USE_TMA and a_desc is not None:
         # Expand path - with TMA enabled, load from A using TMA descriptor
@@ -1058,8 +1105,7 @@ def _fused_moe_lora_kernel(
         # 'sorted_token_ids_ptr' then store them in c_ptr in this same sorted order
         tl.static_assert(a_desc is None, "a_desc must be none")
         a_ptrs = cur_a_ptr + (
-            offs_token[:, None] // token_mapping_factor * stride_am
-            + offs_k[None, :] * stride_ak
+            offs_a_row[:, None] * stride_am + offs_k[None, :] * stride_ak
         )
 
     if USE_TMA:
@@ -1125,16 +1171,19 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
-        # compiler may infer different types for a and b when merging
-        # if/else branches (TMA desc path returns fp32, tl.load returns
-        # the pointer's element type).
-        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
+        # Cast operands to the input dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging if/else
+        # branches (TMA desc path returns fp32, tl.load returns the pointer's
+        # element type). Casting to bfloat16 here silently changes fp16 LoRA
+        # operands and can produce incorrect results.
+        dot_dtype = a_ptr.dtype.element_ty
+        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+    if not FP32_ADD_INPUTS:
+        accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = _get_c_ptrs(
@@ -1142,7 +1191,7 @@ def _fused_moe_lora_kernel(
         lora_id,
         pid_m,
         offs,
-        offs_token,
+        offs_c_row,
         offs_cn,
         stride_cm,
         stride_cn,
@@ -1155,6 +1204,8 @@ def _fused_moe_lora_kernel(
     if SPLIT_K == 1:
         if ADD_INPUTS:
             prev = tl.load(c_ptrs, mask=c_mask, other=0.0)
+            if FP32_ADD_INPUTS:
+                prev = prev.to(tl.float32)
             tl.store(c_ptrs, prev + accumulator, mask=c_mask)
         else:
             tl.store(c_ptrs, accumulator, mask=c_mask)
@@ -1198,7 +1249,9 @@ def _fused_moe_lora_shrink(
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     use_tma: bool = False,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    assert row_map is None or not use_tma
     w1_lora_a_stacked = lora_a_stacked[0]
     shrink_config = {
         "BLOCK_SIZE_M": block_size_m,
@@ -1210,6 +1263,7 @@ def _fused_moe_lora_shrink(
         "SPLIT_K": split_k,
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "FP32_ADD_INPUTS": False,
         "USE_TMA": use_tma,
     }
 
@@ -1218,6 +1272,8 @@ def _fused_moe_lora_shrink(
     grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
         num_active_loras, sorted_token_ids, expert_ids
     )
+    if grid_lora_dim == 0:
+        return
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -1229,7 +1285,9 @@ def _fused_moe_lora_shrink(
     a_desc = None
     b_desc = None
     if use_tma and num_slices == 1:
-        b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        b_desc = TensorDescriptor.from_tensor(
             lora_a_stacked[0],
             [1, 1, shrink_config["BLOCK_SIZE_N"], shrink_config["BLOCK_SIZE_K"]],
         )
@@ -1245,6 +1303,7 @@ def _fused_moe_lora_shrink(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        row_map,
         N,
         K,
         EM,
@@ -1275,6 +1334,7 @@ def _fused_moe_lora_shrink(
         USE_B_L2_CACHE=True,
         sort_c=use_tma and sorted_token_ids is not None,
         IS_PRIMARY=True,
+        REMAP_A=row_map is not None and mul_routed_weight,
         **shrink_config,
     )
 
@@ -1317,7 +1377,10 @@ def _fused_moe_lora_expand(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    assert row_map is None or not use_tma
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
     N = w1_output_dim_size
@@ -1338,12 +1401,15 @@ def _fused_moe_lora_expand(
         "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
+        "FP32_ADD_INPUTS": device.type == "xpu",
         "USE_TMA": use_tma,
     }
 
     grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
         num_active_loras, sorted_token_ids, expert_ids
     )
+    if grid_lora_dim == 0:
+        return
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -1357,13 +1423,15 @@ def _fused_moe_lora_expand(
     a_desc = None
     b_desc = None
     if use_tma:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
         if sorted_token_ids is not None:
-            a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            a_desc = TensorDescriptor.from_tensor(
                 a_intermediate_cache1,
                 [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
             )
         if num_slices == 1:
-            b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            b_desc = TensorDescriptor.from_tensor(
                 lora_b_stacked[0],
                 [1, 1, expand_config["BLOCK_SIZE_N"], expand_config["BLOCK_SIZE_K"]],
             )
@@ -1381,6 +1449,7 @@ def _fused_moe_lora_expand(
         expert_ids,
         num_tokens_post_padded,
         token_lora_mapping,
+        row_map,
         N,
         K,
         EM,
@@ -1407,10 +1476,11 @@ def _fused_moe_lora_expand(
         token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        ADD_INPUTS=True,
+        ADD_INPUTS=add_inputs,
         USE_B_L2_CACHE=True,
         sort_c=False,
         IS_PRIMARY=False,
+        REMAP_C=row_map is not None,
         **expand_config,
     )
 
@@ -1453,7 +1523,15 @@ def _fused_moe_lora(
     fully_sharded: bool = False,
     offset: int = 0,
     add_inputs: bool = True,
+    row_map: torch.Tensor | None = None,
 ) -> None:
+    """Adds the MoE LoRA delta of each (token, topk) pair to `output`.
+
+    If `row_map` is given, `output` (and `qcurr_hidden_states` when it holds
+    one row per pair, i.e. `mul_routed_weight=True`) are indexed by
+    `row_map[token * top_k_num + k]` instead of the pair index, and pairs
+    mapped to a negative row are skipped.
+    """
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert topk_weights.dim() == qcurr_hidden_states.dim() == 2
     if sorted_token_ids is None:
@@ -1477,7 +1555,11 @@ def _fused_moe_lora(
     assert top_k_num == topk_weights.shape[1]
 
     # Fast path: single fused kernel
-    if not fully_sharded:
+    if (
+        not fully_sharded
+        and max_lora_rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK
+        and topk_weights.shape[0] > FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
+    ):
         M_pairs = topk_weights.numel()
         if (
             sorted_token_ids is None
@@ -1496,6 +1578,7 @@ def _fused_moe_lora(
                 adapter_enabled,
                 mul_routed_weight,
                 add_inputs=add_inputs,
+                row_map=row_map,
             )
             return
         # shrink/expand BLOCK_SIZE_M must match the block_size that
@@ -1520,12 +1603,12 @@ def _fused_moe_lora(
             mul_routed_weight,
             shrink_block_size_m,
             add_inputs=add_inputs,
+            row_map=row_map,
         )
         return
 
-    assert add_inputs, (
-        "fused_moe_lora(add_inputs=False) is only supported on the "
-        "fully_sharded=False fast path"
+    assert add_inputs or not fully_sharded, (
+        "fused_moe_lora(add_inputs=False) is not supported with fully_sharded=True"
     )
 
     device = qcurr_hidden_states.device
@@ -1546,7 +1629,12 @@ def _fused_moe_lora(
 
     # TMA is not currently compatiple with fully_sharded due to the non-determinism
     # of token id sorting across ranks.
-    use_tma = supports_tma(device) and not fully_sharded
+    use_tma = (
+        supports_tma(device)
+        and not fully_sharded
+        and max_lora_rank * output.element_size() % 16 == 0
+        and row_map is None
+    )
 
     intermediate_cache_shape = (
         num_slices,
@@ -1609,6 +1697,7 @@ def _fused_moe_lora(
         mul_routed_weight,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        row_map=row_map,
     )
 
     if fully_sharded:
@@ -1659,117 +1748,9 @@ def _fused_moe_lora(
         offset,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        add_inputs=add_inputs,
+        row_map=row_map,
     )
-
-
-def _fused_moe_lora_fake(
-    output: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    max_lora_rank: int,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    adapter_enabled: torch.Tensor,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
-    mul_routed_weight: bool = False,
-    fully_sharded: bool = False,
-    offset: int = 0,
-    add_inputs: bool = True,
-) -> None:
-    return
-
-
-def _fused_moe_lora_shrink_fake(
-    a_intermediate_cache1: torch.Tensor,
-    qcurr_hidden_states: torch.Tensor,
-    lora_a_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
-
-
-def _fused_moe_lora_expand_fake(
-    output: torch.Tensor,
-    a_intermediate_cache1: torch.Tensor,
-    lora_b_stacked: list[torch.Tensor],
-    topk_weights: torch.Tensor,
-    sorted_token_ids: torch.Tensor | None,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor | None,
-    token_lora_mapping: torch.Tensor,
-    top_k_num: int,
-    lora_ids: torch.Tensor,
-    adapter_enabled: torch.Tensor,
-    device: torch.device,
-    N: int,
-    M: int,
-    EM: int,
-    K: int,
-    num_tokens: int,
-    num_experts: int,
-    num_slices: int,
-    max_lora_rank: int,
-    w1_output_dim_size: int,
-    block_size_m: int,
-    block_size_n: int,
-    block_size_k: int,
-    group_size_m: int,
-    num_warps: int,
-    num_stages: int,
-    split_k: int,
-    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
-    mul_routed_weight: bool = False,
-    offset: int = 0,
-    use_gdc: bool = False,
-    use_tma: bool = False,
-) -> None:
-    return
 
 
 try:
@@ -1777,21 +1758,18 @@ try:
         op_name="fused_moe_lora",
         op_func=_fused_moe_lora,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_shrink",
         op_func=_fused_moe_lora_shrink,
         mutates_args=["a_intermediate_cache1"],
-        fake_impl=_fused_moe_lora_shrink_fake,
     )
 
     direct_register_custom_op(
         op_name="fused_moe_lora_expand",
         op_func=_fused_moe_lora_expand,
         mutates_args=["output"],
-        fake_impl=_fused_moe_lora_expand_fake,
     )
 
     fused_moe_lora = torch.ops.vllm.fused_moe_lora

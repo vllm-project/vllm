@@ -216,21 +216,6 @@ DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
 }
 
-template <int ngpus>
-DINLINE void barrier_at_start_release(const RankSignals& sg, Signal* self_sg,
-                                      int rank) {
-  __syncthreads();
-  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
-  if (threadIdx.x < ngpus) {
-    auto peer_counter_ptr = &sg.signals[threadIdx.x]->start[blockIdx.x][rank];
-    auto self_counter_ptr = &self_sg->start[blockIdx.x][threadIdx.x];
-    st_flag_release(peer_counter_ptr, flag);
-    while (ld_flag_acquire(self_counter_ptr) != flag);
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
-}
-
 // This function is meant to be used as the second or the final
 // synchronization barrier in the all reduce kernel. If it's the final
 // synchronization barrier, we don't need to make any visibility guarantees
@@ -276,22 +261,6 @@ DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
   }
   __syncthreads();
   // use one thread to update flag
-  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
-}
-
-template <int ngpus>
-DINLINE void barrier_at_start_release(const RankSignals& sg, Signal* self_sg,
-                                      int rank) {
-  __syncthreads();
-  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
-  if (threadIdx.x < ngpus) {
-    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank],
-                            flag, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
-    while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
-                                  __ATOMIC_ACQUIRE,
-                                  __MEMORY_SCOPE_DEVICE) < flag);
-  }
-  __syncthreads();
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
 }
 

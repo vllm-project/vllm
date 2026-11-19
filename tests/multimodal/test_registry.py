@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for MultiModalRegistry.supports_multimodal_inputs and
+"""Unit tests for MultiModalRegistry.supports_multimodal_inputs and
 Qwen2.5-VL visual component loading behavior.
 """
 
@@ -9,31 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from ..models.utils import build_model_context
+from vllm.multimodal.encoder_budget import MultiModalBudget
 
 pytestmark = pytest.mark.cpu_test
-
-
-@pytest.mark.parametrize(
-    "model_id,limit_mm_per_prompt,expected",
-    [
-        ("Qwen/Qwen2-0.5B-Instruct", {}, False),
-        ("Qwen/Qwen2.5-VL-3B-Instruct", {}, True),
-        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0, "video": 0}, False),
-        ("Qwen/Qwen2.5-VL-3B-Instruct", {"image": 0}, True),
-    ],
-)
-@pytest.mark.core_model
-def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
-    """Test supports_multimodal_inputs returns correct boolean for various
-    configs."""
-    ctx = build_model_context(
-        model_id,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-    )
-    assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
 
 
 def test_create_processor_error_uses_served_model_name():
@@ -48,3 +27,18 @@ def test_create_processor_error_uses_served_model_name():
         match="friendly-model-name is not a multimodal model",
     ):
         MULTIMODAL_REGISTRY.create_processor(model_config)
+
+
+def test_encoder_budget_excludes_modality_with_embeds_disabled():
+    def encoder_cache_size(video_limit):
+        model_config = ModelConfig(
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            limit_mm_per_prompt={"image": 0, "video": video_limit},
+            enable_mm_embeds=True,
+        )
+        vllm_config = VllmConfig(model_config=model_config)
+        return MultiModalBudget(vllm_config, MULTIMODAL_REGISTRY).encoder_cache_size
+
+    image_only = encoder_cache_size({"count": 0, "allow_embeds": False})
+
+    assert image_only < encoder_cache_size(0)

@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -15,14 +15,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .step3p5 import Step3p5DecoderLayer
-from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
+from .utils import (
+    get_draft_quant_config,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -30,7 +31,7 @@ logger = init_logger(__name__)
 class SharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -152,8 +153,19 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 
 
 class Step3p5MTP(nn.Module):
+    # Each MTP layer's shared_head carries its own LM head weights.
+    has_own_lm_head = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        # The target config may be a multimodal wrapper (Step3.7); build the
+        # draft from its own text and quant configs.
+        assert vllm_config.speculative_config is not None
+        draft_quant_config = get_draft_quant_config(vllm_config)
+        vllm_config = vllm_config.with_hf_config(
+            vllm_config.speculative_config.draft_model_config.hf_config
+        )
+        vllm_config.quant_config = draft_quant_config
         self.config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model = Step3p5AMultiTokenPredictor(
@@ -284,30 +296,10 @@ class Step3p5MTP(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        params_need_to_load = set(params_dict.keys())
-        # Some KV cache scales are optional: checkpoints may omit them and vLLM
-        # will fall back to default scales during initialization.
-        optional_params = {
-            name
-            for name, param in params_dict.items()
-            if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale"))
-            and getattr(param, "numel", lambda: 0)() == 1
-            and getattr(param, "requires_grad", False) is False
-        }
-        params_need_to_load -= optional_params
-        if params_need_to_load != loaded_params and is_mtp_completeness_check_enabled():
-            missing_params = list(params_need_to_load - loaded_params)
-            param_name_example = missing_params[0]
-            raise RuntimeError(
-                "Some parameters like "
-                f"{param_name_example} are not in the checkpoint and will falsely "
-                "use random initialization"
-            )
         return loaded_params
 
-    def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+    def _rewrite_spec_layer_name(self, spec_layer: int | None, name: str) -> str:
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
@@ -324,6 +316,7 @@ class Step3p5MTP(nn.Module):
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
+            assert spec_layer is not None
             name = name.replace(
                 f"model.layers.{spec_layer}.", f"model.layers.{spec_layer}.mtp_block."
             )
