@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import replace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +18,7 @@ from vllm.entrypoints.anthropic.api_router import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.common.cli_args import BaseFrontendArgs
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.serve.exception_handling.register import (
@@ -32,6 +34,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TokensPrompt
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import (
     apply_max_tokenize_tokens,
@@ -281,3 +284,20 @@ def test_blank_env_var_startup_and_cli_precedence(
         assert args.max_tokenize_tokens == 7
     finally:
         envs.disable_envs_cache()
+
+
+@pytest.mark.asyncio
+async def test_harmony_chat_without_tok_params_does_not_truncate():
+    online_renderer = _build_harmony_online_renderer()
+    request = ChatCompletionRequest(
+        model="gpt-oss",
+        messages=[{"role": "user", "content": "Hello world, testing harmony chat."}],
+        truncate_prompt_tokens=3,
+    )
+
+    _, engine_inputs = await online_renderer.render_chat(request)
+    assert len(engine_inputs) == 1
+    engine_input = cast(TokensPrompt, engine_inputs[0])
+    # Ordinary chat rendering (tok_params=None) must preserve all encoded tokens
+    # rather than truncating to 3 tokens.
+    assert len(engine_input["prompt_token_ids"]) > 3

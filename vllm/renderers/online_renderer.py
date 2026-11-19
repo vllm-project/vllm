@@ -613,14 +613,13 @@ class OnlineRenderer:
         messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
-        if tok_params is None:
-            tok_params = request.build_tok_params(self.model_config)
 
         prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
-        tok_params.apply_post_tokenization(
-            self.renderer.tokenizer,
-            prompt,
-        )
+        if tok_params is not None:
+            tok_params.apply_post_tokenization(
+                self.renderer.tokenizer,
+                prompt,
+            )
         engine_input = tokens_input(
             prompt["prompt_token_ids"], cache_salt=request.cache_salt
         )
