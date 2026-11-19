@@ -69,7 +69,7 @@ def test_rocm_fp8_mqa_logits_uses_aiter_dispatch_on_cdna4(monkeypatch):
         raise AssertionError("CDNA4 must not probe the Triton module")
 
     fake_aiter_module = ModuleType("aiter.mqa_logits")
-    fake_aiter_module.mqa_logits = fake_mqa_logits
+    fake_aiter_module.mqa_logits = fake_mqa_logits  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "aiter.mqa_logits", fake_aiter_module)
     monkeypatch.setattr(sparse_mod, "_ON_GFX942", False)
     monkeypatch.setattr(sparse_mod, "get_cdna_version", lambda: 4)
