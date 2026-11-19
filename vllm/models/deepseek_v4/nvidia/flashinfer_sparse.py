@@ -59,7 +59,7 @@ def get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 
 
 def packed_block_span(pool: torch.Tensor) -> int:
-    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
+    """Per-block stride of `pool` in tokens (`stride(0)//stride(-2)`): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
     token-aligned."""
     block_stride = pool.stride(0)
@@ -103,7 +103,7 @@ def required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
+    Inherits the base and backend reuses its`DeepseekV4SparseMLAMetadataBuilder`
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -351,8 +351,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
 
-        Returns ``(compressed_kv_cache, seq_lens, sparse_indices,
-        sparse_topk_lens)``, sized ``num_rows`` (default: the real tokens).
+        Returns `(compressed_kv_cache, seq_lens, sparse_indices,
+        sparse_topk_lens)`, sized `num_rows` (default: the real tokens).
         """
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills

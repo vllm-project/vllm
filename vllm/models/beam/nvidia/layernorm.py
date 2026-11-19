@@ -158,7 +158,7 @@ def beam_norm_residual_norm(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Fuse post-norm, scaled residual add and next pre-norm, keeping each cast.
 
-    Returns the new residual and, when ``next_weight`` is given, its
+    Returns the new residual and, when `next_weight` is given, its
     normalization for the next sublayer.
     """
     assert x.ndim == residual.ndim == 2 and x.shape == residual.shape

@@ -171,9 +171,15 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_num_image_tokens(
-        self, *, image_width: int, image_height: int, cropping: bool = True
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        cropping: bool = True,
+        hf_processor=None,
     ) -> int:
-        hf_processor = self.get_hf_processor()
+        if hf_processor is None:
+            hf_processor = self.get_hf_processor()
         image_size = hf_processor.image_size
         patch_size = hf_processor.patch_size
         downsample_ratio = hf_processor.downsample_ratio
@@ -296,6 +302,7 @@ class DeepseekVL2MultiModalProcessor(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     cropping=len(images) <= 2,
+                    hf_processor=hf_processor,
                 )
             return [image_token_id] * num_image_tokens
 
@@ -745,6 +752,13 @@ class DeepseekVLV2ForCausalLM(
         features = self.vision.forward_features(pixel_values)
         return self.projector(features)
 
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return self.encoder_cudagraph_forward(
+            {"pixel_values": mm_kwargs["pixel_values"]}, path=path
+        )
+
     def postprocess_encoder_output(
         self,
         outputs: dict[str, torch.Tensor],
@@ -756,9 +770,9 @@ class DeepseekVLV2ForCausalLM(
     ) -> None:
         """Assemble per-image embeddings from raw per-tile projector output.
 
-        ``outputs["default"]`` has shape ``[N_tiles_captured, hw, n_embed]``.
+        `outputs["default"]` has shape `[N_tiles_captured, hw, n_embed]`.
         This method re-applies newlines and the view-separator that the
-        eager ``_pixel_values_to_embedding`` path inserts in-line.
+        eager `_pixel_values_to_embedding` path inserts in-line.
         """
         assert batch_mm_kwargs is not None
         output = outputs["default"]

@@ -139,9 +139,9 @@ def fused_post_expert_finalize(
     expert_map: torch.Tensor | None = None,
     permuted_idx: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``out[t] = sum_k tw[t, k] * norm(routed[t, k])`` written in ``out.dtype``.
+    """`out[t] = sum_k tw[t, k] * norm(routed[t, k])` written in `out.dtype`.
 
-    Routes with a negative ``expert_map`` entry or ``permuted_idx == -1`` were
+    Routes with a negative `expert_map` entry or `permuted_idx == -1` were
     never written and are masked before the read.
     """
     if expert_map is not None:

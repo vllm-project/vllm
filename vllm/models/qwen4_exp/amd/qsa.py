@@ -41,10 +41,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.ops import rocm_octave
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
 )
 from vllm.v1.worker.workspace import (
@@ -115,9 +115,9 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
-    """FullAttentionSpec backend used by the merged QSA owner.
+    """Full-attention backend used by the merged QSA owner.
 
-    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    With an Octave `kv_cache_dtype` the main K/V cache holds one packed
     Octave slot per (token, KV head) and sparse attention runs the Octave
     sparse decode kernel over the selected positions.
     """
@@ -435,11 +435,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
-        if self.dual_chunk_attention_config is not None:
-            raise NotImplementedError("Qwen4Exp QSA does not support dual-chunk RoPE")
         # Qwen4Exp full-attention checkpoints always pack a sigmoid output
         # gate next to Q, even when an inherited config default says otherwise.
         self.attn_output_gate = True
@@ -543,8 +538,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -552,6 +547,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _run_qsa(
         self,
