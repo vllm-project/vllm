@@ -1969,3 +1969,43 @@ def fake_vllm_ir(monkeypatch):
     yield
 
     del test_lib
+
+
+@pytest.fixture
+def gpu_model_runner_for_requests(dist_init, tmp_path):
+    """A real MRv2 runner with small request buffers, without loading weights."""
+    from transformers import OPTConfig
+
+    from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=32,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        vocab_size=32000,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), max_model_len=1024),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_num_seqs=10,
+            max_num_batched_tokens=64,
+            max_model_len=1024,
+        ),
+    )
+    device = torch.device("cuda", 0)
+    runner = GPUModelRunner(config, device)
+    runner.model_state = DefaultModelState(config, nn.Module(), None, device)
+    runner.block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=10,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[64],
+        device=device,
+    )
+    return runner
