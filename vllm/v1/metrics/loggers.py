@@ -963,7 +963,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         histogram_request_time_per_output_token = self._histogram_cls(
             name="vllm:request_time_per_output_token_seconds",
-            documentation="Histogram of time_per_output_token_seconds per request.",
+            documentation=(
+                "Histogram of time_per_output_token_seconds per request, "
+                "observed only for requests that generate more than one token."
+            ),
             buckets=inter_token_latency_buckets,
             labelnames=labelnames,
         )
@@ -1335,9 +1338,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens
             )
-            self.histogram_request_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
-            )
+            if finished_request.num_generation_tokens > 1:
+                self.histogram_request_time_per_output_token[engine_idx].observe(
+                    finished_request.mean_time_per_output_token
+                )
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param

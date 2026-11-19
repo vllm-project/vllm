@@ -12,6 +12,7 @@ import pytest
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -19,6 +20,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -331,3 +333,36 @@ def test_watermark_requests_counter_registration(with_config: bool):
         assert ("vllm:watermark_requests" in names) == with_config
     finally:
         unregister_vllm_metrics()
+
+
+def test_request_tpot_only_observes_requests_with_a_decode_interval():
+    """TPOT is undefined for requests that generate fewer than two tokens
+    (e.g. P/D prefill workers with max_tokens=1), so they must not add
+    zero samples to the histogram."""
+    stats = IterationStats()
+    stats.finished_requests = [
+        FinishedRequestStats(
+            finish_reason=FinishReason.LENGTH,
+            num_generation_tokens=n,
+            mean_time_per_output_token=tpot,
+        )
+        for n, tpot in [(0, 0.0), (1, 0.0), (2, 0.04), (5, 0.06)]
+    ]
+    try:
+        PrometheusStatLogger(build_logger_config(ObservabilityConfig())).record(
+            scheduler_stats=None, iteration_stats=stats
+        )
+        samples = {
+            sample.name: sample.value
+            for metric in prometheus_client.REGISTRY.collect()
+            for sample in metric.samples
+            if sample.name.startswith("vllm:request_time_per_output_token_seconds")
+            and sample.labels.get("le") in (None, "0.01")
+        }
+    finally:
+        unregister_vllm_metrics()
+
+    name = "vllm:request_time_per_output_token_seconds"
+    assert samples[f"{name}_count"] == 2
+    assert samples[f"{name}_sum"] == pytest.approx(0.1)
+    assert samples[f"{name}_bucket"] == 0
