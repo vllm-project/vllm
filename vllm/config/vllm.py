@@ -114,6 +114,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
+        "HYV4DFlyModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "Inkling2ForConditionalGeneration",
@@ -153,7 +154,14 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # kernel selection during graph capture.
         # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
         return (
-            frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+            frozenset(
+                {
+                    "DeepseekV41ForCausalLM",
+                    "HYV4ForCausalLM",
+                    "HYV4VLForConditionalGeneration",
+                    "HYV4MTPModel",
+                }
+            )
             | _QWEN3_5_ARCHITECTURES
         )
     if current_platform.is_cuda():
@@ -610,6 +618,30 @@ class VllmConfig:
             else None
         )
         return bool(mm_config and mm_config.mm_encoder_only)
+
+    @property
+    def gpu_iteration_timing(self) -> bool:
+        """Whether the output worker times logged iterations with CUDA events.
+        Otherwise they are logged without an elapsed time."""
+        # TODO: Drop this gate. Untimed iterations could be handled without the
+        # config knowing which frontend, executor and engine process are in use.
+        parallel_config = self.parallel_config
+        # With more API servers the frontend does not log iteration details.
+        frontend_logs = (
+            self.observability_config.enable_logging_iteration_details
+            and parallel_config._api_process_count == 1
+        )
+        # The worker ends a timed iteration in sample_tokens.
+        worker_returns_records = (
+            self.model_config is not None
+            and self.model_config.runner_type == "generate"
+            and not self.is_mm_encoder_only
+            and parallel_config.distributed_executor_backend in ("uni", "mp")
+            # Only EngineCoreProc publishes the records a dummy batch returns.
+            and envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        )
+        worker_times = self.device_config.device_type == "cuda"
+        return frontend_logs and worker_returns_records and worker_times
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -1542,7 +1574,7 @@ class VllmConfig:
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
-        self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+        self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
@@ -3507,6 +3539,24 @@ class VllmConfig:
                 "return_sampling_mask is set and the batch-sharded gather does "
                 "not forward sampling masks"
             )
+
+        if self.lora_config is not None:
+            target_modules = self.lora_config.target_modules
+            # Default targets include lm_head. Explicit targets may name it
+            # directly or with a module prefix (e.g. language_model.lm_head).
+            targets_lm_head = target_modules is None or any(
+                target == "lm_head" or target.endswith(".lm_head")
+                for target in target_modules
+            )
+            if targets_lm_head:
+                # compute_logits_local() skips the TP logits gather, and the
+                # lm_head LoRA delta can only be applied after that gather
+                # (LogitsProcessorWithLoRA raises on skip_gather).
+                blockers.append(
+                    "it does not yet work with LoRA when the lm_head is targeted, "
+                    "whose delta requires the TP logits gather that batch-sharded "
+                    "sampling skips"
+                )
 
         if blockers:
             raise ValueError(
