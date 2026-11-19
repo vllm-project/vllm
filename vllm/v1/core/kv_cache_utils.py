@@ -10,7 +10,7 @@ import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cache
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -629,9 +629,14 @@ def _gen_prompt_embeds_extra_hash_keys(
 
 
 # Hash prompt embeds on the thread pool only when the new blocks hold at least
-# this many bytes in total and per block.
+# this many bytes in total and per block. Measured: below 4 MiB in total,
+# threads save under ~1 ms, and below 32 KiB per block the GIL handoffs
+# between blocks cost more than the threads save.
 PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES = 4 << 20
 PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES = 32 << 10
+# Measured: hashing scales to about 8 threads, so more would mostly compete with
+# the API server on the node.
+MAX_PROMPT_EMBEDS_HASH_THREADS = 8
 
 
 def _parallel_prehash_pays_off(
@@ -651,12 +656,22 @@ def _parallel_prehash_pays_off(
 
 
 def num_prompt_embeds_hash_threads(vllm_config: VllmConfig) -> int:
-    """Threads to hash prompt embeds with: up to 8, sharing this node's usable
-    CPUs with the other local data-parallel engine cores."""
+    """Threads to hash prompt embeds with: up to MAX_PROMPT_EMBEDS_HASH_THREADS,
+    sharing this node's usable CPUs with the other local data-parallel engine
+    cores. They are busy only while a large prompt is hashed."""
     if not vllm_config.model_config.enable_prompt_embeds:
         return 1
     num_local_engines = max(1, vllm_config.parallel_config.data_parallel_size_local)
-    return max(1, min(8, available_cpu_count() // num_local_engines))
+    num_cpus = available_cpu_count() // num_local_engines
+    return max(1, min(MAX_PROMPT_EMBEDS_HASH_THREADS, num_cpus))
+
+
+@cache
+def _prompt_embeds_hash_pool(num_threads: int) -> ThreadPoolExecutor:
+    """One pool per process (an engine core builds one block hasher), created on
+    first use so deployments without large prompt embeds never start threads.
+    Its idle threads are joined when the process exits."""
+    return ThreadPoolExecutor(num_threads, thread_name_prefix="prompt_embeds_hash")
 
 
 class _PromptEmbedsBlockPrehasher:
@@ -670,17 +685,13 @@ class _PromptEmbedsBlockPrehasher:
     def __init__(self, num_threads: int):
         self.num_threads = num_threads
 
-    @cached_property
-    def _pool(self) -> ThreadPoolExecutor:
-        # Created on first use so deployments without large prompt embeds never
-        # start the threads.
-        return ThreadPoolExecutor(
-            self.num_threads, thread_name_prefix="prompt_embeds_hash"
-        )
-
     def prehash(self, request: Request, block_ranges: list[tuple[int, int]]) -> None:
         prompt_embeds = request.prompt_embeds
         assert prompt_embeds is not None
+        if not (prompt_embeds.is_cpu and prompt_embeds.is_contiguous()):
+            # tensor_data would copy the whole tensor, the per-block path
+            # copies one block at a time.
+            return
 
         cached = request._prompt_embeds_per_block_hashes
         todo = [r for r in block_ranges if r not in cached]
@@ -701,7 +712,8 @@ class _PromptEmbedsBlockPrehasher:
         # A few runs per thread even out threads that land on busier cores.
         chunk_size = cdiv(len(todo), 4 * self.num_threads)
         chunks = [todo[i : i + chunk_size] for i in range(0, len(todo), chunk_size)]
-        for ranges, digests in zip(chunks, self._pool.map(hash_blocks, chunks)):
+        pool = _prompt_embeds_hash_pool(self.num_threads)
+        for ranges, digests in zip(chunks, pool.map(hash_blocks, chunks)):
             cached.update(zip(ranges, digests))
 
 

@@ -2123,14 +2123,19 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor, xxhash, xxhash_cbor])
 @pytest.mark.parametrize("mixed_prompt", [False, True])
 @pytest.mark.parametrize("num_lookahead", [0, 1])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_parallel_prompt_embeds_hashing_matches_sequential(
-    hash_fn: Callable[[Any], bytes], mixed_prompt: bool, num_lookahead: int
+    hash_fn: Callable[[Any], bytes],
+    mixed_prompt: bool,
+    num_lookahead: int,
+    dtype: torch.dtype,
 ):
     """Hashing prompt embeds on the thread pool must not change any block hash,
-    including blocks hashed later as the request grows."""
+    including blocks hashed later as the request grows. bfloat16 has no numpy
+    dtype, so its bytes are exported through a uint8 view."""
     block_size = 16
     num_prompt_tokens = 64 * block_size + 5
-    prompt_embeds = torch.randn(num_prompt_tokens, 2048, dtype=torch.float16)
+    prompt_embeds = torch.randn(num_prompt_tokens, 2048, dtype=dtype)
     block_nbytes = block_size * prompt_embeds[:1].nbytes
     assert block_nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BLOCK_BYTES
     assert prompt_embeds.nbytes >= kv_cache_utils.PROMPT_EMBEDS_PARALLEL_HASH_MIN_BYTES
@@ -2159,6 +2164,38 @@ def test_parallel_prompt_embeds_hashing_matches_sequential(
         request.append_output_token_ids(list(range(2 * block_size)))
     assert len(parallel.block_hashes) == 66
     assert parallel.block_hashes == sequential.block_hashes
+
+
+def test_parallel_prompt_embeds_hashing_skips_non_contiguous(monkeypatch):
+    """A tensor that is not CPU-contiguous takes the per-block path, so hashing
+    copies one block at a time instead of materializing the whole tensor."""
+    block_size = 16
+    num_prompt_tokens = 64 * block_size
+    # Transposed storage: a non-contiguous (num_prompt_tokens, 2048) view.
+    prompt_embeds = torch.randn(2048, num_prompt_tokens, dtype=torch.float16).t()
+    assert not prompt_embeds.is_contiguous()
+    copied_rows: list[int] = []
+    tensor_data = kv_cache_utils.tensor_data
+
+    def recording_tensor_data(tensor: torch.Tensor) -> memoryview:
+        copied_rows.append(len(tensor))
+        return tensor_data(tensor)
+
+    monkeypatch.setattr(kv_cache_utils, "tensor_data", recording_tensor_data)
+    sequential, parallel = (
+        make_request(
+            request_id=str(num_threads),
+            prompt_token_ids=None,
+            block_size=block_size,
+            hash_fn=sha256,
+            prompt_embeds=prompt_embeds,
+            num_prompt_embeds_hash_threads=num_threads,
+        )
+        for num_threads in (1, 4)
+    )
+
+    assert parallel.block_hashes == sequential.block_hashes
+    assert max(copied_rows) <= block_size
 
 
 def test_unpadded_page_size_includes_per_token_head_scales():
