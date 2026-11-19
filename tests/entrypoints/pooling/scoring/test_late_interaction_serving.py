@@ -293,8 +293,15 @@ async def test_late_interaction_cleanup_wait_is_bounded(
 
 
 @pytest.mark.asyncio
-async def test_late_interaction_cleanup_preserves_cancellation_after_request_error():
-    """Cancellation during cleanup must replace the pending request error."""
+@pytest.mark.parametrize(
+    "cleanup_error",
+    [None, RuntimeError("query cache release failed")],
+    ids=["success", "failure"],
+)
+async def test_late_interaction_cleanup_preserves_cancellation_after_request_error(
+    cleanup_error: RuntimeError | None, caplog_vllm: pytest.LogCaptureFixture
+):
+    """The handler stays cancelled and any cleanup error is logged."""
     loop = asyncio.get_running_loop()
     cleanup = loop.create_future()
     cleanup_entered = asyncio.Event()
@@ -311,12 +318,18 @@ async def test_late_interaction_cleanup_preserves_cancellation_after_request_err
     try:
         await cleanup_entered.wait()
         handler.cancel()
-        loop.call_soon(cleanup.set_result, None)
+        if cleanup_error is None:
+            loop.call_soon(cleanup.set_result, None)
+        else:
+            loop.call_soon(cleanup.set_exception, cleanup_error)
         done, _ = await asyncio.wait({handler}, timeout=1)
         assert handler in done, "Handler did not finish after cleanup"
         with pytest.raises(asyncio.CancelledError):
             handler.result()
-        assert cleanup.result() is None
+        logged_errors = [
+            record.exc_info[1] for record in caplog_vllm.records if record.exc_info
+        ]
+        assert logged_errors == ([cleanup_error] if cleanup_error is not None else [])
     finally:
         if not cleanup.done():
             cleanup.set_result(None)

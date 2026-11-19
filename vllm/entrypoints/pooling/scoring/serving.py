@@ -236,6 +236,10 @@ class ServingScores(PoolingServing):
                 except asyncio.CancelledError as exc:
                     cancellation = exc
             task.result()
+        except Exception:
+            if cancellation is not None:
+                logger.exception("Late-interaction cleanup failed during cancellation.")
+            raise
         finally:
             if cancellation is not None:
                 raise cancellation
