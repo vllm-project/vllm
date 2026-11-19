@@ -748,6 +748,35 @@ class EngineCore:
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
+    def _keep_scheduling(
+        self, batch_queue: deque, future: Future[Any], model_executed: bool
+    ) -> bool:
+        """Whether to schedule another step rather than wait on the oldest batch."""
+        if not model_executed:
+            if not self.scheduler.has_requests():
+                return False
+            # PP: empty steps only help a decode awaiting the cadence.
+            if self._pp_admission and not self.scheduler.has_decode_awaiting_cadence():
+                self._idle_step = future
+                return False
+        return len(batch_queue) < self.batch_queue_size
+
+    def _wait_for_new_request(self, batch_queue: deque) -> bool:
+        """PP, with a free batch slot: wait on the oldest batch, but return True
+        as soon as a request is added, to schedule it into the slot."""
+        return (
+            (self._pp_admission and self.deferred_step is None)
+            and len(batch_queue) < self.batch_queue_size
+            and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
+        )
+
+    def _on_batch_done(
+        self, future: Future[Any], scheduler_output: SchedulerOutput
+    ) -> None:
+        # A step with tokens can make schedule() produce work again.
+        if scheduler_output.total_num_scheduled_tokens or future is self._idle_step:
+            self._idle_step = None
+
     def _wait_for_output(self, future: Future[Any]) -> Any:
         """Wait for a step's model output, meanwhile handling inputs if possible."""
         self._handle_inputs_while_waiting(future)
@@ -834,13 +863,7 @@ class EngineCore:
             if self.deferred_step is None:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
-                schedule_more = model_executed or self.scheduler.has_requests()
-                if schedule_more and not model_executed and self._pp_admission:
-                    # PP: empty steps only help a decode awaiting the cadence.
-                    schedule_more = self.scheduler.has_decode_awaiting_cadence()
-                    if not schedule_more:
-                        self._idle_step = future
-                if schedule_more and len(batch_queue) < self.batch_queue_size:
+                if self._keep_scheduling(batch_queue, future, model_executed):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, model_executed
@@ -851,11 +874,7 @@ class EngineCore:
             # is non-empty.
             return None, False
 
-        if (
-            (self._pp_admission and self.deferred_step is None)
-            and len(batch_queue) < self.batch_queue_size
-            and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
-        ):
+        if self._wait_for_new_request(batch_queue):
             # Schedule the newly arrived request into the free slot.
             return None, model_executed
 
@@ -869,8 +888,7 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
         iteration_details = self._untimed_iteration_details(scheduler_output)
-        if scheduler_output.total_num_scheduled_tokens or future is self._idle_step:
-            self._idle_step = None
+        self._on_batch_done(future, scheduler_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

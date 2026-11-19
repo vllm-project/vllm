@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -444,6 +445,8 @@ def _mock_batch_queue_core() -> MagicMock:
     core.deferred_step = None
     core._pp_admission = False
     core._idle_step = None
+    for name in ("_keep_scheduling", "_wait_for_new_request", "_on_batch_done"):
+        setattr(core, name, partial(getattr(EngineCore, name), core))
     return core
 
 
