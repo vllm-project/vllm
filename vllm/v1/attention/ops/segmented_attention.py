@@ -33,6 +33,7 @@ from .segmented_attention_config import (
 from .segmented_attention_config import (
     MMPrefixMode,
     segmented_attention_span,
+    segmented_mm_qk_loop_options,
 )
 from .segmented_attention_config import (
     SegmentedAttentionConfig as SegmentedAttentionConfig,
@@ -872,6 +873,11 @@ def _launch_segmented_attention(
         triton.cdiv(qcap * (hq // hk), cfg["bm"]),
         splits,
     )
+    if mm_prefix_range is not None:
+        # Explicit launch configs can bypass the selector and autotuner.
+        qk_pipeline, qk_unroll = segmented_mm_qk_loop_options(cfg, dim)
+    else:
+        qk_pipeline, qk_unroll = cfg.get("qk_pipeline"), cfg.get("qk_unroll")
     # Query capacity only indexes split scratch; single-pass kernels share it.
     stage_args = (
         q,
@@ -914,12 +920,8 @@ def _launch_segmented_attention(
         sinks is not None,
         cfg.get("prefix_fast", False) and sliding_window < 0,
         cfg.get("pv_split", False),
-        None
-        if mm_prefix_range is not None and cfg["bk"] == dim
-        else cfg.get("qk_pipeline"),
-        None
-        if mm_prefix_range is not None and cfg["bk"] == dim
-        else cfg.get("qk_unroll"),
+        qk_pipeline,
+        qk_unroll,
         bool(native_fp8_upcast),
         4 if native_fp8_upcast and mode == "native4" else 1,
     )

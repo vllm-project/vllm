@@ -159,6 +159,16 @@ def segmented_kv_upcast_mode(config: Mapping[str, object]) -> KVUpcastMode:
     return mode
 
 
+def segmented_mm_qk_loop_options(
+    config: SegmentedLaunchConfig, dim: int
+) -> tuple[int | None, int | None]:
+    """Return the QK loop scheduling hints for an image-prefix launch."""
+    # A full-width tile has a single QK iteration, so neither hint applies.
+    if config["bk"] == dim:
+        return None, None
+    return config.get("qk_pipeline"), config.get("qk_unroll")
+
+
 @_cache_config_selector
 def select_segmented_config(
     batch: int,
@@ -270,6 +280,8 @@ def select_segmented_config(
             else:
                 # Sparse-image prompts retain the wide BF16 accumulator schedule.
                 cfg.update({"stages": 3, "pv_split": True, "qk_pipeline": 3})
+    if mm_prefix_mode != "none":
+        cfg["qk_pipeline"], cfg["qk_unroll"] = segmented_mm_qk_loop_options(cfg, dim)
     mode: KVUpcastMode = (
         _select_segmented_kv_upcast(
             cfg, batch, max_query_len, max_seq_len, hq, hk, dim, sliding_window

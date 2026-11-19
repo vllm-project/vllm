@@ -122,6 +122,25 @@ def test_segmented_mm_metadata_keeps_only_live_image_queries():
 
 
 @pytest.mark.parametrize(
+    "dim,query_len,seq_len,kv_heads,fp8,expected",
+    [
+        pytest.param(128, 1, 64, 1, False, (128, None, None), id="full-width"),
+        pytest.param(128, 256, 8192, 4, True, (64, 3, None), id="pipeline"),
+        pytest.param(512, 1, 64, 1, False, (64, None, 4), id="unroll"),
+    ],
+)
+def test_segmented_mm_selector_sets_qk_loop_options(
+    dim, query_len, seq_len, kv_heads, fp8, expected
+):
+    from vllm.v1.attention.ops.segmented_attention_config import select_segmented_config
+
+    config = select_segmented_config(
+        1, query_len, seq_len, 8, kv_heads, dim, fp8, mm_prefix_mode="unclamped"
+    )
+    assert (config["bk"], config["qk_pipeline"], config["qk_unroll"]) == expected
+
+
+@pytest.mark.parametrize(
     "changed",
     [
         dict(mm_prefix_mode="none"),

@@ -46,6 +46,7 @@ from vllm.v1.attention.ops.segmented_attention_config import (
     SegmentedLaunchConfig,
     segmented_kv_upcast_mode,
     segmented_mm_prefix_bucket,
+    segmented_mm_qk_loop_options,
     segmented_query_capacity,
     select_segmented_config,
 )
@@ -193,10 +194,14 @@ def _candidate_configs(
     base = _normalized_config(default, batch, query_len, heads, dim)
     if not native_fp8:
         base["kv_upcast"] = "normal"
+    if mm_prefix_mode != "none":
+        base = _canonical_mm_config(base, dim, sliding_window)
     bases = [base]
     if legacy_default is not None:
         legacy = _normalized_config(legacy_default, batch, query_len, heads, dim)
         legacy["kv_upcast"] = base["kv_upcast"]
+        if mm_prefix_mode != "none":
+            legacy = _canonical_mm_config(legacy, dim, sliding_window)
         if legacy != base:
             bases.append(legacy)
     launches: list[SegmentedAttentionConfig] = []
@@ -262,12 +267,11 @@ def _canonical_mm_config(
     result = config.copy()
     result.setdefault("pv_split", False)
     result.setdefault("prefix_fast", False)
-    result.setdefault("qk_pipeline", None)
-    result.setdefault("qk_unroll", None)
+    result["qk_pipeline"], result["qk_unroll"] = segmented_mm_qk_loop_options(
+        config, dim
+    )
     if sliding_window >= 0:
         result["prefix_fast"] = False
-    if result["bk"] == dim:
-        result["qk_pipeline"] = result["qk_unroll"] = None
     if result["splits"] == 1:
         result["reduce_d"] = dim
         result["reduce_warps"] = 4
