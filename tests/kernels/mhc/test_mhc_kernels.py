@@ -2410,7 +2410,9 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
     """Folding the post into the pre projection must match doing them apart.
 
     The residual is bfloat16, so the two accumulation orders are allowed to
-    land a rounding step apart; the tolerance here is one bfloat16 ULP.
+    land a rounding step apart; the tolerance here is one bfloat16 ULP. AITER's
+    bfloat16 rounding of the residual depends on the arch, so the pre is checked
+    against the residual the op wrote.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -2433,11 +2435,6 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
     rms_eps = hc_pre_eps = hc_sinkhorn_eps = 1e-6
     pre_args = (fn, hc_scale, hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, 1.0, 20)
 
-    next_residual = mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
-    expected = (
-        next_residual,
-        *mhc_pre_delayed_torch(next_residual, *pre_args, pre_mix=pre_mix),
-    )
     actual = MHCPreDelayedOp().forward_hip(
         residual,
         *pre_args,
@@ -2447,6 +2444,10 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
         comb_res_mix=comb_res_mix,
     )
 
+    expected = (
+        mhc_post_torch(x, residual, post_layer_mix, comb_res_mix),
+        *mhc_pre_delayed_torch(actual[0], *pre_args, pre_mix=pre_mix),
+    )
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
 
