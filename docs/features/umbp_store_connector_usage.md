@@ -141,6 +141,20 @@ With `kv_role: "kv_consumer"` the connector only restores and never stores.
 - Pipeline parallelism is rejected.
 - Stores are submitted once per step after the forward pass.
 
+### MiniMax M3 monokernel
+
+The ROCm MiniMax M3 `--monokernel` accepts `UMBPStoreConnector` because it
+restores whole KV blocks produced with the same cache layout. Connectors that
+do not declare `only_restores_canonical_kv` remain unsupported. A
+`MultiConnector` qualifies only when every child declares this capability.
+
+All existing MiniMax monokernel deployment requirements still apply, including
+TP4, compatible AITER MXFP4 expert weights, FP8 attention and indexer caches,
+and block size 128. Keep prefix caching, asynchronous UMBP loading, and the
+hybrid KV cache manager enabled so attention and indexer state are restored
+together. A connector capability declaration does not make an unsupported
+checkpoint weight layout compatible with the monokernel.
+
 With KV events enabled, the scheduler verifies residency on every rank before
 publishing a stored-object event. It periodically rechecks tracked objects
 during engine steps to report removals. These checks do not delay the release

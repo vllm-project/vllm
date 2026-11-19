@@ -54,7 +54,13 @@ class DecodeConfig:
             reasons.append("does not support LoRA")
         transfer = getattr(config, "kv_transfer_config", None)
         if transfer is not None and transfer.kv_connector is not None:
-            reasons.append("does not support a KV connector")
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(transfer)
+            if not connector_cls.only_restores_canonical_kv(transfer):
+                reasons.append("does not support a KV connector with noncanonical KV")
         speculative = config.speculative_config
         if speculative is not None and speculative.method != "eagle3":
             reasons.append("supports only EAGLE3 speculative decoding")

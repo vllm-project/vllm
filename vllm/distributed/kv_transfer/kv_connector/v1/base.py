@@ -218,6 +218,15 @@ class KVConnectorBase_V1(ABC):
         """Whether the connector can follow the KV cache remap of sleep mode."""
         return True
 
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether loads restore whole blocks produced by an identical KV layout.
+
+        Persistent kernels may retain paths that assume the model's own cache
+        writer produced every restored block.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

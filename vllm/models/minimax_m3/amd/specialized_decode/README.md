@@ -20,6 +20,12 @@ Milestone one is deliberately narrow:
 kernel and its host launcher. Unsupported static deployments are refused with
 all known reasons.
 
+KV connectors are accepted only when they restore whole blocks produced by
+the same KV cache layout (`only_restores_canonical_kv`). `UMBPStoreConnector`
+supports this contract in embedded and standalone modes. Keep async loading
+and the hybrid KV cache manager enabled so both the FP8 attention KV and
+sparse-indexer K caches can be restored. Other connectors remain refused.
+
 ## Fail-stop
 
 In-kernel waits are bounded (10 s) and a timeout, a host abort or a failed
