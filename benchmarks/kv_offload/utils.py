@@ -350,20 +350,24 @@ class VLLMServer:
 
     def _wait_for_processes(self, pids: list[int], timeout_s: float) -> bool:
         deadline = time.monotonic() + timeout_s
-        while pids and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             pids = [pid for pid in pids if self._process_exists(pid)]
-            if pids:
-                time.sleep(0.5)
+            if not pids:
+                return True
+            time.sleep(min(0.5, deadline - time.monotonic()))
+        pids = [pid for pid in pids if self._process_exists(pid)]
         return not pids
 
     @staticmethod
     def _process_exists(pid: int) -> bool:
+        state = VLLMServer._process_state(pid)
+        if state is None or state == "Z":
+            return False
         try:
             os.kill(pid, 0)
         except OSError:
             return False
-        # ignore zombies, which are still in /proc but not alive
-        return VLLMServer._process_state(pid) != "Z"
+        return True
 
     @staticmethod
     def _process_state(pid: int) -> str | None:
@@ -374,7 +378,7 @@ class VLLMServer:
         for line in status.splitlines():
             if line.startswith("State:"):
                 return line.split()[1]
-        return None
+        raise RuntimeError(f"/proc/{pid}/status has no State line")
 
     def _port_available(self) -> bool:
         try:
