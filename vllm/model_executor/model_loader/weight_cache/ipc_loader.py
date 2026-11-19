@@ -16,12 +16,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import (
-    get_dp_group,
-    get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -31,7 +26,6 @@ from vllm.model_executor.model_loader.utils import (
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends import IPC_BACKENDS
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    TensorKind,
     rebuild_entries,
     record_bytes,
 )
@@ -50,6 +44,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_socket_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_weight_cache_key,
     is_draft_model_cacheable,
     record_external_weight_charge,
     record_external_weight_fallback,
@@ -212,21 +207,19 @@ class IpcModelLoader(BaseModelLoader):
         prefix: str,
         state: WeightCacheState,
     ) -> nn.Module:
-        tensors, kinds = self._rebuild_storages(state)
+        tensors = self._rebuild_storages(state)
         return build_model_from_processed_weights(
             vllm_config,
             model_config,
             prefix,
             tensors,
-            kinds,
+            state.manifest,
             aliases=state.aliases,
             attrs=state.attrs,
             load_config=self.load_config,
         )
 
-    def _rebuild_storages(
-        self, state: WeightCacheState
-    ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind]]:
+    def _rebuild_storages(self, state: WeightCacheState) -> dict[str, torch.Tensor]:
         """Rebuild manifest tensors from one imported buffer per storage."""
         buffers = [
             record_bytes(record, storage["nbytes"])
@@ -234,34 +227,15 @@ class IpcModelLoader(BaseModelLoader):
                 state.storages, state.manifest["storages"], strict=True
             )
         ]
-        tensors = rebuild_tensors(state.manifest, buffers)
-        kinds: dict[str, TensorKind] = {
-            name: "param" if view["is_param"] else "buffer"
-            for name, view in state.manifest["tensors"].items()
-        }
-        return tensors, kinds
+        return rebuild_tensors(state.manifest, buffers)
 
     def _fetch_state(
         self,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
     ) -> WeightCacheState:
-        dp_group = get_dp_group()
-        pp_group = get_pp_group()
-        parallel_config = vllm_config.parallel_config
-        cache_key = WeightCacheKey.from_model_config(
-            model_config,
-            cache_config=vllm_config.cache_config,
-            tp_size=get_tensor_model_parallel_world_size(),
-            tp_rank=get_tensor_model_parallel_rank(),
-            pp_size=pp_group.world_size,
-            pp_rank=pp_group.rank_in_group,
-            dp_size=dp_group.world_size,
-            dp_rank=dp_group.rank_in_group,
-            is_draft=self.is_draft,
-            enable_expert_parallel=parallel_config.enable_expert_parallel,
-            expert_placement_strategy=parallel_config.expert_placement_strategy,
-            kernel_config=vllm_config.kernel_config,
+        cache_key = build_weight_cache_key(
+            vllm_config, model_config, is_draft=self.is_draft
         )
         return self._request_state(cache_key)
 

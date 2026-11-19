@@ -264,9 +264,6 @@ class WeightCacheDaemon:
         self.cache_key = build_weight_cache_key(
             vllm_config, self.model_config, is_draft=is_draft
         )
-        if is_draft:
-            # The engine builds the draft as the only pipeline stage.
-            self.cache_key = replace(self.cache_key, pp_size=1, pp_rank=0)
 
     def warmup(self) -> None:
         """Run each warmup cache's pass (adopting remote caches via D2D)."""

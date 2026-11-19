@@ -127,7 +127,8 @@ def build_weight_cache_key(
     Shared with the daemon so the peer loader requests the shard its own
     daemon fingerprinted: TP/PP ranks come from the rank the daemon (or
     engine worker) stamped on `parallel_config.rank`, and the DP placement
-    follows the engine's per-worker view.
+    follows the engine's per-worker view. Draft models always use a single
+    pipeline stage.
     """
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -144,8 +145,8 @@ def build_weight_cache_key(
         cache_config=vllm_config.cache_config,
         tp_size=tp_size,
         tp_rank=rank % tp_size,
-        pp_size=parallel_config.pipeline_parallel_size,
-        pp_rank=rank // tp_size,
+        pp_size=1 if is_draft else parallel_config.pipeline_parallel_size,
+        pp_rank=0 if is_draft else rank // tp_size,
         dp_size=dp_size,
         dp_rank=dp_rank,
         is_draft=is_draft,

@@ -1382,7 +1382,6 @@ def test_ipc_rope_matching(
     import socket
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import nullcontext
-    from types import SimpleNamespace
 
     import torch
     from transformers import DeepseekV2Config, Qwen3VLConfig
@@ -1412,8 +1411,14 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
+    tp_size = 2 if rank else 1
+    monkeypatch.setattr(default_vllm_config, "model_config", model_config)
+    monkeypatch.setattr(default_vllm_config.parallel_config, "rank", rank)
+    monkeypatch.setattr(
+        default_vllm_config.parallel_config, "tensor_parallel_size", tp_size
+    )
     server.cache_key = WeightCacheKey.from_model_config(
-        model_config, 1, 0, cache_config=default_vllm_config.cache_config
+        model_config, tp_size, 0, cache_config=default_vllm_config.cache_config
     )
     model_config.hf_text_config.rope_parameters.update(
         rope_type=rope_type, rope_theta=theta, factor=factor
@@ -1425,12 +1430,6 @@ def test_ipc_rope_matching(
     server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: rank)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     loader.fallback = fallback
@@ -1628,12 +1627,6 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.cache_config = CacheConfig(
         cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=skip_layers
     )
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     requested_keys: list[WeightCacheKey] = []
 
@@ -1710,12 +1703,6 @@ def test_ipc_cache_key_tracks_kernel_backends(
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.kernel_config = KernelConfig(**engine_kernel_config)
-    for name in ("get_dp_group", "get_pp_group"):
-        monkeypatch.setattr(
-            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
-        )
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
     )

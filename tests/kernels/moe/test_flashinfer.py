@@ -660,10 +660,8 @@ def _check_flashinfer_ipc_weights(entries, expected, device_index):
         loader = object.__new__(IpcModelLoader)
         storages, manifest = entries
         records = [entry.rebuild(device_index) for entry in storages]
-        tensors, kinds = loader._rebuild_storages(
-            WeightCacheState(manifest, records, {}, {})
-        )
-        _register_processed_tensors(layer, tensors, kinds, {})
+        tensors = loader._rebuild_storages(WeightCacheState(manifest, records, {}, {}))
+        _register_processed_tensors(layer, tensors, manifest, {})
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
