@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+
+import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
@@ -10,6 +14,24 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     get_target_lm_head,
     maybe_share_target_embed,
 )
+
+
+def with_draft_dtype(vllm_config: VllmConfig, dtype: torch.dtype) -> VllmConfig:
+    """Return `vllm_config` with its model_config reporting the draft's dtype.
+
+    The draft is built, and its "auto" KV cache sized, from
+    `vllm_config.model_config`, which is the target's. Swapping in the draft
+    ModelConfig would also change the target facts the draft reads (layer
+    count, vocab size), and replace() would revalidate the target config, so
+    only the dtype is overridden, on shallow copies.
+    """
+    if vllm_config.model_config.dtype == dtype:
+        return vllm_config
+    model_config = copy.copy(vllm_config.model_config)
+    model_config.dtype = dtype
+    vllm_config = copy.copy(vllm_config)
+    vllm_config.model_config = model_config
+    return vllm_config
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -41,6 +63,9 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         load_config=get_draft_load_config(vllm_config),
     )
     draft_vllm_config = speculative_config.apply_draft_eplb_overrides(draft_vllm_config)
+    # Build the draft's weights and KV cache in its own dtype
+    # (SpeculativeConfig.dtype); a no-op when it matches the target's.
+    draft_vllm_config = with_draft_dtype(draft_vllm_config, draft_model_config.dtype)
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
             vllm_config=draft_vllm_config, model_config=draft_model_config
@@ -71,5 +96,11 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         if draft_lm_head is not None:
             del dflash_model.lm_head
         dflash_model.lm_head = target_lm_head
+        # The shared head takes the target's activation and head dtypes, also
+        # when the draft runs in its own dtype (SpeculativeConfig.dtype).
+        dflash_model.lm_head_dtype = vllm_config.model_config.dtype
+        for module in dflash_model.modules():
+            if isinstance(module, LogitsProcessor):
+                module.head_dtype = vllm_config.model_config.head_dtype
 
     return dflash_model
