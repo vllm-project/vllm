@@ -72,30 +72,39 @@ def _run_graph(manager: RejectionSamplerGraph, args):
     return rejection_sample(*args, graph=manager)
 
 
+def _assert_parity(result_a, result_b):
+    """Compare two rejection_sample results on their valid prefix.
+
+    `sampled` rows are valid only up to `num_sampled[r]`; the tail is
+    uninitialized on the eager path (`new_empty`), so only the consumed
+    prefix may be compared.
+    """
+    sampled_a, num_a = result_a
+    sampled_b, num_b = result_b
+    assert torch.equal(num_a, num_b)
+    for r in range(num_a.shape[0]):
+        k = int(num_a[r])
+        assert torch.equal(sampled_a[r, :k], sampled_b[r, :k])
+
+
 def test_graph_matches_eager_and_replays():
     device = "cuda"
     manager = RejectionSamplerGraph(torch.device(device))
 
     args_a = _make_inputs(device, seed=0)
-    eager_sampled, eager_num_sampled = _run_eager(args_a)
+    eager = _run_eager(args_a)
 
-    graph_sampled, graph_num_sampled = _run_graph(manager, args_a)
+    graph = _run_graph(manager, args_a)
     # First graph call captures and must match eager bit-exactly.
-    assert torch.equal(graph_sampled, eager_sampled)
-    assert torch.equal(graph_num_sampled, eager_num_sampled)
+    _assert_parity(graph, eager)
 
     # Same inputs replayed through the graph: still identical.
-    replay_sampled, replay_num_sampled = _run_graph(manager, args_a)
-    assert torch.equal(replay_sampled, eager_sampled)
-    assert torch.equal(replay_num_sampled, eager_num_sampled)
+    _assert_parity(_run_graph(manager, args_a), eager)
 
     # Different inputs: the replay must track the new data, matching a
     # fresh eager run on the same inputs (guards against stale replays).
     args_b = _make_inputs(device, seed=1)
-    eager_sampled_b, eager_num_sampled_b = _run_eager(args_b)
-    graph_sampled_b, graph_num_sampled_b = _run_graph(manager, args_b)
-    assert torch.equal(graph_sampled_b, eager_sampled_b)
-    assert torch.equal(graph_num_sampled_b, eager_num_sampled_b)
+    _assert_parity(_run_graph(manager, args_b), _run_eager(args_b))
 
 
 def test_capture_failure_falls_back_to_eager():
@@ -104,21 +113,18 @@ def test_capture_failure_falls_back_to_eager():
     manager._fill_static_inputs = lambda *args, **kwargs: (raise_capture_error())
 
     args = _make_inputs(device, seed=2)
-    sampled, num_sampled = _run_graph(manager, args)
+    result = _run_graph(manager, args)
     # The capture failed; the step must fall back to eager results and the
     # manager must be permanently disabled.
-    eager_sampled, eager_num_sampled = _run_eager(args)
-    assert torch.equal(sampled, eager_sampled)
-    assert torch.equal(num_sampled, eager_num_sampled)
+    eager = _run_eager(args)
+    _assert_parity(result, eager)
     assert manager._disabled
     assert manager._graph is None
     assert manager._sampled_buf is None
 
     # Later steps keep running eagerly (no crash, consistent results).
     args2 = _make_inputs(device, seed=3)
-    sampled2, _ = _run_graph(manager, args2)
-    eager_sampled2, _ = _run_eager(args2)
-    assert torch.equal(sampled2, eager_sampled2)
+    _assert_parity(_run_graph(manager, args2), _run_eager(args2))
 
 
 def raise_capture_error():
