@@ -614,6 +614,33 @@ def test_select_lora_explicit_non_triton_backend():
     assert experts_cls is not None
 
 
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU only.")
+@pytest.mark.parametrize(
+    ("moe_backend", "batch_invariant", "expected_backend"),
+    [
+        ("auto", False, UnquantizedMoeBackend.XPU),
+        ("triton", False, UnquantizedMoeBackend.TRITON),
+        ("auto", True, UnquantizedMoeBackend.TRITON),
+    ],
+)
+def test_select_xpu_lora_backend(
+    monkeypatch, moe_backend, batch_invariant, expected_backend
+):
+    """XPU LoRA prefers the XpuFusedMoe hooks, falling back to Triton when they
+    do not support the config or Triton is requested explicitly."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if batch_invariant else "0")
+    moe_config = make_dummy_moe_config()
+    moe_config.is_lora_enabled = True
+    moe_config.moe_backend = moe_backend
+
+    selected_backend, experts_cls = select_unquantized_moe_backend(
+        moe_config=moe_config
+    )
+
+    assert selected_backend == expected_backend
+    assert experts_cls is not None
+
+
 @skipif_not_cuda_rocm
 @pytest.mark.parametrize(
     ("all2all_backend", "moe_backend", "expected_format"),

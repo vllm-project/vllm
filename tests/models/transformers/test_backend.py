@@ -125,13 +125,13 @@ def check_implementation(
 
 
 @pytest.mark.parametrize(
-    "model,model_impl,num_fused",
+    "model,model_impl,num_fused,trust_remote_code",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1)),
-        ("vllm-project/Ilama-3.2-1B", "auto", (1, 1)),  # CUSTOM CODE
-        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1)),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1), False),
+        ("vllm-project/Ilama-3.2-1B", "auto", (1, 1), True),
+        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1), False),  # MoE
     ],
-)  # trust_remote_code=True by default
+)
 def test_models(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -139,14 +139,17 @@ def test_models(
     model: str,
     model_impl: str,
     num_fused: tuple[int, int],
+    trust_remote_code: bool,
 ) -> None:
     check_implementation(
         hf_runner,
         vllm_runner,
         example_prompts,
         model,
+        kwargs_ref={"trust_remote_code": trust_remote_code},
         num_fused=num_fused,
         model_impl=model_impl,
+        trust_remote_code=trust_remote_code,
     )
 
 
@@ -174,6 +177,30 @@ def test_compile_mm_encoder(
         ),
     ):
         pass
+
+
+def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
+    """EAGLE-3 runs on a composite VLM whose decoder records the aux hidden states."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    draft_config = AutoConfig.from_pretrained(model).text_config
+    draft_config.architectures = ["LlamaForCausalLMEagle3"]
+    draft_config.num_hidden_layers = 1
+    draft_config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        load_format="dummy",
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(tmp_path),
+            "num_speculative_tokens": 2,
+        },
+    ) as llm:
+        llm.generate_greedy(["Hello"], max_tokens=8)
 
 
 def test_infer_dynamic_arg_dims():
@@ -246,8 +273,8 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.has_device_capability(90):
-        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+    if not (current_platform.is_xpu() or current_platform.has_device_capability(90)):
+        pytest.skip("Attention sinks need FlashAttention 3, TRTLLM or XPU attention")
 
     model = "tiny-random/gpt-oss-bf16"
     with vllm_runner(
@@ -270,9 +297,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
-    with vllm_runner(
-        model, model_impl="transformers", trust_remote_code=False, **kwargs
-    ) as model_test:
+    with vllm_runner(model, model_impl="transformers", **kwargs) as model_test:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
