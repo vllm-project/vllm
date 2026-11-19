@@ -55,7 +55,7 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 With `stream=true`, each chunk carries the masks of the tokens it emits.
 
-On a server with `--return-sampling-mask` enabled, set
+On either the Python or Rust frontend with `--return-sampling-mask` enabled, set
 `sampling_params.return_sampling_mask` to `false` in a non-streaming
 `/inference/v1/generate` tokens request to omit the mask from the response.
 This allows greedy or untruncated sampling. The request can still

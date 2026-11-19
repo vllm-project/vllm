@@ -160,10 +160,6 @@ async def test_generate_rejects_min_tokens_above_server_cap(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="sampling mask output is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize(
     "server",
     [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
@@ -208,9 +204,39 @@ async def test_generate_sampling_mask(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override_mask", "stream", "output_mode", "error"),
+    [
+        (True, False, "tokens", "Enable --return-sampling-mask"),
+        (False, True, "tokens", "requires a non-streaming tokens request"),
+        (False, False, "text", "requires a non-streaming tokens request"),
+    ],
+)
+async def test_generate_rejects_incompatible_sampling_mask_override(
+    client, override_mask, stream, output_mode, error
+):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 1,
+                "top_k": 5,
+                "return_sampling_mask": override_mask,
+            },
+            "stream": stream,
+            "output_mode": output_mode,
+        },
+    )
+    assert response.status_code == 400
+    assert error in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND or not current_platform.is_cuda_alike(),
-    reason="sampling-mask opt-out uses the Python CUDA or ROCm serving path",
+    not current_platform.is_cuda_alike(),
+    reason="sampling-mask opt-out requires the CUDA or ROCm sampler",
 )
 @pytest.mark.parametrize(
     ("server", "speculative"),

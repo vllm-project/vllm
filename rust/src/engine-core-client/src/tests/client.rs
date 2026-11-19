@@ -4021,6 +4021,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            return_sampling_mask: None,
             stream_interval: None,
         },
     );
