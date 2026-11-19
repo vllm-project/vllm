@@ -18,11 +18,11 @@
 //   E_i = exp(G_i - G_15) keeps |log| <= 80.
 //   kk = tril_-1(<k_i E_i, k_j / E_j>), qk = scale tril(<q_i E_i, k_j / E_j>),
 //   AI = (I + diag(b) kk)^-1 diag(b)
-//   Kp = k exp(G), Qp = scale q exp(G), Kend = k exp(G_31 - G),
+//   Kp = k exp(G), Qp = scale q exp(G), K_end = k exp(G_31 - G),
 //   Gamma_C = exp(G_31)
 // Recurrence per chunk (S0 = state at chunk start), Y = V - Kp S0^T:
-//   U = AI Y,  O = Qp S0^T + qk U,  S = S0 o Gamma_C + U^T Kend
-// 64-token chunks: K1 also forms W = AI^T Kend and (qk AI)^T, so that K2 needs
+//   U = AI Y,  O = Qp S0^T + qk U,  S = S0 o Gamma_C + U^T K_end
+// 64-token chunks: K1 also forms W = AI^T K_end and (qk AI)^T, so that K2 needs
 // no U:
 //   O = Qp S0^T + (qk AI) Y,  S = S0 o Gamma_C + Y^T W
 #include <cuda_bf16.h>
@@ -43,8 +43,8 @@ constexpr int C = 32;  // tokens per chunk
 constexpr float L2E = 1.4426950408889634f;
 
 // ---- operand image (K1 output, K2 stage): A1 = [Kp; Qp] 64x128 K-major (2
-// sub-tiles of 8 KB), KE = Kend 32x128 (2 sub-tiles of 4 KB, read MN-major), QA
-// = 32 rows x 64 cols: cols 0..31 qk^T (third MN-major N-block after KE),
+// sub-tiles of 8 KB), KE = K_end 32x128 (2 sub-tiles of 4 KB, read MN-major),
+// QA = 32 rows x 64 cols: cols 0..31 qk^T (third MN-major N-block after KE),
 // cols 32..63 AI (K-major), GC = Gamma_C fp32 [128]
 constexpr int ST_A = 0, ST_KE = 16384, ST_QA = 24576, ST_GC = 28672,
               IMG_BYTES = 29184;
@@ -60,7 +60,7 @@ constexpr int PS_LD = 0, PS_L10 = 2592, PS_EI = 3872, PS_TM = 6464;
 constexpr int PS_RQ = 0, PS_RK = 128, PS_BS = 256, PS_T0 = 384, PS_T1 = 896,
               PS_BYTES = 1408;
 // only the image's QA and GC parts live in shared memory (right after the
-// inputs); Kp, Qp, Kend go to global directly
+// inputs); Kp, Qp, K_end go to global directly
 constexpr int K1_IN = 0, K1_IMG = 24576 - ST_QA, K1_PS = K1_IMG + IMG_BYTES,
               K1_BAR = K1_PS + PS_BYTES;
 constexpr int K1_TM = (K1_BAR + 64 + 127) / 128 * 128,
@@ -280,13 +280,13 @@ __device__ __forceinline__ void tiny_direct(const Params& p, int n, int h,
     const float rk = rsqrtf(warp_sum(ka[0] * ka[0] + ka[1] * ka[1] +
                                      ka[2] * ka[2] + ka[3] * ka[3]) +
                             1e-6f);
-    float gam[4], kh[4], qh[4], gk[4];
+    float gmul[4], kh[4], qh[4], gk[4];
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
-      gam[e] = __expf(p.lb / (1.f + __expf(-ea * (ga[e] + da[e]))));
+      gmul[e] = __expf(p.lb / (1.f + __expf(-ea * (ga[e] + da[e]))));
       kh[e] = ka[e] * rk;
       qh[e] = qa[e] * rq;
-      gk[e] = gam[e] * kh[e];
+      gk[e] = gmul[e] * kh[e];
     }
     float xr[16];
 #pragma unroll
@@ -299,8 +299,8 @@ __device__ __forceinline__ void tiny_direct(const Params& p, int n, int h,
       const float4 sv = S[r];
       const float u = __shfl_sync(0xffffffffu, um, 2 * r);
       S[r] = make_float4(
-          fmaf(sv.x, gam[0], u * kh[0]), fmaf(sv.y, gam[1], u * kh[1]),
-          fmaf(sv.z, gam[2], u * kh[2]), fmaf(sv.w, gam[3], u * kh[3]));
+          fmaf(sv.x, gmul[0], u * kh[0]), fmaf(sv.y, gmul[1], u * kh[1]),
+          fmaf(sv.z, gmul[2], u * kh[2]), fmaf(sv.w, gmul[3], u * kh[3]));
       xr[r] = fmaf(S[r].x, qh[0],
                    fmaf(S[r].y, qh[1], fmaf(S[r].z, qh[2], S[r].w * qh[3])));
     }
@@ -649,7 +649,7 @@ __global__ void __launch_bounds__(128, LAT ? 6 : 5)
     }
     if (pw >= 2) {
       // qk^T: element (row j, col i) = qk[i][j] (j <= i), read MN-major beside
-      // Kend; transposed by stmatrix
+      // K_end; transposed by stmatrix
       uint32_t op[8];
 #pragma unroll
       for (int jj = 0; jj < 4; ++jj)
@@ -762,9 +762,10 @@ __global__ void __launch_bounds__(128, LAT ? 6 : 5)
 // rows [64 half, 64 half + 64) as fp32 wgmma accumulators. Warp 0 also loads,
 // per chunk, the operand image (one bulk copy) and this half's V columns. Per
 // chunk, on the critical path: G1 = Kp S0^T -> Y = V - G1 -> U = AI Y -> S +=
-// U^T Kend. The output GEMMs O = Qp S0^T + qk U of chunk c are issued after its
-// state update and drained in chunk c+1. OB: chunks per output store (one TMA
-// store per warp for OB full chunks); DS: output stored straight from registers
+// U^T K_end. The output GEMMs O = Qp S0^T + qk U of chunk c are issued after
+// its state update and drained in chunk c+1. OB: chunks per output store (one
+// TMA store per warp for OB full chunks); DS: output stored straight from
+// registers
 template <int NST, int OB, bool LAT, bool DS>
 __global__ void __launch_bounds__(128, 2)
     kda_recur(const __grid_constant__ Params p) {
@@ -1043,7 +1044,7 @@ __global__ void __launch_bounds__(128, 2)
         ptx::reg_fence_u32(aY[jj >> 1][2 * (jj & 1) + hr]);
       }
     // U^T = Y^T AI^T by mma.sync per warp (no wgmma in flight, so S0 o Gamma_C
-    // runs beside it); S += U^T Kend; O2 = (qk U)^T, qk^T read MN-major
+    // runs beside it); S += U^T K_end; O2 = (qk U)^T, qk^T read MN-major
     float acc2[16], accU[16];
 #pragma unroll
     for (int e = 0; e < 16; ++e) accU[e] = 0.f;
@@ -1095,7 +1096,7 @@ __global__ void __launch_bounds__(128, 2)
 
 // ============================== K2 with 64-token chunks
 // ============================== image: A = [Kp; Qp] 128 rows x 128 cols
-// K-major (2 sub-tiles of 16 KB), W = AI^T Kend 64 tokens x 128 keys read
+// K-major (2 sub-tiles of 16 KB), W = AI^T K_end 64 tokens x 128 keys read
 // MN-major (2 N-blocks of 8 KB), QA = (qk AI)^T 64 x 64 read MN-major (8 KB),
 // GC = Gamma_C fp32 [128]
 constexpr int C64 = 64;
@@ -1132,12 +1133,12 @@ __device__ __forceinline__ int2 locate64(const P& p, int key, bool by_chunk,
 // ============================== One CTA of 256 threads per (chunk of 64
 // tokens, head); warpgroup b runs the 32-token sub-chunk b as K1 does (mid
 // frame relative to token 32 b + 15), then the two halves are joined:
-//   kk10 = Kp1' kend0^T, qk10 = Qp1' kend0^T with Kp1' = k exp(G_i - G_31) (i
-//   in sub 1), kend0 = k exp(G_31 - G_j) AI = [[AI0, 0], [-AI1 kk10 AI0, AI1]];
-//   W^T = Kend^T AI (Kend from the mid-frame Km and per-key factors) (qk AI)^T
-//   = AI^T qk^T
+//   kk10 = Kp1' k_end0^T, qk10 = Qp1' k_end0^T with Kp1' = k exp(G_i - G_31) (i
+//   in sub 1), k_end0 = k exp(G_31 - G_j) AI = [[AI0, 0], [-AI1 kk10 AI0,
+//   AI1]]; W^T = K_end^T AI (K_end from the mid-frame Km and per-key factors)
+//   (qk AI)^T = AI^T qk^T
 // smem: per sub b at 24576 b: k, q, g as in K1 (mid frames written over them);
-// KX: Kp1'/Qp1' (16 KB), kend0 (8 KB), later the inverse scratch and then the
+// KX: Kp1'/Qp1' (16 KB), k_end0 (8 KB), later the inverse scratch and then the
 // staged image tail W | (qk AI)^T, followed by GC
 constexpr int P64_KX = 49152, P64_PS = P64_KX + 24576;
 constexpr int P64_RQ = 0, P64_RK = 256, P64_BS = 512, P64_TS = 768,
@@ -1217,7 +1218,7 @@ __global__ void __launch_bounds__(256, 2)
   const int r0 = 16 * hf + 4 * rqi, col0 = 64 * csub + 8 * coi;
   // A_log and dt_bias are loaded here and used only after the input wait, so
   // that no thread waits for them first
-  const float alog = __ldg(p.A_log + h);
+  const float a_log = __ldg(p.A_log + h);
   const float4 db0 =
       __ldg(reinterpret_cast<const float4*>(p.dt_bias + h * 128 + col0));
   const float4 db1 =
@@ -1228,7 +1229,7 @@ __global__ void __launch_bounds__(256, 2)
     offu[u] = (r0 + u) * 128 + (((coi ^ (r0 + u)) & 7) << 4);
   __syncthreads();
   ptx::mbarrier_wait_parity(ibar, 0);
-  const float eA2 = 0.5f * expf(alog);
+  const float eA2 = 0.5f * expf(a_log);
   float dA[8] = {eA2 * db0.x, eA2 * db0.y, eA2 * db0.z, eA2 * db0.w,
                  eA2 * db1.x, eA2 * db1.y, eA2 * db1.z, eA2 * db1.w};
 
@@ -1355,7 +1356,7 @@ __global__ void __launch_bounds__(256, 2)
           kps[q] = pack_bf16(a0 * e15[e], a1 * e15[e + 1]);
           qps[q] = pack_bf16(c0 * e15[e], c1 * e15[e + 1]);
           kx[q] = pack_bf16(b0 * e1[e],
-                            b1 * e1[e + 1]);  // kend0 = k exp(G_31 - G_j)
+                            b1 * e1[e + 1]);  // k_end0 = k exp(G_31 - G_j)
         } else {
           const float x0 = a0 * e15[e], x1 = a1 * e15[e + 1], y0 = c0 * e15[e],
                       y1 = c1 * e15[e + 1];
@@ -1636,7 +1637,7 @@ __global__ void __launch_bounds__(256, 2)
   ptx::fence_proxy_async_smem();
   __syncthreads();
 
-  // ---- P5: W^T = Kend^T AI (warpgroup b: keys 64 b .. 64 b + 63) and (qk
+  // ---- P5: W^T = K_end^T AI (warpgroup b: keys 64 b .. 64 b + 63) and (qk
   // AI)^T = AI^T qk^T (warpgroup b: i in sub b)
   {
     const int mk = pl >> 3;
@@ -2151,9 +2152,8 @@ bool kernel_run(const Args& a, const Ctx& ctx) {
       // the first E chunks of every sequence are prepped by a grid launched
       // before K2 on the SMs K2 leaves free, the rest by a grid launched as
       // K2's programmatic dependent
-      const int E = std::min(
-          192 / (H * N),
-          T / C64 + 1);  // 12 at H N = 16 (measured best on prefill/q8k_H16)
+      // E = 12 at H * N = 16 (measured best at T=8192, H=16, one sequence)
+      const int E = std::min(192 / (H * N), T / C64 + 1);
       Params pe = p;
       pe.c0 = 0;
       pe.trig = 1;
