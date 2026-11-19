@@ -222,8 +222,8 @@ launch. `peer_group_transport` picks how rows move:
 
 `peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
 compute stream, started before the decoder layers with each Engram layer
-waiting for its own rows; `async` on a side stream, at a CUDA graph break per
-fetch.
+waiting for its own rows; `async` on a side stream. Full CUDA graphs capture
+both; piecewise ones break at the start and at each Engram layer's wait.
 
 Prefill and decode engines can share one group (each GPU holds less of every
 table) or form one group each (each group holds a full copy, and neither slows

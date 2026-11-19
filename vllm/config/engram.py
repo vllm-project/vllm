@@ -82,7 +82,8 @@ class EngramConfig:
     started before the decoder layers, each Engram layer waiting for its own
     rows; over RDMA the rows move without SMs in between. `async`: on a side
     stream beside the layers, so their SM work (all of NVLink's gather)
-    overlaps compute, at a CUDA graph break per fetch."""
+    overlaps compute. Full CUDA graphs capture both; piecewise ones break at
+    the start and at each Engram layer's wait."""
 
     peer_group_rdma_inflight: int = Field(default=8, ge=0)
     """With `rdma`, the most prefill-sized gathers (64 WRs each) a GPU's NIC
