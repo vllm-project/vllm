@@ -464,21 +464,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     # Models using a compatible paged sparse backend may opt in.
     supports_fp8_ds_mla_sliding_window: ClassVar[bool] = False
 
-    @classmethod
-    def _validate_sliding_window_kv_cache_dtype(
-        cls, sliding_window: int | None, kv_cache_dtype: CacheDType | str
-    ) -> None:
-        if sliding_window is not None and (
-            kv_cache_dtype == "nvfp4_ds_mla"
-            or (
-                kv_cache_dtype == "fp8_ds_mla"
-                and not cls.supports_fp8_ds_mla_sliding_window
-            )
-        ):
-            raise ValueError(
-                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
-            )
-
     def __init__(
         self,
         num_heads: int,
@@ -544,7 +529,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        self._validate_sliding_window_kv_cache_dtype(sliding_window, kv_cache_dtype)
+        if sliding_window is not None and (
+            kv_cache_dtype == "nvfp4_ds_mla"
+            or (
+                kv_cache_dtype == "fp8_ds_mla"
+                and not self.supports_fp8_ds_mla_sliding_window
+            )
+        ):
+            raise ValueError(
+                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
+            )
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
