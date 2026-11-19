@@ -106,6 +106,10 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    packed_wire_segments: bool = False
+    """Packed transfer only: tensors over the buffer travel as dim-0
+    segments (`chunk_layout`). Producer and consumers must agree, so it is off
+    unless the trainer asks for it; vLLM's own trainer engine does."""
     use_load_plan: bool = False
     """Dense backend only: write received tensors of the target model through a
     load plan built from `metadata` at the first weight update (see
@@ -133,7 +137,13 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
     only the mode actually in use. Shared by the dense and sparse trainer
     engines so the two cannot drift."""
-    return {key: value for key, value in asdict(init_info).items() if value is not None}
+    payload = {
+        key: value for key, value in asdict(init_info).items() if value is not None
+    }
+    if not payload["packed_wire_segments"]:
+        # not sent unless used, so a worker that predates it still accepts it
+        del payload["packed_wire_segments"]
+    return payload
 
 
 def build_worker_init_payload(
@@ -142,6 +152,7 @@ def build_worker_init_payload(
     packed: bool = False,
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    packed_wire_segments: bool = False,
     use_load_plan: bool = False,
     metadata: list[tuple[str, str, list[int]]] | None = None,
 ) -> dict:
@@ -154,6 +165,7 @@ def build_worker_init_payload(
         packed=packed,
         packed_buffer_size_bytes=packed_buffer_size_bytes,
         packed_num_buffers=packed_num_buffers,
+        packed_wire_segments=packed_wire_segments,
         use_load_plan=use_load_plan,
         metadata=metadata,
     )
