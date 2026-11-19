@@ -361,6 +361,7 @@ class BenchmarkRun:
         self.port = port
         self.max_seconds = max_seconds
         self.mode = mode
+        self.shm_engine_id = f"benchmark_{os.getpid()}"
         self.run_dir = session_dir / spec.name
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.guidellm = GuideLLM(
@@ -378,32 +379,32 @@ class BenchmarkRun:
         print("  [2/5] Writing KV transfer config...")
         config_path = self._write_config(self.run_dir / "kv_transfer_config.json")
         print("  [3/5] Starting vLLM server...")
-        with VLLMServer(
-            MODEL,
-            TP_SIZE,
-            self.spec.gpu.get_num_bytes() // TP_SIZE,
-            config_path,
-            self.port,
-            self.run_dir / "vllm.log",
-        ) as server:
-            print("  [4/5] Running guidellm benchmark...")
-            guidellm_result = self.guidellm.run(
-                self.spec, self.run_dir / "guidellm.log"
-            )
-            server.assert_running()
-            result = {
-                "name": self.spec.name,
-                "spec": asdict(self.spec),
-                "status": "ok",
-                **guidellm_result,
-            }
+        try:
+            with VLLMServer(
+                MODEL,
+                TP_SIZE,
+                self.spec.gpu.get_num_bytes() // TP_SIZE,
+                config_path,
+                self.port,
+                self.run_dir / "vllm.log",
+            ) as server:
+                print("  [4/5] Running guidellm benchmark...")
+                guidellm_result = self.guidellm.run(
+                    self.spec, self.run_dir / "guidellm.log"
+                )
+                server.assert_running()
+                result = {
+                    "name": self.spec.name,
+                    "spec": asdict(self.spec),
+                    "status": "ok",
+                    **guidellm_result,
+                }
+        finally:
+            self._cleanup_shm()
         return result
 
     def _cleanup(self) -> None:
-        uid = os.getuid()
-        for shm in Path("/dev/shm").glob("vllm_offload*"):
-            if shm.stat().st_uid == uid:
-                shm.unlink()
+        self._cleanup_shm()
         if self.mode == "fs":
             self.fs_dir.mkdir(parents=True, exist_ok=True)
             for entry in self.fs_dir.iterdir():
@@ -411,6 +412,13 @@ class BenchmarkRun:
                     shutil.rmtree(entry)
                 else:
                     entry.unlink()
+
+    def _cleanup_shm(self) -> None:
+        uid = os.getuid()
+        pattern = f"vllm_offload_{self.shm_engine_id}.mmap*"
+        for shm in Path("/dev/shm").glob(pattern):
+            if shm.stat().st_uid == uid:
+                shm.unlink()
 
     def _write_config(self, path: Path) -> Path | None:
         """Write the KV transfer config; returns None in gpu mode."""
@@ -433,6 +441,7 @@ class BenchmarkRun:
         config = {
             "kv_connector": "OffloadingConnector",
             "kv_role": "kv_both",
+            "engine_id": self.shm_engine_id,
             "kv_connector_extra_config": extra,
         }
         path.write_text(json.dumps(config, indent=2))
