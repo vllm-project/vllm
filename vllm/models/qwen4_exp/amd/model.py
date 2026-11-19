@@ -169,9 +169,13 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        tp_sequence_parallel_experts: bool = False,
     ) -> None:
         super().__init__(
-            vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
+            vllm_config=vllm_config,
+            prefix=prefix,
+            reduce_results=reduce_results,
+            tp_sequence_parallel_experts=tp_sequence_parallel_experts,
         )
         if self.replicate_shared_expert and not self.is_sequence_parallel:
             # Reduce routed outputs before adding replicated shared outputs.
@@ -252,6 +256,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
             reduce_results=not self.use_hc_sequence_parallel,
+            tp_sequence_parallel_experts=self.use_hc_sequence_parallel,
         )
 
         hc_config = HyperConnectionConfig(
@@ -328,7 +333,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel or self.mlp.experts_take_local_tokens:
             # MoE consumes local tokens and returns complete local outputs.
             mlp_out = self.mlp(block_input, already_sequence_parallel=True)
         else:
@@ -337,7 +342,11 @@ class Qwen4ExpDecoderLayer(nn.Module):
             mlp_out = self.mlp(block_input)
             if self.use_hc_sequence_parallel:
                 assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
-                reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
+                moe_config = self.mlp.experts.moe_config
+                # Sequence-parallel experts also skip the final all-reduce.
+                reduce_output = (
+                    moe_config.skip_final_all_reduce or moe_config.is_sequence_parallel
+                )
                 # Only sum partial outputs. Reduced outputs already include all ranks.
                 mlp_out = (
                     sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)

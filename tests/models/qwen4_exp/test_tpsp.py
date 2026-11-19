@@ -18,6 +18,7 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Qwen4Exp SP requires CUDA or ROCm", allow_module_level=True)
 
 from tests.utils import multi_gpu_test
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import (
     EngramConfig,
     ParallelConfig,
@@ -31,6 +32,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.prepare_finalize import tp_sequence_parallel
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.common.ops.sequence_parallel import (
@@ -129,13 +131,18 @@ def _make_decoder(config: VllmConfig, rank: int) -> Qwen4ExpDecoderLayer:
         if config.parallel_config.enable_expert_parallel:
             experts.w13_weight.add_(rank * 0.01)
         experts.quant_method.process_weights_after_loading(experts)
+        # Fuses the router and shared-expert gate weights when the shared
+        # expert runs inside the experts.
+        layer.mlp.experts.process_weights_after_loading()
     return layer
 
 
-def _check_decoder_ple(rank: int) -> None:
+def _check_decoder_ple(rank: int, experts_take_local_tokens: bool = False) -> None:
     """Compare HC SP with full tokens across a PLE prefill and cached decode."""
     configs = [_make_config(rank, hc_sp=enabled) for enabled in (False, True)]
     layers = [_make_decoder(config, rank) for config in configs]
+    if experts_take_local_tokens:
+        assert layers[1].mlp.experts_take_local_tokens
     states = []
     for layer in layers:
         ple = layer.ple
@@ -265,8 +272,18 @@ def _check_compiled_sp_ops(module) -> None:
         torch.testing.assert_close(compiled(x), collectives(x), atol=0, rtol=0)
 
 
-def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> None:
+def _run_sp(
+    rank: int,
+    port: int,
+    moe_sp: bool,
+    compiled_ops: bool = False,
+    experts_take_local_tokens: bool = False,
+    gather_in_prepare: bool = False,
+) -> None:
     """Initialize rank-local runtime state and run one equivalence check."""
+    if gather_in_prepare:
+        # Every batch then skips the runner's gather before routing.
+        patch.object(tp_sequence_parallel, "MXFP4_DISPATCH_MIN_TOKENS", 0).start()
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
     config = _make_config(rank, moe_sp=moe_sp)
@@ -292,7 +309,7 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
                     for module in (qwen4_model, ple_layer):
                         _check_compiled_sp_ops(module)
                 else:
-                    _check_decoder_ple(rank)
+                    _check_decoder_ple(rank, experts_take_local_tokens)
     finally:
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
@@ -302,6 +319,27 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
 def test_hc_sp_decoder_and_ple() -> None:
     """HC SP preserves decoder output and PLE cache across a token-shard boundary."""
     mp.spawn(_run_sp, args=(get_open_port(), False), nprocs=2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="AITER fused shared experts",
+)
+@pytest.mark.parametrize("gather_in_prepare", [False, True])
+@multi_gpu_test(num_gpus=2)
+def test_hc_sp_tp_sequence_parallel_experts(
+    monkeypatch, gather_in_prepare: bool
+) -> None:
+    """With the shared expert fused into the experts, HC SP feeds them local
+    tokens. They must match full-token experts whether the runner gathers
+    before routing or the prepare step gathers the routed tokens."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
+    mp.spawn(
+        _run_sp,
+        args=(get_open_port(), False, False, True, gather_in_prepare),
+        nprocs=2,
+    )
 
 
 @multi_gpu_test(num_gpus=4)

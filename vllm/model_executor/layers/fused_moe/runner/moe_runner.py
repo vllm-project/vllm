@@ -12,7 +12,9 @@ from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
+    tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
@@ -33,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPMonolithic,
     _quantize_input,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.tp_sequence_parallel import (
+    MoEPrepareAndFinalizeTPSequenceParallel,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
@@ -846,9 +851,24 @@ class MoERunner(MoERunnerInterface):
         return self._maybe_add_zero_expert_output(result)
 
     @property
+    def _tp_sequence_parallel_dispatch(
+        self,
+    ) -> MoEPrepareAndFinalizeTPSequenceParallel | None:
+        kernel = self._quant_method.moe_kernel
+        prepare_finalize = None if kernel is None else kernel.prepare_finalize
+        if isinstance(prepare_finalize, MoEPrepareAndFinalizeTPSequenceParallel):
+            return prepare_finalize
+        return None
+
+    @property
     def do_naive_dispatch_combine(self) -> bool:
+        parallel_config = self.moe_config.moe_parallel_config
         return (
-            self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
+            self.moe_config.dp_size > 1
+            or (
+                parallel_config.is_sequence_parallel
+                and not parallel_config.use_tp_sequence_parallel_dispatch
+            )
         ) and not self._quant_method.supports_internal_mk
 
     def _quantizes_before_pcp_gather(self) -> bool:
@@ -982,6 +1002,17 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input
             )
 
+        tp_sp_dispatch = self._tp_sequence_parallel_dispatch
+        gathered_before_router = (
+            tp_sp_dispatch is not None
+            and self.gate is not None
+            and self._shared_experts is None
+            and input_ids is None
+            and tp_sp_dispatch.gather_before_router(hidden_states.shape[0])
+        )
+        if gathered_before_router:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
@@ -993,7 +1024,12 @@ class MoERunner(MoERunnerInterface):
             else:
                 router_logits, _ = self.gate(hidden_states)
 
-        with self._sequence_parallel_context():
+        with (
+            self._sequence_parallel_context(),
+            tp_sp_dispatch.input_gathered()
+            if gathered_before_router and tp_sp_dispatch is not None
+            else nullcontext(),
+        ):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
@@ -1010,6 +1046,9 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_overlapping=shared_experts_overlapping,
                 hidden_states_scale=hidden_states_scale,
             )
+            if gathered_before_router:
+                assert isinstance(hidden_states, torch.Tensor)
+                hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
 
             return self._maybe_combine(
                 shared_output,
