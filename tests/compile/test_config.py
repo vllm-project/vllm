@@ -601,7 +601,7 @@ def test_cudagraph_sizes_post_init(
 
 @pytest.fixture
 def capture_platform_config(monkeypatch):
-    def resolve(platform, settings=None):
+    def resolve(platform, settings=None, *, adaptive=False):
         monkeypatch.setattr("vllm.platforms.current_platform", platform)
         monkeypatch.setattr("vllm.config.vllm.current_platform", platform)
         return EngineArgs(
@@ -613,6 +613,7 @@ def capture_platform_config(monkeypatch):
                 "method": "draft_model",
                 "model": "facebook/opt-125m",
                 "num_speculative_tokens": 2,
+                "enable_adaptive_verification": adaptive,
             },
             compilation_config={
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
@@ -670,8 +671,6 @@ def test_platform_capture_policy_preserves_users_and_drafter(
         @classmethod
         def get_prefill_cudagraph_capture_grid(cls, max_tokens, dense_head=False):
             sizes = {1, 5, max_tokens}
-            if dense_head:
-                sizes.update(range(1, min(max_tokens, 32) + 1))
             return sorted(s for s in sizes if 1 <= s <= max_tokens)
 
         @classmethod
@@ -689,6 +688,26 @@ def test_platform_capture_policy_preserves_users_and_drafter(
     resolved = copy.deepcopy({name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS})
     cc = replace(config).compilation_config
     assert resolved == {name: getattr(cc, name) for name in _CAPTURE_SIZE_FIELDS}
+
+
+def test_platform_adaptive_capture_grid(capture_platform_config):
+    """Adaptive graphs use the platform grid within the decode token budget."""
+
+    class AdaptivePlatform(NativePlatform):
+        @classmethod
+        def get_varlen_decode_cudagraph_capture_grid(cls, max_tokens, dense_head=False):
+            return [1, 7, max_tokens]
+
+    config = capture_platform_config(
+        AdaptivePlatform(),
+        {
+            "max_decode_cudagraph_capture_requests": 4,
+            "max_decode_cudagraph_capture_tokens": 11,
+        },
+        adaptive=True,
+    )
+    assert config.get_varlen_decode_cudagraph_token_sizes(3) == [1, 7, 11]
+    assert 7 in config.compilation_config.cudagraph_capture_sizes
 
 
 def test_platform_capture_grid_cannot_exceed_its_limit(capture_platform_config):
