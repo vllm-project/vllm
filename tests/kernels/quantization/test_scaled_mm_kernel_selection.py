@@ -25,6 +25,10 @@ from vllm.model_executor.kernels.linear import (
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
+    XPUFp8BlockScaledMMKernel,
+    XPUFp8W8A16BlockScaledMMKernel,
+    XPUW8A8FP8LinearKernel,
+    XPUW8A16FP8LinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
@@ -398,6 +402,7 @@ class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
 def test_register_oot_fp8_block_linear_kernel(platform_mock, default_vllm_config):
     """Test that block-scaled FP8 kernel registration works correctly."""
     platform_mock._enum = PlatformEnum.OOT
+    platform_mock.is_xpu.return_value = False
     register_linear_kernel(
         OOTFp8BlockScaledMMLinearKernel, PlatformEnum.OOT, "fp8_block"
     )
@@ -431,3 +436,40 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize("native_fp8", [False, True])
+@pytest.mark.parametrize("block", [False, True])
+@patch.object(XPUFp8W8A16BlockScaledMMKernel, "is_supported", return_value=(True, None))
+@patch.object(XPUFp8BlockScaledMMKernel, "is_supported", return_value=(True, None))
+@patch.object(XPUW8A16FP8LinearKernel, "is_supported", return_value=(True, None))
+@patch.object(XPUW8A8FP8LinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_xpu_fp8_kernel_preference(
+    platform_mock, _w8a8, _w8a16, _blk, _blk16, block, native_fp8
+):
+    """Xe3p (native FP8) prefers W8A8; other XPUs prefer weight-only W8A16."""
+    platform_mock._enum = PlatformEnum.XPU
+    platform_mock.is_xpu.return_value = True
+    if block:
+        act_key, w_key = kFp8Dynamic128Sym, kFp8Static128BlockSym
+        expected = (
+            XPUFp8BlockScaledMMKernel if native_fp8 else XPUFp8W8A16BlockScaledMMKernel
+        )
+    else:
+        act_key = w_key = kFp8StaticTensorSym
+        expected = XPUW8A8FP8LinearKernel if native_fp8 else XPUW8A16FP8LinearKernel
+
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
+    with (
+        patch.object(XPUW8A8FP8LinearKernel, "has_native_fp8", return_value=native_fp8),
+        set_current_vllm_config(config),
+    ):
+        kernel = init_fp8_linear_kernel(
+            activation_quant_key=act_key,
+            weight_quant_key=w_key,
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+            weight_shape=(128, 128),
+        )
+    assert type(kernel) is expected
