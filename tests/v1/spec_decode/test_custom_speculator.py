@@ -246,7 +246,6 @@ def _checkpoint_spec(
             speculator_config_class=declared,
             hf_config=SimpleNamespace(model_type=model_type),
         ),
-        use_gemma4_mtp=lambda: False,
         use_multi_module_mtp=lambda: False,
     )
 

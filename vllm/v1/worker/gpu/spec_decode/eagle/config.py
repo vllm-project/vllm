@@ -37,6 +37,7 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
     draft_kv_depends_on_next_token = True
+    one_token_draft_decodes = True
     supports_watermarking = True
 
     @classmethod

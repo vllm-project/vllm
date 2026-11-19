@@ -60,6 +60,8 @@ class SpeculatorConfig:
     # Draft KV at position i is built from token i + 1, which a prefix-cache hit
     # ending at i may not match, so its last block is recomputed (EAGLE block drop).
     draft_kv_depends_on_next_token: ClassVar[bool] = False
+    # Runs the draft steps after the first as one-token decodes, with FULL graphs.
+    one_token_draft_decodes: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.

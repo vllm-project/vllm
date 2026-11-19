@@ -2120,14 +2120,6 @@ class SpeculativeConfig:
         """
         return self.speculator_config.max_num_new_slots_for_drafting
 
-    def use_gemma4_mtp(self) -> bool:
-        return (
-            self.method == "mtp"
-            and self.draft_model_config is not None
-            and getattr(self.draft_model_config.hf_config, "model_type", None)
-            == "gemma4_mtp"
-        )
-
     def use_eagle(self) -> bool:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
