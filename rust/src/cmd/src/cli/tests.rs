@@ -838,9 +838,7 @@ fn frontend_args_json_resolves_logging_config() {
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
-
-        For more information, try '--help'.
+        error: invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
     "#]].assert_eq(&error.to_string());
 }
 
@@ -3002,14 +3000,12 @@ fn frontend_args_json_rejects_unsupported_fields() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}' for '--args-json <JSON>': 
-        The following arguments are not implemented in Rust frontend yet:
+        error: The following arguments are not implemented in Rust frontend yet:
         - uvicorn_log_level
 
         Remove these arguments to continue.
-
-        For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -3030,15 +3026,13 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
-        The following arguments are not implemented in Rust frontend yet:
+        error: The following arguments are not implemented in Rust frontend yet:
         - response_role
         - uvicorn_log_level
 
         Remove these arguments to continue.
-
-        For more information, try '--help'.
-    "#]].assert_eq(&actual);
+    "#]]
+    .assert_eq(&actual);
 }
 
 /// Python args that have no meaningful Rust equivalent are accepted on both the
@@ -3400,10 +3394,9 @@ fn frontend_args_json_rejects_malformed_json() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B"' for '--args-json <JSON>': invalid JSON arguments: EOF while parsing an object at line 1 column 30
-
-        For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+        error: invalid JSON arguments: EOF while parsing an object at line 1 column 30
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
