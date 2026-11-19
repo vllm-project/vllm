@@ -355,12 +355,13 @@ def test_measured_sizing_leaves_room_for_prompt_embeds_rows(monkeypatch):
         "reserve_mm_ipc_gpu_memory",
         lambda available, *args: available,
     )
-    # 512Ki rows of 1024 bf16 values: 1 GiB of prompt_embeds.
+    # max_model_len + max_num_batched_tokens = 512Ki rows of 1024 bf16 values:
+    # 1 GiB of prompt_embeds.
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             multimodal_config=None,
             enable_prompt_embeds=True,
-            max_model_len=512 * 1024,
+            max_model_len=512 * 1024 - 8192,
             dtype=torch.bfloat16,
             get_inputs_embeds_size=lambda: 1024,
         ),

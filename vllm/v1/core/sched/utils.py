@@ -31,15 +31,6 @@ def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
     return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
-def prompt_embeds_budget_bytes(vllm_config: "VllmConfig", max_model_len: int) -> int:
-    """GPU memory the workers may hold for `prompt_embeds` rows with this
-    `max_model_len`; memory planning sets it aside like the KV cache."""
-    if not (row_bytes := prompt_embeds_row_bytes(vllm_config)):
-        return 0
-    rows = prompt_embeds_budget_rows(max_model_len, vllm_config.scheduler_config)
-    return rows * row_bytes
-
-
 def _has_repeating_pattern(
     token_ids: Sequence[int],
     pattern_len: int,

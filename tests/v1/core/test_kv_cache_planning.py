@@ -46,7 +46,10 @@ from vllm.v1.core.kv_cache_planning import (
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
 )
-from vllm.v1.core.sched.utils import prompt_embeds_budget_bytes, prompt_embeds_row_bytes
+from vllm.v1.core.sched.utils import (
+    prompt_embeds_budget_rows,
+    prompt_embeds_row_bytes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     DFlashSlidingWindowManager,
@@ -1921,7 +1924,8 @@ def test_auto_fit_max_model_len_counts_prompt_embeds_rows():
         fitted[enable_prompt_embeds] = (model_config.max_model_len, config)
 
     max_len, config = fitted[True]
-    rows_bytes = prompt_embeds_budget_bytes(vllm_config, max_len)
+    rows = prompt_embeds_budget_rows(max_len, vllm_config.scheduler_config)
+    rows_bytes = rows * prompt_embeds_row_bytes(vllm_config)
     assert 0 < max_len < fitted[False][0]
     assert config.num_blocks * mem_per_block + rows_bytes <= limited_memory
 

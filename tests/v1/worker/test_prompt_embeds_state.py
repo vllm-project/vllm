@@ -190,11 +190,12 @@ def test_drops_embeds_after_last_prompt_step():
 
 
 def test_rows_over_budget_fail_loudly():
-    """Rows held on the GPU must stay within the profiled budget. Adding past
-    it means the scheduler and workers disagree on when rows are freed."""
+    """Rows held on the GPU must stay within the budget KV cache planning sets
+    aside. Adding past it means the scheduler and workers disagree on when rows
+    are freed, so it fails with an error that names the request."""
     state = _make_state()
     state.add_request(0, _NewReqData("a", torch.randn(10, HIDDEN)))
-    with pytest.raises(AssertionError, match="max_model_len budget"):
+    with pytest.raises(RuntimeError, match="request b exceed the prompt_embeds budget"):
         state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
 
     state.remove_request("a")
