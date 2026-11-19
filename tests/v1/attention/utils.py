@@ -49,7 +49,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class BatchSpec:
     """Specification for a batch configuration (workload shape only)."""
 
@@ -299,7 +299,7 @@ def create_vllm_config(
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = breakable_env
 
 
-@dataclass
+@dataclass(slots=True)
 class BackendConfig:
     name: str
     attention_config: dict

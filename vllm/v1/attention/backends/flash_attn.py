@@ -93,11 +93,13 @@ FA4_DENSE_MAX_SEQLEN_K = 8192
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
     """Warm paged, causal FA4 on Blackwell and Hopper."""
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         q_stage: int
         dtype: torch.dtype
         qhead_per_kvhead: int
+        # The SplitKV combine kernel keys on the layer's query heads.
+        num_qo_heads: int
         head_dim: int
         page_size: int
         has_window_left: bool
@@ -129,6 +131,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_stage=q_stage,
             dtype=dtype,
             qhead_per_kvhead=num_qo_heads // num_kv_heads,
+            num_qo_heads=num_qo_heads,
             head_dim=head_dim,
             page_size=page_size,
             has_window_left=window_size[0] >= 0,
@@ -243,20 +246,24 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
             # FA4's forward compile-only entry returns before its transitive
             # SplitKV combine. Call the native combine entry in FakeTensorMode:
-            # it populates the native cache without launching the kernel.
+            # it populates the native cache without launching the kernel. The
+            # combine keys on the layer's query heads.
+            num_heads = compile_key.num_qo_heads
             with FakeTensorMode():
                 _flash_attn_fwd_combine(
                     torch.empty(
-                        (compile_key.num_splits, 2, 1, 512),
+                        (compile_key.num_splits, 2, num_heads, 512),
                         dtype=torch.float32,
                         device="cuda",
                     ),
                     torch.empty(
-                        (compile_key.num_splits, 2, 1),
+                        (compile_key.num_splits, 2, num_heads),
                         dtype=torch.float32,
                         device="cuda",
                     ),
-                    torch.empty((2, 1, 512), dtype=compile_key.dtype, device="cuda"),
+                    torch.empty(
+                        (2, num_heads, 512), dtype=compile_key.dtype, device="cuda"
+                    ),
                     cu_seqlens=torch.empty((3,), dtype=torch.int32, device="cuda"),
                 )
 

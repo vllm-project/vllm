@@ -4,6 +4,7 @@
 import importlib.metadata
 import os
 import platform
+import threading
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -659,6 +660,7 @@ class RocmPlatform(Platform):
         "modelopt_fp4",
         "modelopt_mxfp8",
         "modelopt_mixed",
+        "modelopt_int8",
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
@@ -793,7 +795,7 @@ class RocmPlatform(Platform):
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
             if not sel_invalid_reasons:
-                logger.info_once(
+                logger.debug_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
@@ -893,7 +895,7 @@ class RocmPlatform(Platform):
                 valid_str,
             )
         else:
-            logger.info_once(
+            logger.debug_once(
                 "Using %s backend out of potential backends: %s.",
                 selected_backend.name,
                 valid_str,
@@ -922,7 +924,7 @@ class RocmPlatform(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
         from importlib.util import find_spec
@@ -934,7 +936,7 @@ class RocmPlatform(Platform):
             and on_cdna()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using AITER Flash Attention backend for ViT model.")
+            logger.debug_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
@@ -942,10 +944,10 @@ class RocmPlatform(Platform):
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using Flash Attention backend for ViT model.")
+            logger.debug_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        logger.info_once("Using Torch SDPA backend for ViT model.")
+        logger.debug_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
@@ -1056,8 +1058,9 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         try:
-            device = amdsmi_get_processor_handles()[device_id]
+            device = amdsmi_get_processor_handles()[physical_device_id]
         except AmdSmiException as error:
             logger.error("amdsmi device query failed ", exc_info=error)
             return ""
@@ -1301,6 +1304,35 @@ class RocmPlatform(Platform):
         )
 
     @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Fill torch's hipBLASLt handle pool for the microbatch threads.
+
+        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
+        hipMemset that can land after a GEMM on the comm stream has started, and
+        the GEMM then never finishes. Microbatch threads are new every step and
+        take their per-stream handles from the pool."""
+        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
+        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=device)
+
+        def touch() -> None:
+            torch.accelerator.set_device_index(device.index)
+            for stream in streams:
+                with torch.cuda.stream(stream):
+                    torch.mm(a, a, out_dtype=torch.float32)
+
+        threads = [threading.Thread(target=touch) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        torch.accelerator.synchronize(device)
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
@@ -1404,6 +1436,7 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
@@ -1427,11 +1460,24 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        rotary_embedding_query_only = default
+        rotary_embedding = default
+        if cc.uses_rope_kernel():
+            rotary_embedding_query_only = [
+                "vllm_c",
+                *(p for p in default if p != "vllm_c"),
+            ]
+            rotary_embedding = rotary_embedding_query_only
+            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+                rotary_embedding = ["aiter", *rotary_embedding]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["native"],
+            rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=rotary_embedding_query_only,
         )
 
     @classmethod
