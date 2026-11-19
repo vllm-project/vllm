@@ -1023,10 +1023,265 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
-        ("POST", "/generative_scoring"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
+}
+
+/// Engine script for `/generative_scoring`: receive one add request per
+/// item, answer item `i` with `label_logprobs[i][j]` for its label `j`, and
+/// hand the requests, in item order, to `requests`.
+fn generative_scoring_script(
+    label_logprobs: Vec<Vec<f32>>,
+    requests: Arc<std::sync::Mutex<Vec<EngineCoreRequest>>>,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let mut received = Vec::new();
+            for _ in &label_logprobs {
+                received.push(decode_add_request(&recv_engine_message(dealer).await));
+            }
+            received.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+            let outputs = received
+                .iter()
+                .zip(&label_logprobs)
+                .map(|(request, logprobs)| {
+                    let labels = request
+                        .sampling_params
+                        .as_ref()
+                        .and_then(|params| params.logprob_token_ids.clone())
+                        .expect("label token IDs");
+                    // The sampled token first, then the requested ones.
+                    let entries = std::iter::once((labels[0], logprobs[0]))
+                        .chain(labels.iter().copied().zip(logprobs.iter().copied()))
+                        .map(|(token_id, logprob)| TokenLogprob {
+                            token_id,
+                            logprob,
+                            rank: 1,
+                        })
+                        .collect();
+                    request_output_with_logprobs(
+                        &request.request_id,
+                        vec![labels[0]],
+                        Some(EngineCoreFinishReason::Length),
+                        None,
+                        Some(Logprobs {
+                            positions: vec![PositionLogprobs { entries }],
+                        }),
+                        None,
+                    )
+                })
+                .collect();
+            send_outputs(
+                push,
+                RequestBatchOutputs {
+                    outputs,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            *requests.lock().unwrap() = received;
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_reads_label_logprobs_with_plain_sampling_params() {
+    // Generation-config defaults must not change the scored distribution.
+    let backend = FakeChatBackend {
+        sampling_hints: vllm_text::SamplingHints {
+            default_temperature: Some(0.25),
+            default_top_p: Some(0.5),
+            default_top_k: Some(20),
+            default_repetition_penalty: Some(1.5),
+            ..Default::default()
+        },
+        ..FakeChatBackend::new()
+    };
+    let requests = Arc::default();
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+        default_ready_response(),
+        Arc::new(backend),
+        |state| state,
+        generative_scoring_script(
+            vec![vec![-1.0, -2.0], vec![-2.0, -1.0]],
+            Arc::clone(&requests),
+        ),
+    )
+    .await;
+    let mut app = build_router(state);
+
+    let (status, mut json) = post_json(
+        &mut app,
+        "/generative_scoring",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "query": "Q:",
+            "items": ["a", "b"],
+            "label_token_ids": [89, 78],
+            "cache_salt": "salt",
+            "priority": 3,
+            "request_id": "req",
+        }),
+    )
+    .await;
+    engine_task.finish().await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    json["created"] = json!("<created>");
+
+    let engine_requests = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            format!(
+                "{}: prompt {:?}, temperature {}, top_p {}, top_k {}, min_p {}, \
+                 penalties {}/{}/{}, watermarking {}, max_tokens {}, logprobs {:?}, \
+                 logprob_token_ids {:?}, cache_salt {:?}, priority {}",
+                request.request_id,
+                decode_prompt_token_ids(request).expect("prompt token IDs"),
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                params.min_p,
+                params.repetition_penalty,
+                params.presence_penalty,
+                params.frequency_penalty,
+                params.watermarking,
+                params.max_tokens,
+                params.logprobs,
+                params.logprob_token_ids,
+                request.cache_salt,
+                request.priority,
+            )
+        })
+        .collect::<Vec<_>>();
+    expect_test::expect![[r#"
+        [
+            "generative-scoring-req-0: prompt [256, 81, 58, 97], temperature 1, top_p 1, top_k 0, min_p 0, penalties 1/0/0, watermarking false, max_tokens 1, logprobs Some(2), logprob_token_ids Some([89, 78]), cache_salt Some(\"salt\"), priority 3",
+            "generative-scoring-req-1: prompt [256, 81, 58, 98], temperature 1, top_p 1, top_k 0, min_p 0, penalties 1/0/0, watermarking false, max_tokens 1, logprobs Some(2), logprob_token_ids Some([89, 78]), cache_salt Some(\"salt\"), priority 3",
+        ]
+    "#]].assert_debug_eq(&engine_requests);
+    expect_test::expect![[r#"
+        {
+          "id": "generative-scoring-req",
+          "object": "list",
+          "created": "<created>",
+          "model": "Qwen/Qwen1.5-0.5B-Chat",
+          "data": [
+            {
+              "index": 0,
+              "object": "score",
+              "score": 0.7310585786300049
+            },
+            {
+              "index": 1,
+              "object": "score",
+              "score": 0.2689414213699951
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 8,
+            "total_tokens": 10,
+            "completion_tokens": 2,
+            "completion_tokens_details": null
+          }
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&json).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_joins_and_truncates_item_prompts() {
+    let mut ready = default_ready_response();
+    ready.max_model_len = 6;
+    let mut results = Vec::new();
+    for (backend, body) in [
+        (
+            FakeChatBackend::new(),
+            json!({"query": "ab", "items": ["c"]}),
+        ),
+        (
+            FakeChatBackend::new(),
+            json!({"query": "ab", "items": ["c"], "item_first": true}),
+        ),
+        (
+            FakeChatBackend::new(),
+            json!({"query": "ab", "items": ["c"], "add_special_tokens": false}),
+        ),
+        // Truncated to `max_model_len - 1`, keeping the start.
+        (
+            FakeChatBackend::new(),
+            json!({"query": [1, 2], "items": [[3, 4, 5, 6, 7]], "apply_softmax": false}),
+        ),
+        // Token IDs need no tokenizer.
+        (
+            FakeChatBackend::without_tokenizer(),
+            json!({"query": [1, 2], "items": [[3]], "apply_softmax": false}),
+        ),
+    ] {
+        let requests = Arc::<std::sync::Mutex<Vec<EngineCoreRequest>>>::default();
+        let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+            ready.clone(),
+            Arc::new(backend),
+            |state| state,
+            generative_scoring_script(vec![vec![-1.0]], Arc::clone(&requests)),
+        )
+        .await;
+        let mut request = body.clone();
+        request["label_token_ids"] = json!([1]);
+        let (status, json) =
+            post_json(&mut build_router(state), "/generative_scoring", request).await;
+        engine_task.finish().await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let prompt = decode_prompt_token_ids(&requests.lock().unwrap()[0]).expect("prompt");
+        results.push(format!(
+            "{body} -> prompt {prompt:?}, prompt_tokens {}, score {}",
+            json["usage"]["prompt_tokens"], json["data"][0]["score"]
+        ));
+    }
+    expect_test::expect![[r#"
+        [
+            "{\"query\":\"ab\",\"items\":[\"c\"]} -> prompt [256, 97, 98, 99], prompt_tokens 4, score 1.0",
+            "{\"query\":\"ab\",\"items\":[\"c\"],\"item_first\":true} -> prompt [99, 256, 97, 98], prompt_tokens 4, score 1.0",
+            "{\"query\":\"ab\",\"items\":[\"c\"],\"add_special_tokens\":false} -> prompt [97, 98, 99], prompt_tokens 3, score 1.0",
+            "{\"query\":[1,2],\"items\":[[3,4,5,6,7]],\"apply_softmax\":false} -> prompt [1, 2, 3, 4, 5], prompt_tokens 5, score 0.36787944117144233",
+            "{\"query\":[1,2],\"items\":[[3]],\"apply_softmax\":false} -> prompt [1, 2, 3], prompt_tokens 3, score 0.36787944117144233",
+        ]
+    "#]].assert_debug_eq(&results);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_rejects_invalid_requests_before_submission() {
+    let (mut app, _engine_task) = test_app().await;
+    let mut errors = Vec::new();
+    for extra in [
+        json!({"model": "missing"}),
+        json!({"label_token_ids": []}),
+        json!({"items": []}),
+        // More labels than `max_logprobs`.
+        json!({"label_token_ids": (0..21).collect::<Vec<u32>>()}),
+        json!({"cache_salt": "a/b"}),
+    ] {
+        let mut body = json!({"query": "q", "items": ["a"], "label_token_ids": [1]});
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (status, json) = post_json(&mut app, "/generative_scoring", body).await;
+        errors.push(format!("{extra} -> {status}: {}", json["error"]["message"]));
+    }
+    expect_test::expect![[r#"
+        [
+            "{\"model\":\"missing\"} -> 404 Not Found: \"The model `missing` does not exist.\"",
+            "{\"label_token_ids\":[]} -> 400 Bad Request: \"label_token_ids must contain at least one token ID.\"",
+            "{\"items\":[]} -> 400 Bad Request: \"items must contain at least one item.\"",
+            "{\"label_token_ids\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]} -> 400 Bad Request: \"requested logprobs of 21, which is greater than max allowed: 20\"",
+            "{\"cache_salt\":\"a/b\"} -> 400 Bad Request: \"Parameter 'cache_salt' must be a non-empty string of at most 128 characters and must not contain '@', '/', '\\\\', or NUL.\"",
+        ]
+    "#]].assert_debug_eq(&errors);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6940,6 +7195,11 @@ async fn engine_request_errors_map_to_http_status() {
             ),
             ("/inference/v1/generate", raw(false), status),
             (
+                "/generative_scoring",
+                json!({"model": model, "query": "hello", "items": ["!"], "label_token_ids": [1]}),
+                status,
+            ),
+            (
                 "/v1/responses",
                 json!({"model": model, "input": "hello"}),
                 status,
@@ -9265,6 +9525,10 @@ async fn skip_tokenizer_init_serves_token_id_completions_only() {
         ),
         ("/tokenize", json!({"prompt": "hi"})),
         ("/detokenize", json!({"tokens": [104]})),
+        (
+            "/generative_scoring",
+            json!({"query": "hi", "items": [[104]], "label_token_ids": [1]}),
+        ),
     ] {
         let (status, json) = post_json(&mut app, uri, body).await;
         errors.push(format!("{uri} {status}: {}", json["error"]["message"]));
@@ -9278,6 +9542,7 @@ async fn skip_tokenizer_init_serves_token_id_completions_only() {
             "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
             "/tokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
             "/detokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/generative_scoring 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
         ]
     "#]].assert_debug_eq(&errors);
 }
