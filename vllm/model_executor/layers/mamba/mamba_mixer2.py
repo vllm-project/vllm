@@ -497,7 +497,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
         a_weight_loader = composed_weight_loader(
-            sharded_weight_loader(0), lambda x: -torch.exp(x.float())
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float()), elementwise=True
         )
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})

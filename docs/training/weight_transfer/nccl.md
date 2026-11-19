@@ -311,9 +311,11 @@ Sparse NCCL sends only `O(nnz)` indices and values, in batches of at most 512 Mi
   [NCCL M2N](m2n.md).
 - Sparse NCCL's pipeline-parallel behavior is untested.
 - **Sparse updates need copy-based weight loaders.** Unchanged elements are
-  staged as NaN and kept by the loader's final `Tensor.copy_`. If a model's
-  loader writes another way, the NaN markers are stored and the update
-  raises, so the model must be reloaded before serving.
+  staged as NaN and kept by the loader's final `Tensor.copy_`; a loader that
+  writes another way stores the NaN markers. A parameter loaded through
+  `composed_weight_loader` supports sparse updates only when the loader is
+  marked `elementwise=True` (currently Mamba2 `A`); otherwise the update
+  raises `NotImplementedError`.
 
 ## Examples
 

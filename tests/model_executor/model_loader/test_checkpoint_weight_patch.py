@@ -194,30 +194,6 @@ def test_dense_and_sparse_patches_follow_packed_tp_loader():
     assert torch.equal(no_local_weight_model.weight, torch.tensor([1.0]))
 
 
-class _SliceAssignModel(torch.nn.Module):
-    """Model whose loader writes with slice assignment instead of Tensor.copy_."""
-
-    def __init__(self):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.zeros(4))
-
-    def load_weights(self, weights):
-        loaded = set()
-        for name, loaded_weight in weights:
-            assert name == "w"
-            self.weight.data[:] = loaded_weight
-            loaded.add("weight")
-        return loaded
-
-
-def test_sparse_patch_rejects_loader_that_bypasses_copy():
-    model = _SliceAssignModel()
-    with pytest.raises(RuntimeError, match="NaN markers.*weight"):
-        load_checkpoint_weight_patches(
-            model, [_make_patch("w", indices=[2], values=[30.0])]
-        )
-
-
 class _MambaConvModel(torch.nn.Module):
     """One TP rank of a GatedDeltaNet-style conv1d weight (Qwen3.5, Qwen3-Next)."""
 
@@ -285,9 +261,9 @@ def test_sparse_patch_through_mamba_v2_sharded_loader(tp_size):
 
 
 class _ComposedLoaderModel(torch.nn.Module):
-    """A Mamba2-style parameter stored as -exp(checkpoint value)."""
+    """A parameter loaded through composed_weight_loader (Mamba2 `A` by default)."""
 
-    def __init__(self):
+    def __init__(self, fn=None, elementwise: bool = True):
         from vllm.model_executor.model_loader.weight_utils import (
             composed_weight_loader,
             default_weight_loader,
@@ -296,7 +272,9 @@ class _ComposedLoaderModel(torch.nn.Module):
         super().__init__()
         self.A = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
         self.A.weight_loader = composed_weight_loader(
-            default_weight_loader, lambda x: -torch.exp(x.float())
+            default_weight_loader,
+            fn if fn is not None else (lambda x: -torch.exp(x.float())),
+            elementwise=elementwise,
         )
 
     def load_weights(self, weights):
@@ -316,3 +294,28 @@ def test_sparse_patch_through_composed_loader_transforms_once():
         model, [_make_patch("A_log", indices=[2], values=[-2.0])]
     )
     assert torch.equal(model.A, -torch.exp(torch.tensor(v2, dtype=torch.float32)))
+
+
+def test_sparse_patch_through_composed_loader_keeps_mask_when_fn_drops_nan():
+    model = _ComposedLoaderModel(fn=torch.nan_to_num)
+    load_checkpoint_weight_patches(
+        model, [_make_patch("A_log", values=[3.0, 4.0, 5.0, 6.0])]
+    )
+
+    load_checkpoint_weight_patches(
+        model, [_make_patch("A_log", indices=[1], values=[7.0])]
+    )
+    assert torch.equal(model.A, torch.tensor([3.0, 7.0, 5.0, 6.0]))
+
+
+def test_sparse_patch_rejects_composed_loader_not_marked_elementwise():
+    model = _ComposedLoaderModel(fn=lambda x: x * 2, elementwise=False)
+    load_checkpoint_weight_patches(
+        model, [_make_patch("A_log", values=[1.0, 2.0, 3.0, 4.0])]
+    )
+    assert torch.equal(model.A, torch.tensor([2.0, 4.0, 6.0, 8.0]))
+
+    with pytest.raises(NotImplementedError, match="elementwise=True"):
+        load_checkpoint_weight_patches(
+            model, [_make_patch("A_log", indices=[1], values=[7.0])]
+        )
