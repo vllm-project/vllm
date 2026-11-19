@@ -424,9 +424,12 @@ class Worker(WorkerBase):
         tp = get_tp_group().rank_in_group
         return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
-    def compute_weight_checksums(self) -> dict[str, str]:
+    def compute_weight_checksums(self, is_draft: bool = False) -> dict[str, str]:
         prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.get_model())
+        model = self.get_draft_model() if is_draft else self.get_model()
+        if model is None:
+            raise RuntimeError("No resident draft model to checksum on this worker.")
+        digests = compute_tensor_digests(model)
         return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
