@@ -73,8 +73,8 @@ def _assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
 def _strided_context_inputs(
     num_tokens: int, num_heads: int, dtype: torch.dtype, k_pe_fp8: bool
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The real prefill-context layouts: ``k_nope``/``v`` as the two strided
-    halves of one kv_b_proj output and ``k_pe`` as a column slice of the gather
+    """The real prefill-context layouts: `k_nope`/`v` as the two strided
+    halves of one kv_b_proj output and `k_pe` as a column slice of the gather
     workspace (left in the fp8 cache layout for a plain fp8 cache)."""
     kv_nope = _randn(num_tokens, num_heads, 256, dtype=dtype)
     k_nope, v = kv_nope.split((128, 128), dim=-1)

@@ -17,8 +17,6 @@ model:
   active_parameters: "2.4B"
   context_length: 32768
   base_args:
-    - "--gpu-memory-utilization"
-    - "0.75"
     - "--max-num-seqs"
     - "32"
   base_env: {}
@@ -79,7 +77,6 @@ guide: |
     --host 0.0.0.0 \
     --port 8000 \
     --tensor_parallel_size 2 \
-    --gpu-memory-utilization 0.75 \
     --max-num-seqs 32
   ```
 
@@ -88,7 +85,7 @@ guide: |
   ```bash
   export VLLM_ROCM_USE_AITER=1
   vllm serve jinaai/jina-reranker-m0 \
-    --tensor_parallel_size 2 --gpu-memory-utilization 0.75 --max-num-seqs 32
+    --tensor_parallel_size 2 --max-num-seqs 32
   ```
 
   ## Rerank API
@@ -146,7 +143,6 @@ guide: |
   llm = LLM(
       model="jinaai/jina-reranker-m0",
       tensor_parallel_size=2,
-      gpu_memory_utilization=0.75,
       max_model_len=1024,
       max_num_seqs=32,
       kv_cache_dtype="fp8",

@@ -1,19 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload (``VLLM_RELOAD_MODE=direct``).
+"""Direct weight reload (`VLLM_RELOAD_MODE=direct`).
 
 Cold start records each tensor's checkpoint layout before post-load processing
-(PWAL). ``begin`` views re-laid-out tensors back to that layout on their
-storage, the loaders write the checkpoint in place, and ``finish`` reruns PWAL,
+(PWAL). `begin` views re-laid-out tensors back to that layout on their
+storage, the loaders write the checkpoint in place, and `finish` reruns PWAL,
 which must keep addresses (captured CUDA graphs) and refill derived tensors.
-Between ``begin`` and a successful ``finish`` the model must not run; there is
+Between `begin` and a successful `finish` the model must not run; there is
 no rollback, the next full update repairs it.
 
-Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+Delivery contract: an update loads every parameter cold start loaded (as
+`model.load_weights` reports it; after a dummy start, the first update sets
+the record and is not checked itself), except those level 2 sleep preserves
+(`--sleep-preserve-parameter-names`: the update does not rewrite them).
+`finish` checks it before rerunning PWAL, which would otherwise reprocess the
+kept runtime bytes of a parameter the update left out.
+A parameter flagged `fill_on_reload` must also be delivered whole: `begin`
+zero-fills each such tensor this model owns whole, as its checkpoint-layout
+view (padding the loaders skip or fill, and a load plan skips loader fills);
+a tensor shared with another model (draft and target) is zeroed only by its
+owner's `begin`.
 """
 
 from collections.abc import Iterator
+from fnmatch import fnmatchcase
 
 import torch
 
@@ -30,9 +40,13 @@ logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
+    "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "loadable_tensors",
+    "mark_loaded",
     "record_checkpoint_layout",
+    "track_loaded_params",
 ]
 
 
@@ -53,15 +67,20 @@ _LOADER_ATTRS = (
 
 
 def direct_reload_enabled() -> bool:
-    """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
+    """Whether weight updates reload in place (`VLLM_RELOAD_MODE=direct`)."""
     return envs.VLLM_RELOAD_MODE == "direct"
+
+
+def direct_reload_active(model: torch.nn.Module) -> bool:
+    """Whether `model` is between `begin_direct_reload` and its finish."""
+    return getattr(model, "_direct_reload_begun", False)
 
 
 def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
-def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+def loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Parameters and persistent buffers, each object once."""
     seen: set[int] = set()
     for module_name, module in model.named_modules():
@@ -75,6 +94,67 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
                 continue
             seen.add(id(tensor))
             yield (f"{module_name}.{name}" if module_name else name), tensor
+
+
+def track_loaded_params(model: torch.nn.Module) -> None:
+    """Collect the parameter names `model.load_weights` returns until the
+    cold-start record or the reload's finish; `None` once a call returns
+    `None` (the model does not report them: nothing is checked)."""
+    load_weights = getattr(model, "load_weights", None)
+    if load_weights is None:  # a bare module: nothing to check
+        return
+    if not getattr(load_weights, "_tracks_loads", False):
+
+        def tracked(*args, **kwargs):
+            loaded = load_weights(*args, **kwargs)
+            names = model.__dict__.get("_loaded_params")
+            if names is not None:
+                if loaded is None:
+                    model._loaded_params = None
+                else:
+                    names.update(loaded)
+            return loaded
+
+        tracked._tracks_loads = True  # type: ignore[attr-defined]
+        model.load_weights = tracked
+    model._loaded_params = set()
+
+
+def mark_loaded(model: torch.nn.Module, name: str) -> None:
+    """Report parameter `name` loaded without `load_weights` (written in
+    place by a weight transfer engine)."""
+    names = model.__dict__.get("_loaded_params")
+    if names is not None:
+        names.add(name)
+
+
+def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) -> None:
+    """Raise unless the update loaded every parameter cold start loaded, except
+    those level 2 sleep preserves because the update does not rewrite them.
+    `load_weights` reports parameter names, whatever checkpoint names fed
+    them (fused or per-expert); a tied parameter counts under either name."""
+    loaded = model.__dict__.pop("_loaded_params", None)
+    required = model.__dict__.get("_required_params")
+    if loaded is None or required is None:  # the model does not report loads
+        return
+    if not required:  # dummy start: the first update sets what is required
+        model._required_params = loaded
+        return
+    preserved = getattr(model_config, "sleep_preserve_parameter_names", ())
+    params = dict(model.named_parameters(remove_duplicate=False))
+    delivered = {params.get(n, n) for n in loaded}
+    missing = sorted(
+        n
+        for n in required
+        if params.get(n, n) not in delivered
+        and not any(fnmatchcase(n, p) for p in preserved)
+    )
+    if missing:
+        raise RuntimeError(
+            f"direct reload: the update did not load {len(missing)} parameters "
+            f"cold start loaded (e.g. {missing[:8]}); every update must resend "
+            "them, start a new full update"
+        )
 
 
 def _check_supported_modules(model: torch.nn.Module) -> None:
@@ -114,19 +194,25 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported_modules(model)
+    # what cold start loaded, every update must load again; after a dummy
+    # start (nothing loaded) the first update sets it
+    model._required_params = model.__dict__.pop("_loaded_params", None)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
-            t._ckpt = (model._ckpt_owner, _layout(t), attrs)
+            storage = t.untyped_storage().data_ptr()
+            t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
         for name, p in model.named_parameters(remove_duplicate=False)
         if hasattr(p, "_ckpt")
     )
+    # reruns skip modules added after cold start (LoRA wrappers)
+    model._ckpt_modules = list(model.named_modules())
 
 
 def _check_params_kept(model: torch.nn.Module) -> None:
@@ -158,7 +244,7 @@ def _checkpoint_views(
     tensor post-load processing re-laid out; raises if a storage cannot
     hold its checkpoint layout."""
     views: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for name, t in _loadable_tensors(model):
+    for name, t in loadable_tensors(model):
         ckpt = getattr(t, "_ckpt", None)
         if ckpt is None:
             continue  # no layout: created by post-load processing, derived
@@ -173,6 +259,8 @@ def _checkpoint_views(
             )
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
+        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
+            offset = t.storage_offset()
         span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
         need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
@@ -198,14 +286,19 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
+    track_loaded_params(model)
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
-    for _, t in _loadable_tensors(model):
+    for _, t in loadable_tensors(model):
         if not _owned(model, t):
             continue
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+        if getattr(t, "fill_on_reload", False):
+            # Reset padding: loaders skip it or fill it, and a load plan skips
+            # loader fills. Erases the checkpoint region too.
+            t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
@@ -224,6 +317,7 @@ def finish_direct_reload(
         raise RuntimeError(
             "direct reload: finish without a begin; start a new full update"
         )
+    _check_update_complete(model, model_config)
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 

@@ -8,6 +8,10 @@
 // keys without materializing the [rows, keys] logits matrix.
 // This file is the libtorch-stable host wrapper. All scratch memory is passed
 // in by the caller (no allocation here), so the op is CUDA-graph friendly.
+//
+// Acknowledgement: LiteTopK (arXiv:2607.11976) was the first to fuse
+// sparse-attention indexer scoring with top-k selection without materializing
+// the full logits matrix, using classic sample-based threshold filtering.
 
 #include "../torch_utils.h"
 

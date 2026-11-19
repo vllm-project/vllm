@@ -69,14 +69,14 @@ class HYV4FeedForward(nn.Module):
 class HYV4MoEFused(nn.Module):
     """HY V4 MoE layer with optional SwiGLU clamp support.
 
-    When ``config.swiglu_limit > 0`` the routed experts use a clamped SwiGLU::
+    When `config.swiglu_limit > 0` the routed experts use a clamped SwiGLU::
 
         gate = clamp(gate, max=limit)
         up = clamp(up, -limit, limit)
         output = silu(gate) * up
 
     Dense layers and shared experts are NOT clamped. The clamp is forwarded to
-    ``FusedMoEFactory`` as ``swiglu_limit`` so it travels through the quant
+    `FusedMoEFactory` as `swiglu_limit` so it travels through the quant
     config to every expert backend instead of mutating global state.
 
     NOTE: The reference implementation additionally supports HPC gate kernels,
@@ -91,18 +91,15 @@ class HYV4MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        reduce_results: bool = True,
+        *,
+        routed_hidden_size: int | None = None,
+        routed_input_transform: nn.Module | None = None,
+        routed_output_transform: nn.Module | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
-        self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}."
-            )
         top_k = config.num_experts_per_tok
         intermediate_size = config.expert_hidden_dim
         router_scaling_factor = getattr(config, "router_scaling_factor", 1.0)
@@ -113,11 +110,6 @@ class HYV4MoEFused(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = GateLinear(
             config.hidden_size,
@@ -148,12 +140,20 @@ class HYV4MoEFused(nn.Module):
         raw_swiglu_limit = getattr(config, "swiglu_limit", 0)
         use_swiglu_clamp = bool(raw_swiglu_limit) and float(raw_swiglu_limit) > 0
         moe_swiglu_limit = float(raw_swiglu_limit) if use_swiglu_clamp else None
+        if routed_input_transform is not None:
+            self.routed_expert_down_proj = routed_input_transform
+        if routed_output_transform is not None:
+            self.routed_expert_up_proj = routed_output_transform
 
         self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=top_k,
-            hidden_size=config.hidden_size,
+            hidden_size=(
+                config.hidden_size if routed_hidden_size is None else routed_hidden_size
+            ),
             intermediate_size=intermediate_size,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
             renormalize=config.route_norm,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -167,7 +167,21 @@ class HYV4MoEFused(nn.Module):
             e_score_correction_bias=self.expert_bias,
             shared_experts=self.shared_experts,
             swiglu_limit=moe_swiglu_limit,
+            reduce_results=reduce_results,
         )
+        assert reduce_results or self.experts.moe_config.skip_final_all_reduce
+        mapping = self.experts.routed_experts.expert_map_manager
+        self.ep_size, self.ep_rank = mapping.ep_size, mapping.ep_rank
+        self.ep_group = get_ep_group().device_group if mapping.use_ep else None
+        self.n_physical_experts = mapping.global_num_experts
+        self.n_local_physical_experts = mapping.local_num_experts
+        local_ids = (
+            list(range(mapping.global_num_experts))
+            if mapping.expert_map is None
+            else (mapping.expert_map >= 0).nonzero().flatten().tolist()
+        )
+        self.physical_expert_start = min(local_ids, default=0)
+        self.physical_expert_end = max(local_ids, default=-1) + 1
         self.prefix = prefix
         if use_swiglu_clamp:
             logger.debug_once(

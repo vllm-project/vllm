@@ -266,8 +266,8 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(8, 4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
         pytest.param(8, 16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
         pytest.param(8, 4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
-        pytest.param(8, 16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
-        pytest.param(8, 4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+        pytest.param(8, 16, (9,), torch.float32, torch.bfloat16, id="tp16-max"),
+        pytest.param(8, 4, (9,), torch.bfloat16, torch.float32, id="tp4-max"),
         pytest.param(
             1,
             1,
@@ -287,7 +287,7 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(
             2,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.float32,
             id="ratio2-tp4-max-fp32",
@@ -303,10 +303,22 @@ def test_fused_post_conv_int64_token_offset():
         pytest.param(
             4,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.bfloat16,
             id="ratio4-tp4-max-fp32",
+        ),
+        # More requests leave fewer idle SMs, so the CUDA kernel splits V less.
+        pytest.param(
+            2, 1, (9, 9, 4, 2), torch.float32, torch.bfloat16, id="ratio2-4reqs"
+        ),
+        pytest.param(
+            2,
+            1,
+            (9,) * 14 + (3, 0),
+            torch.bfloat16,
+            torch.float32,
+            id="ratio2-16reqs-ragged",
         ),
     ],
 )

@@ -61,12 +61,16 @@ def _make_top16_bf16_finalize_asm() -> str:
         "ld.global.v4.u32 {_index4, _index5, _index6, _index7}, [$5+16];",
         "ld.global.v4.u32 {_index8, _index9, _index10, _index11}, [$5+32];",
         "ld.global.v4.u32 {_index12, _index13, _index14, _index15}, [$5+48];",
-        "ld.global.v4.u32 "
-        "{_weight_words0, _weight_words1, _weight_words2, "
-        "_weight_words3}, [$6];",
-        "ld.global.v4.u32 "
-        "{_weight_words4, _weight_words5, _weight_words6, "
-        "_weight_words7}, [$6+16];",
+        (
+            "ld.global.v4.u32 "
+            "{_weight_words0, _weight_words1, _weight_words2, "
+            "_weight_words3}, [$6];"
+        ),
+        (
+            "ld.global.v4.u32 "
+            "{_weight_words4, _weight_words5, _weight_words6, "
+            "_weight_words7}, [$6+16];"
+        ),
     ]
     for pair in range(8):
         lines.append(
@@ -80,11 +84,15 @@ def _make_top16_bf16_finalize_asm() -> str:
         lines.extend(
             [
                 f"setp.ge.s32 _valid{route}, _index{route}, 0;",
-                f"@_valid{route} mad.wide.s32 _address{route}, "
-                f"_index{route}, 7168, $4;",
-                f"@_valid{route} ld.global.v4.u32 "
-                f"{{_data{data}, _data{data + 1}, _data{data + 2}, "
-                f"_data{data + 3}}}, [_address{route}];",
+                (
+                    f"@_valid{route} mad.wide.s32 _address{route}, "
+                    f"_index{route}, 7168, $4;"
+                ),
+                (
+                    f"@_valid{route} ld.global.v4.u32 "
+                    f"{{_data{data}, _data{data + 1}, _data{data + 2}, "
+                    f"_data{data + 3}}}, [_address{route}];"
+                ),
             ]
         )
     for route in range(16):
@@ -94,10 +102,14 @@ def _make_top16_bf16_finalize_asm() -> str:
             lines.extend(
                 [
                     f"@_valid{route} mov.b32 {{_lo, _hi}}, _data{data};",
-                    f"@_valid{route} fma.rn.f32.bf16 _acc{element}, _lo, "
-                    f"_weights{route}, _acc{element};",
-                    f"@_valid{route} fma.rn.f32.bf16 _acc{element + 1}, _hi, "
-                    f"_weights{route}, _acc{element + 1};",
+                    (
+                        f"@_valid{route} fma.rn.f32.bf16 _acc{element}, _lo, "
+                        f"_weights{route}, _acc{element};"
+                    ),
+                    (
+                        f"@_valid{route} fma.rn.f32.bf16 _acc{element + 1}, _hi, "
+                        f"_weights{route}, _acc{element + 1};"
+                    ),
                 ]
             )
     for pair in range(4):

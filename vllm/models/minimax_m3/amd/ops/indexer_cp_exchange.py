@@ -206,7 +206,7 @@ def local_topk_keys(
     local_blocks: int,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """Write ``[heads, tokens, topk]`` packed int64 keys for this shard."""
+    """Write `[heads, tokens, topk]` packed int64 keys for this shard."""
     heads, tokens, local = scores.shape
     if global_blocks >= 0xFFFF:
         raise ValueError("packed CP keys support fewer than 65535 sparse blocks")
@@ -241,12 +241,12 @@ def local_topk_keys(
 
 
 def aiter_all_gather(x: torch.Tensor) -> torch.Tensor | None:
-    """AITER IPC all-gather over the TP group as ``[world, *x.shape]``, or None.
+    """AITER IPC all-gather over the TP group as `[world, *x.shape]`, or None.
 
     The payload is viewed as int32 so AITER's pybind layer (which has no
     float64 after it relabels integers as floats) accepts it -- int64 keys and
     bf16 index queries alike. Concatenates along dim 0,
-    then views back to ``x``'s dtype.
+    then views back to `x`'s dtype.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -266,10 +266,10 @@ def aiter_all_gather(x: torch.Tensor) -> torch.Tensor | None:
 
 
 def all_gather(x: torch.Tensor, group: GroupCoordinator) -> torch.Tensor:
-    """All-gather contiguous ``x`` over ``group`` to ``[world, *x.shape]``.
+    """All-gather contiguous `x` over `group` to `[world, *x.shape]`.
 
     AITER's IPC all-gather is tried first: on ROCm the TP communicator's
-    ``all_gather`` stays on the RCCL collective, and its AITER path is only
+    `all_gather` stays on the RCCL collective, and its AITER path is only
     enabled for DP groups, so it would not pick AITER for these small
     per-layer payloads.
     """
@@ -292,7 +292,7 @@ def merge_topk_keys(
     sparse_context_lens_out: torch.Tensor | None = None,
     block_page_stride: int | None = None,
 ) -> torch.Tensor:
-    """Merge gathered ``[world, heads, tokens, topk]`` keys into global top-k."""
+    """Merge gathered `[world, heads, tokens, topk]` keys into global top-k."""
     shards, heads, tokens, per_shard = keys.shape
     topk = topk_idx.shape[2]
     candidates = shards * per_shard

@@ -19,7 +19,7 @@ DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class LogicalCPUInfo:
     id: int = -1
     physical_core: int = -1
@@ -49,7 +49,7 @@ class LogicalCPUInfo:
             return obj_dict
 
 
-@dataclass
+@dataclass(slots=True)
 class MemoryNodeInfo:
     total_memory: int = -1
     available_memory: int = -1
@@ -286,6 +286,23 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
         return visible_nodes
 
     return allowed_memory_node_list
+
+
+def get_worker_memory_nodes(assigned_node_ids: list[int] | None) -> list[int]:
+    """get_visible_memory_node for a CPU worker. Raises a clear error when
+    none of the NUMA nodes assigned to the worker exists on this host."""
+    nodes = get_visible_memory_node(assigned_node_ids)
+    if not nodes:
+        raise ValueError(
+            f"None of the NUMA nodes {assigned_node_ids} assigned to this CPU "
+            f"worker is available; this process can use NUMA nodes "
+            f"{get_memory_affinity()}. Each CPU worker on a host needs its own "
+            "NUMA node, so the data-parallel ranks on this host times "
+            "tensor_parallel_size times pipeline_parallel_size must not exceed "
+            "the host's NUMA nodes. To share NUMA nodes for debugging, set "
+            "VLLM_CPU_SIM_MULTI_NUMA=1 with VLLM_CPU_OMP_THREADS_BIND=auto."
+        )
+    return nodes
 
 
 @cache
