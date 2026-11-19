@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -136,6 +135,20 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    def get_sampling_mask_capture(
+        self, idx_mapping_np: np.ndarray
+    ) -> tuple[np.ndarray, int] | None:
+        """Return the selected requests and their maximum top-k, if any."""
+        if self.capture_sampling_mask is None:
+            return None
+        capture = self.capture_sampling_mask[idx_mapping_np]
+        if not capture.any():
+            return None
+        max_num_kept = int(
+            np.max(self.sampling_states.top_k.np[idx_mapping_np[capture]])
+        )
+        return capture, max_num_kept
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -203,11 +216,17 @@ class Sampler:
             self.req_states.prefill_len.gpu,
         )
 
-        sampling_mask_tensors = (
-            self._capture_sampling_mask(processed_logits, input_batch, num_sampled)
-            if self.capture_sampling_mask is not None
-            else None
-        )
+        sampling_mask_tensors = None
+        mask_capture = self.get_sampling_mask_capture(idx_mapping_np)
+        if mask_capture is not None:
+            capture, max_num_kept = mask_capture
+            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+                processed_logits,
+                input_batch.cu_num_logits,
+                num_sampled,
+                max_num_kept,
+                captured_requests=capture,
+            )
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
@@ -222,39 +241,6 @@ class Sampler:
             sampling_mask_tensors=sampling_mask_tensors,
         )
         return sampler_output
-
-    def _capture_sampling_mask(
-        self,
-        logits: torch.Tensor,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
-    ) -> SamplingMaskTensors | None:
-        assert self.capture_sampling_mask is not None
-        idx_mapping = input_batch.idx_mapping_np
-        capture = self.capture_sampling_mask[idx_mapping]
-        if not capture.any():
-            return None
-
-        cu_num_logits = input_batch.cu_num_logits
-        captured_requests = None
-        if not capture.all():
-            captured_requests = capture
-            # Select the requests' slots plus the final logits boundary. The
-            # kernel reads each selected slot's start in the original logits.
-            slots = np.append(np.flatnonzero(capture), len(capture))
-            slots_gpu = async_tensor_h2d(slots, device=logits.device, dtype=torch.int64)
-            cu_num_logits = cu_num_logits.index_select(0, slots_gpu)
-            num_sampled = num_sampled.index_select(0, slots_gpu[:-1])
-            idx_mapping = idx_mapping[capture]
-
-        max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping]))
-        return SamplingMaskTensors.from_logits(
-            logits,
-            cu_num_logits,
-            num_sampled,
-            max_num_kept,
-            captured_requests=captured_requests,
-        )
 
     def apply_sampling_params(
         self,

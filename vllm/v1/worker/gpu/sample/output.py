@@ -11,6 +11,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
 
@@ -155,7 +156,7 @@ class SamplingMaskTensors(NamedTuple):
     vocab_size: int
     # Fixed request-major output slots. Ordinary sampling has one slot.
     rows_per_request: int = 1
-    # Original request slots for a compacted single-position batch.
+    # Original request slots for a compacted batch.
     captured_requests: np.ndarray | None = None
 
     @classmethod
@@ -169,7 +170,21 @@ class SamplingMaskTensors(NamedTuple):
         *,
         captured_requests: np.ndarray | None = None,
     ) -> SamplingMaskTensors:
-        """Capture the finite-logit support of every row with a sampled token."""
+        """Capture finite-logit support for sampled tokens in selected requests."""
+        if captured_requests is not None:
+            if captured_requests.all():
+                captured_requests = None
+            else:
+                # The selected boundaries still point into the original logits.
+                slots = np.append(
+                    np.flatnonzero(captured_requests), len(captured_requests)
+                )
+                slots_gpu = async_tensor_h2d(
+                    slots, device=logits.device, dtype=torch.int64
+                )
+                cu_num_logits = cu_num_logits.index_select(0, slots_gpu)
+                num_sampled_tokens = num_sampled_tokens.index_select(0, slots_gpu[:-1])
+
         if current_platform.is_xpu():
             compact_sampling_mask = _compact_sampling_mask_xpu
         else:
@@ -187,17 +202,25 @@ class SamplingMaskTensors(NamedTuple):
         )
 
     @classmethod
-    def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:
-        """Join request-contiguous chunks that share one output layout."""
+    def cat(
+        cls,
+        chunks: Sequence[SamplingMaskTensors],
+        *,
+        captured_requests: np.ndarray,
+    ) -> SamplingMaskTensors:
+        """Join captured chunks and attach their request slots in the full batch."""
         first = chunks[0]
         assert len({(c.vocab_size, c.rows_per_request) for c in chunks}) == 1
-        assert all(chunk.captured_requests is None for chunk in chunks)
+        batch_capture = None if captured_requests.all() else captured_requests
+        if len(chunks) == 1:
+            return first._replace(captured_requests=batch_capture)
         return cls(
             torch.cat([chunk.token_ids for chunk in chunks]),
             torch.cat([chunk.packed_mask for chunk in chunks]),
             torch.cat([chunk.counts for chunk in chunks]),
             first.vocab_size,
             first.rows_per_request,
+            batch_capture,
         )
 
     def to_cpu_nonblocking(self) -> SamplingMaskTensors:
@@ -222,12 +245,17 @@ class SamplingMaskTensors(NamedTuple):
         width = token_ids.shape[1]
 
         cu_num_generated_tokens = None
+        captured_positions = self.captured_requests
         if self.rows_per_request == 1:
             sampled_rows = np.arange(len(counts))
         else:
             assert num_sampled_tokens is not None
+            captured_counts = num_sampled_tokens
+            if captured_positions is not None:
+                captured_counts = num_sampled_tokens[captured_positions]
+                captured_positions = np.repeat(captured_positions, num_sampled_tokens)
             active_slots = (
-                np.arange(self.rows_per_request)[None, :] < num_sampled_tokens[:, None]
+                np.arange(self.rows_per_request)[None, :] < captured_counts[:, None]
             )
             sampled_rows = np.flatnonzero(active_slots)
             cu_num_generated_tokens = np.cumsum(
@@ -245,10 +273,9 @@ class SamplingMaskTensors(NamedTuple):
 
         supports = [support(row) for row in sampled_rows]
         lengths = [len(support) for support in supports]
-        if self.captured_requests is not None:
-            assert self.rows_per_request == 1
-            offsets = np.zeros(len(self.captured_requests) + 1, dtype=np.int64)
-            offsets[1:][self.captured_requests] = lengths
+        if captured_positions is not None:
+            offsets = np.zeros(len(captured_positions) + 1, dtype=np.int64)
+            offsets[1:][captured_positions] = lengths
             np.cumsum(offsets[1:], out=offsets[1:])
         else:
             offsets = np.zeros(len(supports) + 1, dtype=np.int64)

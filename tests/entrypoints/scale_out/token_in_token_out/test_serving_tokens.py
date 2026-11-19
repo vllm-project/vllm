@@ -213,12 +213,43 @@ async def test_generate_sampling_mask(client):
     reason="sampling-mask opt-out uses the Python CUDA or ROCm serving path",
 )
 @pytest.mark.parametrize(
-    "server",
-    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
-    indirect=True,
+    ("server", "speculative"),
+    [
+        pytest.param(
+            ["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"],
+            False,
+            id="non-speculative",
+        ),
+        pytest.param(
+            [
+                "--return-sampling-mask",
+                "--logprobs-mode",
+                "processed_logprobs",
+                "--speculative-config",
+                json.dumps(
+                    {
+                        "method": "ngram",
+                        "num_speculative_tokens": 2,
+                        "prompt_lookup_min": 1,
+                        "prompt_lookup_max": 2,
+                    }
+                ),
+                "--per-request-spec-decode-metrics",
+                "summary",
+            ],
+            True,
+            id="speculative",
+        ),
+    ],
+    indirect=["server"],
 )
-async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(client):
-    request = {"model": MODEL_NAME, "token_ids": [1, 2, 3]}
+async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(
+    client, speculative
+):
+    request = {"model": MODEL_NAME, "token_ids": [1] * 8 if speculative else [1, 2, 3]}
+    # The repeated prompt and singleton target support make ngram acceptance
+    # deterministic, so the test exercises rejection sampling with emitted drafts.
+    allowed_tokens = {"allowed_token_ids": [1]} if speculative else {}
     rollout = {
         **request,
         "sampling_params": {
@@ -227,6 +258,7 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(client):
             "top_k": 5,
             "temperature": 1.0,
             "seed": 0,
+            **allowed_tokens,
         },
     }
     eval_request = {
@@ -237,6 +269,7 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(client):
             "temperature": 0.0,
             "return_sampling_mask": False,
             "logprobs": 0,
+            **allowed_tokens,
         },
     }
     rollout_response, eval_response = await asyncio.gather(
@@ -257,6 +290,10 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(client):
     assert [entry["token_id"] for entry in eval_choice["logprobs"]["content"]] == (
         eval_choice["token_ids"]
     )
+    if speculative:
+        for response in (rollout_response, eval_response):
+            stats = response.json()["metrics"]["speculative_decoding"]
+            assert stats["num_accepted_draft_tokens"] > 0
 
 
 @pytest.mark.asyncio

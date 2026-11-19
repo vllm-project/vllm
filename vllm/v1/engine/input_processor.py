@@ -184,15 +184,6 @@ class InputProcessor:
                     "Enable --return-sampling-mask to request sampling mask capture",
                     parameter="return_sampling_mask",
                 )
-            if (
-                sampling_mask_enabled
-                and params.return_sampling_mask is False
-                and self.speculative_config is not None
-            ):
-                raise VLLMValidationError(
-                    "Sampling-mask opt-out requires disabling speculative decoding",
-                    parameter="return_sampling_mask",
-                )
             if sampling_mask_enabled and params.return_sampling_mask is not False:
                 if params.temperature <= 0:
                     raise ValueError(

@@ -165,6 +165,32 @@ def test_sampling_mask_tensors_restores_opted_out_request_slots():
     assert result.slice_request(4, 1).to_nested_list() == [[4]]
 
 
+def test_sampling_mask_tensors_restores_speculative_positions_after_chunking():
+    first = SamplingMaskTensors(
+        token_ids=torch.tensor([[1], [2], [0]]),
+        packed_mask=torch.zeros((3, 1), dtype=torch.uint8),
+        counts=torch.tensor([1, 1, 0]),
+        vocab_size=8,
+        rows_per_request=3,
+    )
+    last = SamplingMaskTensors(
+        token_ids=torch.tensor([[0], [0], [0], [4], [5], [6]]),
+        packed_mask=torch.zeros((6, 1), dtype=torch.uint8),
+        counts=torch.tensor([0, 0, 0, 1, 1, 1]),
+        vocab_size=8,
+        rows_per_request=3,
+    )
+
+    tensors = SamplingMaskTensors.cat(
+        [first, last], captured_requests=np.array([True, False, True, True, False])
+    )
+    result = tensors.tolists(np.array([2, 2, 0, 3, 1]))
+
+    assert result.to_nested_list() == [[1], [2], [], [], [4], [5], [6], []]
+    assert result.slice_request(1, 2).to_nested_list() == [[], []]
+    assert result.slice_request(3, 3).to_nested_list() == [[4], [5], [6]]
+
+
 def test_sampling_mask_tensors_uses_request_boundaries():
     logits = torch.full((6, 8), -float("inf"), device=DEVICE_TYPE)
     logits[0, [1, 3]] = 0
