@@ -23,6 +23,9 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `KimiK25ForConditionalGeneration` | `Kimi-K2.5, Kimi-K2.6` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK3ForConditionalGeneration` | `Kimi-K3` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
+| `MiniCPMV4_6ForConditionalGeneration` | `MiniCPMV4.6`, `MiniCPMV4.7` | ✅︎ | ✅︎ | ❌︎ |
 | `Mistral3ForConditionalGeneration` | `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `PixtralForConditionalGeneration` | `Pixtral`, Mistral-format `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
@@ -31,8 +34,6 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Qwen3_5ForConditionalGeneration` | `Qwen3.5`, `Qwen3.6` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen3_5MoeForConditionalGeneration` | `Qwen3.5-MoE`, `Qwen3.6-MoE` | ✅︎ | ✅︎ | ❌︎ |
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
-| `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ | ❌︎ |
-| `MiniCPMV` | `MiniCPMV2.6`, `MiniCPMV4.0` | ✅︎ | ✅︎ | ❌︎ |
 
 !!! note
     Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
