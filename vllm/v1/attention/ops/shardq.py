@@ -109,14 +109,23 @@ def build_shardq_split(
     common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
 ) -> ShardQSplit | None:
     """This step's `zigzag_split` over the TP group of the tokens after the
-    decodes (requests of at most 1 + num_speculative_tokens tokens). None when
-    too few tokens follow the decodes, none of their requests is longer than
+    decodes, using the same decode boundary as the sparse-MLA metadata
+    builders (short extends count as prefills under PCP). None when too few
+    tokens follow the decodes, none of their requests is longer than
     the top-k, or a rank would own no tokens.
     """
     spec_config = vllm_config.speculative_config
     num_spec = spec_config.num_speculative_tokens if spec_config else 0
     num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-        split_decodes_and_prefills(common_attn_metadata, decode_threshold=1 + num_spec)
+        split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=1 + num_spec,
+            # The sparse-MLA metadata builders treat short extends as prefills
+            # under PCP, so the split must draw the same decode boundary.
+            treat_short_extends_as_decodes=(
+                vllm_config.parallel_config.prefill_context_parallel_size == 1
+            ),
+        )
     )
     min_tokens = vllm_config.attention_config.sparse_mla_shard_q_min_tokens
     if num_prefills == 0 or num_prefill_tokens < min_tokens:

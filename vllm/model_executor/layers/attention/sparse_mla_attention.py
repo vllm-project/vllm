@@ -876,6 +876,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa runs ShardQ metadata and is validated.
     supports_shardq: ClassVar[bool] = False
+    # Whether ShardQ may also run with PCP. Only backends whose ShardQ path
+    # was validated under PCP set this.
+    supports_shardq_with_pcp: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -955,14 +958,20 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         cudagraph_mode = (
             vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
         )
-        # The attention layer decides whether to use ShardQ.
+        # The attention layer decides whether to use ShardQ. Under PCP a
+        # backend splits each PCP rank's share of a step's prefill tokens
+        # again across the TP group; only backends validated in that layout
+        # allow it.
         self.use_shardq = (
             self.supports_shardq
             and vllm_config.attention_config.sparse_mla_shard_q
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1
             and parallel_config.decode_context_parallel_size == 1
-            and parallel_config.prefill_context_parallel_size == 1
+            and (
+                parallel_config.prefill_context_parallel_size == 1
+                or self.supports_shardq_with_pcp
+            )
             and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
         )
 

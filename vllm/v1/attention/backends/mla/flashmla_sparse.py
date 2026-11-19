@@ -726,6 +726,7 @@ class FlashMLASparseMetadataBuilder(
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     supports_shardq: ClassVar[bool] = True
+    supports_shardq_with_pcp: ClassVar[bool] = True
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
@@ -788,14 +789,26 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             # kv_lora_rank-wide workspace, too narrow for the 576 rows.
             self.supports_dense_mha_prefill = False
 
-        # ShardQ runs on the mixed-batch fp8 kernel.
+        # ShardQ runs on the mixed-batch fp8 kernel. At exactly
+        # MIN_HEADS_FOR_BF16_PREFILL heads per rank the layer still prefers the
+        # separate BF16 prefill path, but ShardQ's sub-batches force the
+        # mixed-batch fp8 metadata; allow that only under PCP, where the token
+        # sharding makes up for the smaller PCP-local batches, and not with
+        # speculative decoding, whose non-uniform decode lengths can draw a
+        # different decode boundary than the metadata builder.
+        vllm_config = get_current_vllm_config()
         self.use_shardq = (
             self.use_shardq
             and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
-            and num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            and (
+                num_heads < MIN_HEADS_FOR_BF16_PREFILL
+                or (
+                    num_heads == MIN_HEADS_FOR_BF16_PREFILL
+                    and vllm_config.parallel_config.prefill_context_parallel_size > 1
+                    and vllm_config.speculative_config is None
+                )
+            )
         )
-
-        vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_heads = num_heads
         if not is_quantized_kv_cache(kv_cache_dtype):
