@@ -17,6 +17,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
     should_include_usage,
 )
+from vllm.exceptions import VLLMValidationError
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -265,3 +266,45 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
+
+    def test_prompt_fills_context_reports_input_tokens(self):
+        """A prompt consuming the whole context must report the input length
+        instead of clamping max_tokens to 0 (fixes #68589)."""
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_max_tokens(
+                max_model_len=1024,
+                max_tokens=None,
+                input_length=1024,
+                default_sampling_params={"max_tokens": 2048},
+            )
+        assert exc_info.value.parameter == "input_tokens"
+        assert exc_info.value.value == 1024
+
+    def test_truncation_at_max_model_len_reports_input_tokens(self):
+        """Explicit truncation to the full context is the same client error."""
+        with pytest.raises(VLLMValidationError) as exc_info:
+            get_max_tokens(
+                max_model_len=1024,
+                max_tokens=None,
+                input_length=4096,
+                default_sampling_params={"max_tokens": 2048},
+                truncate_prompt_tokens=1024,
+            )
+        assert exc_info.value.parameter == "input_tokens"
+
+    @pytest.mark.parametrize(
+        "max_tokens, default_sampling_params",
+        [(0, {"max_tokens": 2048}), (None, {"max_tokens": 0})],
+    )
+    def test_explicit_zero_max_tokens_is_not_a_context_error(
+        self, max_tokens, default_sampling_params
+    ):
+        """A client that asked for 0 output tokens keeps the sampling-params
+        error rather than being told its prompt does not fit."""
+        result = get_max_tokens(
+            max_model_len=1024,
+            max_tokens=max_tokens,
+            input_length=1024,
+            default_sampling_params=default_sampling_params,
+        )
+        assert result == 0
