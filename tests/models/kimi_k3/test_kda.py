@@ -22,6 +22,9 @@ from vllm.model_executor.layers.mamba.kda_checkpoint import (
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda_with_fused_gate as chunk_kda_with_fused_gate_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_amd,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
@@ -58,7 +61,9 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda as fla_chunk_kda
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -1771,9 +1776,39 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
 
 
+def _kda_gate(raw_g, A_log, g_bias, lower_bound):
+    return lower_bound * torch.sigmoid(
+        A_log.exp()[None, None, :, None] * (raw_g.float() + g_bias[None, None])
+    )
+
+
+def _fla_chunk_kda(*, raw_g, raw_beta, A_log, g_bias, lower_bound, **kwargs):
+    # Bailing V3 gates outside the shared FLA entry point.
+    return fla_chunk_kda(
+        g=_kda_gate(raw_g, A_log, g_bias, lower_bound),
+        beta=raw_beta.float().sigmoid(),
+        **kwargs,
+    )
+
+
+def _amd_chunk_kda_with_fused_gate(**kwargs):
+    # Its tensor descriptors need a scratch allocator off ROCm.
+    set_triton_allocator(torch.device(DEVICE))
+    return chunk_kda_with_fused_gate_amd(**kwargs)
+
+
+# Kimi-K3 and Kimi-Linear (NVIDIA), Kimi-Linear (ROCm), Bailing V3.
+TRITON_CHECKPOINT_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
+    "kimi_nvidia": chunk_kda_with_fused_gate,
+    "kimi_amd": _amd_chunk_kda_with_fused_gate,
+    "fla": _fla_chunk_kda,
+}
+
+
+@pytest.mark.parametrize("impl", TRITON_CHECKPOINT_IMPLS)
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
-def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype):
+def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype, impl: str):
     """The Triton chunk path stores each row's chunk-aligned checkpoint, leaves
     rows without one untouched, and keeps its output and final state."""
     lower_bound = -3.0
@@ -1792,7 +1827,7 @@ def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype):
     cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int32, device=DEVICE)
 
     def run(**checkpoint_kwargs):
-        return chunk_kda_with_fused_gate(
+        return TRITON_CHECKPOINT_IMPLS[impl](
             q=q,
             k=k,
             v=v.clone(),
@@ -1820,9 +1855,7 @@ def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype):
     torch.testing.assert_close(checkpoint_final_state, final_state)
     assert checkpoint_state[offsets.index(0)].isnan().all()
 
-    gate = lower_bound * torch.sigmoid(
-        A_log.exp()[None, None, :, None] * (raw_g.float() + dt_bias[None, None])
-    )
+    gate = _kda_gate(raw_g, A_log, dt_bias, lower_bound)
     beta = raw_beta.float().sigmoid()
     q_norm = l2norm_fwd(q.contiguous())
     k_norm = l2norm_fwd(k.contiguous())
