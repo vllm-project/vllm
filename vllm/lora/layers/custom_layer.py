@@ -6,11 +6,169 @@
 Add LoRA support for custom layers that require specialized handling here.
 """
 
+from typing import TYPE_CHECKING, cast
+
+import torch
+from transformers import PreTrainedConfig
+
+from vllm.config.lora import LoRAConfig
+from vllm.distributed import get_dcp_group, tensor_model_parallel_all_gather
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
+    ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithLoRA,
 )
+
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+
+
+class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
+    """Adds each head group's adapter delta to the grouped `wo_a` projection.
+
+    All groups share LoRA-A; group `g` uses LoRA-B rows
+    `g * o_lora_rank : (g + 1) * o_lora_rank`, stored as its own buffer so
+    the kernels get a contiguous LoRA-B at a fixed address.
+    """
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PreTrainedConfig | None = None,
+    ) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        if lora_config.fully_sharded_loras:
+            # Each rank's head groups see different inputs, so the shrink can't
+            # be split across ranks: every rank keeps the full LoRA-A.
+            self.lora_a_stacked = (
+                torch.zeros(
+                    max_loras,
+                    1,
+                    lora_config.max_lora_rank,
+                    self.input_size,
+                    dtype=lora_config.lora_dtype,
+                    device=self.device,
+                ),
+            )
+        n_groups = cast("DeepseekV4GroupedWoA", self.base_layer).n_local_groups
+        lora_b = self.lora_b_stacked[0]
+        self.lora_b_stacked = torch.zeros(
+            n_groups,
+            *lora_b.shape[:2],
+            lora_b.shape[2] // n_groups,
+            lora_b.shape[3],
+            dtype=lora_b.dtype,
+            device=lora_b.device,
+        ).unbind(0)
+
+    def reset_lora(self, index: int):
+        self.lora_a_stacked[0][index] = 0
+        for lora_b in self.lora_b_stacked:
+            lora_b[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
+        self.reset_lora(index)
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
+        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
+        group_size = self.lora_b_stacked[0].shape[2]
+        for group, rows in enumerate(lora_b.split(group_size)):
+            group_b = self.lora_b_stacked[group][index, 0]
+            group_b[: rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
+
+    def grouped_forward(
+        self,
+        o: torch.Tensor | QuantizedActivation,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        *,
+        n_groups: int,
+        heads_per_group: int,
+        nope_dim: int,
+        rope_dim: int,
+        o_lora_rank: int,
+        einsum_recipe: tuple[int, int, int],
+        tma_aligned_scales: bool,
+    ) -> torch.Tensor:
+        assert not isinstance(o, QuantizedActivation), "adapter needs BF16 input"
+        base = cast("DeepseekV4GroupedWoA", self.base_layer)
+        z = base.grouped_forward(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+            o_lora_rank=o_lora_rank,
+            einsum_recipe=einsum_recipe,
+            tma_aligned_scales=tma_aligned_scales,
+        )
+        x = base.grouped_input(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+        )
+        for group in range(n_groups):
+            group_output = z[:, group].contiguous()
+            self.punica_wrapper.add_lora_linear(
+                group_output,
+                x[:, group].contiguous(),
+                self.lora_a_stacked,
+                (self.lora_b_stacked[group],),
+                1.0,
+                (o_lora_rank,),
+            )
+            z[:, group] = group_output
+        return z
+
+    @classmethod
+    def can_replace_layer(
+        cls, source_layer, lora_config, packed_modules_list, model_config=None
+    ) -> bool:
+        return type(source_layer).__name__ == "DeepseekV4GroupedWoA"
+
+
+class DeepseekV4CompressorKVScoreWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """Adds the adapter delta to the compressor's FP32 `wkv`/`wgate` output."""
+
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        output = self.base_layer(x)
+        # Punica expand writes in the LoRA dtype, so build the delta separately.
+        delta = torch.zeros_like(output, dtype=self.lora_b_stacked[0].dtype)
+        return output.add_(self._apply_lora_to_output(x, delta))
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "DeepseekV4CompressorKVScoreLinear"
+            and len(packed_modules_list) == 2
+        )
 
 
 class Step5FusedQKVIndexerWithLoRA(MergedColumnParallelLinearWithLoRA):
@@ -79,4 +237,98 @@ class Step5SparseIndexerWWithLoRA(ColumnParallelLinearWithLoRA):
         return (
             type(source_layer).__name__ == "Step5SparseIndexerIndexTPLinear"
             and not lora_config.fully_sharded_loras
+        )
+
+
+class MLAKVBProjWithLoRA(ColumnParallelLinearWithLoRA):
+    """`kv_b_proj` of an `MLAAttention` layer, which marks it.
+
+    Absorbed MLA folds `kv_b_proj` into the cached `W_UK`/`W_UV`, so the
+    attention layer adds the adapter after its BMMs instead of calling forward.
+    """
+
+    def apply_mla_absorbed_kv_b_lora(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        qk_nope_head_dim: int,
+        is_query: bool,
+        gather_dcp: bool = False,
+    ) -> None:
+        """Add the adapter to MLA's absorbed, head-major projection.
+
+        Args:
+            x: `[num_heads, num_tokens, dim]` input of the absorbed `W_UK`
+                (query) or `W_UV` (value) BMM.
+            out: The token-major BMM output, updated in place.
+            qk_nope_head_dim: Per-head rows of LoRA-B before the value rows.
+            is_query: Whether `x` is the query side.
+            gather_dcp: Gather LoRA-B heads across decode context parallel ranks.
+
+        """
+        lora_a = self.lora_a_stacked[0]
+        lora_b = self.lora_b_stacked[0]
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            lora_a = tensor_model_parallel_all_gather(lora_a, dim=2)
+        if gather_dcp:
+            lora_b = get_dcp_group().all_gather(lora_b, dim=2)
+        # MQA may consume only the decode prefix of the mapped batch.
+        indices = self.punica_wrapper.token_lora_indices[: x.shape[1]]
+        for slot in range(lora_a.shape[0]):
+            a = lora_a[slot, 0]
+            b = lora_b[slot, 0].view(x.shape[0], -1, lora_b.shape[-1])
+            if is_query:
+                delta = torch.matmul(x, b[:, :qk_nope_head_dim]) @ a
+            else:
+                delta = torch.matmul(x @ a.T, b[:, qk_nope_head_dim:].transpose(1, 2))
+            out.add_(
+                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
+            )
+
+    @classmethod
+    def can_replace_layer(
+        cls, source_layer, lora_config, packed_modules_list, model_config=None
+    ) -> bool:
+        if not getattr(source_layer, "is_mla_kv_b_proj", False):
+            return False
+        # The next base in the MRO decides between the plain and sharded variant.
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+        )
+
+
+class MLAKVBProjWithShardedLoRA(
+    MLAKVBProjWithLoRA, ColumnParallelLinearWithShardedLoRA
+):
+    """Fully sharded variant: LoRA-A is sharded across TP ranks."""
+
+
+class Glm5NextIndexerWkWeightsWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """Adds the adapter delta to the GLM-5.3-Flash indexer's `k` and FP32
+    head gate."""
+
+    def forward(self, input_):
+        k, weights = self.base_layer(input_)
+        head_dim = k.shape[1]
+        delta = self._apply_lora_to_output(
+            input_, k.new_zeros((k.shape[0], head_dim + weights.shape[1]))
+        )
+        return k + delta[:, :head_dim], weights + delta[:, head_dim:].float()
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "Glm5NextIndexerWkWeightsLinear"
+            and len(packed_modules_list) == 2
         )

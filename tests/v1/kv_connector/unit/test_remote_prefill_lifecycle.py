@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
+from tests.v1.core.utils import uniform_spec
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -27,6 +28,18 @@ from .utils import (
 pytestmark = pytest.mark.cpu_test
 
 
+def _replace_group_specs(group: KVCacheGroup, **changes) -> KVCacheGroup:
+    """Copy of `group` with `changes` applied to every layer's spec."""
+    specs = {
+        name: replace(spec, **changes) for name, spec in group.kv_cache_specs.items()
+    }
+    return replace(
+        group,
+        kv_cache_specs=specs,
+        block_size=changes.get("block_size", group.block_size),
+    )
+
+
 def _num_waiting_requests(scheduler) -> int:
     return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
 
@@ -34,6 +47,214 @@ def _num_waiting_requests(scheduler) -> int:
 def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     """(waiting_to_start, in_progress, completed_waiting) request counts."""
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
+
+
+@pytest.mark.parametrize(
+    "max_num_seqs, max_inflight, expected_loading",
+    [
+        (16, None, (2, 4, 5)),
+        (16, 8, (2, 4, 5)),
+        (1, 8, (2, 4, 5)),
+        (1, None, (0, 0, 0)),
+    ],
+)
+def test_max_async_kv_loads_per_step(max_num_seqs, max_inflight, expected_loading):
+    """Per-step limits pace loads; full batches require an in-flight cap."""
+    vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = 2
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_inflight
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for _ in range(5):
+        scheduler.add_request(
+            create_request(
+                block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+            )
+        )
+    for num_loading in expected_loading:
+        scheduler.update_from_output(
+            scheduler_output, create_model_runner_output([local])
+        )
+        scheduler_output = scheduler.schedule()
+        assert _kv_fetch_stages(scheduler)[1] == num_loading
+
+
+def _remote_scheduler(max_num_seqs: int, max_num_inflight_kv_loads: int):
+    vllm_config = create_vllm_config(max_num_seqs=max_num_seqs)
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_num_inflight_kv_loads
+    return create_scheduler(vllm_config), vllm_config.cache_config.block_size
+
+
+def test_inflight_kv_loads_start_while_batch_full():
+    """With --max-num-inflight-kv-loads, loads start while the running batch is
+    full, up to the cap, and a finished load counts until its request runs."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [local]
+
+    remote = [
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(4)
+    ]
+    for request in remote:
+        scheduler.add_request(request)
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [local]
+    assert [r.status for r in remote] == [RequestStatus.WAITING_FOR_REMOTE_KVS] * 2 + [
+        RequestStatus.WAITING
+    ] * 2
+    assert list(scheduler.async_kv_waiting) == remote[2:]
+
+    # A finished load holds its blocks until its request runs.
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([local], finished_recving={remote[0].request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler)[1:] == (1, 1)
+    assert remote[2].status == RequestStatus.WAITING
+
+    # The freed slot goes to the finished load, which lets the next one start.
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.finish_requests(local.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert scheduler.running == [remote[0]]
+    assert remote[2].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert list(scheduler.async_kv_waiting) == remote[3:]
+
+
+def test_early_kv_load_does_not_overtake_finished_load():
+    """A load started while the batch is full queues behind older loads, so
+    a finished load gets the next free slot."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    older, newer = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    scheduler.add_request(older)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert older.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.add_request(newer)
+    for finished in (older, newer):
+        scheduler.update_from_output(
+            scheduler_output,
+            create_model_runner_output([local], finished_recving={finished.request_id}),
+        )
+        scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler)[1:] == (0, 2)
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.finish_requests(local.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert scheduler.running == [older]
+
+
+def test_aborted_kv_load_counts_until_transfer_done():
+    """An aborted load keeps its place under the cap while its transfer still
+    writes its blocks, so cancelling loading requests can't exceed the cap."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=1
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    aborted, waiting = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    scheduler.add_request(aborted)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert aborted.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.finish_requests(aborted.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(waiting)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert waiting.status == RequestStatus.WAITING
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([local], finished_recving={aborted.request_id}),
+    )
+    scheduler.schedule()
+    assert aborted.request_id not in scheduler.requests
+    assert waiting.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+@pytest.mark.parametrize("max_inflight, max_per_step", [(1, None), (None, 1), (8, 1)])
+def test_async_kv_load_limits_do_not_block_local_requests(max_inflight, max_per_step):
+    """Throttled async loads don't hold back local requests."""
+    vllm_config = create_vllm_config(max_num_seqs=2)
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = max_inflight
+    vllm_config.scheduler_config.max_async_kv_loads_per_step = max_per_step
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    remote = [
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    ]
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    for request in (*remote, local):
+        scheduler.add_request(request)
+
+    scheduler.schedule()
+    assert remote[0].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert remote[1].status == RequestStatus.WAITING
+    assert scheduler.running == [local]
+
+
+def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
+    """Only requests the connector's may_load_async flags start early loads."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    early, late = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    monkeypatch.setattr(
+        scheduler.connector, "may_load_async", lambda request: request is early
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for request in (early, late):
+        scheduler.add_request(request)
+    assert list(scheduler.async_kv_waiting) == [early]
+    assert list(scheduler.waiting) == [late]
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.schedule()
+    assert scheduler.running == [local]
+    assert early.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert late.status == RequestStatus.WAITING
 
 
 def test_basic_lifecycle():
@@ -86,7 +307,7 @@ def test_basic_lifecycle():
         0
     ].req_to_blocks[request_id]
     for block in blocks:
-        assert block._block_hash is None
+        assert block.block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -130,7 +351,7 @@ def test_basic_lifecycle():
     ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
     # Confirm the rest of the prompt is scheduled in this step.
@@ -318,13 +539,13 @@ def test_no_spurious_prefix_caching():
     num_hashed_blocks = 0
     for block in local_blocks:
         assert block.ref_cnt == 1
-        num_hashed_blocks += 1 if block._block_hash is not None else 0
+        num_hashed_blocks += 1 if block.block_hash is not None else 0
     assert num_hashed_blocks > 0
 
     # Remote blocks should not be cached.
     for block in remote_blocks:
         assert block.ref_cnt == 1
-        assert block._block_hash is None
+        assert block.block_hash is None
 
 
 def test_full_block_prompt():
@@ -484,13 +705,9 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    # V2 emits a resumed (previously preempted) request as a NewRequestData
+    # A resumed (previously preempted) request is emitted as a NewRequestData
     # rather than a cached request.
-    if scheduler.use_v2_model_runner:
-        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
-    else:
-        cached = scheduler_output.scheduled_cached_reqs
-        num_computed = cached.num_computed_tokens[0]
+    num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
     assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
@@ -642,6 +859,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         mamba_enabled=True,
         num_blocks=10000,
     )
+    kv_cache_config.hash_block_size = BLOCK_SIZE
 
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 
@@ -666,7 +884,6 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # Model returns no tokens for intermediate prefill chunk
     intermediate_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[]],
     )
     scheduler.update_from_output(scheduler_output, intermediate_output)
@@ -789,15 +1006,11 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     kv_cache_config = make_kv_cache_config(
         hash_block_size, swa_enabled=swa_enabled, sw_size=4096, num_blocks=num_blocks
     )
-    full_group = kv_cache_config.kv_cache_groups[0]
-    full_group.kv_cache_spec = replace(full_group.kv_cache_spec, block_size=block_size)
+    groups = kv_cache_config.kv_cache_groups
+    groups[0] = _replace_group_specs(groups[0], block_size=block_size)
     if swa_enabled:
-        sliding_group = kv_cache_config.kv_cache_groups[-1]
-        sliding_spec = sliding_group.kv_cache_spec
-        assert isinstance(sliding_spec, SlidingWindowSpec)
-        sliding_group.kv_cache_spec = replace(
-            sliding_spec,
-            page_size_padded=full_group.kv_cache_spec.page_size_bytes,
+        groups[-1] = _replace_group_specs(
+            groups[-1], page_size_padded=uniform_spec(groups[0]).page_size_bytes
         )
     scheduler = create_scheduler(
         vllm_config,
@@ -869,13 +1082,12 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         mamba_cache_mode=mamba_cache_mode,
         num_blocks=num_blocks,
     )
-    mamba_group = kv_cache_config.kv_cache_groups[-1]
-    mamba_spec = mamba_group.kv_cache_spec
-    assert isinstance(mamba_spec, MambaSpec)
-    mamba_group.kv_cache_spec = replace(
-        mamba_spec,
-        block_size=mamba_block_size,
-        num_speculative_blocks=num_spec_tokens,
+    groups = kv_cache_config.kv_cache_groups
+    groups[-1] = replace(
+        _replace_group_specs(groups[-1], block_size=mamba_block_size),
+        manager_config=groups[-1].manager_config.replace_params(
+            num_speculative_blocks=num_spec_tokens
+        ),
     )
     scheduler = create_scheduler(
         vllm_config,

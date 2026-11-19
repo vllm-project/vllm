@@ -3,13 +3,13 @@
 """CPU MLA prefill backend using zentorch SDPA on AMD Zen CPUs.
 
 Subclasses the generic CPU SDPA backend and replaces the per-request attention
-with ``zentorch_sdpa``, which fuses the scale, causal mask, softmax and both
+with `zentorch_sdpa`, which fuses the scale, causal mask, softmax and both
 matmuls of the base implementation into a single call.
 
-``zentorch_sdpa`` does not return a usable log-sum-exp, so requests that need
+`zentorch_sdpa` does not return a usable log-sum-exp, so requests that need
 one (context chunks, prefix/suffix merge) are delegated to the base backend.
 
-Availability is reported through :meth:`is_available`, so the prefill selector
+Availability is reported through `is_available`, so the prefill selector
 gates this backend once at selection time rather than per attention call.
 """
 
@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import CPUSDPAMLAPrefillBac
 
 
 class ZenCPUSDPAMLAPrefillBackend(CPUSDPAMLAPrefillBackend):
-    """MLA prefill backend for AMD Zen CPUs backed by ``zentorch_sdpa``."""
+    """MLA prefill backend for AMD Zen CPUs backed by `zentorch_sdpa`."""
 
     @staticmethod
     def get_name() -> str:
@@ -38,7 +38,7 @@ class ZenCPUSDPAMLAPrefillBackend(CPUSDPAMLAPrefillBackend):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Convert one request's [S, NH, D] tensors to the [1, NH, S, D] layout.
 
-        MLA has ``v_head_dim < qk_head_dim``, which the fused kernel does not
+        MLA has `v_head_dim < qk_head_dim`, which the fused kernel does not
         accept, so V is padded up to the query head dim. The original V head
         dim is returned so the caller can slice the padding off afterwards.
         """

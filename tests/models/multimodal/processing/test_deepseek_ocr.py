@@ -24,10 +24,13 @@ from vllm.model_executor.models.deepseek_ocr import (
     DeepseekOCRImagePixelInputs,
 )
 from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processors.deepseek_ocr import (
     DeepseekOCRProcessor,
     ImageTransform,
 )
+
+from ...utils import build_model_context
 
 MODEL_ID = "deepseek-ai/DeepSeek-OCR"
 
@@ -46,7 +49,7 @@ class TestDeepseekOCREmptyImagesCrop:
         """A small image (<=640px) produces empty images_crop and should
         not crash the TensorSchema validation.
 
-        Previously, the code used ``numel() > 0`` to decide whether to read
+        Previously, the code used `numel() > 0` to decide whether to read
         image_size from the tensor shape. When numel()==0, it fell back to
         base_size=1024, mismatching the actual tensor dim of 640.
         """
@@ -144,14 +147,14 @@ class TestDeepseekOCREmptyImagesCrop:
 
 
 class TestDeepseekOCRInputValidation:
-    """Bare ``assert`` used to validate user input here returned HTTP 500
+    """Bare `assert` used to validate user input here returned HTTP 500
     (AssertionError) instead of HTTP 400 (ValueError) and disappeared under
-    ``python -O``, silently corrupting the tokenized sequence. See #53850.
+    `python -O`, silently corrupting the tokenized sequence. See #53850.
     """
 
     def test_mismatched_image_count_raises_value_error(self, processor):
-        """Two ``<image>`` tokens with one image must raise ValueError, not
-        AssertionError (which would yield HTTP 500 and, under ``-O``, silently
+        """Two `<image>` tokens with one image must raise ValueError, not
+        AssertionError (which would yield HTTP 500 and, under `-O`, silently
         drop the middle text segment)."""
         image = Image.new("RGB", (100, 100), color="red")
         with pytest.raises(ValueError, match="does not match number of images"):
@@ -185,8 +188,8 @@ def _balanced_normalized_pixels(
 class TestDeepseekOCRZeroSumPixelsAccepted:
     """Zero-sum normalized pixels must still produce validated image inputs.
 
-    Returning None from ``_parse_and_validate_image_input`` makes
-    ``embed_multimodal`` return None and trips the worker encoder-output
+    Returning None from `_parse_and_validate_image_input` makes
+    `embed_multimodal` return None and trips the worker encoder-output
     sanity check, killing EngineCore. The zero-sum shortcut is therefore
     removed; balanced images must parse like any other valid tensor.
     """
@@ -242,3 +245,37 @@ class TestDeepseekOCRZeroSumPixelsAccepted:
         )
         assert image_input is not None
         assert torch.equal(image_input.data, pixel_values)
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("model_id", [MODEL_ID, "deepseek-ai/DeepSeek-OCR-2"])
+@pytest.mark.parametrize("kwargs", [{}, {"crop_mode": False}, {"max_crops": 1}])
+@pytest.mark.parametrize("prompt_as_tokens", [False, True])
+def test_crop_kwargs_match_processed_image_tokens(model_id, kwargs, prompt_as_tokens):
+    """Crop overrides must reserve the tokens actually emitted by the processor."""
+    images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (400, 300))]
+    results = []
+    for on_engine in (False, True):
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=kwargs if on_engine else None,
+            limit_mm_per_prompt={"image": 2},
+            mm_processor_cache_gb=0.01,
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        hf = processor.info.get_hf_processor(**kwargs)
+        prompt = "<image>\n<image>\nRead the text."
+        expected = hf(prompt=prompt, images=images, **kwargs)[
+            "num_image_tokens"
+        ].tolist()
+        if prompt_as_tokens:
+            prompt = ctx.get_tokenizer().encode(prompt)
+        for _ in range(2):
+            result = processor(
+                prompt,
+                mm_items=processor.info.parse_mm_data({"image": images}),
+                hf_processor_mm_kwargs={} if on_engine else kwargs,
+            )
+            assert [p.length for p in result["mm_placeholders"]["image"]] == expected
+        results.append(result["prompt_token_ids"])
+    assert results[0] == results[1]

@@ -19,10 +19,10 @@ struct MediumResume {
   uint32_t remaining = 0;
 };
 
-template <int TopK, int BlockSize, int VecSize>
-__device__ __noinline__ void recover_medium(const float* scores,
-                                            int32_t* output, uint32_t length,
-                                            void* smem, uint32_t prefix,
+template <int TopK, int BlockSize, int VecSize, typename InT>
+__device__ __noinline__ void recover_medium(const InT* scores, int32_t* output,
+                                            uint32_t length, void* smem,
+                                            uint32_t prefix,
                                             uint32_t remaining) {
   topk_histogram_4096::exact_topk_rescan<TopK, BlockSize, VecSize, 1, 4096>(
       scores, output, length, smem, prefix, remaining);
@@ -70,7 +70,9 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
                                        IdType* __restrict__ output,
                                        uint32_t length, uint32_t top_k,
                                        void* dynamic_smem, int* scratch) {
-  using Traits = FilteredTopKTraits<DType, false>;
+  using Traits =
+      FilteredTopKTraits<decltype(topk_histogram_4096::to_float(DType{})),
+                         false>;
   using Radix = SampledRadixDigits;
   constexpr uint32_t kItemsPerThread = 2;
   constexpr uint32_t kSampleSize = BlockSize * kItemsPerThread;
@@ -92,7 +94,8 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
     const uint32_t score_idx = static_cast<uint32_t>(
         (static_cast<uint64_t>(2 * sample_idx + 1) * length) /
         (2 * kSampleSize));
-    sample_keys[i] = Traits::ToOrdered(scores[score_idx]);
+    sample_keys[i] =
+        Traits::ToOrdered(topk_histogram_4096::to_float(scores[score_idx]));
   }
 
   auto* sort_smem =
@@ -127,14 +130,14 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
       static_cast<uint64_t>(CandidateCapacity) * kSampleSize) {
     return false;
   }
-  const auto collect_candidate = [&](uint32_t idx, DType score) {
+  const auto collect_candidate = [&](uint32_t idx, float score) {
     if (Traits::ToOrdered(score) >= proposed_pivot) {
       const int pos = atomicAdd(candidate_count, 1);
       if (pos < static_cast<int>(CandidateCapacity)) candidates[pos] = idx;
     }
   };
 
-  vec_t<DType, VecSize> score_vec;
+  vec_t<float, VecSize> score_vec;
   const uint32_t aligned_length = length / VecSize * VecSize;
   for (uint32_t base = tx * VecSize; base < aligned_length;
        base += BlockSize * VecSize) {
@@ -145,7 +148,7 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
     }
   }
   for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
-    collect_candidate(idx, scores[idx]);
+    collect_candidate(idx, topk_histogram_4096::to_float(scores[idx]));
   }
   __syncthreads();
 
@@ -157,8 +160,8 @@ __device__ bool try_sampled_exact_topk(const DType* __restrict__ scores,
 
   auto* candidate_keys = candidates + CandidateCapacity;
   for (int i = tx; i < num_candidates; i += BlockSize) {
-    candidate_keys[i] =
-        static_cast<int>(Traits::ToOrdered(scores[candidates[i]]));
+    candidate_keys[i] = static_cast<int>(Traits::ToOrdered(
+        topk_histogram_4096::to_float(scores[candidates[i]])));
   }
 
   if (tx == 0) {

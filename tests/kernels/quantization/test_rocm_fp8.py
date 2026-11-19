@@ -51,8 +51,8 @@ def _reload_envs():
 def _restore_rocm_env_state():
     """Restore global env + AITER flag state after every test.
 
-    Tests here reload ``vllm.envs`` (a module singleton) and refresh the
-    cached ``rocm_aiter_ops`` env flags. Restoring in a fixture teardown
+    Tests here reload `vllm.envs` (a module singleton) and refresh the
+    cached `rocm_aiter_ops` env flags. Restoring in a fixture teardown
     guarantees cleanup even when an assertion fails mid-test, preventing
     state from leaking into other tests in the same worker.
     """
@@ -414,7 +414,7 @@ def test_aiter_fp8_kv_attention_matches_bf16_reference():
         cu_seqlens_k=cu_seq_lens,
         max_seqlen_q=query_len,
         max_seqlen_k=kv_len,
-        min_seqlen_q=1,
+        min_seqlen_q=0,
         dropout_p=0.0,
         softmax_scale=scale,
         causal=True,

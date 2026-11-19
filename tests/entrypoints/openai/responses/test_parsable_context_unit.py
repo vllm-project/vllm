@@ -459,7 +459,7 @@ def test_num_init_messages_offset():
 
 
 def test_length_truncation_marks_last_item_incomplete():
-    """A turn cut by max_output_tokens ends in an ``incomplete`` item, both
+    """A turn cut by max_output_tokens ends in an `incomplete` item, both
     with a parser (tool call) and without one (plain message)."""
     request = _make_request(
         tool_choice="auto",

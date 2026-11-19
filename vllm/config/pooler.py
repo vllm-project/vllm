@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal, get_args
+from typing import Literal, get_args
 
 from pydantic import model_validator
 from pydantic_core import ArgsKwargs
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 from vllm.tasks import PoolingTask, check_removed_pooling_task
-from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
@@ -183,19 +182,11 @@ class PoolerConfig:
             )
         return self.tok_pooling_type
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
