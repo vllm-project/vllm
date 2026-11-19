@@ -1963,6 +1963,110 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
         torch.testing.assert_close(fused, reference, rtol=0, atol=0, equal_nan=True)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
+def test_dflash2_candidate_walk_matches_dense_step_loop_on_cuda(deduplicate_contexts):
+    """The DFlash2 candidate walk picks what `DraftWatermarker.sample` picks on
+    dense rows that are -inf outside each step's candidates.
+
+    Covers a small vocabulary (so contexts repeat), a partial context and
+    greedy, opted-out and padding rows; padding rows are not compared.
+    """
+    num_reqs, num_steps, top_k, vocab_size, max_num_reqs = 4, 4, 5, 8, 6
+    generator = torch.Generator().manual_seed(0)
+    candidate_ids = torch.stack(
+        [
+            torch.randperm(vocab_size, generator=generator)[:top_k]
+            for _ in range(num_reqs * num_steps)
+        ]
+    ).view(num_reqs, num_steps, top_k)
+    scores = torch.randn(num_reqs, num_steps, top_k, top_k, generator=generator) * 3
+    idx_mapping = torch.tensor([4, 2, 0, -1]).repeat_interleave(num_steps)
+    valid = torch.tensor([True, True, True, False])
+    temperature = torch.tensor([0.7, 1.0, 0.0, 1.3, 0.6, 0.9])
+    seeds = torch.arange(max_num_reqs) * 1000
+    sample_pos = torch.arange(num_steps).repeat(num_reqs) + 21
+    contexts = torch.randint(0, 3, (num_reqs, 2), generator=generator)
+    contexts[0, 0] = -1
+    all_token_ids = torch.randint(0, 3, (max_num_reqs, 32), generator=generator)
+    cuda = [
+        t.cuda()
+        for t in (candidate_ids, scores, idx_mapping, temperature, seeds, sample_pos)
+    ]
+    candidate_ids, scores, idx_mapping, temperature, seeds, sample_pos = cuda
+
+    def draft_watermarker():
+        watermarker = DraftWatermarker(
+            GumbelWatermarker(key=42, context_width=2),
+            max_num_reqs=max_num_reqs,
+            device=torch.device("cuda"),
+            num_speculative_steps=num_steps,
+            deduplicate_contexts=deduplicate_contexts,
+            deduplicate_contexts_max_history=None,
+        )
+        watermarker.prepare(
+            contexts=contexts.cuda(),
+            enabled=torch.tensor([True, True, False, True]).cuda(),
+            all_token_ids=all_token_ids.cuda(),
+            prompt_lens=torch.full((max_num_reqs,), 4).cuda(),
+            total_lens=torch.full((max_num_reqs,), 24).cuda(),
+        )
+        return watermarker
+
+    fused = draft_watermarker()
+    draft_tokens = torch.zeros(max_num_reqs, num_steps, dtype=torch.int64).cuda()
+    realized = torch.zeros(max_num_reqs, num_steps, top_k).cuda()
+    fused.sample_candidates(
+        candidate_ids,
+        scores,
+        idx_mapping,
+        temperature,
+        seeds,
+        sample_pos,
+        draft_tokens,
+        realized,
+    )
+
+    reference = draft_watermarker()
+    logits_cache = torch.zeros(max_num_reqs, num_steps, vocab_size).cuda()
+    rows = torch.arange(num_reqs).cuda()
+    previous = torch.zeros(num_reqs, dtype=torch.int64).cuda()
+    by_step = [t.view(num_reqs, num_steps) for t in (idx_mapping, sample_pos)]
+    reference_tokens, reference_realized = [], []
+    for step in range(num_steps):
+        row_scores = scores[rows, step, previous]
+        dense = torch.full((num_reqs, vocab_size), float("-inf")).cuda()
+        dense.scatter_(1, candidate_ids[:, step], row_scores)
+        sampled = reference.sample(
+            dense,
+            by_step[0][:, step],
+            temperature,
+            seeds,
+            by_step[1][:, step] - 1,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=logits_cache,
+            logits_cache_col=torch.full((num_reqs,), step).cuda(),
+        )
+        previous = (candidate_ids[:, step] == sampled.unsqueeze(-1)).int().argmax(-1)
+        reference_tokens.append(sampled)
+        reference_realized.append(row_scores)
+
+    valid = valid.cuda()
+    for actual, expected in (
+        (draft_tokens[:num_reqs], torch.stack(reference_tokens, dim=1)),
+        (realized[:num_reqs], torch.stack(reference_realized, dim=1)),
+        (fused.state.contexts[:num_reqs], reference.state.contexts[:num_reqs]),
+        (
+            fused.state.prior_contexts[:num_reqs],
+            reference.state.prior_contexts[:num_reqs],
+        ),
+    ):
+        torch.testing.assert_close(actual[valid], expected[valid], rtol=0, atol=0)
+
+
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
     speculator.draft_logits = DraftLogitsCache(
