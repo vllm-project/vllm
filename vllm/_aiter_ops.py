@@ -2387,13 +2387,16 @@ class rocm_aiter_ops:
     _BF16_FP8_MOE_INSTANCE_ID: str | None = None
 
     @classmethod
-    def set_bf16_fp8_moe_bound(cls) -> None:
+    def set_bf16_fp8_moe_bound(cls, default_bound: str | None = "0") -> None:
         """Select the activation dtype of the interleaved AITER MXFP4 kernels.
 
         AITER computes with BF16 activations below `AITER_BF16_FP8_MOE_BOUND`
         tokens and with MXFP8 (per-1x32 e8m0) activations otherwise (gfx950,
         gate_mode INTERLEAVE). The process-wide bound follows the layer's
         resolved `targets` spec, else `quantization_config.moe`.
+
+        `default_bound` applies without an activation request in non-strict
+        mode; `None` leaves the bound untouched (AITER's default).
         """
         from vllm.config import get_current_vllm_config_or_none
         from vllm.config.quantization import user_activation_override
@@ -2426,10 +2429,13 @@ class rocm_aiter_ops:
         elif envs.VLLM_STRICT_QUANT_SCHEME:
             # Adding activation quantization to a weight-only request is forbidden.
             bound = cls._ALWAYS_BF16_BOUND
+        elif default_bound is None:
+            # No activation request: keep this path's historical behaviour.
+            return
         else:
-            # No activation request: keep the historical MXFP8 default (gfx950).
+            # No activation request: keep this path's historical default.
             # Use `activation: null` or VLLM_STRICT_QUANT_SCHEME=1 for BF16.
-            bound = "0"
+            bound = default_bound
         previous = cls._BF16_FP8_MOE_BOUND
         if previous is not None and previous != bound:
             if envs.VLLM_STRICT_QUANT_SCHEME:

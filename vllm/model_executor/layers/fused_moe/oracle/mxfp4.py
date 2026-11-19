@@ -1450,7 +1450,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        rocm_aiter_ops.set_bf16_fp8_moe_bound()
+        # gpt-oss never forced the bound: without an activation request, keep
+        # AITER's default (BF16 below 256 tokens, MXFP8 at or above).
+        rocm_aiter_ops.set_bf16_fp8_moe_bound(default_bound=None)
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)

@@ -958,6 +958,22 @@ def test_aiter_activation_bound_resets_on_model_reload(
             _NO_ACTIVATION_BOUND,
             id="gpt-oss-bf16",
         ),
+        # Without a request, each path keeps main's behaviour: the general path
+        # forces MXFP8, gpt-oss keeps AITER's default bound.
+        pytest.param(
+            mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
+            {},
+            _UNSET,
+            "0",
+            id="general-unset",
+        ),
+        pytest.param(
+            mxfp4_oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+            {},
+            _UNSET,
+            None,
+            id="gpt-oss-unset",
+        ),
         # The separated A4W4 layout fixes its own dtype: it leaves the bound alone.
         pytest.param(
             mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
@@ -972,7 +988,11 @@ def test_aiter_weight_conversion_sets_the_activation_bound(
     convert, kwargs, activation, expected
 ):
     """The AITER BF16 weight-conversion paths apply the requested activation."""
-    spec = QuantSpec(weight=kMxfp4Static, activation=activation)
+    spec = (
+        None
+        if activation is _UNSET
+        else QuantSpec(weight=kMxfp4Static, activation=activation)
+    )
     with torch.device(current_platform.device_type):
         w13 = torch.zeros(4, 512, 128, dtype=torch.uint8)
         w2 = torch.zeros(4, 256, 128, dtype=torch.uint8)
