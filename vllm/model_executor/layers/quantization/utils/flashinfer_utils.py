@@ -28,6 +28,14 @@ def has_flashinfer_situ_activation() -> bool:
     return hasattr(ActivationType, "Situ")
 
 
+def has_flashinfer_swiglustep_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "SwigluStep")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
@@ -36,6 +44,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         if situ is None:
             raise ValueError("The installed FlashInfer does not support SITU")
         return situ
+
+    if activation == MoEActivation.SWIGLUSTEP:
+        step = getattr(ActivationType, "SwigluStep", None)
+        if step is None:
+            raise ValueError("The installed FlashInfer does not support SWIGLUSTEP")
+        return step
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -111,12 +125,13 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
             shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
         )
 
-    # Stack weights for all experts
-    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    # Stack weights for all experts, in place: they may be the layer's
+    # parameters, whose addresses captured CUDA graphs keep across reloads
+    gemm1_weights.copy_(
+        torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
-    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    gemm2_weights.copy_(
+        torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
 
 
@@ -494,12 +509,12 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
-    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    All three transforms (gate/up row reorder, `shuffle_matrix_a` weight
+    shuffle, `shuffle_matrix_sf_a` scale shuffle) are fixed row/index
     permutations that depend only on the per-expert matrix shape, so the
     permutation is computed once and applied to every expert in a single
-    gather instead of once per expert. ``block_scale_interleave`` accepts a
-    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    gather instead of once per expert. `block_scale_interleave` accepts a
+    batched `(E, M, K)` scale tensor directly. Output is bit-identical to
     the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
     seconds per layer at load).
     """

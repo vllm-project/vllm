@@ -228,6 +228,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def model_config(self) -> ModelConfig:
         return self._model_config
 
+    def get_num_items(self, modality: ModalityStr) -> int:
+        return len(self._items_by_modality.get(modality, ()))
+
     @cached_property
     def model_cls(self) -> type[SupportsMultiModal]:
         from vllm.model_executor.model_loader import get_model_cls
@@ -317,15 +320,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             num_items = len(self._items_by_modality[original_modality]) + 1
 
         mm_config = self.model_config.multimodal_config
-        if (
-            mm_config is not None
-            and mm_config.enable_mm_embeds
-            and mm_config.get_limit_per_prompt(input_modality) == 0
-            and original_modality.endswith("_embeds")
-        ):
-            # Skip validation: embeddings bypass limit when enable_mm_embeds=True
-            pass
-        else:
+        skip_validation = False
+        if mm_config is not None and original_modality.endswith("_embeds"):
+            if not mm_config.is_mm_embeds_enabled(input_modality):
+                raise VLLMValidationError(
+                    f"`{original_modality}` inputs are disabled via "
+                    "`--limit-mm-per-prompt`",
+                    parameter=original_modality,
+                )
+            # Embeddings bypass limit when enable_mm_embeds=True
+            skip_validation = mm_config.get_limit_per_prompt(input_modality) == 0
+        if not skip_validation:
             self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         return input_modality, original_modality, use_vision_chunk, num_items

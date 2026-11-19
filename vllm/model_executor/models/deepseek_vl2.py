@@ -7,6 +7,7 @@
 import functools
 import math
 from collections.abc import Hashable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -18,10 +19,11 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -169,9 +171,15 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_num_image_tokens(
-        self, *, image_width: int, image_height: int, cropping: bool = True
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        cropping: bool = True,
+        hf_processor=None,
     ) -> int:
-        hf_processor = self.get_hf_processor()
+        if hf_processor is None:
+            hf_processor = self.get_hf_processor()
         image_size = hf_processor.image_size
         patch_size = hf_processor.patch_size
         downsample_ratio = hf_processor.downsample_ratio
@@ -294,6 +302,7 @@ class DeepseekVL2MultiModalProcessor(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     cropping=len(images) <= 2,
+                    hf_processor=hf_processor,
                 )
             return [image_token_id] * num_image_tokens
 
@@ -304,6 +313,21 @@ class DeepseekVL2MultiModalProcessor(
                 replacement=get_replacement_deepseek_vl2,
             )
         ]
+
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        images = inputs.mm_data_items.get("image")
+        if isinstance(images, ImageProcessorItems):
+            # process_one disables cropping when there are more than two images.
+            cropping = len(images) <= 2
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["image"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm, mm_hash=mm_hash, cropping=cropping
+                )
+                for mm_hash in hashes["image"]
+            ]
+        return hashes
 
     def _cached_apply_hf_processor(
         self,
@@ -442,7 +466,13 @@ class DeepseekVLV2ForCausalLM(
         except ImportError as e:
             raise ImportError("Please install timm") from e
 
-        with set_default_torch_dtype(torch.float16):
+        # Skipped towers are built under a meta default device, but timm's
+        # constructor calls .item(), which meta tensors do not support.
+        on_meta = torch.get_default_device().type == "meta"
+        with (
+            set_default_torch_dtype(torch.float16),
+            torch.device("cpu") if on_meta else nullcontext(),
+        ):
             model = timm.create_model(
                 "vit_so400m_patch14_siglip_384.webli",
                 pretrained=False,
@@ -450,6 +480,8 @@ class DeepseekVLV2ForCausalLM(
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
+        if on_meta:
+            model = model.to("meta")
 
         if get_tensor_model_parallel_world_size() > 1:
             model = self.patch_vit_for_tp(model, quant_config)
@@ -720,6 +752,13 @@ class DeepseekVLV2ForCausalLM(
         features = self.vision.forward_features(pixel_values)
         return self.projector(features)
 
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return self.encoder_cudagraph_forward(
+            {"pixel_values": mm_kwargs["pixel_values"]}, path=path
+        )
+
     def postprocess_encoder_output(
         self,
         outputs: dict[str, torch.Tensor],
@@ -731,9 +770,9 @@ class DeepseekVLV2ForCausalLM(
     ) -> None:
         """Assemble per-image embeddings from raw per-tile projector output.
 
-        ``outputs["default"]`` has shape ``[N_tiles_captured, hw, n_embed]``.
+        `outputs["default"]` has shape `[N_tiles_captured, hw, n_embed]`.
         This method re-applies newlines and the view-separator that the
-        eager ``_pixel_values_to_embedding`` path inserts in-line.
+        eager `_pixel_values_to_embedding` path inserts in-line.
         """
         assert batch_mm_kwargs is not None
         output = outputs["default"]

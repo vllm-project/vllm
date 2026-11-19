@@ -442,10 +442,14 @@ def streamed_reasoning_end(reasoner, output, prompt=PROMPT_TOKEN_IDS):
     return None
 
 
-def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding():
+def test_streaming_reasoning_gate_matches_thinking_closer_without_decoding(
+    monkeypatch,
+):
     tokenizer = FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE)
     reasoner = ResponseTemplateReasoningParser(tokenizer)
-    tokenizer.decode = lambda *_args, **_kwargs: pytest.fail("decoded")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tokenizer, "decode", lambda *_args, **_kwargs: pytest.fail("decoded")
+    )
     output = [50, 101] + [102] * 100 + [51, 103]
 
     assert streamed_reasoning_end(reasoner, output) == len(output) - 2
@@ -643,6 +647,36 @@ def test_gemma4_response_template_prompt_state_matches_registered_parser(
         1,
         prompt_token_ids=prompt_token_ids,
     )
+
+
+# A second turn whose generation prompt opens reasoning:
+# <|turn>model\nanswer<turn|><|turn>model\n<|channel>thought\n
+TWO_TURN_PROMPT_TOKEN_IDS = [53, 100, 103, 55, 53, 100, 50, 101]
+
+
+@pytest.mark.parametrize(
+    ("prompt_token_ids", "expected"),
+    [
+        (TWO_TURN_PROMPT_TOKEN_IDS, ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-4:], ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-3:], ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-1:], (None, "plan<channel|>answer")),
+        (None, (None, "plan<channel|>answer")),
+    ],
+    ids=["full", "from_anchor", "past_anchor", "past_opener", "none"],
+)
+def test_prompt_suffix_parses_like_full_prompt_or_no_prompt(prompt_token_ids, expected):
+    """A suffix of the prompt (e.g. from derender) parses like the full prompt
+    while it still holds the reasoning opener, and like no prompt after that."""
+    parser = ResponseTemplateParser(
+        FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), TOOLS, enable_auto_tools=True
+    )
+    if prompt_token_ids is not None:
+        parser.set_prompt_token_ids(prompt_token_ids)
+
+    reasoning, content, _ = parser.parse("plan<channel|>answer<turn|>", request())
+
+    assert (reasoning, content) == expected
 
 
 def test_gemma4_response_template_reasoning_suppression_matches_registered_parser():
@@ -1164,7 +1198,9 @@ def test_tool_choice_none_preserves_raw_call_as_content():
 
 
 def test_adjust_request_preserves_parser_delimiters_without_forcing_stop_text():
-    req = request()
+    # The annotation stops ``adjust_request(req) is req`` below from narrowing
+    # this SimpleNamespace stand-in to a real request model.
+    req: SimpleNamespace = request()
     parser = ResponseTemplateParser(
         FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         TOOLS,
@@ -1199,7 +1235,10 @@ def test_call_cut_off_before_its_closer_is_parsed():
     assert content is None
     assert normalize_calls(calls) == [("set_alarm", {"hour": 7, "label": "morning"})]
     assert streamed is not None
-    assert [call.function.name for call in streamed.tool_calls] == ["set_alarm"]
+    assert len(streamed.tool_calls) == 1
+    function = streamed.tool_calls[0].function
+    assert function is not None
+    assert function.name == "set_alarm"
 
 
 @pytest.mark.parametrize(

@@ -121,10 +121,10 @@ class Learnable2DInterpPosEmb(nn.Module):
     ) -> torch.Tensor:
         """Build packed per-token positional embeddings for a list of grids.
 
-        Returns a tensor of shape ``(sum(h * w), dim)`` formed by interpolating
-        the learned ``(height, width, dim)`` weight to each ``(h, w)`` grid and
+        Returns a tensor of shape `(sum(h * w), dim)` formed by interpolating
+        the learned `(height, width, dim)` weight to each `(h, w)` grid and
         concatenating the flattened results in the same order as
-        ``grid_hws_list``. Lives outside the captured CUDA graph so the
+        `grid_hws_list`. Lives outside the captured CUDA graph so the
         per-grid Python iteration is safe.
         """
         weight_shape = list(self.weight.shape[:-1])
@@ -193,8 +193,8 @@ class MoonVisionPatchEmbed(nn.Module):
             x (L, Channels): input tensor
             grid_hw (N, 2): grid height and width
             pos_embeds: precomputed positional embeddings of shape
-                ``(L, Cout)``. When provided, ``grid_hw`` is unused and the
-                CUDA-graph-incompatible interpolation in ``self.pos_emb`` is
+                `(L, Cout)`. When provided, `grid_hw` is unused and the
+                CUDA-graph-incompatible interpolation in `self.pos_emb` is
                 skipped.
 
         Returns:
@@ -282,11 +282,11 @@ class Rope2DPosEmb(nn.Module):
         self,
         grid_hws_list: list[list[int]] | list[tuple[int, int]],
     ) -> torch.Tensor:
-        """List-based variant of :meth:`get_freqs_cis_by_seqlens`.
+        """List-based variant of `get_freqs_cis_by_seqlens`.
 
-        Accepts a Python list of ``(h, w)`` pairs so callers that already
+        Accepts a Python list of `(h, w)` pairs so callers that already
         operate outside the captured CUDA graph can avoid materializing a
-        tensor + ``.tolist()`` round-trip.
+        tensor + `.tolist()` round-trip.
         """
         assert all(
             1 <= h <= self.max_height and 1 <= w <= self.max_width
@@ -316,34 +316,6 @@ class Rope2DPosEmb(nn.Module):
 
         """
         return self.get_freqs_cis_by_seqlens_list(grid_hws.tolist())
-
-    def get_freqs_cis_by_idx(
-        self, pos_idx: torch.Tensor, pos_idx_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Args:
-            pos_idx: tensor of shape (..., 2), It contains the (h, w) position indices of each 2D token.
-            pos_idx_mask: a mask of shape (...), the leading dimensions should be the same as pos_idx.
-                Rope will only be applied to the tokens with True mask. `freqs_cis` for the tokens with False mask with be ones.
-
-        Return:
-            freqs_cis: tensor of shape (..., dim//2)
-
-        """
-        assert (
-            pos_idx.shape[:-1] == pos_idx_mask.shape
-            and pos_idx.shape[-1] == 2
-            and pos_idx.ndim == pos_idx_mask.ndim + 1
-        ), (pos_idx.shape, pos_idx_mask.shape)
-        assert pos_idx_mask.dtype == torch.bool, pos_idx_mask.dtype
-
-        shp = pos_idx_mask.shape + (self.dim // 2,)  # ..., head_dim/2
-        freqs_cis = torch.ones(
-            shp, dtype=torch.complex64, device=self.device
-        )  # ..., head_dim/2
-        freqs_cis[pos_idx_mask] = self.precomputed_freqs_cis[
-            pos_idx[..., 0][pos_idx_mask], pos_idx[..., 1][pos_idx_mask]
-        ]
-        return freqs_cis
 
 
 class MLP2(nn.Module):
@@ -449,7 +421,7 @@ class MoonVitEncoderLayer(nn.Module):
         x (torch.Tensor): (seqlen, hidden_dim)
         cu_seqlens (torch.Tensor):
         max_seqlen: Optional precomputed scalar tensor. When omitted it
-            is derived from ``cu_seqlens``, which produces a GPU scalar
+            is derived from `cu_seqlens`, which produces a GPU scalar
             that breaks CUDA graph capture.
 
         """
@@ -615,12 +587,12 @@ def patch_merger_packed(
     gather_idx: torch.Tensor,
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
-    """CUDA-graph-safe equivalent of :func:`patch_merger`.
+    """CUDA-graph-safe equivalent of `patch_merger`.
 
     Uses a precomputed index tensor to gather the per-token reshape +
-    permute that ``patch_merger`` does inside a Python loop. The output is
-    the concatenated 3D tensor ``(sum(new_h * new_w), kh * kw, d_model)``,
-    matching what ``torch.cat(patch_merger(...))`` would produce.
+    permute that `patch_merger` does inside a Python loop. The output is
+    the concatenated 3D tensor `(sum(new_h * new_w), kh * kw, d_model)`,
+    matching what `torch.cat(patch_merger(...))` would produce.
     """
     kh, kw = merge_kernel_size
     d_model = x.size(-1)
@@ -631,7 +603,7 @@ def _build_merge_gather_idx(
     grid_hws_list: list[list[int]] | list[tuple[int, int]],
     merge_kernel_size: tuple[int, int],
 ) -> np.ndarray:
-    """Build the per-token gather indices used by :func:`patch_merger_packed`.
+    """Build the per-token gather indices used by `patch_merger_packed`.
 
     For each item with grid (h, w) and merge kernel (kh, kw), the output
     block at position (nh, nw) gathers the kh*kw input tokens at rows
@@ -710,12 +682,12 @@ class MoonVitPretrainedModel(PreTrainedModel):
 
         Used by the CUDA graph capture and replay paths to precompute
         every grid-dependent input outside the captured graph, so per-grid
-        Python iteration and ``.tolist()`` round-trips are fine; the
+        Python iteration and `.tolist()` round-trips are fine; the
         values are then copied into fixed-shape buffers for replay.
 
         Args:
-            grid_hws_list: List of ``(h, w)`` patch-grid sizes per image.
-            max_batch_size: When set, ``cu_seqlens`` is right-padded with
+            grid_hws_list: List of `(h, w)` patch-grid sizes per image.
+            max_batch_size: When set, `cu_seqlens` is right-padded with
                 its last value so the buffer covers up to this many
                 sequences. Required at CUDA graph capture/replay so the
                 buffer shape matches what was recorded; padding entries
@@ -794,12 +766,12 @@ class MoonVitPretrainedModel(PreTrainedModel):
         pixel_values (torch.Tensor): The input pixel values.
         grid_hw (torch.Tensor): The grid height and width.
         encoder_metadata: Optional precomputed metadata produced by
-            :meth:`prepare_encoder_metadata`. When provided every
-            ``.tolist()`` call in the forward path is skipped, the
+            `prepare_encoder_metadata`. When provided every
+            `.tolist()` call in the forward path is skipped, the
             returned tensor is the packed
-            ``(sum(new_h*new_w), kh*kw, hidden_size)`` form (suitable
-            for CUDA graph capture/replay), and ``grid_hw`` is unused.
-            When ``None`` the legacy path runs and returns a list of
+            `(sum(new_h*new_w), kh*kw, hidden_size)` form (suitable
+            for CUDA graph capture/replay), and `grid_hw` is unused.
+            When `None` the legacy path runs and returns a list of
             per-image tensors.
 
         """

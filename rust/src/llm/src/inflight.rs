@@ -3,7 +3,7 @@
 
 //! Tracking of the external→internal request-id mapping for in-flight requests.
 //!
-//! When request-id randomization is enabled (the default), [`crate::Llm`]
+//! When request-id randomization is enabled (the default), [`crate::EngineCoreLlm`]
 //! rewrites the external (user-supplied) request id into a unique internal
 //! engine id before reaching engine-core. Engine-core only ever knows the
 //! internal id, so aborting a request by its external id requires resolving it

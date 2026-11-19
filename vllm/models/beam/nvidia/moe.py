@@ -5,7 +5,12 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    RoutedScaleMode,
+)
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -16,7 +21,7 @@ from .activation import beam_silu_mul
 
 
 class BeamMLP(nn.Module):
-    """SwiGLU MLP for the ``dense`` entries of ``mlp_layer_types``."""
+    """SwiGLU MLP for the `dense` entries of `mlp_layer_types`."""
 
     def __init__(
         self,
@@ -25,6 +30,7 @@ class BeamMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -40,6 +46,7 @@ class BeamMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
+            reduce_results=reduce_results,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -55,9 +62,11 @@ class BeamMLP(nn.Module):
 
 
 class BeamSparseMoeBlock(nn.Module):
-    """Grouped sigmoid ``noaux_tc`` MoE block."""
+    """Grouped sigmoid `noaux_tc` MoE block."""
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
+    ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
@@ -77,6 +86,7 @@ class BeamSparseMoeBlock(nn.Module):
         self.gate.register_parameter("e_score_correction_bias", e_score_correction_bias)
 
         self.experts = FusedMoEFactory(
+            reduce_results=reduce_results,
             gate=self.gate,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -92,12 +102,31 @@ class BeamSparseMoeBlock(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=config.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,
             prefix=f"{prefix}.experts",
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def defer_finalize(self, max_tokens: int) -> None:
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+            TrtLlmNvFp4ExpertsModular,
+            TrtLlmNvFp4ExpertsMonolithic,
+        )
+
+        experts_cls = getattr(
+            self.experts.routed_experts.quant_method, "experts_cls", None
+        )
+        if experts_cls in (TrtLlmNvFp4ExpertsModular, TrtLlmNvFp4ExpertsMonolithic):
+            self.experts.moe_config.defer_moe_finalize(max_tokens)
+
+    def forward(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        if self.experts.moe_config.should_defer_moe_finalize(hidden_states.shape[0]):
+            output = self.experts._forward_impl(hidden_states, hidden_states, None)
+            assert isinstance(output, UnfinalizedMoEOutput)
+            return output
+
         return self.experts(hidden_states=hidden_states, router_logits=hidden_states)

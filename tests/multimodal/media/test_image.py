@@ -1,17 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+import struct
+import zlib
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pybase64 as base64
 import pytest
-from PIL import Image
+import torch
+from PIL import Image, features
+from PIL.BlpImagePlugin import BLPFormatError
 
-from vllm.multimodal.image import (
-    ALLOWED_IMAGE_FORMATS,
-    open_image,
-)
+from vllm.multimodal import image as image_utils
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.image import ALLOWED_IMAGE_FORMATS, open_image
 from vllm.multimodal.media import ImageMediaIO, MediaConnector, MediaDecodedBudget
+from vllm.multimodal.media.video import VideoMediaIO
+from vllm.utils.import_utils import has_torchcodec_image_decoding
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -257,7 +264,6 @@ def test_image_pixel_limit_respected():
     import vllm.envs as envs
 
     image = Image.new("RGB", (100, 100), (255, 0, 0))
-    from io import BytesIO
 
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -277,7 +283,6 @@ def test_image_pixel_limit_rejected(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 100)
 
     image = Image.new("RGB", (20, 20), (0, 255, 0))
-    from io import BytesIO
 
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -288,6 +293,82 @@ def test_image_pixel_limit_rejected(monkeypatch):
         image_io.load_bytes(data)
 
 
+def test_image_decompression_bomb_rejected(monkeypatch):
+    """Pillow rejects images above twice `Image.MAX_IMAGE_PIXELS` with its own
+    non-OSError exception, which must surface as a client-side ValueError."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 50)
+
+    image = Image.new("RGB", (20, 20), (0, 255, 0))
+
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, Image.DecompressionBombError)
+
+
+def test_image_broken_png_rejected():
+    """A PNG with a corrupted chunk structure surfaces as a client-side
+    ValueError (Pillow raises SyntaxError, which is not an OSError)."""
+    # Real-world request bytes: stray bytes between the IDAT CRC and the
+    # IEND chunk shift the stream, so Pillow reads a bogus chunk header.
+    data = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000004000000040806000000a9f19e"
+        "7e000000144944415478da63fccfc0c0c0c0c0c0c0c0c0c000000e0001ff02ab"
+        "ce36890000000049454e44ae426082"
+    )
+
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, SyntaxError)
+
+
+@pytest.mark.parametrize(
+    ("data", "cause"),
+    [
+        # AVIF without a primary item: the AVIF decoder raises RuntimeError
+        # from Image.open().
+        pytest.param(
+            base64.b64decode(
+                "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
+                "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
+                "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
+                "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
+                "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
+                "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
+            ),
+            RuntimeError,
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
+        ),
+        # BLP2 header with compression 0, which Pillow does not know:
+        # BLPFormatError, a NotImplementedError and so a RuntimeError, from
+        # image.load().
+        (
+            b"BLP2"
+            + struct.pack("<i", 0)
+            + bytes([1, 0, 0, 0])
+            + struct.pack("<II", 1, 1)
+            + bytes(128 + 1024),
+            BLPFormatError,
+        ),
+    ],
+    ids=["avif-no-primary-item", "blp-unknown-compression"],
+)
+def test_image_decoder_error_rejected(data, cause):
+    """Decoder errors that are neither OSError nor SyntaxError surface as a
+    client-side ValueError instead of HTTP 500 or 501."""
+    image_io = ImageMediaIO()
+    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
+        image_io.load_bytes(data)
+    assert isinstance(exc_info.value.__cause__, cause)
+
+
 def test_image_pixel_limit_disabled(monkeypatch):
     """Setting VLLM_MAX_IMAGE_PIXELS=0 disables the pixel limit."""
     import vllm.envs as envs
@@ -295,7 +376,6 @@ def test_image_pixel_limit_disabled(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 0)
 
     image = Image.new("RGB", (1000, 1000), (0, 0, 255))
-    from io import BytesIO
 
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -307,8 +387,6 @@ def test_image_pixel_limit_disabled(monkeypatch):
 
 
 def _png_bytes(width: int, height: int) -> bytes:
-    from io import BytesIO
-
     buf = BytesIO()
     Image.new("RGB", (width, height), (1, 2, 3)).save(buf, format="PNG")
     return buf.getvalue()
@@ -354,12 +432,10 @@ def test_request_decoded_budget_disabled(monkeypatch):
 
 
 def test_media_connector_enforces_request_decoded_budget(monkeypatch):
-    import pybase64
-
     import vllm.envs as envs
 
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 600)
-    b64 = pybase64.b64encode(_png_bytes(10, 10)).decode()
+    b64 = base64.b64encode(_png_bytes(10, 10)).decode()
     url = f"data:image/png;base64,{b64}"
     connector = MediaConnector(decoded_budget=MediaDecodedBudget())
 
@@ -435,3 +511,196 @@ showpage
 def test_open_image_does_not_accept_format_override():
     """The allowlist helper must not expose a formats override."""
     assert "formats" not in inspect.signature(open_image).parameters
+
+
+requires_torchcodec_images = pytest.mark.skipif(
+    not has_torchcodec_image_decoding(),
+    reason="requires torchcodec >= 0.16",
+)
+
+
+def _encode(image: Image.Image, fmt: str, **save_kwargs) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, fmt, **save_kwargs)
+    return buffer.getvalue()
+
+
+def _rgb_png_16_bit() -> bytes:
+    """Pillow can't write 16-bit RGB PNGs, so build one by hand."""
+    rng = np.random.default_rng(0)
+    pixels = rng.integers(0, 2**16, (8, 8, 3), dtype=np.uint16).astype(">u2")
+    rows = b"".join(b"\x00" + row.tobytes() for row in pixels)
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(kind + payload)
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", 8, 8, 16, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _noisy_rgb_image(width: int = 48, height: int = 32) -> Image.Image:
+    rng = np.random.default_rng(0)
+    return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
+
+
+def _jpeg_with_xmp_before_exif() -> bytes:
+    """A rotated JPEG whose EXIF APP1 segment follows an XMP APP1 segment."""
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    data = _encode(_noisy_rgb_image(), "JPEG", exif=exif.tobytes())
+    xmp = b"http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>"
+    segment = b"\xff\xe1" + struct.pack(">H", len(xmp) + 2) + xmp
+    return data[:2] + segment + data[2:]
+
+
+def _to_hwc(media: Image.Image | torch.Tensor) -> np.ndarray:
+    if isinstance(media, torch.Tensor):
+        return media.permute(1, 2, 0).numpy()
+    return np.asarray(media)
+
+
+@requires_torchcodec_images
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP", "AVIF"])
+@pytest.mark.parametrize("mode", ["RGB", "L"])
+@pytest.mark.parametrize("orientation", [None, *range(1, 9)])
+def test_torchcodec_backend_matches_pil(fmt, mode, orientation):
+    """The torchcodec backend must return the same pixels as Pillow, including
+    grayscale-to-RGB conversion and EXIF orientation."""
+    save_kwargs = {}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif.tobytes()
+    data = _encode(_noisy_rgb_image().convert(mode), fmt, **save_kwargs)
+
+    pil = ImageMediaIO().load_bytes(data)
+    tc = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+
+    assert isinstance(pil.media, Image.Image)
+    assert isinstance(tc.media, torch.Tensor)
+    assert tc.media.dtype == torch.uint8 and tc.media.shape[0] == 3
+    np.testing.assert_array_equal(_to_hwc(tc.media), _to_hwc(pil.media))
+    assert tc.io_config == pil.io_config
+
+
+@requires_torchcodec_images
+@pytest.mark.parametrize(
+    ("data", "image_mode"),
+    [
+        (_encode(Image.new("RGBA", (8, 8), (255, 0, 0, 128)), "PNG"), "RGB"),
+        (_encode(Image.new("RGB", (8, 8)), "PNG", transparency=(0, 0, 0)), "RGB"),
+        (_encode(Image.new("CMYK", (8, 8), (0, 255, 0, 0)), "JPEG"), "RGB"),
+        (_encode(Image.new("I;16", (8, 8), 1000), "PNG"), "RGB"),
+        (_rgb_png_16_bit(), "RGB"),
+        (_encode(Image.new("RGB", (8, 8)), "GIF"), "RGB"),
+        (
+            _encode(
+                Image.new("RGB", (8, 8)),
+                "WEBP",
+                save_all=True,
+                append_images=[Image.new("RGB", (8, 8), (255, 255, 255))],
+            ),
+            "RGB",
+        ),
+        (_jpeg_with_xmp_before_exif(), "RGB"),
+        (_encode(Image.new("RGB", (8, 8)), "JPEG"), None),
+        (_encode(Image.new("RGB", (8, 8)), "JPEG"), "L"),
+    ],
+    ids=[
+        "rgba",
+        "rgb_png_trns",
+        "cmyk",
+        "16bit",
+        "16bit_rgb",
+        "gif",
+        "animated_webp",
+        "jpeg_xmp_before_exif",
+        "no_mode_conversion",
+        "non_rgb_target",
+    ],
+)
+def test_torchcodec_backend_uses_pil_when_outputs_would_differ(data, image_mode):
+    result = ImageMediaIO(image_mode, image_backend="torchcodec").load_bytes(data)
+    assert isinstance(result.media, Image.Image)
+    expected = ImageMediaIO(image_mode).load_bytes(data)
+    np.testing.assert_array_equal(np.asarray(result.media), np.asarray(expected.media))
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_checks_limits_before_decoding(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("torchcodec must not decode an over-limit image")
+
+    import vllm.envs as envs
+
+    monkeypatch.setattr(image_utils, "torchcodec_decode_image", fail)
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 100)
+    data = _encode(Image.new("RGB", (11, 10)), "JPEG")
+    with pytest.raises(ValueError, match="exceed the maximum of 100 pixels"):
+        ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_falls_back_to_pil_on_decode_error(monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("JPEG decoding was disabled at build time")
+
+    monkeypatch.setattr(image_utils, "torchcodec_decode_image", fail)
+    data = _encode(_noisy_rgb_image(), "PNG")
+    result = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+    assert isinstance(result.media, Image.Image)
+
+    # Corrupt input still surfaces as a client error.
+    with pytest.raises(ValueError, match="Failed to load image"):
+        ImageMediaIO(image_backend="torchcodec").load_bytes(data[: len(data) // 2])
+
+
+def test_torchcodec_backend_unavailable_uses_pil(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.multimodal.media.image.has_torchcodec_image_decoding", lambda: False
+    )
+    image_io = ImageMediaIO(image_backend="torchcodec")
+    assert image_io.image_backend == "pil"
+    result = image_io.load_bytes(_encode(_noisy_rgb_image(), "JPEG"))
+    assert isinstance(result.media, Image.Image)
+
+
+def test_unknown_image_backend_rejected():
+    with pytest.raises(ValueError, match="Unknown image_backend"):
+        ImageMediaIO(image_backend="opencv")
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_hash_matches_pil():
+    """The decoding backend must not change the multimodal cache key."""
+    for mode in ["RGB", "L"]:
+        data = _encode(_noisy_rgb_image().convert(mode), "JPEG")
+        pil = ImageMediaIO().load_bytes(data)
+        tc = ImageMediaIO(image_backend="torchcodec").load_bytes(data)
+        assert MultiModalHasher.hash_kwargs(
+            "blake3", image=tc
+        ) == MultiModalHasher.hash_kwargs("blake3", image=pil)
+
+
+@requires_torchcodec_images
+def test_torchcodec_backend_jpeg_frame_list_video():
+    frames = [_noisy_rgb_image(), _noisy_rgb_image().transpose(Image.FLIP_LEFT_RIGHT)]
+    data = ",".join(
+        base64.b64encode(_encode(frame, "JPEG")).decode() for frame in frames
+    )
+
+    def load(image_io):
+        video_io = VideoMediaIO(image_io, num_frames=-1)
+        frames, _ = video_io.load_base64("video/jpeg", data).media
+        return frames
+
+    expected = load(ImageMediaIO())
+    actual = load(ImageMediaIO(image_backend="torchcodec"))
+    assert actual.shape == (2, 32, 48, 3)
+    np.testing.assert_array_equal(actual, expected)

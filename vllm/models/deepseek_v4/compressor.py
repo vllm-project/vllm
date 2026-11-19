@@ -29,10 +29,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
 
 
@@ -94,9 +94,8 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
-        self.block_size = mla_spec.block_size
+        assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
+        self.block_size = self.kv_cache_spec.block_size
 
         self.token_to_req_indices = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens,
@@ -176,19 +175,21 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
         # full-cache rows share state pages with contiguous KV pages, so padding
         # would break page matching.
         uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
-        return SlidingWindowMLASpec(  # only has one vector instead of K + V
+        spec = MLAAttentionSpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
             head_size=self.state_dim,
             dtype=self.dtype,
-            sliding_window=self.sliding_window,
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+        )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.sliding_window
         )
 
     def forward(self): ...
@@ -197,13 +198,21 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
     Owns the linear / norm / state-cache / ape state and the shared forward
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
-    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    (`compress_norm_rope_store_triton`) by default, except for the NVIDIA
     head_dim=512 path which uses the CuTeDSL compressor kernels for better
     performance.
     """
@@ -268,7 +277,14 @@ class DeepseekCompressor(nn.Module):
             requires_grad=False,
         )
 
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        # CPU packs the weight for its GEMM and frees the raw copy, so it keeps
+        # the quant-method forward and upcasts the BF16 output itself.
+        kv_score_linear = (
+            MergedColumnParallelLinear
+            if current_platform.is_cpu()
+            else DeepseekV4CompressorKVScoreLinear
+        )
+        self.fused_wkv_wgate = kv_score_linear(
             self.hidden_size,
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,
@@ -374,10 +390,7 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
-        token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
-        num_actual = slot_mapping.shape[0]
-        block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
@@ -418,6 +431,34 @@ class DeepseekCompressor(nn.Module):
             and state_metadata.c128_boundary is False
         ):
             return
+
+        self._compress_norm_rope_store(
+            state_metadata,
+            state_cache,
+            state_width,
+            positions,
+            rotary_emb,
+            attn_metadata,
+            pdl_kwargs,
+        )
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        """Compress the saved states and write K to the cache; a platform
+        subclass overrides it to write its own cache layout."""
+        token_to_req_indices = state_metadata.token_to_req_indices
+        slot_mapping = state_metadata.slot_mapping
+        num_actual = slot_mapping.shape[0]
+        block_table = state_metadata.block_table
+        block_size = state_metadata.block_size
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -466,11 +507,12 @@ class DeepseekCompressor(nn.Module):
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
                 "compress_scratch": self._compress_scratch,
+                "fp8_scale": fp8_scale,
             }
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
-            extra_kwargs = {}
+            extra_kwargs = {"fp8_scale": fp8_scale}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,

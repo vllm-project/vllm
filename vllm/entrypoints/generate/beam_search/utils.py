@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,7 +18,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchSequence:
     """A sequence for beam search.
     It keeps track of the tokens and the log probability of the sequence.
@@ -101,7 +102,7 @@ class BeamSearchSequence:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class BeamSearchOutput:
     """The output of beam search.
     It contains the list of the best beam search sequences.
@@ -139,30 +140,34 @@ class BeamSearchInstance:
 
 
 def get_beam_search_score(
-    tokens: list[int],
+    num_generated_tokens: int,
     cumulative_logprob: float,
-    eos_token_ids: set[int],
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
 
-    Adapted from
+    Like Transformers, the length counts the generated tokens, including a
+    terminating EOS token. Adapted from
 
-    https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
+    https://github.com/huggingface/transformers/blob/09a71e5b32a747dbc7805599457e67c956ef212f/src/transformers/generation/utils.py#L3531
     """
-    seq_len = len(tokens)
-    if tokens[-1] in eos_token_ids:
-        seq_len -= 1
+    # An aborted beam may not have generated any tokens.
+    # A large |length_penalty| overflows or underflows the power. Saturate
+    # instead of raising, so the request still returns its beams.
+    try:
+        denominator = max(num_generated_tokens, 1) ** length_penalty
+    except OverflowError:
+        denominator = math.inf
+    if denominator == 0.0:
+        return -math.inf if cumulative_logprob < 0 else 0.0
+    return cumulative_logprob / denominator
 
-    # An aborted beam may contain only an EOS prompt token.
-    return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
 
-
-def create_sort_beams_key_function(eos_token_ids: set[int], length_penalty: float):
+def create_sort_beams_key_function(length_penalty: float):
     def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(
-            x.tokens, x.cum_logprob, eos_token_ids, length_penalty
-        )
+        # `logprobs` has one entry per generated token, including an EOS token
+        # that `tokens` omits unless include_stop_str_in_output is set.
+        return get_beam_search_score(len(x.logprobs), x.cum_logprob, length_penalty)
 
     return sort_beams_key
 
@@ -171,10 +176,10 @@ def get_beam_search_eos_token_ids(
     generation_config: dict[str, Any], eos_token_id: int | None
 ) -> set[int]:
     """Return the token ids that end generation: the tokenizer EOS plus the
-    generation config's ``eos_token_id``.
+    generation config's `eos_token_id`.
 
     This uses a separate SamplingParams so the params sent to the engine keep
-    their own ``stop_token_ids`` and are validated as before.
+    their own `stop_token_ids` and are validated as before.
     """
     params = SamplingParams()
     params.update_from_generation_config(generation_config, eos_token_id)

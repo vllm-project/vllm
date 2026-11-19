@@ -59,6 +59,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
+from ..layers.fusion.mm_input_norm import IdentityInputNorm
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -319,7 +320,7 @@ class SiglipVisionEmbeddings(nn.Module):
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(
             pixel_values.to(dtype=target_dtype)
-        )  # shape = [*, width, grid, grid]
+        )  # shape = [*, embed_dim, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
@@ -659,6 +660,7 @@ class SiglipVisionTransformer(nn.Module):
         require_post_norm: bool | None = None,
         prefix: str = "",
         use_head: bool | None = False,
+        input_norm: nn.Module | None = None,
     ) -> None:
         super().__init__()
 
@@ -726,6 +728,8 @@ class SiglipVisionTransformer(nn.Module):
                 orig_to_new_prefix=drops
             )
 
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
@@ -742,6 +746,7 @@ class SiglipVisionTransformer(nn.Module):
         select_layers: list[int] | None = None,
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
+        pixel_values = self.input_norm(pixel_values.to(device=self.device), self.dtype)
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
@@ -812,6 +817,7 @@ class SiglipVisionModel(nn.Module):
         require_post_norm: bool | None = None,
         prefix: str = "",
         use_head: bool | None = False,
+        input_norm: nn.Module | None = None,
     ) -> None:
         super().__init__()
 
@@ -823,6 +829,7 @@ class SiglipVisionModel(nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
             use_head=use_head,
+            input_norm=input_norm,
         )
 
     def get_input_embeddings(self) -> nn.Module:

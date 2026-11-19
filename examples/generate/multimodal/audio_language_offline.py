@@ -113,7 +113,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
 def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
     model_name = "zai-org/GLM-ASR-Nano-2512"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # GLM-ASR uses <|pad|> token for audio
     audio_placeholder = "<|pad|>" * audio_count
@@ -125,7 +125,6 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
@@ -172,7 +171,6 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=2048,
         max_num_seqs=2,
         enable_lora=True,
@@ -248,6 +246,26 @@ def run_midashenglm(question: str, audio_count: int):
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
+    )
+
+
+# Ming3-ASR
+def run_ming_v3_asr(question: str, audio_count: int) -> ModelRequestData:
+    from vllm.model_executor.models.ming_v3_asr import ASR_INSTRUCTION
+
+    assert audio_count == 1, "Ming3-ASR only supports single audio input per prompt"
+    engine_args = EngineArgs(
+        model="inclusionAI/Ming-3.0-asr-tiny",
+        trust_remote_code=True,
+        dtype="bfloat16",
+        max_model_len=8192,
+        max_num_seqs=4,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=ASR_INSTRUCTION + "<audio><audioPatch></audio>",
     )
 
 
@@ -503,6 +521,7 @@ model_example_map = {
     "granite_speech": run_granite_speech,
     "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
+    "ming_v3_asr": run_ming_v3_asr,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,

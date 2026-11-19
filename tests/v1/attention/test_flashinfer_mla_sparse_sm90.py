@@ -17,6 +17,7 @@ import torch
 
 # isort: off
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Backend,
     FlashInferMLASparseSM90Builder,
@@ -175,16 +176,17 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
-@pytest.mark.parametrize("use_mha", [False, True])
+@pytest.mark.parametrize("route", list(SparseMLAPrefillRoute))
 @pytest.mark.parametrize("num_decodes", [0, 1])
-def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_decodes):
+def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decodes):
     """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
-    builder.state = FakeState(TOPK)
+    state = FakeState(TOPK)
+    builder.state = state
     builder.prefill_state = None
-    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.prefill = SimpleNamespace(route=route)
     metadata.state = None
     metadata.req_id_per_token = None
     metadata.num_prefills = 1
@@ -209,10 +211,10 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
 
     assert result.state is builder.state
     expected_lens = [1402] if num_decodes else []
-    if not use_mha:
+    if route is SparseMLAPrefillRoute.SPARSE_MQA:
         expected_lens += [1, 2, 3, 4, 5]
-    assert builder.state.plan_calls[0][0] == len(expected_lens)
-    assert builder.state.plan_calls[0][1].tolist() == expected_lens
+    assert state.plan_calls[0][0] == len(expected_lens)
+    assert state.plan_calls[0][1].tolist() == expected_lens
 
 
 @pytest.mark.parametrize(
@@ -236,23 +238,27 @@ def test_hisparse_forward_reads_physical_caches(
     staged = torch.zeros(3, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
     paged = torch.zeros(5, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
     index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.convert_logical_to_physical_topk = MagicMock(
-        side_effect=lambda _i, topk, *_a, **_k: (
-            torch.full_like(topk, 7),
-            torch.zeros(topk.shape[0], dtype=torch.int32),
-        )
-    )
-    index_group.physical_kv_cache = MagicMock(return_value=hot)
-    index_group.cache = MagicMock(
-        return_value=SimpleNamespace(all_context_pages_resident=resident)
-    )
-    index_group.stage_prefill_rows = MagicMock(
-        return_value=(
-            staged,
-            torch.tensor([[2]], dtype=torch.int32),
-            torch.zeros(num_prefill, dtype=torch.int32),
-        )
-    )
+    mocks = {
+        "convert_logical_to_physical_topk": MagicMock(
+            side_effect=lambda _i, topk, *_a, **_k: (
+                torch.full_like(topk, 7),
+                torch.zeros(topk.shape[0], dtype=torch.int32),
+            )
+        ),
+        "physical_kv_cache": MagicMock(return_value=hot),
+        "cache": MagicMock(
+            return_value=SimpleNamespace(all_context_pages_resident=resident)
+        ),
+        "stage_prefill_rows": MagicMock(
+            return_value=(
+                staged,
+                torch.tensor([[2]], dtype=torch.int32),
+                torch.zeros(num_prefill, dtype=torch.int32),
+            )
+        ),
+    }
+    for name, mock in mocks.items():
+        monkeypatch.setattr(index_group, name, mock)
     impl.index_group = index_group
     impl.index_group_index = 0
     impl.topk_indices_buffer[:, :1] = 3
@@ -286,7 +292,7 @@ def test_hisparse_forward_reads_physical_caches(
         assert ckv.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
         assert fake.kv_indices[:rows].tolist() == [slot] * rows
     if num_prefill:
-        assert index_group.stage_prefill_rows.called == (not resident)
+        assert mocks["stage_prefill_rows"].called == (not resident)
 
 
 @pytest.mark.parametrize(
@@ -302,10 +308,15 @@ def test_builder_plans_hisparse_prefill_rows_separately(
     addresses batch rows from the first prefill row."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
-    builder.state = FakeState(TOPK)
-    builder.prefill_state = FakeState(TOPK)
-    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: False)
+    state, prefill_state = FakeState(TOPK), FakeState(TOPK)
+    builder.state = state
+    builder.prefill_state = prefill_state
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.prefill = (
+        SimpleNamespace(route=SparseMLAPrefillRoute.SPARSE_MQA)
+        if num_decodes < num_tokens
+        else None
+    )
     metadata.req_id_per_token = None
     metadata.num_prefills = int(num_decodes < num_tokens)
     metadata.num_decode_tokens = num_decodes
@@ -326,18 +337,16 @@ def test_builder_plans_hisparse_prefill_rows_separately(
 
     split = 0 < num_decodes < num_tokens
     first = lens[:num_decodes] if split else lens
-    assert [c[1].tolist() for c in builder.state.plan_calls] == [first]
-    assert builder.state.row_offset == 0
-    assert result.state is builder.state
+    assert [c[1].tolist() for c in state.plan_calls] == [first]
+    assert state.row_offset == 0
+    assert result.state is state
     if split:
-        assert [c[1].tolist() for c in builder.prefill_state.plan_calls] == [
-            lens[num_decodes:]
-        ]
-        assert builder.prefill_state.row_offset == num_decodes
-        assert result.prefill_state is builder.prefill_state
+        assert [c[1].tolist() for c in prefill_state.plan_calls] == [lens[num_decodes:]]
+        assert prefill_state.row_offset == num_decodes
+        assert result.prefill_state is prefill_state
     else:
-        assert builder.prefill_state.plan_calls == []
-        assert result.prefill_state is builder.state
+        assert prefill_state.plan_calls == []
+        assert result.prefill_state is state
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
@@ -601,7 +610,7 @@ def test_upper_bound_plan_matches_exact(num_reqs, q_per_req, lo, hi, row_offset)
     """Sync-free planning from optimistic host bounds (async spec decode)
     must match exact planning: the device clamp trims every work item back
     to its row's valid count, so no -1 slot is read. A plan covering only
-    the batch rows from ``row_offset`` clamps against those rows."""
+    the batch rows from `row_offset` clamps against those rows."""
     torch.manual_seed(0)
     heads, topk, kpool, width = SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
     ctx, valid, cam, req_id, slots = _clamp_batch(
