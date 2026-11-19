@@ -23,6 +23,12 @@ from tests.models.registry import _HfExamplesInfo
 from tests.utils import create_new_process_for_each_test
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.models.qwen3.nvidia import model as qwen3_model
+from vllm.models.qwen3.xpu import model as qwen3_xpu_model
+
+
+def test_xpu_vendor_entry_point_reuses_qwen3_sp_model():
+    assert qwen3_xpu_model.Qwen3Model is qwen3_model.Qwen3Model
+    assert qwen3_xpu_model.Qwen3ForCausalLM is qwen3_model.Qwen3ForCausalLM
 
 
 class _StubLayer:
@@ -41,19 +47,19 @@ def _make_model(
     num_layers: int = 2,
     pp_world_size: int = 1,
 ) -> tuple[qwen3_model.Qwen3Model, list[_StubLayer]]:
-    """Build a `Qwen3Model` with `Qwen2Model.__init__` stubbed out to
+    """Build a `Qwen3Model` with `Qwen3ModelBase.__init__` stubbed out to
     just install `layers`/`start_layer`/`end_layer`, so the real SP
     wiring in `Qwen3Model.__init__` runs against stand-in layers instead
     of a full model."""
     layers = [_StubLayer() for _ in range(num_layers)]
 
-    def fake_qwen2_init(self, *, vllm_config, prefix="", decoder_layer_type=None):
+    def fake_qwen3_init(self, *, vllm_config, prefix=""):
         nn.Module.__init__(self)
         self.layers = layers
         self.start_layer = 0
         self.end_layer = num_layers
 
-    monkeypatch.setattr(qwen3_model.Qwen2Model, "__init__", fake_qwen2_init)
+    monkeypatch.setattr(qwen3_model.Qwen3ModelBase, "__init__", fake_qwen3_init)
     monkeypatch.setattr(
         qwen3_model,
         "get_pp_group",
@@ -125,7 +131,7 @@ def test_forward_skips_shard_gather_when_sp_inactive(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(qwen3_model, "is_sp_active", lambda pc: False)
     sentinel = object()
     base_forward = lambda self, *a, **k: sentinel  # noqa: E731
-    monkeypatch.setattr(qwen3_model.Qwen2Model, "forward", base_forward)
+    monkeypatch.setattr(qwen3_model.Qwen3ModelBase, "forward", base_forward)
     for name in ("sp_shard", "sp_all_gather"):
 
         def _fail(x, name=name):
@@ -162,7 +168,7 @@ def test_forward_shards_embeds_and_gathers_single_output_when_sp_active(
     def fake_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds):
         return inputs_embeds * 10
 
-    monkeypatch.setattr(qwen3_model.Qwen2Model, "forward", fake_forward)
+    monkeypatch.setattr(qwen3_model.Qwen3ModelBase, "forward", fake_forward)
 
     def fake_sp_all_gather(x):
         gather_calls.append(x)
@@ -194,7 +200,7 @@ def test_forward_gathers_every_aux_hidden_state_when_sp_active(
     hidden = torch.ones(3, 2)
     aux = [torch.full((3, 2), 2.0), torch.full((3, 2), 3.0)]
     monkeypatch.setattr(
-        qwen3_model.Qwen2Model, "forward", lambda self, *a, **k: (hidden, aux)
+        qwen3_model.Qwen3ModelBase, "forward", lambda self, *a, **k: (hidden, aux)
     )
     monkeypatch.setattr(qwen3_model, "sp_all_gather", lambda x: x)
 

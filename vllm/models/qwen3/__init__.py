@@ -10,6 +10,8 @@ from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
     from .nvidia.model import Qwen3ForCausalLM  # type: ignore[assignment]
+elif current_platform.is_xpu():
+    from .xpu.model import Qwen3ForCausalLM  # type: ignore[assignment]
 else:
     from vllm.model_executor.models.qwen3 import (  # type: ignore[assignment]
         Qwen3ForCausalLM,

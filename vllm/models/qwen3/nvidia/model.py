@@ -33,9 +33,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer as Qwen3DecoderLayerBase
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM as Qwen3ForCausalLMBase
+from vllm.model_executor.models.qwen3 import Qwen3Model as Qwen3ModelBase
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     maybe_prefix,
@@ -78,11 +78,11 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
-class Qwen3Model(Qwen2Model):
+class Qwen3Model(Qwen3ModelBase):
+    decoder_layer_type = Qwen3DecoderLayer
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(
-            vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer
-        )
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.parallel_config = vllm_config.parallel_config
         if not self.parallel_config.use_sequence_parallel:
             return
