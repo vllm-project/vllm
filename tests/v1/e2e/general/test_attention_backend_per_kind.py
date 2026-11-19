@@ -14,18 +14,21 @@ from vllm import LLM
 from vllm.config.attention import AttentionConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
 
 MODEL = "google/gemma-3-1b-it"
 
 
 def _collect_group_backends(worker) -> list[tuple[str, str]]:
     """Runs on the worker: returns (spec_kind, backend_name) per attn group."""
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
-
+    kv_cache_groups = worker.model_runner.kv_cache_config.kv_cache_groups
     out: list[tuple[str, str]] = []
     for kv_group in worker.model_runner.attn_groups:
         for attn_group in kv_group:
-            kind = get_kv_cache_spec_kind(attn_group.kv_cache_spec)
+            group = kv_cache_groups[attn_group.kv_cache_group_id]
+            kind = get_kv_cache_kind(
+                group.manager_config, group.kv_cache_specs.values()
+            )
             out.append((kind.value, attn_group.backend.get_name()))
     return out
 

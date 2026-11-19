@@ -52,6 +52,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -72,6 +73,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     parse_w4a16_int4_weight_config,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequantize_fp8_moe_weights,
     validate_fp8_block_shape_moe,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -862,6 +864,23 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             set_weight_attrs(w2_bias, extra_weight_attrs)
         else:
             layer.w13_bias, layer.w2_bias = None, None
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            weight_key=self.weight_quant_key,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.weight_block_size,
+            static_input_scales=self.static_input_scales,
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Fp8 moe kernels require a single activation scale.
@@ -1835,9 +1854,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        # Convert weights to kernel format (handles all backend-specific logic)
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        if self.model_type == "gpt_oss":
+            converted_weights = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=layer.w13_weight,
@@ -1849,7 +1867,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w13_input_scale=layer.w13_input_scale,
                 w2_input_scale=layer.w2_input_scale,
             )
-        )
+        else:
+            converted_weights = convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                activation=self.moe.activation,
+            )
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 
         # Handle weight/scale assignment based on backend type
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
