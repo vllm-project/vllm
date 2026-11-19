@@ -78,11 +78,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import (
-    direct_reload_refusals,
-    refusal_message,
-    reloads_directly,
-)
+from vllm.model_executor.model_loader.reload.direct import reloads_directly
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
@@ -1716,33 +1712,9 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
-        # refuse before the trainer sends anything
-        self._check_direct_reload()
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-
-    def _check_direct_reload(self) -> None:
-        """Raise on every rank if direct reload refuses an updatable model on
-        any pipeline stage, before an update could leave it half-updated."""
-        engine = self.weight_transfer_engine
-        assert engine is not None
-        reasons: list[str] = []
-        if engine.reloads_through_start_reload:
-            reasons += direct_reload_refusals(self.model_runner.get_model())
-            draft = self.get_draft_model()
-            if draft is not None and self.supports_draft_weight_updates():
-                reasons += direct_reload_refusals(draft)
-        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
-            # stages hold different modules: one refusing stage refuses all
-            pp_group = get_pp_group()
-            gathered: list[list[str]] = [[] for _ in range(pp_group.world_size)]
-            torch.distributed.all_gather_object(
-                gathered, reasons, group=pp_group.cpu_group
-            )
-            reasons = list(dict.fromkeys(r for rank in gathered for r in rank))
-        if reasons:
-            raise RuntimeError(refusal_message(reasons))
 
     def shutdown_weight_transfer_engine(self) -> None:
         """Release a trainer connection without shutting down inference."""

@@ -13,12 +13,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import (
-    ParallelConfig,
-    VllmConfig,
-    WeightTransferConfig,
-    get_current_vllm_config,
-)
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker import gpu_worker
@@ -36,7 +31,6 @@ class _RecordingEngine:
         self.closed = False
         self.reset_count = 0
         self.supports_draft_weight_update = False
-        self.reloads_through_start_reload = True
         self.model = nn.Module()
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
@@ -87,8 +81,7 @@ class _RecordingModelRunner:
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
-    transfer = WeightTransferConfig() if engine is not None else None
-    worker.vllm_config = VllmConfig(weight_transfer_config=transfer)
+    worker.vllm_config = VllmConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._incomplete_weight_updates = set()
@@ -333,33 +326,3 @@ def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
-
-
-@pytest.mark.parametrize("case", ["nccl", "sparse_nccl", "draft"])
-def test_init_engine_refuses_an_unsupported_model(monkeypatch, case):
-    # refused before a trainer sends anything, unless the engine does not
-    # reload every update through `start_reload`
-    engine = _RecordingEngine()
-    engine.reloads_through_start_reload = case != "sparse_nccl"
-    initialized: list[dict] = []
-    monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
-    monkeypatch.setattr(
-        engine, "init_transfer_engine", initialized.append, raising=False
-    )
-    worker = _make_worker(engine)
-    refused = nn.Module()
-    refused._reloads_directly = True  # as cold start records
-    refused._direct_reload_refusals = ["humming"]
-    if case == "draft":
-        engine.supports_draft_weight_update = True
-        monkeypatch.setattr(worker.model_runner, "get_draft_model", lambda: refused)
-        monkeypatch.setattr(worker, "supports_draft_weight_updates", lambda: True)
-    else:
-        monkeypatch.setattr(worker.model_runner, "get_model", lambda: refused)
-    if case == "sparse_nccl":
-        Worker.init_weight_transfer_engine(worker, {})
-        assert initialized == [{}]
-    else:
-        with pytest.raises(RuntimeError, match="humming"):
-            Worker.init_weight_transfer_engine(worker, {})
-        assert not initialized

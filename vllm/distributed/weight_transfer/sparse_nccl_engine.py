@@ -149,8 +149,6 @@ class SparseNCCLWeightTransferEngine(
     update_info_cls = SparseNCCLWeightTransferUpdateInfo
     supports_draft_weight_update = False
 
-    reloads_through_start_reload = False
-
     def __init__(
         self,
         config: WeightTransferConfig,

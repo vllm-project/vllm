@@ -49,10 +49,8 @@ arrives, and an update that delivers only one of them fails at finish.
 ## Refused Configurations
 
 These configurations serve as usual, but direct reload refuses to update them;
-use `VLLM_RELOAD_MODE=layerwise` to update them. With the NCCL and IPC weight
-transfer backends, `init_weight_transfer_engine` raises the error, before the
-trainer sends anything; otherwise (e.g. `reload_weights`), the first weight
-update raises it, leaving the model unchanged.
+use `VLLM_RELOAD_MODE=layerwise` to update them. The error is raised at the
+start of the first weight update, leaving the model unchanged.
 
 - Online quantization not in the table above, or of layers loaded outside
   their weight loaders (e.g. gpt-oss experts).
