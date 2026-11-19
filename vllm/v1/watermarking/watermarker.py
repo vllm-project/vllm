@@ -121,6 +121,22 @@ class Watermarker(ABC):
         """
         return None
 
+    def _try_sample_candidates(
+        self,
+        scores: torch.Tensor,
+        candidate_ids: torch.Tensor,
+        random_sampler: RandomSampler,
+        state: DraftContextState,
+        draft_tokens: torch.Tensor,
+        realized_scores: torch.Tensor,
+    ) -> bool:
+        """Sample a candidate-head (DFlash2) draft block in one fused pass.
+
+        Writes `draft_tokens` and the picked score rows to `realized_scores`.
+        Returns False when there is no fused implementation.
+        """
+        return False
+
 
 @runtime_checkable
 class SupportsSpeculativeDecoding(Protocol):

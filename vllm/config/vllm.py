@@ -1457,9 +1457,9 @@ class VllmConfig:
                 )
             if not speculative_config.speculator_config.supports_watermarking:
                 raise ValueError(
-                    "Watermarking supports only dflash, dspark, eagle, eagle3 and "
-                    "mtp speculative decoding, and not DFlash2 and LiLiCorr "
-                    "candidate-head drafters yet."
+                    "Watermarking supports only dflash (including DFlash2), dspark, "
+                    "eagle, eagle3 and mtp speculative decoding, and not LiLiCorr "
+                    "drafters yet."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking

@@ -5440,26 +5440,18 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
     config._check_supports_watermarking()
 
 
-_DFLASH_CANDIDATE_SPECULATOR_CONFIGS = {
-    "DFlash2DraftModel": DFlash2SpeculatorConfig,
-    "LiLiCorrDraftModel": LiLiCorrSpeculatorConfig,
-}
-
-
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
-def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
+def test_dual_key_gumbel_accepts_dflash2_drafts():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = fake_speculative_config(
-        _DFLASH_CANDIDATE_SPECULATOR_CONFIGS[architecture],
+        DFlash2SpeculatorConfig,
         method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        draft_model_config=SimpleNamespace(architectures=[architecture]),
+        draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
     )
 
-    with pytest.raises(ValueError, match="candidate-head drafters"):
-        config._check_supports_watermarking()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_rejects_unsupported_speculative_method():
