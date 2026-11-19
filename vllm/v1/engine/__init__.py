@@ -159,6 +159,13 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Whether the engine computes prompt logprobs, for frontends without a
+    # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
+    # which skips prompt tokens in some layers.
+    supports_prompt_logprobs: bool = True
+    # Whether a disaggregated consumer accepts placeholder metadata without
+    # embedding tensors.
+    allow_missing_mm_embeddings: bool = False
 
 
 class EngineCoreRequest(
