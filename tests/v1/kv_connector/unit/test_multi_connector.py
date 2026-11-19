@@ -1403,10 +1403,8 @@ def test_handshake_metadata_of_subclass_reaches_every_connector():
 
 @pytest.mark.cpu_test
 def test_handshake_metadata_of_every_pcp_rank_reaches_its_connector():
-    """With PCP and no DCP, NIXL reports handshake metadata on PCP rank 0 only,
-    while a KV store such as UMBP reports it on every rank. Both workers of the
-    PP stage share `(pp_rank, tp_rank)`, so each worker's metadata is keyed by
-    its ranks; otherwise PCP rank 1 replaces NIXL's metadata."""
+    """With PCP and no DCP, NIXL reports on PCP rank 0 only and a KV store such
+    as UMBP on every rank. PCP rank 1 must not replace NIXL's metadata."""
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
         kv_connector_extra_config={

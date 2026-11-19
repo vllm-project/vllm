@@ -154,9 +154,7 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 
 class WorkerRanks(NamedTuple):
-    """Ranks of a worker within its engine, which lays out its workers as
-    `PP x PCP x TP` with TP innermost. DCP groups reuse these workers, so the
-    three ranks identify each worker."""
+    """Position of a worker in its engine's `PP x PCP x TP` layout."""
 
     pp_rank: int
     pcp_rank: int
@@ -845,19 +843,12 @@ class KVConnectorBase_V1(ABC):
     def set_worker_handshake_metadata(
         self, metadata: dict[WorkerRanks, KVConnectorHandshakeMetadata]
     ) -> None:
-        """Set the handshake metadata of every worker that reported one.
+        """Set handshake metadata keyed by the ranks of each worker.
 
-        The default passes it to `set_xfer_handshake_metadata_pp_aware`, keyed
-        by `(pp_rank, tp_rank)` with the PCP rank folded into the TP rank under
-        PCP x DCP. Without DCP, PCP ranks share a key, so they must report equal
-        metadata. Override this method to receive every worker's metadata.
-
-        Args:
-            metadata: handshake metadata keyed by the ranks of its worker.
-
-        Raises:
-            ValueError: if workers that share a key report different metadata.
-
+        The default calls `set_xfer_handshake_metadata_pp_aware` with
+        `(pp_rank, tp_rank)` keys, folding the PCP rank into the TP rank under
+        PCP x DCP. Without DCP, the PCP ranks of a key must report equal (`==`)
+        metadata. Override to receive the metadata of every worker.
         """
         parallel_config = self._vllm_config.parallel_config
         pcp_stride = (
@@ -866,18 +857,17 @@ class KVConnectorBase_V1(ABC):
             and parallel_config.decode_context_parallel_size > 1
             else 0
         )
-        by_tp_rank: dict[tuple[int, int], KVConnectorHandshakeMetadata] = {}
+        pp_aware: dict[tuple[int, int], KVConnectorHandshakeMetadata] = {}
         for ranks, rank_metadata in metadata.items():
             key = (ranks.pp_rank, ranks.tp_rank + ranks.pcp_rank * pcp_stride)
-            if key in by_tp_rank and by_tp_rank[key] != rank_metadata:
+            if key in pp_aware and pp_aware[key] != rank_metadata:
                 raise ValueError(
-                    f"PCP ranks reported different handshake metadata for "
-                    f"(pp_rank, tp_rank) {key}, which {type(self).__name__} "
-                    "receives as one entry. Override set_worker_handshake_metadata "
-                    "to receive the metadata of every worker."
+                    f"{type(self).__name__} receives one handshake metadata per "
+                    f"(pp_rank, tp_rank), but PCP ranks reported different "
+                    f"metadata for {key}."
                 )
-            by_tp_rank[key] = rank_metadata
-        self.set_xfer_handshake_metadata_pp_aware(by_tp_rank)
+            pp_aware[key] = rank_metadata
+        self.set_xfer_handshake_metadata_pp_aware(pp_aware)
 
     @classmethod
     def build_prom_metrics(

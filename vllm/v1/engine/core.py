@@ -969,25 +969,17 @@ class EngineCore:
             )
 
             if xfer_handshake_metadata:
-                reports = [r for r in xfer_handshake_metadata if r is not None]
-                if not all(isinstance(key, WorkerRanks) for r in reports for key in r):
-                    # Workers that key their metadata by other tuples, such as
-                    # out-of-tree platform workers, keep the plain merge.
-                    legacy: dict[Any, Any] = {}
-                    for report in reports:
-                        legacy.update(report)
-                    kv_connector.set_xfer_handshake_metadata_pp_aware(legacy)
-                    return
-                content: dict[WorkerRanks, Any] = {}
-                for report in reports:
-                    for ranks, metadata in report.items():
-                        if ranks in content:
-                            raise ValueError(
-                                "Two workers reported KV connector handshake "
-                                f"metadata as {ranks}."
-                            )
-                        content[ranks] = metadata
-                kv_connector.set_worker_handshake_metadata(content)
+                # xfer_handshake_metadata is list of dicts from workers
+                # Merge all worker dicts into a single dict
+                content: dict[Any, Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                if all(isinstance(key, WorkerRanks) for key in content):
+                    kv_connector.set_worker_handshake_metadata(content)
+                else:
+                    # Out-of-tree platform workers may use their own keys.
+                    kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
     def _reset_caches(
         self,

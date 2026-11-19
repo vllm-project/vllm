@@ -896,8 +896,10 @@ class Worker(WorkerBase):
     def get_kv_connector_handshake_metadata(
         self,
     ) -> dict[WorkerRanks, KVConnectorHandshakeMetadata] | None:
-        """Get KV connector metadata from this worker if available, keyed by
-        the ranks of this worker."""
+        """Get KV connector metadata from this worker if available.
+
+        Returned dict is keyed by this worker's `WorkerRanks`.
+        """
         if not has_kv_transfer_group():
             return None
 

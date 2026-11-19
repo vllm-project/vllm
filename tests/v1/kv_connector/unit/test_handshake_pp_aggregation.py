@@ -10,9 +10,13 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
+    KVConnectorRole,
     WorkerRanks,
 )
 from vllm.v1.engine import core as engine_core_module
+from vllm.v1.kv_cache_interface import KVCacheConfig
+
+from .utils import create_vllm_config
 
 pytestmark = pytest.mark.cpu_test
 
@@ -128,12 +132,13 @@ def _run_engine_core_handshake(
 
 class _LegacyConnector(KVConnectorBase_V1):
     def __init__(self, pcp_size: int = 1, dcp_size: int = 1) -> None:
-        self._vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                tensor_parallel_size=1,
-                prefill_context_parallel_size=pcp_size,
-                decode_context_parallel_size=dcp_size,
-            )
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        super().__init__(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         )
         self.legacy_metadata: dict[int, KVConnectorHandshakeMetadata] | None = None
 
@@ -258,9 +263,9 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
 @pytest.mark.parametrize(
     ("dcp_size", "agents", "expected"),
     [
-        # PCP x DCP shards: PCP rank 1 maps past the TP ranks, as before.
+        # PCP x DCP: PCP rank 1 maps past the TP ranks.
         (2, ("pcp0", "pcp1"), {(0, 0): "pcp0", (0, 1): "pcp1"}),
-        # Replicated PCP: identical reports share one key.
+        # PCP without DCP: equal reports share one key.
         (1, ("same", "same"), {(0, 0): "same"}),
     ],
 )
@@ -270,8 +275,7 @@ def test_engine_keys_pcp_ranks_by_tp_rank_for_pp_aware_connector(
     agents: tuple[str, str],
     expected: dict[tuple[int, int], str],
 ) -> None:
-    """A connector keyed by `(pp_rank, tp_rank)` receives PCP ranks under the
-    keys that workers reported before they reported their ranks."""
+    """The PCP rank is folded into `(pp_rank, tp_rank)` only under PCP x DCP."""
     connector = _PPAwareConnector(pcp_size=2, dcp_size=dcp_size)
 
     _run_engine_core_handshake(
@@ -291,8 +295,8 @@ def test_engine_keys_pcp_ranks_by_tp_rank_for_pp_aware_connector(
 def test_engine_rejects_different_pcp_metadata_for_pp_aware_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without DCP, PCP ranks share a `(pp_rank, tp_rank)` key. A connector
-    keyed that way gets an error rather than only the last rank's metadata."""
+    """Without DCP, PCP ranks share a `(pp_rank, tp_rank)` key, so different
+    metadata raises instead of keeping only the last rank's."""
     connector = _PPAwareConnector(pcp_size=2, dcp_size=1)
 
     with pytest.raises(ValueError, match="PCP ranks reported different"):
@@ -309,8 +313,8 @@ def test_engine_rejects_different_pcp_metadata_for_pp_aware_connector(
 def test_engine_passes_platform_worker_keys_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Out-of-tree platform workers that key metadata by their own tuples keep
-    the previous merge, so their connectors receive those keys unchanged."""
+    """Keys other than `WorkerRanks`, such as those of out-of-tree platform
+    workers, reach the connector unchanged."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
     connector = _PPAwareConnector(pcp_size=2)
