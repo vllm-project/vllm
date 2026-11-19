@@ -281,6 +281,9 @@ class Scheduler(SchedulerInterface):
         # Every transfer that pins this engine's blocks or needs it to keep
         # stepping, as explicit entries instead of queue-length arithmetic.
         self.ledger = KVTransferLedger()
+        # Set by a pause that clears the cache, until resume: requests added
+        # meanwhile would load KV computed with the weights being replaced.
+        self._retract_new_imports = False
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -3124,6 +3127,10 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
                     # A remote engine holds KV for this request from now on.
                     self.ledger.open_import(request)
+                    if self._retract_new_imports:
+                        # Prefill locally instead, and stop renewing the
+                        # remote's lease so its blocks are released.
+                        self.retract_kv_transfers()
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -3282,6 +3289,8 @@ class Scheduler(SchedulerInterface):
     def set_pause_state(self, pause_state: PauseState) -> None:
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
+        if pause_state == PauseState.UNPAUSED:
+            self._retract_new_imports = False
 
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
@@ -3423,8 +3432,11 @@ class Scheduler(SchedulerInterface):
         queued and prefill with the new weights after the pause.
 
         Called again until the pause completes, for the exports of prefills
-        that were in flight and the imports of requests added since.
+        that were in flight, and for each request added until resume: a
+        paused decoder that kept its lease renewals would hold the remote's
+        blocks until it resumes.
         """
+        self._retract_new_imports = True
         self.drop_retained_exports()
         retracted: list[Request] = []
         for entry in self.ledger.live_imports():

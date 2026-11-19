@@ -1059,7 +1059,8 @@ class EngineCore:
         if mode == "abort":
             # Also drops the exports kept for remote readers.
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-        elif mode == "keep" and clear_cache:
+        if mode != "wait" and clear_cache:
+            # After an abort only requests added later are left to retract.
             self.scheduler.retract_kv_transfers()
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
@@ -2495,9 +2496,10 @@ class EngineCoreProc(EngineCore):
             # Aborting everything also drops the exports kept for a remote
             # reader instead of waiting for it (it may be paused or asleep and
             # keep renewing them indefinitely).
-        elif mode == "keep" and clear_cache:
+        if mode != "wait" and clear_cache:
             # The kept requests' remote loads become local prefills, so the
-            # reset needs to wait only for the transfers in flight.
+            # reset needs to wait only for the transfers in flight. After an
+            # abort only the requests added until resume are left to retract.
             self.scheduler.retract_kv_transfers()
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW

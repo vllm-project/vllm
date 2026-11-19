@@ -1257,6 +1257,45 @@ def test_clearing_keep_pause_turns_remote_loads_into_local_prefills(stage):
     assert_scheduler_empty(scheduler)
 
 
+def test_remote_loads_added_during_a_clearing_pause_prefill_locally():
+    """Until resume, a request added after a clearing pause would load KV
+    computed with the weights being replaced, and renewing its lease would
+    hold the remote's blocks while the decoder stays paused. It prefills
+    locally instead; after resume remote loads are used again."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    withdrawn: list[str] = []
+    scheduler.connector.cancel_kv_transfers = lambda exports, imports: withdrawn.extend(
+        r.request_id for r in imports
+    )
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.retract_kv_transfers()
+
+    late = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 2,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(late)
+    assert withdrawn == [late.request_id]
+    assert not late.kv_transfer_params["do_remote_prefill"]
+    assert not scheduler.ledger.live_imports()
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    after = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 2,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(after)
+    assert withdrawn == [late.request_id]
+    assert after.kv_transfer_params["do_remote_prefill"]
+    assert [e.request for e in scheduler.ledger.live_imports()] == [after]
+
+
 def test_reset_prefix_cache_releases_admitted_remote_load():
     """A received remote load that the token budget has not admitted yet
     holds blocks while waiting; a reset that preempts running requests must
