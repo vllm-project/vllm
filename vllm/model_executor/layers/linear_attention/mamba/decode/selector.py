@@ -36,17 +36,11 @@ def select_mamba_ssu_kernel(
 ) -> type[MambaSSUKernel]:
     """Select the SSU kernel for a layer from `--mamba-backend`, or
     automatically when it is unset."""
-    requested = vllm_config.mamba_config.backend
-    # The model runner commits ring trackers by the configured backend, so
-    # FlashInfer ReplaySSM runs only when requested.
-    kernels = SSU_KERNELS
-    if requested is None:
-        kernels = tuple(k for k in SSU_KERNELS if k is not FlashInferReplaySSMKernel)
     kernel = select_linear_attn_kernel(
         "Mamba SSU",
-        kernels,
+        SSU_KERNELS,
         LinearAttnSelectorConfig.from_current_platform(vllm_config, kv_cache_spec),
-        requested,
+        vllm_config.mamba_config.backend,
     )
     assert issubclass(kernel, MambaSSUKernel)
     return kernel
