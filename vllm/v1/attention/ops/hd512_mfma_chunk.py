@@ -131,7 +131,7 @@ hd512c_attn(const bf16* __restrict__ q,
         float scale,
         long nblk_max,
         int segs) {
-    __shared__ float pofs[4][2 * 256];
+    __shared__ float pofs[2][4][2 * 256];  // ping-pong banks, 1 barrier/visit
     const int tile_blk = blockIdx.x;
     const int kvh = blockIdx.y;
     const int seg = blockIdx.z;
@@ -156,7 +156,11 @@ hd512c_attn(const bf16* __restrict__ q,
 
     const long e = (long)tile_blk * 2 + kvh;
     const long tail = (e * segs + seg) * 32;
-    if (b0 >= b1) {
+    // Causal visit cull: blocks at/above the
+    // tile's max causal token carry no unmasked row; exact math, kept
+    // blocks' accumulation order unchanged (bit-identical outputs).
+    const int b_hi = min(b1, (prefix + 8 * tile + 23) >> 4);
+    if (b0 >= b_hi) {
         if (gv == 0) {
             #pragma unroll
             for (int st = 0; st < 2; ++st) {
@@ -196,8 +200,8 @@ hd512c_attn(const bf16* __restrict__ q,
     #pragma unroll
     for (int st = 0; st < 2; ++st) { m[st] = -INFINITY; l[st] = 1.0f; }
 
-    for (int b = b0; b < b1; ++b) {
-        __syncthreads();                      // pofs free from prev readback
+    for (int b = b0; b < b_hi; ++b) {
+        const int buf = (b - b0) & 1;   // ping-pong bank: 1 barrier/visit
 
         // -- V^T fragments from the coalesced V^T table: ONE uint2 per frag,
         // fully coalesced (16 consecutive dims per 128B line) --------------
@@ -235,7 +239,7 @@ hd512c_attn(const bf16* __restrict__ q,
             }
             #pragma unroll
             for (int i = 0; i < 4; ++i)
-                pofs[warp][st * 256 + nw * 16 + 4 * gv + i] = s[i];
+                pofs[buf][warp][st * 256 + nw * 16 + 4 * gv + i] = s[i];
         }
         __syncthreads();                      // partials staged
 
@@ -244,11 +248,12 @@ hd512c_attn(const bf16* __restrict__ q,
         for (int st = 0; st < 2; ++st) {
             f32x4 s;
             {
-                const float* pli = pofs[0] + st * 256 + nw * 16 + 4 * gv;
+                const float* pli = pofs[buf][0] + st * 256 + nw * 16
+                                        + 4 * gv;
                 float a0 = pli[0], a1 = pli[1], a2 = pli[2], a3 = pli[3];
                 #pragma unroll
                 for (int w2 = 1; w2 < 4; ++w2) {
-                    const float* plw = pofs[w2] + st * 256 + nw * 16
+                    const float* plw = pofs[buf][w2] + st * 256 + nw * 16
                                      + 4 * gv;
                     a0 += plw[0]; a1 += plw[1]; a2 += plw[2]; a3 += plw[3];
                 }
