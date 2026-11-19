@@ -64,6 +64,7 @@ def _launch_kwargs(
     chunk_lookback=-1,
     rswa_window=None,
     window_aware_segments=True,
+    allow_width9_split_k=False,
 ):
     """Run the launcher with both kernels mocked. Returns the launch kwargs of
     kernel_unified_attention and of reduce_segments (None if not launched)."""
@@ -106,6 +107,7 @@ def _launch_kwargs(
         ),
         rswa_window=rswa_window,
         window_aware_segments=window_aware_segments,
+        allow_width9_split_k=allow_width9_split_k,
     )
     reduce_call = reduce.__getitem__.return_value.call_args
     return (
@@ -141,6 +143,15 @@ def _spy_reduce_segments(monkeypatch):
         (6, {"num_seqs": 1}, True),
         (8, {}, True),
         (9, {"num_seqs": 1}, False),
+        (9, {"allow_width9_split_k": True, "threshold": 10}, True),
+        (9, {"allow_width9_split_k": True, "threshold": 9}, False),
+        (9, {"allow_width9_split_k": True, "threshold": 10, "scratch_rows": 17}, False),
+        (
+            9,
+            {"allow_width9_split_k": True, "num_seqs": 1, "window_size": (63, 0)},
+            False,
+        ),
+        (10, {"allow_width9_split_k": True, "num_seqs": 1}, False),
         (5, {"causal": False}, False),
         (5, {"causal": "per_sequence"}, False),
         (5, {"threshold": 1}, False),
@@ -459,6 +470,69 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
         seq_threshold_3D=16,
     )
     assert len(reduce_grids) == 1
+
+
+@torch.inference_mode()
+def test_width9_split_k_reference_and_padding(monkeypatch):
+    """Compare both routes on the same paged KV, including an empty padded request."""
+    with torch.device(DEVICE_TYPE):
+        set_random_seed(7)
+        query_lens = [9, 9]
+        seq_lens = [257, 2049]
+        q = torch.randn(27, 32, 128, dtype=torch.bfloat16)
+        k = torch.randn(20, 128, 8, 128, dtype=q.dtype)
+        v = torch.randn_like(k)
+        pages = torch.randint(0, 20, (3, 17), dtype=torch.int32)
+        starts = torch.tensor([0, 9, 18, 18], dtype=torch.int32)
+        lengths = torch.tensor([*seq_lens, 0], dtype=torch.int32)
+        expected = ref_paged_attn(
+            q[:18].float(),
+            k.float(),
+            v.float(),
+            query_lens,
+            seq_lens,
+            pages[:2],
+            128**-0.5,
+        )
+        grids = _spy_reduce_segments(monkeypatch)
+        for split_k in (False, True):
+            out = torch.full_like(q, 123)
+            scratch = [
+                torch.full((29, 32, 16, *tail), 123.0, dtype=torch.float32)
+                for tail in [(128,), (), ()]
+            ]
+            grids.clear()
+            unified_attention(
+                q,
+                k,
+                v,
+                out,
+                starts,
+                9,
+                lengths,
+                max(seq_lens),
+                128**-0.5,
+                True,
+                (-1, -1),
+                pages,
+                0.0,
+                None,
+                None,
+                None,
+                seq_threshold_3D=16,
+                num_par_softmax_segments=16,
+                softmax_segm_output=scratch[0][1:-1],
+                softmax_segm_max=scratch[1][1:-1],
+                softmax_segm_expsum=scratch[2][1:-1],
+                allow_width9_split_k=split_k,
+            )
+            assert len(grids) == int(split_k)
+            torch.testing.assert_close(
+                out[:18].float(), expected, atol=1.5e-2, rtol=1e-2
+            )
+            assert (out[18:] == 123).all()
+            for buf in scratch:
+                assert (buf[0] == 123).all() and (buf[-1] == 123).all()
 
 
 @triton.jit
