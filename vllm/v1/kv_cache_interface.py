@@ -659,6 +659,9 @@ class KVCacheLayerConfig:
 
     manager_config: ManagerConfig
     spec: KVCacheSpec
+    is_draft: bool = field(default=False, kw_only=True, compare=False)
+    """Whether a draft model owns this layer; excluded from equality so it never
+    affects grouping."""
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:

@@ -480,9 +480,22 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+    # Size groups without draft-only sliding-window buckets (e.g. a tail-only
+    # DFlash/DSpark drafter): a small one would shrink the group size and pad
+    # the target's full-attention layers, costing KV memory on every token,
+    # while padding it costs only its window. Other draft-only buckets (e.g.
+    # MQA drafters) are unbounded, so they still count.
+    def _is_windowed_draft_bucket(layers: list[str]) -> bool:
+        return all(layer_configs[n].is_draft for n in layers) and issubclass(
+            layer_configs[layers[0]].manager_cls, SlidingWindowManager
+        )
+
+    sizing_buckets = [
+        layers for layers in layer_buckets if not _is_windowed_draft_bucket(layers)
+    ] or layer_buckets
+    min_num_layers = min(len(layers) for layers in sizing_buckets)
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
+    max_num_layers = max(len(layers) for layers in sizing_buckets)
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
