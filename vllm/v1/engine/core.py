@@ -852,11 +852,8 @@ class EngineCore:
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         # With async scheduling depth > 2, wait until no queued step shares a
         # request with the deferred one.
-        if self.deferred_step is not None and all(
-            so.num_scheduled_tokens.keys().isdisjoint(
-                self.deferred_step[0].num_scheduled_tokens
-            )
-            for _, so, _ in batch_queue
+        if self.deferred_step is not None and not any(
+            so.shares_requests_with(self.deferred_step[0]) for _, so, _ in batch_queue
         ):
             deferred_scheduler_output, exec_future = self.deferred_step
             self.deferred_step = None
