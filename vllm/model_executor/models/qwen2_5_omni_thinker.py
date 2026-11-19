@@ -102,6 +102,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import get_mm_embedding_modality_masks
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -164,6 +165,34 @@ def may_interleave_audio_video(multimodal_embeddings: Sequence[torch.Tensor]) ->
     """
     modalities = {getattr(embed, "modality", None) for embed in multimodal_embeddings}
     return None in modalities or {"audio", "video"} <= modalities
+
+
+def get_omni_modality_masks(
+    input_ids: torch.Tensor,
+    multimodal_embeddings: Sequence[torch.Tensor],
+    is_multimodal: torch.Tensor,
+    token_ids: Mapping[str, int],
+) -> dict[str, torch.Tensor]:
+    """Position mask per modality in `token_ids`, restricted to `is_multimodal`.
+
+    Built from the batch placement the encoder gather attaches to each
+    embedding. Without it, falls back to reading `input_ids` on the host; that
+    read is deliberately not allow-listed so VLLM_GPU_SYNC_CHECK flags a lost
+    placement.
+    """
+    masks = get_mm_embedding_modality_masks(multimodal_embeddings, is_multimodal)
+    if masks is not None:
+        return {
+            modality: masks[modality]
+            if modality in masks
+            else torch.zeros_like(is_multimodal)
+            for modality in token_ids
+        }
+    input_ids_cpu = input_ids.cpu()
+    return {
+        modality: is_multimodal & (input_ids_cpu == token_id)
+        for modality, token_id in token_ids.items()
+    }
 
 
 def check_interleaved_audio_video(
@@ -1663,13 +1692,15 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 is_multimodal=is_multimodal,
             )
 
-        with gpu_sync_allowed():
-            input_ids_cpu = input_ids.cpu()
-            is_video = is_multimodal & (input_ids_cpu == video_token_id)
-            is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
-
-            num_video = is_video.sum().item()
-            num_audio = is_audio.sum().item()
+        masks = get_omni_modality_masks(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal,
+            {"video": video_token_id, "audio": audio_token_id},
+        )
+        is_video, is_audio = masks["video"], masks["audio"]
+        num_video = is_video.sum().item()
+        num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
             inputs_embeds = self._embed_text_input_ids(
