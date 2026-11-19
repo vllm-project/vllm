@@ -59,7 +59,7 @@ exports GPU weights:
 | Backend | Storage and sharing | Platforms |
 | --- | --- | --- |
 | `torch_ipc` (default) | PyTorch CUDA IPC handles over the local Unix socket | CUDA and ROCm |
-| `vmm_ipc` | CUDA VMM allocations exported as POSIX file descriptors | CUDA on Linux |
+| `vmm_ipc` | CUDA/HIP VMM allocations exported as POSIX file descriptors | CUDA and ROCm on Linux |
 
 For example:
 
@@ -80,9 +80,10 @@ After loading, post-processing and warmup, the daemon calls `build_manifest`
 to record the final canonical parameters and buffers as logical views over
 distinct storages, including any tensors created or replaced during warmup. It
 then materializes the storages, drops the model and releases startup runtime
-resources. VMM moves non-empty GPU storages into exportable `cuMemCreate`
-allocations. By default, consecutive storages are packed in input order toward
-a 1 GiB logical cap, with 512-byte alignment between logical storages. An
+resources. VMM moves non-empty GPU storages into exportable `cuMemCreate` or
+`hipMemCreate` allocations. By default, consecutive storages are packed in
+input order toward a 1 GiB logical cap, with 512-byte alignment between logical
+storages. An
 oversized storage gets its own allocation, and every allocation is rounded up
 to the driver's granularity. Set `--weight-cache-vmm-max-allocation-bytes` to
 change the cap, or to `0` to use one allocation per storage. Each pack is copied
@@ -119,7 +120,7 @@ and D2D protocols; this PR does not rewrite either one.
 Both backends can be deployed independently of the serving Pod, provided GPU
 access, socket mounts, ownership and container settings allow it. VMM does not
 introduce that deployment capability. The daemon still loads the model and
-initializes CUDA; this backend does not implement a separate CUDA-free FD
+initializes the GPU; this backend does not implement a separate GPU-free FD
 holder. It also does not add EPLB or sleep-mode support.
 
 The built-in `torch_ipc` and `vmm_ipc` backends are the only statically supported

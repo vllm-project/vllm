@@ -100,7 +100,9 @@ def _export_vmm_test_model(connection):
         )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
+)
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
     """Packed FD imports share one owner while logical tensor views stay independent."""
     from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
@@ -179,7 +181,9 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
 
 
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="VMM backend requires CUDA or ROCm"
+)
 def test_vmm_peer_copy_preserves_views_and_current_device():
     """VMM sources can seed a different GPU without redirecting its stream sync."""
     from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
@@ -348,7 +352,8 @@ class WeightCacheDaemon:
         pytest.param(
             "vmm_ipc",
             marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="VMM backend requires CUDA"
+                not current_platform.is_cuda_alike(),
+                reason="VMM backend requires CUDA or ROCm",
             ),
         ),
     ],

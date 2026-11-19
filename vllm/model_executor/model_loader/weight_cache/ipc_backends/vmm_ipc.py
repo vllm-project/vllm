@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUDA VMM storage shared by POSIX descriptors, with tensor-owned mappings."""
+"""CUDA/ROCm VMM storage shared by POSIX descriptors, with owned mappings."""
 
 from __future__ import annotations
 
@@ -23,15 +23,16 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils imp
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
     TensorEntry,
 )
+from vllm.utils.extensible_tensor import uint8_tensor_from_ptr
 from vllm.utils.vmm_driver import (
     MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-    CudaVmmDriver,
+    VmmDriver,
     get_vmm_driver,
 )
 
 
 class VmmAllocation:
-    """Own a mapping; PyTorch's CUDA array interface retains its Python owner."""
+    """Own a mapping; `StorageRecord.owner` retains it while tensors use it."""
 
     def __init__(
         self,
@@ -44,9 +45,7 @@ class VmmAllocation:
         self.handle = 0
         self.mapped = False
         self.fd: SharedFileDescriptor | None = None
-        self.driver = get_vmm_driver()
-        if not isinstance(self.driver, CudaVmmDriver):
-            raise RuntimeError("The VMM weight-cache backend requires CUDA")
+        self.driver: VmmDriver = get_vmm_driver()
         self.driver.ensure_context(device_index)
         granularity = self.driver.granularity(
             device_index, MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
@@ -71,17 +70,8 @@ class VmmAllocation:
                 self.close()
             raise
 
-    @property
-    def __cuda_array_interface__(self) -> dict:
-        return {
-            "shape": (self.size,),
-            "typestr": "|u1",
-            "data": (self.ptr, False),
-            "version": 3,
-        }
-
     def tensor(self) -> torch.Tensor:
-        return torch.as_tensor(self, device=torch.device("cuda", self.device_index))
+        return uint8_tensor_from_ptr(self.ptr, self.size, self.device_index)
 
     def close(self) -> None:
         if not self.mapped and not self.handle and not self.ptr:

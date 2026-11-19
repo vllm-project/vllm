@@ -171,6 +171,17 @@ class VmmDriver:
         fns["unmap"].argtypes = [DevicePtr, ctypes.c_size_t]
         fns["release"].argtypes = [MemHandle]
         fns["address_free"].argtypes = [DevicePtr, ctypes.c_size_t]
+        fns["export"].argtypes = [
+            ctypes.c_void_p,
+            MemHandle,
+            ctypes.c_int,
+            ctypes.c_ulonglong,
+        ]
+        fns["import"].argtypes = [
+            pointer(MemHandle),
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
         for fn in fns.values():
             fn.restype = ctypes.c_int
 
@@ -258,6 +269,33 @@ class VmmDriver:
     def release(self, handle: int) -> None:
         self._check(self._fns["release"](handle))
 
+    def export_fd(self, handle: int) -> int:
+        """Export an allocation as an owned, non-inheritable POSIX descriptor."""
+        fd = ctypes.c_int(-1)
+        self._check(
+            self._fns["export"](
+                ctypes.byref(fd), handle, MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0
+            )
+        )
+        try:
+            os.set_inheritable(fd.value, False)
+        except BaseException:
+            os.close(fd.value)
+            raise
+        return fd.value
+
+    def import_fd(self, fd: int) -> int:
+        """Import a POSIX descriptor; the caller still owns and must close it."""
+        handle = MemHandle()
+        self._check(
+            self._fns["import"](
+                ctypes.byref(handle),
+                ctypes.c_void_p(fd),
+                MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+            )
+        )
+        return handle.value
+
 
 class CudaVmmDriver(VmmDriver):
     dlpack_device_type = 2  # kDLCUDA
@@ -272,6 +310,8 @@ class CudaVmmDriver(VmmDriver):
         "unmap": "cuMemUnmap",
         "release": "cuMemRelease",
         "address_free": "cuMemAddressFree",
+        "export": "cuMemExportToShareableHandle",
+        "import": "cuMemImportFromShareableHandle",
     }
 
     def __init__(self) -> None:
@@ -301,48 +341,8 @@ class CudaVmmDriver(VmmDriver):
             ctypes.c_int,
         ]
         lib.cuDeviceGetAttribute.restype = ctypes.c_int
-        lib.cuMemExportToShareableHandle.argtypes = [
-            ctypes.c_void_p,
-            MemHandle,
-            ctypes.c_int,
-            ctypes.c_ulonglong,
-        ]
-        lib.cuMemExportToShareableHandle.restype = ctypes.c_int
-        lib.cuMemImportFromShareableHandle.argtypes = [
-            ctypes.POINTER(MemHandle),
-            ctypes.c_void_p,
-            ctypes.c_int,
-        ]
-        lib.cuMemImportFromShareableHandle.restype = ctypes.c_int
         self._rdma_capable: dict[int, bool] = {}
         self._fabric_capable: dict[int, bool] = {}
-
-    def export_fd(self, handle: int) -> int:
-        """Export an allocation as an owned, non-inheritable POSIX descriptor."""
-        fd = ctypes.c_int(-1)
-        self._check(
-            self._lib.cuMemExportToShareableHandle(
-                ctypes.byref(fd), handle, MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0
-            )
-        )
-        try:
-            os.set_inheritable(fd.value, False)
-        except BaseException:
-            os.close(fd.value)
-            raise
-        return fd.value
-
-    def import_fd(self, fd: int) -> int:
-        """Import a POSIX descriptor; the caller still owns and must close it."""
-        handle = MemHandle()
-        self._check(
-            self._lib.cuMemImportFromShareableHandle(
-                ctypes.byref(handle),
-                ctypes.c_void_p(fd),
-                MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-            )
-        )
-        return handle.value
 
     def _device_attribute(self, attribute: int, device_index: int) -> bool:
         flag = ctypes.c_int()
@@ -450,6 +450,8 @@ class HipVmmDriver(VmmDriver):
         "unmap": "hipMemUnmap",
         "release": "hipMemRelease",
         "address_free": "hipMemAddressFree",
+        "export": "hipMemExportToShareableHandle",
+        "import": "hipMemImportFromShareableHandle",
     }
 
     def __init__(self) -> None:
