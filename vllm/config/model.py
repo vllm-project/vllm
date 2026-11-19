@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import InitVar, field
+from dataclasses import InitVar, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -97,6 +97,7 @@ TokenizerMode = Literal[
     "hf",
     "glm5_next",
     "alpamayo2_super",
+    "hy_v4",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -186,16 +187,19 @@ class ModelConfig:
     - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
       trajectory and special tokens added; selected automatically for
       `nvidia/Alpamayo2-Super`.
+    - "hy_v4" uses the HF tokenizer with HYV4 VL chat rendering.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
-    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
-      with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "kimi_k3" requires a tokenizer with native Kimi K3 XTML chat encoding.
+      It rejects the generic Hugging Face Jinja fallback.
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
-      (GLM-5.3-Flash).
+      (GLM-5.3-Flash). GLM-5.3-Flash multimodal inputs require the Rust
+      frontend; Python supports text-only inference with image and video
+      limits set to zero.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -356,7 +360,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
@@ -449,7 +453,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     language_model_only: InitVar[bool] = False
-    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int | bool]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
@@ -591,7 +595,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         language_model_only: bool,
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -763,6 +767,21 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Backend pooling classes wrap encoders and decoders, so default per model
+        if (
+            model_info.is_pooling_model
+            and not model_info.supports_multimodal
+            and self.using_transformers_backend()
+        ):
+            from vllm.model_executor.models.transformers.utils import (
+                get_default_seq_pooling_type,
+            )
+
+            seq_pooling_type = get_default_seq_pooling_type(self)
+            self._model_info = replace(
+                model_info, default_seq_pooling_type=seq_pooling_type
+            )
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
@@ -776,6 +795,8 @@ class ModelConfig:
                 "KimiK31ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "kimi_k3"
+            elif arch == "HYV4VLForConditionalGeneration":
+                self.tokenizer_mode = "hy_v4"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch in (
@@ -785,7 +806,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
@@ -1425,6 +1450,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "inkling2",
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
@@ -1436,6 +1462,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "modelopt_int8",
                 "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
@@ -1550,29 +1577,6 @@ class ModelConfig:
         if cls is not None:
             cls.verify_and_update_model_config(self)
 
-    def verify_dual_chunk_attention_config(
-        self,
-        load_config: LoadConfig,
-    ) -> None:
-        if hasattr(self.hf_config, "dual_chunk_attention_config"):
-            # Try loading the sparse attention config
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_sparse_attention_config,
-            )
-
-            sparse_attn_config = get_sparse_attention_config(self, load_config)
-            if sparse_attn_config:
-                self.hf_config.dual_chunk_attention_config[
-                    "sparse_attention_config"
-                ] = sparse_attn_config
-                if (
-                    "sparse_attention_enabled"
-                    not in self.hf_config.dual_chunk_attention_config
-                ):
-                    self.hf_config.dual_chunk_attention_config[
-                        "sparse_attention_enabled"
-                    ] = True
-
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1596,6 +1600,8 @@ class ModelConfig:
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
+
+        self.verify_eplb_config(parallel_config)
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
@@ -1652,6 +1658,92 @@ class ModelConfig:
                 "data_parallel_size > 1 or tensor_parallel_size > 1 "
                 "or pipeline_parallel_size > 1."
             )
+
+    def verify_eplb_config(
+        self,
+        parallel_config: ParallelConfig,
+        *,
+        num_experts: int | None = None,
+        config_name: str = "eplb_config.num_redundant_experts",
+        disable_config_name: str | None = None,
+    ) -> None:
+        """Validate that this model's experts can be evenly distributed by EPLB."""
+        if not parallel_config.enable_eplb:
+            return
+
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            get_expert_substitution_spec,
+        )
+
+        if get_expert_substitution_spec(self) is not None:
+            return
+
+        ep_size = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.prefill_context_parallel_size
+            * parallel_config.data_parallel_size
+        )
+        if ep_size <= 1:
+            return
+
+        redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        expert_counts = self.get_eplb_expert_counts(num_experts)
+        if not expert_counts:
+            return
+
+        if redundant_experts is None:
+            from vllm.config.parallel import get_min_num_redundant_experts
+
+            num_logical_experts = (
+                num_experts if num_experts is not None else self.get_num_experts()
+            )
+            redundant_experts = get_min_num_redundant_experts(
+                num_logical_experts, ep_size
+            )
+
+        invalid_counts = {
+            count
+            for count in expert_counts
+            if (count + redundant_experts) % ep_size != 0
+        }
+        if not invalid_counts:
+            return
+
+        lowest_valid_counts = {(-count) % ep_size for count in expert_counts}
+        if len(lowest_valid_counts) == 1:
+            lowest_valid = next(iter(lowest_valid_counts))
+            remediation = f"Set {config_name} to {lowest_valid}."
+        else:
+            remediation = (
+                f"No single {config_name} value makes all routed expert counts "
+                f"({', '.join(str(count) for count in sorted(expert_counts))}) "
+                "divisible by the EP size."
+            )
+        if disable_config_name is not None:
+            remediation += f" To disable EPLB, set {disable_config_name} to false."
+
+        raise ValueError(
+            "EPLB requires each model's routed experts plus redundant experts "
+            "to be evenly distributed across EP ranks. "
+            f"Model {self.model!r} has routed expert counts "
+            f"{', '.join(str(count) for count in sorted(invalid_counts))}, "
+            f"EP size {ep_size}, and {config_name}={redundant_experts}. "
+            f"{remediation}"
+        )
+
+    def get_eplb_expert_counts(self, num_experts: int | None = None) -> set[int]:
+        if num_experts is not None:
+            return {num_experts} if num_experts > 0 else set()
+
+        arch_config = self.model_arch_config
+        expert_counts = {arch_config.num_experts}
+        if arch_config.per_layer_overrides is not None:
+            expert_counts.update(
+                layer.get("num_experts", arch_config.num_experts)
+                for layer in arch_config.per_layer_overrides
+            )
+        expert_counts.discard(0)
+        return expert_counts
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""

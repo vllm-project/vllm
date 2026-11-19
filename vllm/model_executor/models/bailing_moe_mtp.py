@@ -10,7 +10,6 @@ from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -30,7 +29,7 @@ from vllm.model_executor.models.bailing_moe_linear import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
+from .utils import maybe_prefix
 
 
 def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
@@ -147,15 +146,12 @@ class BailingMoeV25MultiTokenPredictor(nn.Module):
                 )
             }
         )
-        if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -268,7 +264,7 @@ class BailingMoeV25MTPModel(nn.Module):
             if remapped_name is None:
                 return False
             name = remapped_name
-            if name not in params_dict or is_pp_missing_parameter(name, self):
+            if name not in params_dict:
                 return False
 
             param = params_dict[name]

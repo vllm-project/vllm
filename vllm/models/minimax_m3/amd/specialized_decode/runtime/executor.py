@@ -27,7 +27,7 @@ COVERAGE_LOG_EVERY = 1024
 RESET_LAUNCHES = (1 << 17) - (1 << 14)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoHealth:
     failed: bool
     rank: int = -1

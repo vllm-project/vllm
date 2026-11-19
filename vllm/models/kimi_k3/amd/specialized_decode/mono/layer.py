@@ -136,7 +136,7 @@ SENT_ROWS = 16  # the served widths (runtime.MAX_ROWS)
 _STREAM = fx.Stream(None)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class K2Build:
     tokens: int
     nblocks: int  # the MLP AttnRes block sources

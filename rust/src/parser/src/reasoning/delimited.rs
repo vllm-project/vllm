@@ -98,6 +98,7 @@ impl DelimitedReasoningParserBuilder {
             after_start: self.after_start,
             after_end: self.after_end,
             current_in_reasoning: false,
+            prompt_closed_reasoning: false,
             buffer: DecodedText::default(),
             pending_after: "",
         })
@@ -133,6 +134,8 @@ pub(crate) struct DelimitedReasoningParser {
 
     // Mutable state.
     current_in_reasoning: bool,
+    /// The prompt's last reasoning boundary is an end marker.
+    prompt_closed_reasoning: bool,
     buffer: DecodedText,
     pending_after: &'static str,
 }
@@ -142,6 +145,7 @@ impl DelimitedReasoningParser {
     pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         self.buffer = DecodedText::default();
         self.current_in_reasoning = false;
+        self.prompt_closed_reasoning = false;
         self.pending_after = "";
         if let Some((index, in_reasoning)) = last_reasoning_boundary_position(
             prompt_token_ids,
@@ -150,6 +154,7 @@ impl DelimitedReasoningParser {
             self.tokenizer.as_ref(),
         ) {
             self.current_in_reasoning = in_reasoning;
+            self.prompt_closed_reasoning = !in_reasoning;
             self.pending_after = if in_reasoning {
                 self.after_start
             } else {
@@ -175,6 +180,19 @@ impl DelimitedReasoningParser {
 
     /// Wrap visible output from the initialized reasoning and framing state.
     pub(crate) fn wrap_visible_format(&self, visible: &Format) -> Format {
+        // A prompt that closed reasoning (e.g. thinking disabled in the chat
+        // template) leaves only its unconsumed separator before visible output,
+        // as Python constrains it from the first generated token.
+        if self.prompt_closed_reasoning {
+            if self.pending_after.is_empty() {
+                return visible.clone();
+            }
+            return Format::sequence(vec![
+                Format::const_string(self.pending_after),
+                visible.clone(),
+            ]);
+        }
+
         let begin = if self.current_in_reasoning {
             "".to_string()
         } else {
@@ -186,13 +204,6 @@ impl DelimitedReasoningParser {
         }
         if !self.current_in_reasoning {
             reasoning = Format::optional(reasoning);
-            if !self.pending_after.is_empty() {
-                return Format::sequence(vec![
-                    Format::const_string(self.pending_after),
-                    reasoning,
-                    visible.clone(),
-                ]);
-            }
         }
 
         Format::sequence(vec![reasoning, visible.clone()])
