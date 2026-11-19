@@ -317,6 +317,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
@@ -530,6 +531,37 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
             f"output {i} of {req.request_id}: token sampled for position "
             f"{actual}, delivered as position {expected}"
         )
+
+
+@pytest.mark.parametrize("max_tokens", [1, 2, 5])
+@pytest.mark.parametrize("queue_size", [2, 3, 4])
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_no_steps_past_max_tokens_with_deep_batch_queue(
+    num_spec: int, queue_size: int, max_tokens: int
+):
+    """No step is scheduled past max_tokens with several steps in flight, even
+    when every draft is rejected."""
+    scheduler = _create_async_pp_scheduler(num_spec, pp_size=1, num_blocks=10)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
+    scheduler.add_request(request)
+
+    num_steps = 0
+    schedule = scheduler.schedule
+
+    def counting_schedule(*args, **kwargs) -> SchedulerOutput:
+        nonlocal num_steps
+        output = schedule(*args, **kwargs)
+        num_steps += request.request_id in output.num_scheduled_tokens
+        return output
+
+    scheduler.schedule = counting_schedule  # type: ignore[method-assign]
+    # The fake runner rejects every draft (no accept_drafts).
+    PipelinedEngine(scheduler, queue_size=queue_size).run()
+
+    assert request.num_output_tokens == max_tokens
+    assert request.num_output_placeholder_steps == 0
+    # One prefill step, then one decode step per remaining output token.
+    assert num_steps == max_tokens
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])

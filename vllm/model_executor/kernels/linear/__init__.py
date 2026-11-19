@@ -1196,6 +1196,9 @@ def init_mxfp4_linear_kernel(
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
 
+    if envs.VLLM_BATCH_INVARIANT and platform is PlatformEnum.CUDA:
+        possible = [k for k in possible if k.supports_batch_invariance()]
+
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
         possible,
