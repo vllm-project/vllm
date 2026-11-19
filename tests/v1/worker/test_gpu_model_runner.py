@@ -373,14 +373,18 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("backends", "mamba_page_size_padded"),
+    ("backends", "num_spec_tokens", "block_size", "mamba_page_size_padded"),
     [
-        ([_mock_backend([64])], 4224 * 528),
+        # Without draft tokens the 528-byte row keeps the padded 656-byte estimate.
+        ([_mock_backend([64])], 0, 3328, 3328 * 656),
+        ([_mock_backend([64]), KpoolTailBackend], 0, 3328, 3328 * 656),
         # KPOOL_TAIL supports only BLHNC, which packs Mamba states unpadded.
-        ([_mock_backend([64]), KpoolTailBackend], None),
+        ([_mock_backend([64]), KpoolTailBackend], 1, 4224, None),
     ],
 )
-def test_hybrid_mla_block_alignment(monkeypatch, backends, mamba_page_size_padded):
+def test_hybrid_mla_block_alignment(
+    monkeypatch, backends, num_spec_tokens, block_size, mamba_page_size_padded
+):
     monkeypatch.setattr(
         Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
     )
@@ -408,10 +412,13 @@ def test_hybrid_mla_block_alignment(monkeypatch, backends, mamba_page_size_padde
         state_content_bytes=528,
     )
     vllm_config.compilation_config.static_forward_context["mla"] = mla_layer
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=num_spec_tokens
+    )
 
     Platform._align_hybrid_block_size(vllm_config, backends[0])
 
-    assert vllm_config.cache_config.block_size == 4224
+    assert vllm_config.cache_config.block_size == block_size
     assert vllm_config.cache_config.mamba_page_size_padded == mamba_page_size_padded
 
 

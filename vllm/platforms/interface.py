@@ -985,6 +985,7 @@ class Platform:
             AttentionLayerBase,
         )
         from vllm.model_executor.layers.mamba.abstract import (
+            get_mamba_num_speculative_blocks,
             get_mamba_prefill_checkpoint_alignment,
         )
         from vllm.model_executor.layers.mamba.mamba_utils import mamba_state_alignment
@@ -1010,6 +1011,7 @@ class Platform:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
+        pad_mamba = False
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
@@ -1035,6 +1037,8 @@ class Platform:
             # The layer's backend sets the packed row (e.g. 528-byte fp8_ds_mla
             # rows on SM120), so size the block for the page an MLA layer
             # allocates. Platforms that register no layers keep the estimate.
+            # The larger block a narrower row needs only pays when requests hold
+            # draft-token Mamba states; without them keep the padded estimate.
             mla_config = next(
                 (
                     layer.get_kv_cache_config(vllm_config)
@@ -1048,9 +1052,13 @@ class Platform:
             )
             if mla_config is not None and isinstance(mla_config.spec, AttentionSpec):
                 mla_spec = mla_config.spec
-                attn_page_size_1_token = (
-                    mla_spec.real_page_size_bytes // mla_spec.block_size
-                )
+                row = mla_spec.real_page_size_bytes // mla_spec.block_size
+                if row < attn_page_size_1_token and not (
+                    get_mamba_num_speculative_blocks(vllm_config)
+                ):
+                    pad_mamba = True
+                else:
+                    attn_page_size_1_token = row
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"
@@ -1238,8 +1246,8 @@ class Platform:
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
 
-        if attn_page_size == mamba_page_size or all(
-            layout.is_block_outermost for layout in layouts
+        if attn_page_size == mamba_page_size or (
+            not pad_mamba and all(layout.is_block_outermost for layout in layouts)
         ):
             return
 
