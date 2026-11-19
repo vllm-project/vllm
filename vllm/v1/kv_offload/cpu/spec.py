@@ -4,6 +4,7 @@ from typing import Any
 
 from typing_extensions import override
 
+from vllm.distributed.device_communicators.shm_broadcast import check_shm_free_space
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -45,6 +46,7 @@ def _shared_region_barrier() -> None:
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SHARED_REGION_PER_RANK = True
 
     @classmethod
     def build_metric_definitions(
@@ -133,7 +135,24 @@ class CPUOffloadingSpec(OffloadingSpec):
             aligned_kv_bytes_per_chunk = round_up(
                 kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
+            shared_row_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            if (
+                self.SHARED_REGION_PER_RANK
+                and self._uses_shared_region()
+                and not self.replicated_layout
+            ):
+                aligned_kv_bytes_per_chunk = world_size * round_up(
+                    self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
+                )
             self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            if self.num_chunks < shared_row_chunks and config.parallel.rank == 0:
+                logger.info(
+                    "Per-rank CPU offload regions page-align each rank's slot: "
+                    "%d chunks fit in cpu_bytes_to_use, %d fewer than with one "
+                    "shared row per chunk.",
+                    self.num_chunks,
+                    shared_row_chunks - self.num_chunks,
+                )
 
             # Expose aligned_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
@@ -221,20 +240,37 @@ class CPUOffloadingSpec(OffloadingSpec):
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
             worker_rank = self.worker_rank
-            rank = 0 if self.replicated_layout else worker_rank
+            engine_id = self.config.engine_id
+            row_bytes = self.kv_bytes_per_chunk
             world_size = self.config.parallel.world_size
             if self.replicated_layout:
                 prefault_shard = (worker_rank, world_size)
+            else:
+                engine_id += f"_{worker_rank}"
+                row_bytes = round_up(
+                    self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
+                )
+                # Every rank checks its node's aggregate before any pre-faults.
+                try:
+                    check_shm_free_space(
+                        self.num_chunks
+                        * row_bytes
+                        * self.config.parallel.local_world_size,
+                        allocation_name="CPU KV offload regions in /dev/shm",
+                    )
+                finally:
+                    _shared_region_barrier()
 
             mmap_region = SharedOffloadRegion(
-                engine_id=self.config.engine_id,
+                engine_id=engine_id,
                 num_chunks=self.num_chunks,
-                rank=rank,
-                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                rank=0,
+                kv_bytes_per_chunk=row_bytes,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_shared_region_barrier,
-                unlink_owner=worker_rank == 0,
+                barrier=_shared_region_barrier if self.replicated_layout else None,
                 num_segments=REGION_SEGMENTS,
+                private=not self.replicated_layout,
+                unlink_owner=(worker_rank == 0) if self.replicated_layout else True,
                 populate_shard=None if self.async_init else prefault_shard,
                 populate=not self.async_init,
             )

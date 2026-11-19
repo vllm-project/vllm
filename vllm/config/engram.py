@@ -13,8 +13,15 @@ if TYPE_CHECKING:
 
 # Architecture -> the hf_text_config field naming its n-gram layers. A model is
 # only configurable here if it actually has such layers to store.
+_FLASH_ENGRAM_ARCHITECTURES = {
+    "HYV4FlashForCausalLM",
+    "HYV4FlashVLForConditionalGeneration",
+}
+
 _NGRAM_LAYER_FIELDS = {
     "DeepseekV41ForCausalLM": "engram_layer_ids",
+    "HYV4FlashForCausalLM": "engram_layer_ids",
+    "HYV4FlashVLForConditionalGeneration": "engram_layer_ids",
     "Qwen4ExpForCausalLM": "ple_layer_ids",
     "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
 }
@@ -50,10 +57,11 @@ class EngramConfig:
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
     memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
-    by FABRIC handle where supported, else /dev/shm (which then needs capacity
-    and a shared IPC namespace). Defaults to enabled whenever the other settings
-    allow it, falling back to per-replica tables when DP replicas are not
-    co-located on one node or the host cannot hold them."""
+    by FABRIC handle where supported (on ROCm, HIP VMM host memory with
+    VLLM_ROCM_ENGRAM_HIP_VMM=1), else /dev/shm (which then needs capacity and a
+    shared IPC namespace). Defaults to enabled when the model and other settings
+    allow it; Flash uses private replicas. Falls back to per-replica tables when
+    DP replicas are not co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
@@ -105,6 +113,10 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if model_config.architecture in _FLASH_ENGRAM_ARCHITECTURES:
+            for option in ("dp_shared_memory", "embedding_across_dp", "disk_offload"):
+                if getattr(self, option):
+                    raise ValueError(f"Flash Engram does not support {option}")
         if self.disk_offload:
             from vllm.platforms import current_platform
 
@@ -115,14 +127,22 @@ class EngramConfig:
         if self.peer_group_size and field != "engram_layer_ids":
             raise ValueError("peer_group_size requires a DeepSeek V4.1 model")
 
-    def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
-        """Share host tables by default wherever the configuration permits."""
+    def resolve_dp_shared_memory(
+        self,
+        parallel_config: "ParallelConfig",
+        model_config: "ModelConfig | None" = None,
+    ) -> None:
+        """Share host tables by default wherever the model supports them."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
+                and (
+                    model_config is None
+                    or model_config.architecture not in _FLASH_ENGRAM_ARCHITECTURES
+                )
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:

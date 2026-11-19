@@ -19,6 +19,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
+from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
@@ -146,6 +147,9 @@ class SharedOffloadRegion:
     `num_segments` splits backing files beneath the contiguous mapping.
     `populate=False` skips pre-faulting, for a mapper whose peers pre-fault
     every page or that calls prefault() later.
+
+    `private=True` declares that no peer maps this file: it takes no barrier
+    or shard population, and its unlink owner removes the path after mapping.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -163,9 +167,13 @@ class SharedOffloadRegion:
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
         unlink_owner: bool,
+        private: bool = False,
         populate: bool = True,
         mmap_path: str | None = None,
     ) -> None:
+        assert not private or (
+            unlink_owner and barrier is None and populate_shard is None
+        )
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -276,6 +284,7 @@ class SharedOffloadRegion:
                 finally:
                     os.close(reservation)
                 self._map_segments()
+            exclude_from_core_dump(self.mmap_obj)
             if barrier is not None:
                 barriers_remaining -= 1
                 barrier()
