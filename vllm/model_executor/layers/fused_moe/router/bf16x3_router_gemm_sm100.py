@@ -26,6 +26,7 @@ from quack.compile_utils import make_fake_tensor
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = ["bf16x3_router_gemm"]
@@ -527,8 +528,12 @@ _TILE_CONFIG_OVERRIDES = {
 }
 
 
+@cache
 def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
-    """Return (BN, split_k): tuned table mid-range, generic rule otherwise."""
+    """Return (BN, split_k): tuned table mid-range, generic rule otherwise.
+
+    Cached: it runs on every router call and N takes at most
+    max_num_batched_tokens values."""
     k_tiles = math_utils.cdiv(K, 64)
 
     if 32 < N <= 512:
@@ -612,9 +617,7 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     M, _ = W.shape
     if N == 0:
         return X.new_empty((N, M), dtype=torch.float32)
-    num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
-
-    BN, split_k = _pick_tile_config(N, K, M, num_sms)
+    BN, split_k = _pick_tile_config(N, K, M, num_compute_units(X.device.index))
 
     partials = X.new_empty(split_k, N, M, dtype=torch.float32)
     Sm100BF16x3RouterGemm.compile(K, BN)(X, W, partials, split_k)
