@@ -17,9 +17,12 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
 Keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`, so each
-shard is checked separately. All actions cover the target model's parameters,
-which is what weight loading writes; `reset` zeroes them. The endpoint keeps no
-state, so the caller holds the baseline. Invalid requests return HTTP 400.
+shard is checked separately. By default all actions cover the target model's
+parameters. For `checksum` and `compare`, set `"target": "draft"` to check a
+resident speculative draft model on every rank. Save the baseline from the same
+target. `reset` only supports the target model. The endpoint keeps no state,
+so the caller holds the baseline. Invalid requests return HTTP 400, and
+requesting a draft when there is none returns HTTP 409.
 
 ## RL weight-update check
 
@@ -51,7 +54,7 @@ curl -X POST $URL/resume
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
-- Buffers, draft models and LoRA adapters are not checked.
+- Buffers and LoRA adapters are not checked.
 - CPU backends that repack linear weights hide them from the checker.
 - compressed-tensors online transforms are not supported: their Hadamard
   weights are normalized once per storage, so restored copies differ.

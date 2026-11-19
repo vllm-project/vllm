@@ -301,7 +301,9 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
-    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+    async def compute_weight_checksums(
+        self, is_draft: bool = False
+    ) -> list[dict[str, str]]:
         """Return rank-qualified weight digests from every worker of every engine."""
         raise NotImplementedError
 

@@ -77,6 +77,15 @@ class TestSingleGPU:
         assert response.status_code == 400, response.text
         assert health(server_url) == 200
 
+    def test_draft_checksum_requires_a_draft_model(self, server_url):
+        response = requests.post(
+            f"{server_url}/weight_checker",
+            json={"action": "checksum", "target": "draft"},
+            timeout=10,
+        )
+        assert response.status_code == 409, response.text
+        assert health(server_url) == 200
+
     def test_checksum_is_stable_and_compare_reports_differences(self, server_url):
         baseline = checksums(server_url)
         assert all(

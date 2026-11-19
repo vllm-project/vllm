@@ -234,9 +234,27 @@ async def weight_checker(
     raw_request: Request,
     action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+    target: Annotated[Literal["model", "draft"], Body(embed=True)] = "model",
 ) -> JSONResponse:
-    """Checksum, reset, or compare model weights against a baseline."""
+    """Checksum or compare model weights, or reset the target model."""
     client = engine_client(raw_request)
+    is_draft = target == "draft"
+    if is_draft:
+        if action == "reset":
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST.value,
+                detail="action='reset' only supports target='model'",
+            )
+        spec = client.vllm_config.speculative_config
+        if (
+            spec is None
+            or spec.draft_model_config is None
+            or spec.prefill_context_kv_only
+        ):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT.value,
+                detail="target='draft' requires a resident speculative draft model",
+            )
     if action == "reset":
         await client.collective_rpc("reset_weights")
         return JSONResponse(content={"status": "reset"})
@@ -247,7 +265,12 @@ async def weight_checker(
         )
 
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    per_worker = (
+        await client.compute_weight_checksums(is_draft=True)
+        if is_draft
+        else await client.compute_weight_checksums()
+    )
+    for worker_checksums in per_worker:
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
