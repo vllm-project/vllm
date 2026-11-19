@@ -283,7 +283,9 @@ class SharedCPUBlockPool(BlockPool):
                 block.ref_cnt += 1
                 self._refs[slot] += 1
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self, ordered_blocks: Iterable[KVCacheBlock], evict_first: bool = False
+    ) -> None:
         with self.locked():
             owned = []
             for block in ordered_blocks:
@@ -297,7 +299,7 @@ class SharedCPUBlockPool(BlockPool):
                     owned.append(block)
                 else:
                     block.ref_cnt -= 1
-            super().free_blocks(owned)
+            super().free_blocks(owned, evict_first=evict_first)
             self._peer_pinned.difference_update(
                 b.block_id for b in owned if b.ref_cnt == 0
             )

@@ -160,6 +160,18 @@ def test_shared_offload_rejects_lazy_mode():
         _make_connector(extra_config={"cpu_offload_shared": True, "lazy_offload": True})
 
 
+@pytest.mark.parametrize("hugepage_size", ["2MB", "1GB"])
+def test_shared_offload_rejects_hugetlb_pages(hugepage_size):
+    """Shared mmap allocation must not silently ignore a HugeTLB request."""
+    with pytest.raises(ValueError, match="cpu_hugepage_block_size"):
+        _make_connector(
+            extra_config={
+                "cpu_offload_shared": True,
+                "cpu_hugepage_block_size": hugepage_size,
+            }
+        )
+
+
 def test_shared_offload_waits_for_worker_handshake():
     """Shared workers must never receive IDs from the private scheduler pool."""
     connector = _make_connector(extra_config={"cpu_offload_shared": True})

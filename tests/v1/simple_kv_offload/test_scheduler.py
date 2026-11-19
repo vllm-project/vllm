@@ -756,6 +756,22 @@ def test_shared_dp_joiner_can_initialize_before_creator(tmp_path, monkeypatch):
             region.cleanup()
 
 
+@pytest.mark.parametrize("evict_first", [False, True])
+def test_shared_pool_respects_release_eviction_priority(shared_schedulers, evict_first):
+    """An explicit eviction preference overrides the default cached-block LRU."""
+    writer, _ = shared_schedulers
+    meta = _store_shared_request(writer, make_request(num_blocks=2))
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    pool = writer.scheduler.cpu_block_pool
+    block = pool.blocks[meta.store_cpu_blocks[0]]
+    pool.touch([block])
+    pool.free_blocks([block], evict_first=evict_first)
+    expected = meta.store_cpu_blocks[0 if evict_first else 1]
+    allocated = pool.get_new_blocks(1)
+    assert allocated[0].block_id == expected
+    pool.free_blocks(allocated)
+
+
 def test_shared_dp_hit_is_published_after_store_completion(shared_schedulers):
     """An engine with an empty GPU pool can restore a different DP's prefix."""
     writer, reader = shared_schedulers

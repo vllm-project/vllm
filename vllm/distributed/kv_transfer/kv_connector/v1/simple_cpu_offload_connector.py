@@ -146,6 +146,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         cpu_hugepage_size = parse_hugepage_size(
             extra_config.get("cpu_hugepage_block_size")
         )
+        if cpu_offload_shared and cpu_hugepage_size is not None:
+            raise ValueError(
+                "cpu_hugepage_block_size is not supported with cpu_offload_shared."
+            )
 
         if disk_mode:
             if disk_path is None:

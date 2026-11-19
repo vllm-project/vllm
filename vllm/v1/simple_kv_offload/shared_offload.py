@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.utils import hash_config
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_dp_group,
@@ -97,8 +98,8 @@ def allocate_shared_offload(
         (name, tuple(t.shape[1:]), str(t.dtype)) for name, t in gpu_caches.items()
     )
     signature = (
-        config.model_config.compute_hash(),
-        config.cache_config.compute_hash(),
+        hash_config(config.model_config),
+        hash_config(config.cache_config),
         shared_hash_signature(config),
         repr(kv_cache_config.kv_cache_groups),
         blocks_per_rank,

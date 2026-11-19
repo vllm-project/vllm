@@ -12,7 +12,6 @@ from __future__ import annotations
 import mmap
 import os
 import time
-from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
