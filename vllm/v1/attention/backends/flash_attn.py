@@ -63,7 +63,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -83,6 +83,9 @@ from vllm.v1.worker.cp_utils import (
 )
 
 logger = init_logger(__name__)
+
+# Upper bound for the per-row block table used by FA2 speculative verification.
+_FA2_ROW_BLOCK_TABLE_MAX_BYTES = 256 * 1024 * 1024
 
 FA4_DENSE_FLOAT_DTYPES = (torch.bfloat16, torch.float16)
 FA4_DENSE_Q_TILE = 128
@@ -528,6 +531,13 @@ class FlashAttentionMetadata:
     # (-1, -1) for query tokens outside every multimodal range.
     mm_prefix_query_range_tensor: torch.Tensor | None = None
 
+    # FA2 only: the same batch expressed as one single-token query per row,
+    # set for speculative verification batches. See
+    # FlashAttentionMetadataBuilder._build_fa2_row_view.
+    row_query_start_loc: torch.Tensor | None = None
+    row_seq_lens: torch.Tensor | None = None
+    row_block_table: torch.Tensor | None = None
+
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
     # rswa_window:       sliding window size (scalar int, for logic checks).
@@ -555,6 +565,31 @@ def _get_sliding_window_configs(
             if isinstance(impl, FlashAttentionImpl):
                 sliding_window_configs.add(impl.sliding_window)
     return sliding_window_configs
+
+
+def _fa2_row_view_indices(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    rows: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map every query row to its request and to its own causal KV length.
+
+    Row `r` of a request with `query_len` new tokens sees `seq_len -
+    (query_len - 1 - j)` keys, where `j` is its offset inside the request. That
+    is exactly what a causal multi-row query computes for that row, so each
+    row can be submitted as an independent single-token query. Rows that
+    belong to no request (CUDA graph padding) get a KV length of 0.
+
+    All shapes are static in `rows`, so there is no GPU->CPU sync.
+    """
+    num_reqs = seq_lens.shape[0]
+    query_end = query_start_loc[1 : num_reqs + 1]
+    row_req = torch.searchsorted(query_end, rows, right=True)
+    is_padding = row_req >= num_reqs
+    row_req = row_req.clamp_(max=num_reqs - 1)
+    row_seq_lens = seq_lens[row_req] - query_end[row_req] + 1 + rows
+    row_seq_lens = row_seq_lens.masked_fill_(is_padding, 0)
+    return row_req, row_seq_lens
 
 
 def _maybe_symmetrize_window(
@@ -756,6 +791,36 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 device=self.device,
             )
 
+        # FA2 only applies SplitKV to single-token queries. A speculative
+        # verification step has 1 + num_speculative_tokens query rows per
+        # request, so it would scan the whole KV history with one block per
+        # head. Present such batches to the kernel as one single-token query
+        # per row instead. Buffers are persistent so that FULL CUDA graph
+        # replay sees stable addresses.
+        self._fa2_row_view_max_query_len = 0
+        self._fa2_row_query_start_loc: torch.Tensor | None = None
+        self._fa2_row_seq_lens: torch.Tensor | None = None
+        self._fa2_row_block_table: torch.Tensor | None = None
+        speculative_config = vllm_config.speculative_config
+        if (
+            fa_version == 2
+            and not current_platform.is_xpu()
+            and self.dcp_world_size == 1
+            and speculative_config is not None
+            and (speculative_config.num_speculative_tokens or 0) > 0
+        ):
+            max_query_len = 1 + speculative_config.num_speculative_tokens
+            max_rows = round_up(
+                vllm_config.scheduler_config.max_num_seqs * max_query_len, 32
+            )
+            self._fa2_row_view_max_query_len = max_query_len
+            self._fa2_row_query_start_loc = torch.arange(
+                max_rows + 1, dtype=torch.int32, device=self.device
+            )
+            self._fa2_row_seq_lens = torch.zeros(
+                max_rows, dtype=torch.int32, device=self.device
+            )
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
@@ -955,6 +1020,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             causal=causal,
         )
 
+        self._build_fa2_row_view(attn_metadata)
+
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.  Built for every FA
         # group; Gemma4 nulls the field for its non-sliding layers.
@@ -1000,6 +1067,61 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         return attn_metadata
 
+    def _build_fa2_row_view(self, attn_metadata: FlashAttentionMetadata) -> None:
+        num_rows = attn_metadata.num_actual_tokens
+        if (
+            self._fa2_row_seq_lens is None
+            or not 1 < attn_metadata.max_query_len <= self._fa2_row_view_max_query_len
+            or num_rows > self._fa2_row_seq_lens.shape[0]
+            or attn_metadata.causal is not True
+            or envs.VLLM_BATCH_INVARIANT
+        ):
+            return
+
+        block_table = attn_metadata.block_table
+        num_blocks = block_table.shape[1]
+        if self._fa2_row_block_table is None:
+            max_rows = self._fa2_row_seq_lens.shape[0]
+            if max_rows * num_blocks * 4 > _FA2_ROW_BLOCK_TABLE_MAX_BYTES:
+                logger.warning_once(
+                    "Not using single-token queries for FA2 speculative "
+                    "verification: the per-row block table (%d x %d) would "
+                    "exceed %d MiB.",
+                    max_rows,
+                    num_blocks,
+                    _FA2_ROW_BLOCK_TABLE_MAX_BYTES >> 20,
+                )
+                self._fa2_row_seq_lens = None
+                return
+            self._fa2_row_block_table = torch.zeros(
+                (max_rows, num_blocks), dtype=block_table.dtype, device=self.device
+            )
+        elif self._fa2_row_block_table.shape[1] != num_blocks:
+            return
+
+        assert self._fa2_row_query_start_loc is not None
+        row_req, row_seq_lens = _fa2_row_view_indices(
+            attn_metadata.query_start_loc,
+            attn_metadata.seq_lens,
+            self._fa2_row_query_start_loc[:num_rows],
+        )
+        self._fa2_row_seq_lens[:num_rows] = row_seq_lens
+        # Only the blocks that can be read need to be copied. A block table
+        # wider than the logical one is indexed in smaller kernel blocks.
+        if num_blocks <= cdiv(self.model_config.max_model_len, self.block_size):
+            num_blocks = min(
+                num_blocks, cdiv(attn_metadata.max_seq_len, self.block_size)
+            )
+        self._fa2_row_block_table[:num_rows, :num_blocks] = block_table[
+            row_req, :num_blocks
+        ]
+
+        attn_metadata.row_query_start_loc = self._fa2_row_query_start_loc[
+            : num_rows + 1
+        ]
+        attn_metadata.row_seq_lens = self._fa2_row_seq_lens[:num_rows]
+        attn_metadata.row_block_table = self._fa2_row_block_table[:num_rows]
+
     def update_block_table(
         self,
         metadata: FlashAttentionMetadata,
@@ -1009,6 +1131,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
+        # The row view holds a copy of the source group's block table.
+        new_metadata.row_query_start_loc = None
+        new_metadata.row_seq_lens = None
+        new_metadata.row_block_table = None
         return new_metadata
 
     def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
@@ -1374,6 +1500,18 @@ class FlashAttentionImpl(AttentionImpl):
                     sliding_window_size is not None and sliding_window_size[1] >= 0
                 )
                 causal = not has_window
+
+            if (
+                attn_metadata.row_query_start_loc is not None
+                and causal is True
+                and (sliding_window_size is None or sliding_window_size[0] < 0)
+            ):
+                # FA2 speculative verification: one single-token query per
+                # row, so that the kernel takes its SplitKV decode path.
+                cu_seqlens_q = attn_metadata.row_query_start_loc
+                seqused_k = attn_metadata.row_seq_lens
+                block_table = attn_metadata.row_block_table
+                max_seqlen_q = 1
 
             _FA4_DENSE_ATTENTION_KERNEL(
                 q=query[:num_actual_tokens],
