@@ -13,6 +13,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+from .fused_sigmoid_gating import l2norm_qk, recurrent_step, sigmoid_gating
 from .op import exp, log
 
 
@@ -316,24 +317,17 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
 
     if USE_QK_L2NORM_IN_KERNEL:
-        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q, b_k = l2norm_qk(b_q, b_k)
     b_q = b_q * scale
 
     a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
     b_val = tl.load(b + i_n * stride_b_tok + i_hv).to(tl.float32)
     A_log_val = tl.load(A_log + i_hv).to(tl.float32)
     dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
-    x = a_val + dt_bias_val
-    softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
-    g_val = -tl.exp(A_log_val) * softplus_x
-    beta_val = tl.sigmoid(b_val)
-
-    b_h *= exp(g_val)
-    b_v -= tl.sum(b_h * b_k[None, :], 1)
-    b_v *= beta_val
-    b_h += b_v[:, None] * b_k[None, :]
-    b_o = tl.sum(b_h * b_q[None, :], 1)
+    g_val, beta_val = sigmoid_gating(
+        a_val, b_val, A_log_val, dt_bias_val, 1.0, SOFTPLUS_THRESHOLD
+    )
+    b_h, b_o = recurrent_step(b_h, b_q, b_k, b_v, exp(g_val), beta_val)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
     p_ht = ht + state_idx * stride_final_state_token
