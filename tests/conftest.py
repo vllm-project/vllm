@@ -330,6 +330,17 @@ def dynamo_reset():
     yield
     torch._dynamo.reset()
 
+    # These caches are unbounded or keyed by pattern and ShapeEnv objects, so in
+    # a process that compiles once per test they grow until every full
+    # gc.collect() takes seconds.
+    from torch._inductor.pattern_matcher import PatternPrettyPrinter
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    PatternPrettyPrinter.run.cache_clear()
+    for attr in vars(ShapeEnv).values():
+        if hasattr(attr, "cache_clear"):
+            attr.cache_clear()
+
 
 @pytest.fixture
 def example_prompts() -> list[str]:
