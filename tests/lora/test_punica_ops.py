@@ -625,7 +625,7 @@ def test_add_lora_fused_moe_early_exit(device):
 
     # call add_lora_fused_moe - the early exit should prevent any
     # modification to the output
-    wrapper.add_lora_fused_moe(
+    kwargs = dict(
         y=y,
         x=x,
         lora_a_stacked=lora_a_stacked,
@@ -644,10 +644,16 @@ def test_add_lora_fused_moe_early_exit(device):
         expand_config=expand_config,
         adapter_enabled=adapter_enabled,
     )
+    wrapper.add_lora_fused_moe(**kwargs)
 
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+    # Other DP ranks get this rank's mapping, and send theirs which can use LoRA.
+    assert (wrapper.token_mapping_meta.token_lora_mapping == -1).all()
+    wrapper.add_lora_fused_moe(**kwargs, token_lora_mapping=lora_mapping)
+    assert not torch.equal(y, y_snapshot)
 
 
 def test_torch_ops_bgmv_skips_no_lora_tokens():
