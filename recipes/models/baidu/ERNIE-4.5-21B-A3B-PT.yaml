@@ -44,8 +44,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "8"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--quantization"
       - "fp8"
 
@@ -61,9 +59,6 @@ kv_offload_support:
 
 hardware_overrides:
   amd:
-    extra_args:
-      - "--gpu-memory-utilization"
-      - "0.9"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       SAFETENSORS_FAST_GPU: "1"
@@ -107,7 +102,6 @@ guide: |
   ```bash
   vllm serve baidu/ERNIE-4.5-300B-A47B-PT \
     --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.95 \
     --quantization fp8
   ```
 

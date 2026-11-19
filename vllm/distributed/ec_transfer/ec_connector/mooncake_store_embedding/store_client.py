@@ -11,7 +11,7 @@ from __future__ import annotations
 import ctypes
 import struct
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from enum import IntEnum
 from typing import Any
@@ -180,7 +180,7 @@ class MooncakeEmbeddingStoreClient:
     def _registered_io(
         self,
         buffers: list[tuple[Any, int, int]],
-    ) -> Iterator[Callable[[int], None]]:
+    ) -> Generator[Callable[[int], None]]:
         self._check_healthy()
         registered = []
         submitted = False

@@ -80,13 +80,13 @@ HF_HUB_AMD_ORG_ACCESS = all(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model_id: str
     tp: int
 
 
-@dataclass
+@dataclass(slots=True)
 class EvaluationConfig:
     model_name: str
 
@@ -98,7 +98,6 @@ class EvaluationConfig:
             "think_end_token": "200008",
             "tensor_parallel_size": tp_size,
             "dtype": "auto",
-            "gpu_memory_utilization": 0.95,
             "trust_remote_code": False,
             "enable_prefix_caching": False,
             "enforce_eager": False,

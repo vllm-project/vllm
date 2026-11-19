@@ -183,7 +183,7 @@ class ChunkedTokenDatabase:
             yield start_idx, end_idx, h
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TailKeyBoundary:
     """Hash boundary used to key a group's tail block in the store.
 
@@ -201,7 +201,7 @@ class TailKeyBoundary:
     num_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class MooncakeLookupResult:
     """Lookup result used to build the subsequent load request.
 
@@ -218,7 +218,7 @@ class MooncakeLookupResult:
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadSpec:
     """Specification for loading KV cache from external store."""
 
@@ -229,7 +229,7 @@ class LoadSpec:
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestTracker:
     """Tracks per-request state across scheduler ticks."""
 
