@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import AsyncGenerator
 from http import HTTPStatus
 from typing import Annotated
 
+from anyio import CancelScope
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -22,6 +25,20 @@ from .serving import OpenAIServingTranscription
 logger = init_logger(__name__)
 
 router = APIRouter()
+
+
+class _DiarizedStreamingResponse(StreamingResponse):
+    def __init__(self, stream: AsyncGenerator[str, None]) -> None:
+        super().__init__(content=stream, media_type="text/event-stream")
+        self._stream = stream
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A disconnect during send can leave the generator suspended at yield.
+            with CancelScope(shield=True):
+                await self._stream.aclose()
 
 
 def transcription(request: Request) -> OpenAIServingTranscription:
@@ -58,4 +75,6 @@ async def create_transcriptions(
     elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
+    if request.response_format == "diarized_json":
+        return _DiarizedStreamingResponse(generator)
     return StreamingResponse(content=generator, media_type="text/event-stream")
