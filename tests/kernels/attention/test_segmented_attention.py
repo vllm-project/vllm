@@ -341,6 +341,28 @@ def test_segmented_fp8_long_extend_split_workspace_bound(dim):
                         assert scratch <= MAX_LONG_EXTEND_WORKSPACE_BYTES * dim // 128
 
 
+@pytest.mark.parametrize(
+    "query_len,seq_len,kv_heads,fp8,expected_splits",
+    [
+        pytest.param(256, 32768, 1, False, 1, id="bf16-cache-at-64-mib"),
+        pytest.param(256, 32769, 1, False, 4, id="bf16-cache-over-64-mib"),
+        pytest.param(256, 32768, 1, True, 4, id="fp8-minimum-splits"),
+        pytest.param(256, 131072, 1, True, 8, id="fp8-cache-growth"),
+        pytest.param(1024, 131072, 2, True, 2, id="fp8-scratch-cap"),
+        pytest.param(16, 524288, 2, True, 32, id="fp8-max-splits"),
+    ],
+)
+def test_segmented_d512_gqa8_long_extend_splits(
+    query_len, seq_len, kv_heads, fp8, expected_splits
+):
+    from vllm.v1.attention.ops.segmented_attention_config import select_segmented_config
+
+    config = select_segmented_config(
+        1, query_len, seq_len, 8 * kv_heads, kv_heads, 512, fp8
+    )
+    assert config["splits"] == expected_splits
+
+
 @requires_rdna
 @torch.inference_mode()
 def test_segmented_bf16_d256_long_extend_matches_dense_reference():
