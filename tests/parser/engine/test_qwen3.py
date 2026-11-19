@@ -363,6 +363,33 @@ class TestNonStreaming:
             ),
         }
 
+    def test_nested_parameter_closed_before_in_value_function(
+        self, parser, mock_request
+    ):
+        """Regression: nested parameter closing order (review on PR 68581)
+
+        A complete nested ``<parameter=`` span followed by in-value
+        ``<function=`` markup must not end the outer value early: the inner
+        closer is not the outer value's own, so no phantom call may start.
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write>\n"
+            "<parameter=content>\n"
+            "<parameter=x>1</parameter><function=foo>\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "<parameter=x>1</parameter><function=foo>"
+        }
+
     def test_unclosed_value_still_recovers_at_next_parameter(
         self, parser, mock_request
     ):
@@ -823,6 +850,27 @@ class TestStreaming:
                 "  <parameter=bar>baz</parameter>\n"
                 "</root>\n"
             ),
+        }
+
+    def test_streaming_nested_parameter_closed_before_in_value_function(
+        self, parser, mock_request
+    ):
+        """Streaming path of the nested-closer ordering regression."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=write>\n",
+            "<parameter=content>\n",
+            "<parameter=x>1</parameter>",
+            "<function=foo>\n",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": "<parameter=x>1</parameter><function=foo>"
         }
 
     def test_streaming_unclosed_value_recovers_at_next_parameter(

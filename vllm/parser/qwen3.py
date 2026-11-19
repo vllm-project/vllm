@@ -387,7 +387,10 @@ def _legacy_param_value_extender(
 # absorbed as value text (issue 58147) instead of ending the value or the
 # call. The malformed-input recoveries of TOOL_ARGS are mirrored on the
 # name state, and ``</function>`` / the converter's call-end recovery still
-# close a genuinely unclosed value (issue 67923).
+# close a genuinely unclosed value (issue 67923). TOOL_PARAM_VALUE has no
+# parameter-tag transitions on purpose: a flat state machine cannot tell an
+# inner closer from the value's own, so parameter tags stay value text and
+# the converter's parameter tree owns their segmentation.
 _NESTED_PARAM_TRANSITIONS: dict[tuple[ParserState, str], Transition] = {
     (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
         ParserState.TOOL_PARAM_NAME,
@@ -412,10 +415,6 @@ _NESTED_PARAM_TRANSITIONS: dict[tuple[ParserState, str], Transition] = {
     (ParserState.TOOL_PARAM_NAME, "FUNC_END"): Transition(
         ParserState.TOOL_BETWEEN,
         (EventType.TOOL_CALL_END,),
-    ),
-    (ParserState.TOOL_PARAM_VALUE, "PARAM_END"): Transition(
-        ParserState.TOOL_ARGS,
-        (EventType.ARG_VALUE_CHUNK,),
     ),
     (ParserState.TOOL_PARAM_VALUE, "FUNC_END"): Transition(
         ParserState.TOOL_BETWEEN,
