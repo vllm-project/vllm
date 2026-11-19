@@ -61,11 +61,11 @@ def _decode_bare(raw: str):
 
 
 def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
-    """Parse one value at ``pos`` and return it with the position after it.
+    """Parse one value at `pos` and return it with the position after it.
 
     Raises:
-        _IncompleteValue: ``text`` ends inside the value. A bare scalar at the
-            end of a ``partial`` string counts as incomplete, since more digits
+        _IncompleteValue: `text` ends inside the value. A bare scalar at the
+            end of a `partial` string counts as incomplete, since more digits
             or letters may still follow.
         _MalformedValue: a delimiter stands where the value should start.
 
@@ -160,9 +160,9 @@ class FunctionGemmaToolParser(ToolParser):
     def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
         """Parse a FunctionGemma argument string into a dictionary.
 
-        The chat template writes strings as ``<escape>text<escape>`` and
-        everything else bare: ``true``/``false``, numbers, ``[item,...]`` and
-        ``{key:value,...}`` with bare keys. With ``partial`` the string is a
+        The chat template writes strings as `<escape>text<escape>` and
+        everything else bare: `true`/`false`, numbers, `[item,...]` and
+        `{key:value,...}` with bare keys. With `partial` the string is a
         streaming prefix: parsing stops at the first incomplete value and the
         complete arguments before it are returned.
         """
@@ -258,7 +258,7 @@ class FunctionGemmaToolParser(ToolParser):
         """Stream the part of the arguments JSON not sent yet.
 
         Arguments only grow by appended keys, so their JSON is prefix-stable
-        except for the closing brace, which is held back until ``final``.
+        except for the closing brace, which is held back until `final`.
         """
         self.prev_tool_call_arr[self.current_tool_id]["arguments"] = args
         args_json = json.dumps(args, ensure_ascii=False)

@@ -12,8 +12,8 @@ def get_driver_env_vars(
 ) -> dict[str, str]:
     """Return driver env vars to propagate to Ray workers.
 
-    Returns everything from ``os.environ`` except ``worker_specific_vars``
-    and user-configured exclusions (``RAY_NON_CARRY_OVER_ENV_VARS``).
+    Returns everything from `os.environ` except `worker_specific_vars`
+    and user-configured exclusions (`RAY_NON_CARRY_OVER_ENV_VARS`).
     """
     exclude_vars = worker_specific_vars | RAY_NON_CARRY_OVER_ENV_VARS
 

@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
-  date_updated: 2026-10-19
+  date_updated: 2026-11-05
   tasks:
     - text
     - multimodal
@@ -13,6 +13,9 @@ meta:
     h100: verified
     b200: verified
     gb200: verified
+    # FP8 TP4 with MTP, stock and latency_specialized decode, validated 2026-10
+    # on one 4×GB300 tray (vLLM #63102).
+    gb300: verified
     mi355x: verified
 
 model:
@@ -135,6 +138,12 @@ hardware_notes:
     title: "Long-context indexer top-k opt-in"
     body: "When serving long contexts (>=64k), add `--sparse-indexer-topk-backend aiter` for improved decode performance."
   mi355x: *cdna4_indexer_topk_notes
+  gb300:
+    title: "Low-latency decode (TP4)"
+    body: >-
+      4×GB300 at TP4 can opt into the CuTe DSL specialized decode with
+      `--additional-config '{"decode_backend":"latency_specialized"}'`. See the guide's
+      GB300 section for the requirements.
 
 strategy_overrides:
   pd_cluster:
@@ -213,6 +222,44 @@ guide: |
     --enable-auto-tool-choice \
     --served-model-name zai-org/GLM-5.3-Flash
   ```
+
+  ### Low-latency decode on one GB300 tray (TP4)
+
+  On 4×GB300, `--additional-config '{"decode_backend":"latency_specialized"}'`
+  ([vLLM #63102](https://github.com/vllm-project/vllm/pull/63102)) runs decode and uniform MTP
+  verify steps of up to 64 tokens on fused CuTe DSL kernels; prefill, mixed and larger steps keep
+  the stock path. It is opt-in and refuses at startup with the list of unmet requirements: a GB300
+  (SM100 family) GPU, TP4 without pipeline, data, expert or context parallelism, FULL decode
+  CUDA graphs (the default `FULL_AND_PIECEWISE`), FP8 KV cache, no LoRA or sleep mode, and
+  either no speculation or MTP with at most 7 draft tokens.
+
+  ```bash
+  vllm serve zai-org/GLM-5.3-Flash \
+    --tensor-parallel-size 4 \
+    --kv-cache-dtype fp8 \
+    --numa-bind \
+    --additional-config '{"decode_backend":"latency_specialized"}' \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name zai-org/GLM-5.3-Flash
+  ```
+
+  `--numa-bind` keeps each worker on its GPU's Grace socket; unbound, a worker on the other
+  socket adds about 2.4 ms per step at concurrency 1. Median ITL from `vllm bench serve` (random
+  8K-token prompts, 512 output tokens, no prefix caching, `--numa-bind` on both), stock vs
+  specialized decode:
+
+  | concurrency | 1 | 8 | 32 | 64 | MTP3, 1 | MTP3, 8 | MTP3, 16 |
+  |---|---|---|---|---|---|---|---|
+  | stock | 5.15 ms | 7.23 ms | 11.11 ms | 13.92 ms | 6.64 ms | 11.61 ms | 14.72 ms |
+  | `latency_specialized` | 2.93 ms | 5.53 ms | 9.04 ms | 12.00 ms | 4.98 ms | 9.28 ms | 12.00 ms |
+
+  GSM8K stays within stock's range (0.918 vs 0.914; 0.915 vs 0.912 with MTP3). To bisect a stage,
+  `additional_config.policy` overrides its per-token-count entry; for example
+  `{"decode_backend":"latency_specialized","policy":{"boundary":""}}` runs the fused all-reduce +
+  mHC boundary stock.
 
   ### Prefill/Decode disaggregation (single node, TP4 + TP4)
 

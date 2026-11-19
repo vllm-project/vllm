@@ -34,7 +34,7 @@ from ...utils import create_new_process_for_each_test
 from .. import silly_attention  # noqa: F401
 
 
-@dataclass
+@dataclass(slots=True)
 class LlamaConfig:
     hidden_size: int = 128
     mlp_size: int = 256

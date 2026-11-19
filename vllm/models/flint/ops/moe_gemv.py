@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Expert-indexed small-M NVFP4 GEMV kernels (CuTe DSL) for the low-latency
-decode MoE block, built on the dense GEMV design of ``nvfp4_gemv``: each CTA
+decode MoE block, built on the dense GEMV design of `nvfp4_gemv`: each CTA
 owns 16 output rows (the m16n8k16 M dimension, swap-AB), its warps split K and
 reduce through shared memory, weights are dequantized exactly to BF16
-(``cvt.rn.bf16x2.e2m1x2`` + ``mul.rn.bf16x2``) and the fp32 global scale is
+(`cvt.rn.bf16x2.e2m1x2` + `mul.rn.bf16x2`) and the fp32 global scale is
 applied to the fp32 accumulator.
 
-``gate_up``: one (token, expert) pair per CTA column of the grid; writes
-``bf16(silu(g) * u)`` from fp32 gate/up with FlashInfer's approximate sigmoid
+`gate_up`: one (token, expert) pair per CTA column of the grid; writes
+`bf16(silu(g) * u)` from fp32 gate/up with FlashInfer's approximate sigmoid
 (the shared expert rounds its gate/up to BF16 first and uses the exact SiLU,
 as its dense GEMM does). Expert weights use FlashInfer's W4A16
 layout ([up; gate] in 64-row groups, 6D MMA scales).
 
-``down_combine``: per token and 16 output rows, the down GEMVs of the token's
+`down_combine`: per token and 16 output rows, the down GEMVs of the token's
 top-k experts and of the shared expert, all weights prefetched before
-``griddepcontrol.wait``; ``out = bf16(bf16(sum_j tw_j * y_j) + y_shared)``
-with ``y = bf16(acc * global_scale)``.
+`griddepcontrol.wait`; `out = bf16(bf16(sum_j tw_j * y_j) + y_shared)`
+with `y = bf16(acc * global_scale)`.
 """
 
 from typing import Any
@@ -446,7 +446,7 @@ def _stream():
 
 
 def _compile(key: tuple, fakes: list, *scalars):
-    """Compile kernel ``key = (kind, h, inter, si, topk)`` into ``_compiled``."""
+    """Compile kernel `key = (kind, h, inter, si, topk)` into `_compiled`."""
     global _classes
     import cutlass.cute as cute
 
