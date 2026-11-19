@@ -454,6 +454,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/models/qwen4_exp/amd/hyperconnection.py
       - vllm/models/qwen4_exp/amd/ops/hc.py
@@ -471,6 +472,7 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py

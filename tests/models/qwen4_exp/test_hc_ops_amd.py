@@ -277,3 +277,41 @@ def test_gated_residual_combine_and_mix(
     _assert_combine_and_mix_close(
         actual, residual, block_output, injection, norm_weight, w_down_inject, w_up
     )
+
+    # A LoRA wrapper around a projection must keep the module chain, so its
+    # delta is applied.
+    class Wrapped(torch.nn.Module):
+        def __init__(self, base: torch.nn.Module) -> None:
+            super().__init__()
+            self.base = base
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.base(x)
+
+    module.input_mix_weight_up = Wrapped(module.input_mix_weight_up)
+    calls.clear()
+    with torch.no_grad():
+        actual = module.combine_and_mix(residual, block_output, injection)
+    assert calls == []
+    _assert_combine_and_mix_close(
+        actual, residual, block_output, injection, norm_weight, w_down_inject, w_up
+    )
+
+
+def test_gated_residual_two_stage_needs_bf16(
+    dist_init, aiter_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not rocm_aiter_ops.is_hc_two_stage_enabled():
+        pytest.skip("AITER FlyDSL two-stage HC kernels are not supported here")
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.float16))
+    monkeypatch.setattr(hyperconnection, "get_current_vllm_config", lambda: vllm_config)
+    config = HyperConnectionConfig(
+        hc_count=HC, hidden_size=HIDDEN_SIZE, hc_lowrank=LORA_RANK, rms_norm_eps=EPS
+    )
+    with torch.device("cuda"):
+        module = hyperconnection.GatedResidual(config)
+    assert module.hc_two_stage_max_tokens == 0

@@ -27,6 +27,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -208,11 +209,15 @@ class GatedResidual(nn.Module):
         # The two-stage skinny decode kernels need the norm affine folded into
         # the down+inject weight; process_weights_after_loading fills it.
         # Under VLLM_BATCH_INVARIANT this stays off, because the token-count
-        # dispatch in the op would make outputs depend on batch size.
+        # dispatch in the op would make outputs depend on batch size. The
+        # kernels take only bf16 weights and activations.
+        model_config = get_current_vllm_config().model_config
+        act_dtype = config.params_dtype if model_config is None else model_config.dtype
         self.hc_two_stage_max_tokens = 0
         if (
             use_combine
             and not envs.VLLM_BATCH_INVARIANT
+            and config.params_dtype == act_dtype == torch.bfloat16
             and rocm_aiter_ops.is_hc_two_stage_enabled()
         ):
             down_rows = self.hc_lowrank + self.hc_count + self.pad_size
@@ -291,7 +296,15 @@ class GatedResidual(nn.Module):
         block's mix. Its combine with `block_output` is fused with this
         module's input RMSNorm.
         """
-        if self.hc_two_stage_max_tokens:
+        if (
+            self.hc_two_stage_max_tokens
+            # LoRA wraps the projections after __init__, and the op reads their
+            # weights directly, which would skip the adapter's delta.
+            and isinstance(self.input_mix_weight_up, ReplicatedLinear)
+            and isinstance(
+                self.input_mix_weight_down_block_inject, MergedColumnParallelLinear
+            )
+        ):
             return torch.ops.vllm.qwen4_exp_hc_two_stage_combine_and_mix(
                 hidden_states,
                 prev_block_output,
