@@ -20,7 +20,7 @@ import functools
 import gc
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple
@@ -61,7 +61,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import follow_target_reload_mode
+from vllm.model_executor.model_loader.reload.direct import (
+    layerwise_draft,
+    reloads_directly,
+)
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
@@ -435,7 +438,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with self.draft_context(), self.jit_warmup_registry.activate():
+                # a draft may share tensors with its target: it reloads
+                # layerwise whenever the target does
+                draft_mode = (
+                    nullcontext() if reloads_directly(self.model) else layerwise_draft()
+                )
+                with (
+                    self.draft_context(),
+                    self.jit_warmup_registry.activate(),
+                    draft_mode,
+                ):
                     self.speculator.load_model(self.model)
                     assert self.speculative_config is not None
                     log_layer_backends(
@@ -450,7 +462,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             load_dummy_weights,
                         )
                     self.speculator.free_unused_weights(self.model)
-                    follow_target_reload_mode(self.speculator.model, self.model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

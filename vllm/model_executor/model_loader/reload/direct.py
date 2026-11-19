@@ -23,6 +23,8 @@ owner's `begin`.
 """
 
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from fnmatch import fnmatchcase
 
 import torch
@@ -43,7 +45,7 @@ __all__ = [
     "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
-    "follow_target_reload_mode",
+    "layerwise_draft",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
@@ -68,39 +70,57 @@ _LOADER_ATTRS = (
 )
 
 
+_LAYERWISE_DRAFT: ContextVar[bool] = ContextVar("layerwise_draft", default=False)
+
+
 def direct_reload_enabled() -> bool:
     """Whether a model loaded now records its checkpoint layout to reload directly."""
-    if envs.VLLM_RELOAD_MODE != "auto":
-        return envs.VLLM_RELOAD_MODE == "direct"
-    config = get_current_vllm_config_or_none()
-    if config is None or config.weight_transfer_config is None:
+    if envs.VLLM_RELOAD_MODE == "layerwise":
         return False
-    reason: str | None
-    if config.weight_transfer_config.backend == "sparse_nccl":
-        # it writes runtime tensors in place, never through start/finish_reload
-        reason = "the sparse_nccl weight-transfer backend"
-    elif config.lora_config is not None:
-        # a LoRA model's lm_head is not loaded again by every update
-        reason = "LoRA"
-    else:
-        reason = config.direct_reload_refusal()
-    if reason:
-        logger.info_once(
-            "Direct reload does not support %s: weight updates reload layerwise.",
-            reason,
-        )
-    return reason is None
+    if envs.VLLM_RELOAD_MODE == "auto":
+        config = get_current_vllm_config_or_none()
+        if config is None or config.weight_transfer_config is None:
+            return False
+        reason: str | None
+        if config.weight_transfer_config.backend == "sparse_nccl":
+            # it writes runtime tensors in place, never through start/finish_reload
+            reason = "the sparse_nccl weight-transfer backend"
+        elif config.lora_config is not None:
+            # a LoRA model's lm_head is not loaded again by every update
+            reason = "LoRA"
+        else:
+            reason = config.direct_reload_refusal()
+        if reason:
+            _log_layerwise(reason)
+            return False
+    if _LAYERWISE_DRAFT.get():
+        _log_layerwise("a draft whose target reloads layerwise")
+        return False
+    return True
+
+
+@contextmanager
+def layerwise_draft() -> Iterator[None]:
+    """Load a draft whose target reloads layerwise: the draft does too, as they
+    may share tensors."""
+    token = _LAYERWISE_DRAFT.set(True)
+    try:
+        yield
+    finally:
+        _LAYERWISE_DRAFT.reset(token)
+
+
+def _log_layerwise(reason: str) -> None:
+    logger.info_once(
+        "Direct reload does not support %s: weight updates reload layerwise.",
+        reason,
+        scope="process",
+    )
 
 
 def reloads_directly(model: torch.nn.Module) -> bool:
     """Whether `model`'s updates reload directly: its cold start recorded a layout."""
     return hasattr(model, "_ckpt_param_names")
-
-
-def follow_target_reload_mode(draft: torch.nn.Module, target: torch.nn.Module) -> None:
-    """A draft reloads layerwise whenever its target does: they may share tensors."""
-    if reloads_directly(draft) and not reloads_directly(target):
-        del draft._ckpt_param_names
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -234,10 +254,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     elif (reason := _module_refusal(model)) and envs.VLLM_RELOAD_MODE == "direct":
         raise RuntimeError(f"direct reload: {reason} is not supported")
     if reason:
-        logger.info(
-            "Direct reload does not support %s: weight updates reload layerwise.",
-            reason,
-        )
+        _log_layerwise(reason)
         return
     # what cold start loaded, every update must load again; after a dummy
     # start (nothing loaded) the first update sets it

@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     direct_reload_enabled,
     finish_direct_reload,
-    follow_target_reload_mode,
+    layerwise_draft,
     record_checkpoint_layout,
     reloads_directly,
     track_loaded_params,
@@ -763,15 +763,20 @@ _IPC = SimpleNamespace(backend="ipc")
 
 
 @pytest.mark.parametrize(
-    "overrides",
-    [{}, {"weight_transfer_config": _IPC, "lora_config": object()}],
-    ids=["no-updates", "lora"],
+    "overrides,expected",
+    [
+        ({"weight_transfer_config": _IPC}, True),
+        ({}, False),
+        ({"weight_transfer_config": _IPC, "lora_config": object()}, False),
+        ({"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")}, False),
+    ],
+    ids=["updates", "no-updates", "lora", "sparse-nccl"],
 )
-def test_direct_reload_enabled(monkeypatch, overrides):
+def test_direct_reload_enabled(monkeypatch, overrides, expected):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-    assert direct_reload_enabled() is False
+    assert direct_reload_enabled() is expected
 
 
 def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
@@ -793,12 +798,13 @@ def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
     start_reload(target)
     finish_reload(target, _MODEL_CONFIG, _DEVICE)
     assert calls == ["init", "finalize"]
-    # a draft follows a layerwise target, even one sharing its tensors
-    draft = _cold_start(_checkpoint())
-    draft.attn = target.attn
-    follow_target_reload_mode(draft, target)
+    # a draft of a layerwise target reloads layerwise without its own checks,
+    # even under VLLM_RELOAD_MODE=direct
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    with _DEVICE:
+        draft = _ToyModel()
+    draft.proj.shared_expert_online_loader = SimpleNamespace(finalize=lambda m: None)
+    with layerwise_draft():
+        process_weights_after_loading(draft, _MODEL_CONFIG, _DEVICE)
     assert not reloads_directly(draft)
-    # a direct target leaves its draft's own decision
-    draft = _cold_start(_checkpoint())
-    follow_target_reload_mode(draft, _cold_start(_checkpoint()))
-    assert reloads_directly(draft)
+    assert reloads_directly(_cold_start(_checkpoint()))

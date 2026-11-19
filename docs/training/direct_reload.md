@@ -5,8 +5,10 @@ Direct reload updates a running model's weights in place, and is the default
 their weight-transfer updates and disk `reload_weights` calls reload directly,
 and each must load every weight. Anything listed under
 [Refused Configurations](#refused-configurations) reloads layerwise instead
-(see [Layerwise (Re)loading](layerwise.md)) with a log saying why, while
-`VLLM_RELOAD_MODE=direct` raises an error for it.
+(see [Layerwise (Re)loading](layerwise.md)) with a log saying why.
+`VLLM_RELOAD_MODE=direct` enables direct reload also without
+`--weight-transfer-config` (disk `reload_weights`) and raises an error for
+those refusals; `VLLM_RELOAD_MODE=layerwise` turns it off.
 
 ## How It Works
 
@@ -58,8 +60,11 @@ arrives, and an update that delivers only one of them fails at finish.
   gpt-oss models, and `fp8_per_block` linear layers whose tensor-parallel
   shards are not multiples of 128.
 - Layers using Humming kernels.
+- Pre-processed weights (weight cache), with a log even under
+  `VLLM_RELOAD_MODE=direct`.
 
-A draft model reloads layerwise whenever its target does.
+A draft model reloads layerwise whenever its target does, with a log and
+never an error.
 
 The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
 refuses online quantization.
