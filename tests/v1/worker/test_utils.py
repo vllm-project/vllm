@@ -197,19 +197,23 @@ def _hisparse_parallel_config(**overrides):
         "decode_context_parallel_size": 1,
         "world_size": 2,
         "distributed_executor_backend": "mp",
-        "nnodes_within_dp": 1,
+        "local_world_size": 2,
         "data_parallel_index": 3,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
+def test_hisparse_shares_host_pool_only_for_tp(monkeypatch):
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
     config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
 
+    assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+    config.parallel_config = _hisparse_parallel_config(
+        tensor_parallel_size=8, world_size=8, local_world_size=4
+    )
     assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
     unsupported = (
@@ -219,18 +223,72 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
         {"decode_context_parallel_size": 2},
         {"world_size": 4},
         {"distributed_executor_backend": "ray"},
-        {"nnodes_within_dp": 2},
     )
     for overrides in unsupported:
         config.parallel_config = _hisparse_parallel_config(**overrides)
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
 
+def test_hisparse_host_writer_is_each_nodes_lowest_tp_rank(monkeypatch):
+    config = SimpleNamespace(
+        parallel_config=_hisparse_parallel_config(
+            tensor_parallel_size=4, world_size=4, local_world_size=2
+        )
+    )
+    roles = []
+    for tp_rank in range(4):
+        for module in (hisparse_runtime_module, hisparse_worker_module):
+            monkeypatch.setattr(
+                module, "get_tensor_model_parallel_rank", lambda r=tp_rank: r
+            )
+        leader = hisparse_runtime_module.get_hisparse_host_leader_rank(config)
+        roles.append(
+            (leader, hisparse_worker_module._is_hisparse_host_writer(object(), leader))
+        )
+
+    assert roles == [(0, True), (0, False), (2, True), (2, False)]
+    assert hisparse_worker_module._is_hisparse_host_writer(None, 2)
+
+
+def test_hisparse_host_events_come_from_node_leader(monkeypatch):
+    gathered = [("a0", "b0"), None, ("a2", "b2"), None]
+    gathered_inputs = []
+
+    def all_gather_object(out, obj, group):
+        gathered_inputs.append(obj)
+        out[:] = gathered
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(
+        hisparse_worker_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(world_size=4, cpu_group=object()),
+    )
+    monkeypatch.setattr(
+        torch.cuda.Event, "from_ipc_handle", lambda device, handle: handle
+    )
+
+    events = hisparse_worker_module._create_hisparse_host_events(
+        object(), False, 2, torch.device("cpu")
+    )
+
+    assert events == ("a2", "b2")
+    assert gathered_inputs == [None]
+
+
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+@pytest.mark.parametrize(
+    "tp_rank, local_world_size, leader_rank", [(0, 1, 0), (5, 4, 4)]
+)
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
+    monkeypatch, tp_rank, local_world_size, leader_rank
+):
     page = mmap.PAGESIZE
     tp_group = MagicMock()
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
 
     class FakeSharedOffloadRegion:
         BLOCK_SIZE_ALIGNMENT = page
@@ -276,9 +334,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     config = SimpleNamespace(
         instance_id="instance",
         parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
+            local_world_size=local_world_size,
         ),
     )
 
@@ -293,7 +349,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region is not None
     assert private_pools == []
     assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
+        "engine_id": f"hisparse_instance_dp3_tp{leader_rank}",
         "num_chunks": 1,
         "rank": 0,
         "kv_bytes_per_chunk": 4 * page,
@@ -319,6 +375,9 @@ def test_shared_host_pool_tracks_successful_registrations(
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_tensor_model_parallel_rank", lambda: 0
+    )
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -335,7 +394,8 @@ def test_shared_host_pool_tracks_successful_registrations(
     ]
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
-        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+        instance_id="test",
+        parallel_config=SimpleNamespace(data_parallel_index=0, local_world_size=1),
     )
     context = (
         pytest.raises(RuntimeError, match="cudaHostRegister failed")
@@ -436,10 +496,12 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     assert (backing[9] == -1).all()
 
 
-@pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
+@pytest.mark.parametrize(
+    "shared,is_host_writer", [(False, True), (True, True), (True, False)]
+)
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(
-    monkeypatch, shared, rank, has_copies
+    monkeypatch, shared, is_host_writer, has_copies
 ):
     """Host CoW must read completed writes; shared non-writers only barrier."""
     worker = _make_hisparse_worker()
@@ -447,12 +509,10 @@ def test_hisparse_host_copy_waits_for_writes_on_writer_only(
     worker.host_caches = [cache]
     worker.host_num_blocks = 2
     worker.shared_host_region = object() if shared else None
+    worker.is_host_writer = is_host_writer
     event = MagicMock()
     event.synchronize.side_effect = lambda: cache[0].fill_(7)
     barrier = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "get_tensor_model_parallel_rank", lambda: rank
-    )
     monkeypatch.setattr(
         hisparse_worker_module, "get_tp_group", lambda: SimpleNamespace(barrier=barrier)
     )
@@ -460,7 +520,7 @@ def test_hisparse_host_copy_waits_for_writes_on_writer_only(
 
     worker._copy_host_blocks(copies, event)
 
-    writes = has_copies and (not shared or rank == 0)
+    writes = has_copies and is_host_writer
     assert cache[1].item() == (7 if writes else 0)
     assert event.synchronize.call_count == int(writes)
     assert barrier.call_count == int(shared and has_copies)
@@ -1067,21 +1127,17 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     assert worker.host_write_event is host_write_events[1]
 
 
-@pytest.mark.parametrize("tp_rank, expected_copies", [(0, 1), (1, 0)])
-def test_hisparse_shared_host_block_copy_has_one_writer(
-    monkeypatch, tp_rank, expected_copies
-):
+@pytest.mark.parametrize("is_host_writer", [True, False])
+def test_hisparse_shared_host_block_copy_has_one_writer(monkeypatch, is_host_writer):
     worker = _make_hisparse_worker()
     worker.shared_host_region = object()
+    worker.is_host_writer = is_host_writer
     worker.host_caches = (torch.empty(4, 1),)
     worker.host_num_blocks = 4
     previous_event = MagicMock()
     copies = (KVCacheBlockCopy(0, 1),)
     copy_blocks = MagicMock()
     tp_group = MagicMock()
-    monkeypatch.setattr(
-        hisparse_worker_module, "get_tensor_model_parallel_rank", lambda: tp_rank
-    )
     monkeypatch.setattr(hisparse_worker_module, "get_tp_group", lambda: tp_group)
     monkeypatch.setattr(
         hisparse_worker_module, "copy_kv_cache_blocks_inplace", copy_blocks
@@ -1089,7 +1145,7 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
 
     worker._copy_host_blocks(copies, previous_event)
 
-    assert copy_blocks.call_count == expected_copies
+    assert copy_blocks.call_count == int(is_host_writer)
     tp_group.barrier.assert_called_once_with()
     assert worker.take_completed_host_copies() == [1]
     assert worker.take_completed_host_copies() == []

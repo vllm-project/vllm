@@ -132,7 +132,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             decode_context_parallel_size=1,
             world_size=2 if shared_host_pool else 1,
             distributed_executor_backend="mp",
-            nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,

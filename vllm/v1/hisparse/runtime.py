@@ -15,7 +15,7 @@ import psutil
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -220,7 +220,7 @@ class HiSparseHostPool:
 
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
-    """Whether replicated MLA host KV can share one local mmap."""
+    """Whether replicated MLA host KV can share one mmap per node."""
     parallel = vllm_config.parallel_config
     return (
         current_platform.is_cuda_alike()
@@ -230,8 +230,13 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
         and parallel.decode_context_parallel_size == 1
         and parallel.world_size == parallel.tensor_parallel_size
         and parallel.distributed_executor_backend == "mp"
-        and parallel.nnodes_within_dp == 1
     )
+
+
+def get_hisparse_host_leader_rank(vllm_config: VllmConfig) -> int:
+    """TP rank that creates and writes this node's shared host pool."""
+    local_world_size = vllm_config.parallel_config.local_world_size
+    return get_tensor_model_parallel_rank() // local_world_size * local_world_size
 
 
 def get_hisparse_host_block_stride(
@@ -323,7 +328,7 @@ def allocate_hisparse_host_pools(
     *,
     use_shared_host_pool: bool,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], SharedOffloadRegion | None]:
-    """Allocate private host tensors or one mmap shared by local TP ranks."""
+    """Allocate private host tensors or one mmap shared by each node's TP ranks."""
     if not use_shared_host_pool:
         check_hisparse_host_memory(sum(tensor_sizes))
         private_pools = [allocate_pinned_host_pool(size) for size in tensor_sizes]
@@ -336,7 +341,8 @@ def allocate_hisparse_host_pools(
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
-            f"dp{vllm_config.parallel_config.data_parallel_index}"
+            f"dp{vllm_config.parallel_config.data_parallel_index}_"
+            f"tp{get_hisparse_host_leader_rank(vllm_config)}"
         ),
         num_chunks=1,
         rank=0,
