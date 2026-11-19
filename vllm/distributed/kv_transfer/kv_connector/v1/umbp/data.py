@@ -78,20 +78,19 @@ def tp_replicated_group_ids(
 ) -> frozenset[int]:
     """Groups whose blocks are byte-identical on every TP rank.
 
-    Every layer must declare a single TP shard (`max_tp_shards=1`, e.g. MLA
-    latents and sparse indexers); context parallelism shards them, so it opts
-    out.
+    Every layer across PP stages must declare a single TP shard
+    (`max_tp_shards=1`, e.g. MLA latents and sparse indexers); context
+    parallelism shards them, so it opts out.
     """
     if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
         return frozenset()
     return frozenset(
         group_id
-        for group_id, group in enumerate(config.kv_cache_groups)
-        if group.enable_kv_transfer
-        and group.layer_names
+        for group_id in config.prefix_cacheable_group_ids
+        if (group := config.kv_cache_groups[group_id]).distinct_specs
         and all(
             isinstance(spec, AttentionSpec) and spec.max_tp_shards == 1
-            for spec in group.kv_cache_specs.values()
+            for spec in group.distinct_specs
         )
     )
 

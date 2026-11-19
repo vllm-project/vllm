@@ -30,7 +30,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
 )
 from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -76,13 +76,17 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -702,6 +706,114 @@ def test_pp_stage_without_a_cache_group_is_rejected(monkeypatch):
             KVConnectorRole.WORKER,
             config,
         )
+
+
+def _pp_connector_config(rank: int, tp_size: int = 2) -> VllmConfig:
+    config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        max_model_len=128,
+        kv_connector_extra_config={"mode": "standalone", "key_namespace": "pp"},
+    )
+    return VllmConfig(
+        model_config=config.model_config,
+        scheduler_config=config.scheduler_config,
+        cache_config=config.cache_config,
+        kv_transfer_config=config.kv_transfer_config,
+        device_config=config.device_config,
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            pipeline_parallel_size=2,
+            rank=rank,
+            distributed_executor_backend="mp",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "group_kind", ["mixed", "replicated", "nontransferable", "noncacheable"]
+)
+def test_pp_handshake_uses_global_cacheable_group_specs(monkeypatch, group_kind):
+    """Mixed groups keep every TP key; stage-local groups outside UMBP's
+    prefix objects affect neither startup nor the replication decision."""
+
+    class SharedMemoryRuntime(MemoryRuntime):
+        shares_pool_across_ranks = True
+
+    runtime = SharedMemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    all_replicated = group_kind == "replicated"
+    replicated = replace(_LAYER1_SPEC, max_tp_shards=1)
+    layer_configs = {
+        "layer0": FullAttentionManager.layer_config(
+            replicated if group_kind in ("mixed", "replicated") else _LAYER2_SPEC
+        ),
+        "layer1": FullAttentionManager.layer_config(
+            replicated if all_replicated else _LAYER2_SPEC
+        ),
+    }
+    global_groups = [KVCacheGroup.from_layers(layer_configs)]
+    stage_layers = [
+        {"layer0": layer_configs["layer0"]},
+        {"layer1": layer_configs["layer1"]},
+    ]
+    if group_kind in ("nontransferable", "noncacheable"):
+        manager = (
+            CircularBufferManager
+            if group_kind == "noncacheable"
+            else FullAttentionManager
+        )
+        inactive = {"other_stage": manager.layer_config(replicated)}
+        global_groups.append(
+            KVCacheGroup.from_layers(
+                inactive, enable_kv_transfer=group_kind != "nontransferable"
+            )
+        )
+        stage_layers[1].update(inactive)
+    stage_configs = [
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=_project_kv_cache_groups_to_worker(global_groups, layers),
+        )
+        for layers in stage_layers
+    ]
+    workers = []
+    scheduler = UMBPStoreConnector(
+        _pp_connector_config(0), KVConnectorRole.SCHEDULER, stage_configs[0]
+    )
+    try:
+        for rank in range(4):
+            workers.append(
+                UMBPStoreConnector(
+                    _pp_connector_config(rank),
+                    KVConnectorRole.WORKER,
+                    stage_configs[rank // 2],
+                )
+            )
+        scheduler.set_xfer_handshake_metadata_pp_aware(
+            {
+                (rank // 2, rank % 2): worker.get_handshake_metadata()
+                for rank, worker in enumerate(workers)
+            }
+        )
+        assert all(
+            config.prefix_cacheable_group_ids == (0,) for config in stage_configs
+        )
+        codec = scheduler.connector_scheduler.codec
+        assert codec.replicated_groups == ({0} if all_replicated else set())
+        keys = codec.keys_for_topology(
+            b"block", RankTopology(tp_size=2, pp_size=2), [0]
+        )
+        assert len(set(keys)) == (2 if all_replicated else 4)
+        for rank, worker in enumerate(workers):
+            worker_codec = worker.connector_worker.codec
+            assert worker_codec.key(b"block") in keys
+            assert worker_codec.stores_group(0) == (not all_replicated or rank % 2 == 0)
+    finally:
+        scheduler.shutdown()
+        for worker in workers:
+            worker.shutdown()
 
 
 def test_layout_planner_builds_scatter_gather_ranges():

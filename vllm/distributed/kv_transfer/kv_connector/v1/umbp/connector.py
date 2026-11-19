@@ -100,18 +100,17 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
 
 
 def _reject_stage_missing_groups(kv_cache_config: KVCacheConfig) -> None:
-    """Under PP a stage may hold no layers of a global cache group. Saving,
-    restoring and looking up keys all assume every stage holds every group,
-    so refuse such a layout at startup instead of failing on the first save."""
+    """Reject missing groups that participate in UMBP's prefix objects."""
     missing = [
         group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if not group.layer_names
+        for group_id in kv_cache_config.prefix_cacheable_group_ids
+        if not kv_cache_config.kv_cache_groups[group_id].layer_names
     ]
     if missing:
         raise NotImplementedError(
-            "UMBP with pipeline parallelism needs every KV cache group on every "
-            f"stage, but this stage holds no layers of cache groups {missing}"
+            "UMBP with pipeline parallelism needs every transferable, "
+            "prefix-cacheable KV cache group on every stage, but this stage "
+            f"holds no layers of cache groups {missing}"
         )
 
 
