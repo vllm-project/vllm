@@ -82,45 +82,27 @@ def _flashinfer_nvcc_path() -> str | None:
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
-# FlashInfer builds the CUTLASS FP4 GEMM used by the NVFP4 linear path with a
-# JIT job that runs one compiler process per CPU by default. Each of those
-# processes compiling the CUTLASS FP4 templates (``cicc``) holds several GiB
-# of host memory, so the default parallelism can OOM a machine that is
-# otherwise large enough to serve the model. Measured peak is ~6 GiB per job;
-# budget 8 GiB and stay below half of the memory that is actually free, so a
-# cold start leaves room for the model and the rest of the engine. An explicit
-# ``MAX_JOBS`` always wins.
+# Compiling the dense CUTLASS NVFP4 kernel has used ~6 GiB per compiler job.
 _FLASHINFER_JIT_JOB_BYTES = 8 * 1024**3
 
 
-def limit_flashinfer_jit_parallelism() -> int | None:
-    """Clamp FlashInfer's JIT build parallelism to available host memory.
-
-    FlashInfer runs ``ninja`` with one job per CPU unless ``MAX_JOBS`` is set.
-    For the CUTLASS FP4 GEMM of the NVFP4 linear path each job holds several
-    GiB, so a cold start on a many-core, low-memory host is OOM-killed during
-    engine initialization (issue #46268). Set ``MAX_JOBS`` from the memory that
-    is actually available, unless the user already configured it.
-
-    Returns the parallelism that was chosen, or ``None`` when ``MAX_JOBS`` was
-    already set.
-    """
-    if os.getenv("MAX_JOBS") is not None:
-        return None
+@functools.cache
+def _limit_flashinfer_jit_parallelism() -> None:
+    """Set a worker-wide Ninja default at the first dense CUTLASS NVFP4 GEMM."""
+    if "MAX_JOBS" in os.environ:
+        return
 
     available = get_available_memory()
-    # Half of the free memory, so the build cannot starve the model.
     jobs = max(1, (available // 2) // _FLASHINFER_JIT_JOB_BYTES)
     jobs = min(jobs, os.cpu_count() or 1)
 
-    os.environ["MAX_JOBS"] = str(jobs)
+    max_jobs = os.environ.setdefault("MAX_JOBS", str(jobs))
     logger.info_once(
-        "Limiting FlashInfer JIT build parallelism to %d job(s): %.1f GiB "
+        "Using MAX_JOBS=%s for FlashInfer JIT compilation: %.1f GiB "
         "of host memory is available. Set MAX_JOBS to override.",
-        jobs,
+        max_jobs,
         available / 1024**3,
     )
-    return jobs
 
 
 @functools.cache
@@ -1009,6 +991,8 @@ if has_flashinfer():
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
+        if backend == "cutlass" and use_nvfp4:
+            _limit_flashinfer_jit_parallelism()
         return flashinfer_mm_fp4_(
             A,
             B,
