@@ -219,8 +219,8 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decod
 
 @pytest.mark.parametrize(
     "num_decodes,num_tokens,resident",
-    [(4, 4, False), (0, 4, True), (0, 4, False), (1, 4, False)],
-    ids=["decode", "resident_prefill", "staged_prefill", "mixed"],
+    [(4, 4, False), (0, 4, True), (0, 4, False), (1, 4, False), (1, 4, True)],
+    ids=["decode", "resident_prefill", "staged_prefill", "mixed", "resident_mixed"],
 )
 def test_hisparse_forward_reads_physical_caches(
     monkeypatch, num_decodes, num_tokens, resident
@@ -278,11 +278,16 @@ def test_hisparse_forward_reads_physical_caches(
 
     assert out.shape == (num_tokens, impl.num_heads, HEAD)
     expected_runs = []
-    if num_decodes or resident:
-        expected_runs.append((state, hot, 7, num_decodes or num_tokens))
-    if num_prefill and not resident:
+    if num_decodes:
+        expected_runs.append((state, hot, 7, num_decodes))
+    if num_prefill:
         prefill_runs_on = prefill_state if num_decodes else state
-        expected_runs.append((prefill_runs_on, staged, 2 * BLOCK_SIZE + 3, num_prefill))
+        if resident:
+            expected_runs.append((prefill_runs_on, hot, 7, num_prefill))
+        else:
+            expected_runs.append(
+                (prefill_runs_on, staged, 2 * BLOCK_SIZE + 3, num_prefill)
+            )
     if num_decodes == 0:
         assert prefill_state.wrapper.run_args is None
     for fake, cache, slot, rows in expected_runs:
