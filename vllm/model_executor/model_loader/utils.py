@@ -24,10 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.model_loader.reload import (
-    record_metadata_for_reloading,
-    set_torchao_reload_attrs,
-)
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     check_ipc_quant_support,
@@ -220,11 +217,6 @@ def process_weights_after_loading(
             release_device_memory_under_pressure(target_device)
 
     finalize_model_weights(model, target_device)
-
-    # Needed for torchao model reloading via model.reload_weights
-    # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
-    if model_config.quantization == "torchao":
-        set_torchao_reload_attrs(model, model_config)
 
 
 @contextmanager

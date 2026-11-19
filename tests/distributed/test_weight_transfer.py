@@ -1789,6 +1789,65 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         engine.receive_weights(update_info)
 
 
+def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
+    """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
+    `bufs[i]`."""
+    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
+    import vllm.model_executor.model_loader.reload as reload_mod
+
+    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
+    monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
+    monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
+    model = MagicMock(spec=torch.nn.Module)
+    model.load_weights = MagicMock()
+    engine = IPCWeightTransferEngine(
+        WeightTransferConfig(backend="ipc"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        model,
+    )
+    engine.init_transfer_engine(IPCWeightTransferInitInfo(packed=True))
+    return engine, model
+
+
+def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False):
+    return IPCWeightTransferUpdateInfo(
+        names=names,
+        dtype_names=["float32"] * len(names),
+        shapes=[[n]] * len(names),
+        ipc_handles=handle,
+        chunk_capacity=16 if handle else None,
+        last=last,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
+    """Only each transfer's first chunk carries the handle; finishing before
+    the last chunk raises."""
+    bufs = [
+        torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
+        for k in (0, 4)
+    ]
+    engine, model = _packed_ipc_engine(monkeypatch, bufs)
+    uuid = str(torch.cuda.get_device_properties(0).uuid)
+    starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
+    rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
+
+    engine.start_weight_update()
+    for start in starts:
+        engine.receive_weights(start)
+        engine.receive_weights(rest)
+    engine.finish_weight_update()
+    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
+    assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
+
+    engine.start_weight_update()
+    engine.receive_weights(starts[0])
+    with pytest.raises(RuntimeError, match="before its last chunk"):
+        engine.finish_weight_update()
+
+
 class RecordingClient:
     """A fake VLLMWeightSyncClient that records the order of calls."""
 
