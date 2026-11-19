@@ -3074,19 +3074,8 @@ class VllmConfig:
         """Size the GPU budget for `prompt_embeds` rows so any request fits."""
         model_config = self.model_config
         if model_config is None or not model_config.enable_prompt_embeds:
-            return  # No need to resolve if prompt embeds are not enabled.
-        max_model_len = model_config.max_model_len
-        requested = self.scheduler_config.max_num_prompt_embeds_tokens
-        if requested is not None and requested < max_model_len:
-            logger.warning(
-                "Raising max_num_prompt_embeds_tokens from %d to max_model_len "
-                "(%d) so that any request fits.",
-                requested,
-                max_model_len,
-            )
-        self.scheduler_config.max_num_prompt_embeds_tokens = max(
-            requested or 0, max_model_len
-        )
+            return
+        self.scheduler_config.max_num_prompt_embeds_tokens = model_config.max_model_len
 
     def _resolve_mm_embedding_inputs(self) -> None:
         """Accept embedding inputs, tensor optional, on disaggregated consumers.
