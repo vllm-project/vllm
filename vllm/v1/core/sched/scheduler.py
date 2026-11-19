@@ -61,6 +61,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import (
     check_stop,
+    prompt_embeds_budget_rows,
     remove_all,
 )
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -226,7 +227,9 @@ class Scheduler(SchedulerInterface):
         # Prompt-embeds rows the workers may hold on the GPU, summed over the
         # requests whose prompts are not computed yet: one max-length prompt, so
         # any request fits. Memory profiling reserves it.
-        self.max_num_prompt_embeds_tokens = self.max_model_len
+        self.max_num_prompt_embeds_tokens = prompt_embeds_budget_rows(
+            self.max_model_len, self.scheduler_config
+        )
         self.prompt_embeds_rows: dict[str, int] = {}
         self.num_prompt_embeds_rows = 0
 

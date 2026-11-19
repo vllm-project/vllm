@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.core.sched.utils import prompt_embeds_budget_rows
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -54,7 +55,7 @@ class DefaultModelState(ModelState):
             )
             self.prompt_embeds_state = PromptEmbedsState(
                 self.max_num_reqs,
-                self.max_model_len,
+                prompt_embeds_budget_rows(self.max_model_len, self.scheduler_config),
                 self.inputs_embeds_size,
                 self.dtype,
                 self.device,

@@ -10,18 +10,34 @@ from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import SchedulerConfig, VllmConfig
 
 
-def prompt_embeds_bytes_per_token(vllm_config: "VllmConfig") -> int:
-    """GPU memory per token of `max_model_len` for the `prompt_embeds` rows the
-    workers hold. The scheduler admits rows up to `max_model_len`, so memory
-    planning sets this aside per token, like the KV cache."""
+def prompt_embeds_budget_rows(
+    max_model_len: int, scheduler_config: "SchedulerConfig"
+) -> int:
+    """`prompt_embeds` rows the workers may hold at once, summed over the
+    requests whose prompts are not computed yet: one max-length prompt still
+    being prefilled plus a full step of new prompts."""
+    return max_model_len + scheduler_config.max_num_batched_tokens
+
+
+def prompt_embeds_row_bytes(vllm_config: "VllmConfig") -> int:
+    """GPU memory of one `prompt_embeds` row, or 0 without prompt embeds."""
     model_config = vllm_config.model_config
-    if model_config is None or not model_config.enable_prompt_embeds:
+    if not model_config.enable_prompt_embeds:
         return 0
     assert isinstance(model_config.dtype, torch.dtype)
     return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
+
+
+def prompt_embeds_budget_bytes(vllm_config: "VllmConfig", max_model_len: int) -> int:
+    """GPU memory the workers may hold for `prompt_embeds` rows with this
+    `max_model_len`; memory planning sets it aside like the KV cache."""
+    if not (row_bytes := prompt_embeds_row_bytes(vllm_config)):
+        return 0
+    rows = prompt_embeds_budget_rows(max_model_len, vllm_config.scheduler_config)
+    return rows * row_bytes
 
 
 def _has_repeating_pattern(
