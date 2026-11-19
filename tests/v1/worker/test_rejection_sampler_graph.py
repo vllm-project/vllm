@@ -60,6 +60,7 @@ def _make_inputs(
         expanded_local_pos,
         temperature,
         seed,
+        steps,
     )
 
 
