@@ -41,6 +41,10 @@ from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.last_layer_ffn import (
+    apply_pruned_last_ffn,
+    restore_pruned_last_ffn,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -50,7 +54,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.utils import use_output_lora_mapping
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -316,7 +319,6 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        last_layer_token_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -325,18 +327,12 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-
-        # Attention has already written KV for every prompt token.
-        if last_layer_token_indices is not None:
-            hidden_states = hidden_states.index_select(0, last_layer_token_indices)
-            residual = residual.index_select(0, last_layer_token_indices)
-        # Fully Connected
+        if getattr(self, "prune_last_ffn", False):
+            return apply_pruned_last_ffn(
+                hidden_states, residual, self.post_attention_layernorm, self.mlp
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if last_layer_token_indices is None:
-            hidden_states = self.mlp(hidden_states)
-        else:
-            with use_output_lora_mapping(self.mlp):
-                hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
@@ -401,6 +397,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
             lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
+        if self.end_layer > self.start_layer:
+            self.layers[self.end_layer - 1].prune_last_ffn = True
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -419,11 +417,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-        last_layer_token_indices: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if not get_pp_group().is_last_rank:
-            last_layer_token_indices = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -444,18 +439,9 @@ class LlamaModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if last_layer_token_indices is not None and idx == self.end_layer - 1:
-                hidden_states, residual = layer(
-                    positions,
-                    hidden_states,
-                    residual,
-                    last_layer_token_indices=last_layer_token_indices,
-                    **extra_layer_kwargs,
-                )
-            else:
-                hidden_states, residual = layer(
-                    positions, hidden_states, residual, **extra_layer_kwargs
-                )
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **extra_layer_kwargs
+            )
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -470,13 +456,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        if last_layer_token_indices is not None:
-            output = hidden_states.new_zeros(
-                (positions.shape[-1], hidden_states.shape[-1])
-            )
-            hidden_states = output.index_copy_(
-                0, last_layer_token_indices, hidden_states
-            )
+        hidden_states = restore_pruned_last_ffn(hidden_states, positions.shape[-1])
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -570,17 +550,11 @@ class LlamaForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        last_layer_token_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if last_layer_token_indices is not None:
-            return self.model(
-                input_ids,
-                positions,
-                intermediate_tensors,
-                inputs_embeds,
-                last_layer_token_indices=last_layer_token_indices,
-            )
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        model_output = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return model_output
 
     def compute_logits(
         self,
