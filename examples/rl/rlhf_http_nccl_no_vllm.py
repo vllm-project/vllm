@@ -55,6 +55,8 @@ parser.add_argument("--packed", action="store_true")
 parser.add_argument("--packed-buffer-size-bytes", type=int, default=64 << 20)
 parser.add_argument("--store-port", type=int, default=29612)
 args = parser.parse_args()
+if args.packed_buffer_size_bytes < 16:
+    parser.error("--packed-buffer-size-bytes must be at least 16")
 
 
 def post(path: str, body: dict | None = None) -> dict:
