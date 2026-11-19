@@ -162,6 +162,7 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
@@ -205,6 +206,7 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -256,6 +258,7 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
     for layer in range(2):
         specs[f"model.layers.{layer}.self_attn"] = MLAAttentionSpec(
             head_size=576,
+            cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
             block_stride_alignment=source_alignment,
             **mla,
@@ -296,7 +299,10 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
-            head_size=576, is_index_group_leader=True, **mla
+            head_size=576,
+            cache_role=SparseCacheRole.SPARSE,
+            is_index_group_leader=True,
+            **mla,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             head_size=128,

@@ -57,6 +57,8 @@ pub struct LlmInfo {
     pub model_dtype: Option<ModelDtype>,
     /// Whether the engine was started with LoRA support.
     pub supports_lora: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    pub allow_missing_mm_embeddings: bool,
     /// vLLM version of the engine.
     pub vllm_version: String,
 }
@@ -159,6 +161,7 @@ impl EngineCoreLlm {
             max_model_len: client.max_model_len(),
             model_dtype: Some(client.model_dtype()),
             supports_lora: client.ready_response().supports_lora,
+            allow_missing_mm_embeddings: client.ready_response().allow_missing_mm_embeddings,
             vllm_version: client.vllm_version().to_string(),
         };
         Self {
