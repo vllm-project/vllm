@@ -18,6 +18,9 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MambaSpec
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear_attention.lifecycle import (
+        StepLifecycleOwner,
+    )
     from vllm.model_executor.layers.linear_attention.mamba2.decode.base import (
         MambaSSUKernel,
     )
@@ -32,15 +35,16 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
-    use_replayssm: bool = False
-    use_flashinfer_replayssm: bool = False
-    use_replayssm_trackers: bool = False
     state_alignment: int = 1
     # The kernels the layer selected, which its metadata builder prepares
     # inputs for; None for those it doesn't run.
     ssu_kernel: "type[MambaSSUKernel] | None" = None
-    _replayssm_ring_start: torch.Tensor
-    _replayssm_prev_num_accepted: torch.Tensor
+
+    @property
+    def step_lifecycle_owner(self) -> "type[StepLifecycleOwner] | None":
+        """What builds this layer's per-step work outside the forward
+        (`make_step_lifecycle`): its decode kernel, if it selected one."""
+        return self.ssu_kernel
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.

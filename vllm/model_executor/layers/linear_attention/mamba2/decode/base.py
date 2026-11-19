@@ -73,7 +73,8 @@ class MambaSSUKernel(LinearAttnKernel):
     @classmethod
     def is_replayssm(cls) -> bool:
         """Whether this kernel also reads and fills the layer's input rings
-        (`--use-replayssm`)."""
+        (`--use-replayssm`): plain kernels can't run on a ReplaySSM cache, and
+        ReplaySSM kernels need one."""
         return False
 
     @classmethod
@@ -99,6 +100,10 @@ class MambaSSUKernel(LinearAttnKernel):
     @classmethod
     def validate_configuration(cls, cfg: LinearAttnSelectorConfig) -> list[str]:
         reasons = super().validate_configuration(cfg)
+        if cfg.use_replayssm and not cls.is_replayssm():
+            reasons.append("--use-replayssm not supported")
+        if cls.is_replayssm() and not cfg.use_replayssm:
+            reasons.append("requires --use-replayssm")
         if cfg.use_stochastic_rounding and not cls.supports_stochastic_rounding():
             reasons.append("stochastic rounding not supported")
         if cfg.use_ssu_algorithm and not cls.supports_ssu_algorithm():

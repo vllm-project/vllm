@@ -3824,24 +3824,10 @@ class VllmConfig:
         self.cache_config.use_kda_recoverssm = (
             self.num_speculative_tokens > 0 and is_kda_model
         )
-        use_mamba_replayssm_spec = (
-            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
-        )
-
-        # ReplaySSM isn't a selected kernel yet: it runs Triton unless
-        # FlashInfer is requested.
-        backend = self.mamba_config.backend or MambaBackendEnum.TRITON
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
-            )
-        if (
-            backend == MambaBackendEnum.FLASHINFER
-            and self.cache_config.replayssm_buffer_len > 16
-        ):
-            raise ValueError(
-                "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
             )
         if self.cache_config.use_kda_recoverssm:
             if self.mamba_config.enable_stochastic_rounding:
@@ -3854,63 +3840,8 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
-            if backend != MambaBackendEnum.TRITON:
+            if self.mamba_config.backend not in (None, MambaBackendEnum.TRITON):
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif backend not in (
-            MambaBackendEnum.TRITON,
-            MambaBackendEnum.FLASHINFER,
-        ):
-            raise ValueError(
-                "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
-        elif backend == MambaBackendEnum.FLASHINFER or use_mamba_replayssm_spec:
-            is_flashinfer = backend == MambaBackendEnum.FLASHINFER
-            name = (
-                "FlashInfer ReplaySSM"
-                if is_flashinfer
-                else "Triton ReplaySSM speculative decoding"
-            )
-            if (
-                is_flashinfer
-                and self.cache_config.enable_prefix_caching
-                and self.model_config is not None
-                and self.model_config.dtype != torch.bfloat16
-            ):
-                raise ValueError(
-                    "FlashInfer ReplaySSM with prefix caching requires bfloat16 "
-                    "model inputs for its replay rings; SSM state cache dtype is "
-                    "independent"
-                )
-            if not is_flashinfer and self.mamba_config.enable_stochastic_rounding:
-                raise ValueError(
-                    f"{name} does not support --enable-mamba-cache-stochastic-rounding"
-                )
-            if self.parallel_config.use_ubatching:
-                raise ValueError(f"{name} does not support microbatching")
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(f"{name} currently requires pipeline_parallel_size=1")
-            if use_mamba_replayssm_spec:
-                query_len = 1 + self.num_speculative_tokens
-                if self.cache_config.replayssm_buffer_len < query_len:
-                    raise ValueError(
-                        "ReplaySSM speculative decoding requires "
-                        "--replayssm-buffer-len >= 1 + num_speculative_tokens "
-                        f"({query_len}); got "
-                        f"{self.cache_config.replayssm_buffer_len}"
-                    )
-        if (
-            backend == MambaBackendEnum.TRITON
-            and not self.cache_config.use_kda_recoverssm
-            and self.mamba_config.enable_stochastic_rounding
-            and current_platform.is_cuda()
-            and not current_platform.is_device_capability_family(100)
-        ):
-            raise ValueError(
-                "Triton ReplaySSM with stochastic rounding requires compute "
-                "capability 10.x (the `cvt.rs` PTX instruction). Set "
-                "`--mamba-backend flashinfer`, or omit "
-                "`--enable-mamba-cache-stochastic-rounding`."
-            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance

@@ -240,6 +240,8 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba2/decode/
+    - vllm/model_executor/layers/linear_attention/replayssm/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/
@@ -295,6 +297,8 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba2/decode/
+    - vllm/model_executor/layers/linear_attention/replayssm/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/
@@ -350,6 +354,8 @@ steps:
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/layers/linear_attention/mamba2/decode/
+    - vllm/model_executor/layers/linear_attention/replayssm/
     - vllm/model_executor/models/nemotron_h.py
     - vllm/model_executor/models/qwen3_5.py
     - vllm/models/qwen3_5/

@@ -139,9 +139,9 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
 
-    # ReplaySSM standard decode: per-row ring cursor and flush flag. The first
-    # layer of each cache group fills them on the GPU from per-slot ring
-    # counters (see plan_replayssm_decode); prefix caching also reads the rows'
+    # ReplaySSM standard decode: per-row ring cursor and flush flag. The model
+    # runner fills them on the GPU from per-slot ring counters before the
+    # forward (see plan_replayssm_decode); prefix caching also reads the rows'
     # sequence lengths. None unless use_replayssm is enabled.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
@@ -161,6 +161,20 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+
+    def replayssm_step_slots(
+        self,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """The slots whose rings the step's prefills empty, and the decode
+        rows' slots that ReplaySSM plans: every row of a decode-only batch,
+        full-CUDA-graph padding included, else the leading decode rows."""
+        prefill_slots = self.prefill_state_indices if self.num_prefills else None
+        decode_slots = None
+        if self.write_pos_d is not None:
+            assert self.non_spec_state_indices_tensor is not None
+            rows = self.num_decodes if self.num_prefills else self.num_actual_tokens
+            decode_slots = self.non_spec_state_indices_tensor[:rows]
+        return prefill_slots, decode_slots
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):

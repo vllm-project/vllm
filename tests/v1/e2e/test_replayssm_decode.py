@@ -497,12 +497,13 @@ def _leave_rings_mid_way(worker) -> None:
     groups' pages, so this is safe only while no block holds data."""
     from vllm.config import get_layers_from_vllm_config
     from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.v1.worker.replayssm_utils import replayssm_state, uses_replayssm
 
     vllm_config = worker.vllm_config
     layers = get_layers_from_vllm_config(vllm_config, MambaBase)  # type: ignore[type-abstract]
     for layer in layers.values():
-        if layer.use_replayssm:
-            layer._replayssm_ring_start.fill_(
+        if uses_replayssm(layer):
+            replayssm_state(layer).ring_start.fill_(
                 vllm_config.cache_config.replayssm_buffer_len // 2
             )
             for ring in layer.kv_cache[2:]:

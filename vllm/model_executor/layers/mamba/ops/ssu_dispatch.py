@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ReplaySSM decode planner and FlashInfer ReplaySSM entry. The plain SSU
-decode kernels are in `linear_attention/mamba2/decode/`."""
+"""The Triton ReplaySSM decode planner and the FlashInfer ReplaySSM entry,
+used by the ReplaySSM decode kernels in `linear_attention/mamba2/decode/`."""
 
 import math
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import cache
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config.cache import CacheConfig
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
-from vllm.logger import init_logger
+from vllm.model_executor.layers.linear_attention.replayssm.state import (
+    ReplaySSMLayerState,
+)
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear_attention.lifecycle import GroupLayers
 
 
 @triton.jit(
@@ -78,8 +80,8 @@ def plan_replayssm_decode(
     `ring_pos[slot]` counts the tokens buffered since the slot's last
     full-state write. For each decode row this writes the step's
     `write_pos`/`is_flush` (read by every layer of the cache group) and
-    advances the slot's counter, so the runner supplies no ring metadata.
-    Prefill resets the counters in the same layer.
+    advances the slot's counter. `ReplaySSMRingPlanner` calls it once per cache
+    group and step, after emptying the rings of the step's prefill slots.
 
     With `align_block_size` > 0 (prefix caching, see
     `get_replayssm_align_block_size`), the ring restarts at the first step of
@@ -111,6 +113,51 @@ def plan_replayssm_decode(
     )
 
 
+@dataclass
+class ReplaySSMRingPlanner:
+    """The step lifecycle of ReplaySSM decodes that read planned ring
+    positions (Triton standard decode, Gated DeltaNet): before each forward,
+    per cache group, it empties the rings of the step's prefill slots and
+    plans the step's decode rows."""
+
+    # One layer per group: the group's layers share its metadata and state.
+    groups: list[tuple[str, ReplaySSMLayerState]]
+
+    @classmethod
+    def from_groups(
+        cls, layers_by_group: "Sequence[GroupLayers]"
+    ) -> "ReplaySSMRingPlanner":
+        groups = []
+        for layers in layers_by_group:
+            name, layer = layers[0]
+            assert isinstance(layer.ssu_state, ReplaySSMLayerState)
+            groups.append((name, layer.ssu_state))
+        return cls(groups)
+
+    def record_step(self, attn_metadata: Mapping[str, Any]) -> None:
+        """The forward reads no prefill slot's ring, and decode reads only the
+        planned rows. Capture's null slots plan as no-ops, which compiles the
+        planner before serving."""
+        for name, state in self.groups:
+            metadata = attn_metadata.get(name)
+            # Memory profiling builds no Mamba metadata.
+            if metadata is None:
+                continue
+            prefill_slots, decode_slots = metadata.replayssm_step_slots()
+            if prefill_slots is not None:
+                state.ring_start.index_fill_(0, prefill_slots.long(), 0)
+            if decode_slots is not None:
+                plan_replayssm_decode(
+                    state.ring_start,
+                    decode_slots,
+                    metadata.write_pos_d,
+                    metadata.is_flush_d,
+                    buffer_len=state.buffer_len,
+                    seq_lens=metadata.replayssm_seq_lens_d,
+                    align_block_size=metadata.replayssm_align_block_size,
+                )
+
+
 def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -> int:
     """`plan_replayssm_decode` alignment for a Mamba group with prefix caching.
 
@@ -125,9 +172,6 @@ def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -
     return math.gcd(block_size, cache_config.prefix_match_unit)
 
 
-_flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
-
-
 @cache
 def flashinfer_replayssm_autotune_supported() -> bool:
     """Return True when FlashInfer exposes ReplaySSM autotuning."""
@@ -138,6 +182,13 @@ def flashinfer_replayssm_autotune_supported() -> bool:
     except ImportError:
         return False
     return True
+
+
+@cache
+def _checkpointing_ssu():
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    return checkpointing_ssu
 
 
 def selective_state_update_replayssm_flashinfer(
@@ -171,12 +222,6 @@ def selective_state_update_replayssm_flashinfer(
     With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
     refreshed by the caller each step; without one, a seed is drawn here.
     """
-    if _flashinfer_replayssm_kernel is None:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM has not been initialized. "
-            "Call initialize_mamba_ssu_backend() with use_replayssm=True."
-        )
-
     if x.dim() == 3:
         dim = 0 if cu_seqlens is not None else 1
         x = x.unsqueeze(dim)
@@ -199,7 +244,7 @@ def selective_state_update_replayssm_flashinfer(
         rand_seed = torch.randint(
             0, 2**32, (1,), device=state.device, dtype=torch.int64
         )
-    return _flashinfer_replayssm_kernel(
+    return _checkpointing_ssu()(
         state,
         x_cache,
         B_cache,
@@ -226,38 +271,3 @@ def selective_state_update_replayssm_flashinfer(
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
     )
-
-
-def initialize_mamba_ssu_backend(
-    mamba_config: MambaConfig,
-    kv_cache_config: KVCacheConfig,
-    *,
-    use_replayssm: bool = False,
-) -> None:
-    """Load FlashInfer's ReplaySSM kernel when ReplaySSM decodes on FlashInfer.
-
-    Layers select their SSU kernels themselves (`select_mamba_ssu_kernel`);
-    this is removed once ReplaySSM is selected the same way.
-    """
-    if not any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
-        for g in kv_cache_config.kv_cache_groups
-        for spec in g.kv_cache_specs.values()
-    ):
-        return
-
-    global _flashinfer_replayssm_kernel
-    _flashinfer_replayssm_kernel = None
-    if not use_replayssm:
-        return
-    backend = mamba_config.backend or MambaBackendEnum.TRITON
-    if backend == MambaBackendEnum.FLASHINFER:
-        try:
-            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
-        except ImportError as e:
-            raise ImportError(
-                "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
-            ) from e
-        _flashinfer_replayssm_kernel = checkpointing_ssu
-    logger.info("Using %s ReplaySSM backend.", backend.value)

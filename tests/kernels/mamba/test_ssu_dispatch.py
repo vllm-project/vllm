@@ -22,6 +22,18 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.cpu import CPUSSU
 from vllm.model_executor.layers.linear_attention.mamba2.decode.flashinfer import (
     FlashInferSSUKernel,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base import (
+    MambaReplaySSMLayerState,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton import (
+    TritonReplaySSMKernel,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton_spec import (  # noqa: E501
+    TritonReplaySSMSpecKernel,
+)
 from vllm.model_executor.layers.linear_attention.mamba2.decode.selector import (
     SSU_KERNELS,
 )
@@ -65,13 +77,6 @@ requires_gpu = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(autouse=True)
-def restore_replayssm_kernel():
-    old = ssu_dispatch._flashinfer_replayssm_kernel
-    yield
-    ssu_dispatch._flashinfer_replayssm_kernel = old
-
-
 def _device_ints(values):
     return torch.tensor(values, dtype=torch.int32, device=DEVICE)
 
@@ -79,12 +84,15 @@ def _device_ints(values):
 def _replayssm_mixer(kv_cache, ring_start, committed, A):
     return SimpleNamespace(
         kv_cache=kv_cache,
-        _replayssm_ring_start=ring_start,
-        _replayssm_prev_num_accepted=committed,
-        replayssm_buffer_len=16,
+        ssu_state=MambaReplaySSMLayerState(
+            buffer_len=16,
+            num_spec=0,
+            ring_start=ring_start,
+            prev_num_accepted=committed,
+        ),
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
-        use_flashinfer_replayssm=True,
+        ssu_kernel=FlashInferReplaySSMKernel,
     )
 
 
@@ -238,10 +246,10 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         {**histories[2], 14: histories[2][15], 17: (0, 0)},
     ]
     for (mixers, _, _), expected in zip(grouped, reset_histories, strict=True):
-        assert mixers[0]._replayssm_ring_start.tolist() == [
+        assert mixers[0].ssu_state.ring_start.tolist() == [
             expected.get(slot, (0, 0))[0] for slot in range(slots)
         ]
-        assert mixers[0]._replayssm_prev_num_accepted.tolist() == [
+        assert mixers[0].ssu_state.prev_num_accepted.tolist() == [
             expected.get(slot, (0, 0))[1] for slot in range(slots)
         ]
     metadata = dict(
@@ -274,8 +282,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     for names, (mixers, _, _), table in zip(
         layer_names, grouped, block_tables, strict=True
     ):
-        starts = mixers[0]._replayssm_ring_start
-        committed = mixers[0]._replayssm_prev_num_accepted
+        starts = mixers[0].ssu_state.ring_start
+        committed = mixers[0].ssu_state.prev_num_accepted
         for row, (start, flush) in plans.items():
             dst, src = table[row]
             if dst == null:
@@ -398,8 +406,8 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4
-    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 3, 0, 3]
-    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
+    assert mixer.ssu_state.ring_start.tolist() == [3, 0, 0, 3, 0, 3]
+    assert mixer.ssu_state.prev_num_accepted.tolist() == [2, 0, 0, 2, 0, 2]
 
 
 SM90 = (PlatformEnum.CUDA, DeviceCapability(9, 0))
@@ -413,6 +421,12 @@ def _cfg(
     state_dtype=torch.float32,
     stochastic_rounding=False,
     ssu_algorithm=None,
+    use_replayssm=False,
+    num_spec=0,
+    buffer_len=16,
+    prefix_caching=False,
+    model_dtype=torch.bfloat16,
+    pp_size=1,
 ):
     """A Nemotron-like Mamba2 layer."""
     spec = MambaSpec(
@@ -425,9 +439,14 @@ def _cfg(
         platform,
         capability,
         spec,
-        torch.bfloat16,
+        model_dtype,
         use_stochastic_rounding=stochastic_rounding,
         use_ssu_algorithm=ssu_algorithm is not None,
+        use_replayssm=use_replayssm,
+        replayssm_buffer_len=buffer_len,
+        num_speculative_tokens=num_spec,
+        use_pipeline_parallel=pp_size > 1,
+        use_prefix_caching=prefix_caching,
     )
 
 
@@ -533,6 +552,186 @@ def test_unset_backend_selects_the_kernel_that_supports_the_options(cfg):
     assert _select(cfg) is FlashInferSSUKernel
 
 
+needs_flashinfer = pytest.mark.skipif(
+    not HAS_FLASHINFER, reason="flashinfer not installed"
+)
+
+
+@pytest.mark.parametrize(
+    ("backend", "num_spec", "expected"),
+    [
+        (None, 0, TritonReplaySSMKernel),
+        (MambaBackendEnum.TRITON, 0, TritonReplaySSMKernel),
+        (None, 3, TritonReplaySSMSpecKernel),
+        (MambaBackendEnum.TRITON, 3, TritonReplaySSMSpecKernel),
+        pytest.param(
+            MambaBackendEnum.FLASHINFER,
+            0,
+            FlashInferReplaySSMKernel,
+            marks=needs_flashinfer,
+        ),
+        pytest.param(
+            MambaBackendEnum.FLASHINFER,
+            3,
+            FlashInferReplaySSMKernel,
+            marks=needs_flashinfer,
+        ),
+    ],
+)
+def test_replayssm_kernel_follows_backend_and_speculation(backend, num_spec, expected):
+    """With --use-replayssm, the backend picks the provider (unset is Triton)
+    and speculative decoding picks between the two Triton kernels."""
+    assert (
+        _select(_cfg(*SM100, num_spec=num_spec, use_replayssm=True), backend)
+        is expected
+    )
+
+
+def test_plain_and_replayssm_kernels_reject_each_others_caches():
+    """Plain SSU would update the state without filling ReplaySSM's rings, and
+    ReplaySSM kernels need them."""
+    replay = _cfg(*SM100, use_replayssm=True)
+    for kernel in SSU_KERNELS:
+        cfg = BLACKWELL if kernel.is_replayssm() else replay
+        reasons = kernel.validate_configuration(cfg)
+        assert any("--use-replayssm" in reason for reason in reasons), kernel
+
+
+@pytest.mark.parametrize(
+    ("backend", "cfg", "reason"),
+    [
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(*SM100, buffer_len=17, use_replayssm=True),
+            "<= 16",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(PlatformEnum.CPU, None, use_replayssm=True),
+            "platform CPU",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(
+                *SM100,
+                prefix_caching=True,
+                model_dtype=torch.float16,
+                use_replayssm=True,
+            ),
+            "bfloat16 model inputs",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(*SM100, pp_size=2, use_replayssm=True),
+            "pipeline parallelism",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM100, num_spec=3, buffer_len=3, use_replayssm=True),
+            r"--replayssm-buffer-len >= 1 \+ num_speculative_tokens",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(
+                *SM100, num_spec=3, stochastic_rounding=True, **FP16, use_replayssm=True
+            ),
+            "stochastic rounding not supported",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM100, num_spec=3, pp_size=2, use_replayssm=True),
+            "pipeline parallelism",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM90, stochastic_rounding=True, **FP16, use_replayssm=True),
+            "capability 10",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(
+                PlatformEnum.ROCM,
+                DeviceCapability(9, 4),
+                stochastic_rounding=True,
+                **FP16,
+                use_replayssm=True,
+            ),
+            "gfx950",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM100, stochastic_rounding=True, use_replayssm=True),
+            "float16",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(*SM100, stochastic_rounding=True, use_replayssm=True),
+            "float16",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            _cfg(*SM100, ssu_algorithm="vertical", use_replayssm=True),
+            "algorithm",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM100, ssu_algorithm="vertical", use_replayssm=True),
+            "algorithm",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(*SM100, num_spec=3, ssu_algorithm="vertical", use_replayssm=True),
+            "algorithm",
+        ),
+        (
+            MambaBackendEnum.TRITON,
+            _cfg(PlatformEnum.CPU, None, use_replayssm=True),
+            "CPU",
+        ),
+    ],
+)
+def test_replayssm_kernel_that_cannot_run_fails_at_selection(backend, cfg, reason):
+    """The ReplaySSM checks that lived in `VllmConfig` are the kernels' own."""
+    with pytest.raises(ValueError, match=reason):
+        _select(cfg, backend)
+
+
+def test_triton_replayssm_standard_decode_keeps_pipeline_parallelism():
+    cfg = _cfg(*SM100, pp_size=2, use_replayssm=True)
+    assert _select(cfg, MambaBackendEnum.TRITON) is TritonReplaySSMKernel
+
+
+@pytest.mark.parametrize(
+    ("kernel", "num_spec", "trackers", "alignment", "ring_len"),
+    [
+        (TritonReplaySSMKernel, 0, False, 1, 16),
+        (TritonReplaySSMSpecKernel, 3, True, 1, 20),
+        (FlashInferReplaySSMKernel, 0, True, 16, 17),
+        (FlashInferReplaySSMKernel, 3, True, 16, 20),
+    ],
+)
+def test_replayssm_kernel_declares_its_cache_layout(
+    kernel, num_spec, trackers, alignment, ring_len
+):
+    """Config-time readers (state alignment, ring shapes, the runner's trackers)
+    ask the selected kernel instead of `VllmConfig`. Tracker kernels keep the
+    live and current verify windows in the ring."""
+    assert kernel.uses_ring_trackers is trackers
+    assert kernel.state_alignment == alignment
+    assert kernel.ring_len(16, num_spec) == ring_len
+
+
+@pytest.mark.parametrize("stochastic_rounding", [False, True])
+def test_only_flashinfer_replayssm_takes_a_shared_seed_slot(stochastic_rounding):
+    mamba_config = MambaConfig(enable_stochastic_rounding=stochastic_rounding)
+    assert (
+        FlashInferReplaySSMKernel.uses_rand_seed_slot(mamba_config)
+        is stochastic_rounding
+    )
+    for kernel in (TritonReplaySSMKernel, TritonReplaySSMSpecKernel):
+        assert not kernel.uses_rand_seed_slot(mamba_config)
+
+
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
 @pytest.mark.parametrize(
     ("algorithm", "expected"),
@@ -583,33 +782,12 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-@pytest.mark.parametrize(
-    ("backend", "num_speculative_tokens", "expected_ring_len"),
-    [
-        (MambaBackendEnum.TRITON, 0, 16),
-        (MambaBackendEnum.FLASHINFER, 0, 17),
-        (MambaBackendEnum.FLASHINFER, 3, 20),
-    ],
-)
-def test_replayssm_physical_ring_shape(
-    backend, num_speculative_tokens, expected_ring_len
-):
-    base_shapes = ((8, 4), (8, 4, 16))
-    shapes = MambaStateShapeCalculator.append_replayssm_ring(
-        base_shapes,
-        n_groups=4,
-        tp_world_size=2,
-        logical_window=16,
-        backend=backend,
-        num_speculative_tokens=num_speculative_tokens,
+def test_replayssm_physical_ring_shape():
+    shapes = MambaStateShapeCalculator.replayssm_ring_shapes(
+        (8, 4, 16), n_groups=4, tp_world_size=2, ring_len=20
     )
 
-    assert shapes == (
-        *base_shapes,
-        (8, expected_ring_len, 4),
-        (8, expected_ring_len),
-        (2, expected_ring_len, 16),
-    )
+    assert shapes == ((8, 20, 4), (8, 20), (2, 20, 16))
 
 
 @requires_gpu
@@ -699,52 +877,31 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
         pytest.param([0, 4, 6], (1, 6, 2, 4), (1, 6, 1, 8), 4, id="packed"),
     ],
 )
-def test_replayssm_mixer_selects_mtp_layout(
+def test_flashinfer_replayssm_selects_mtp_layout(
     monkeypatch,
     query_start_loc,
     expected_x_shape,
     expected_B_shape,
     expected_max_seqlen,
 ):
-    import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as dispatch
-
-    mixer = mod.MambaMixer2.__new__(mod.MambaMixer2)
-    torch.nn.Module.__init__(mixer)
-    mixer.prefix = "mixer"
-    mixer.tped_intermediate_size = 0
-    mixer.tped_conv_size = 1
-    mixer.tped_dt_size = 2
-    mixer.num_heads = 2
-    mixer.head_dim = 4
-    mixer.n_groups = mixer.tp_size = 1
-    mixer.ssm_state_size = 8
-    mixer.num_spec = 3
-    mixer.use_replayssm = True
-    mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
-    mixer.replayssm_buffer_len = 16
-    mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    mixer.cache_config = SimpleNamespace(
-        mamba_block_size=16, enable_prefix_caching=False
+    """Full verify windows go to FlashInfer as dense `(batch, 1 + num_spec)`
+    rows; a step with shorter rows goes packed with `cu_seqlens`."""
+    layer = SimpleNamespace(
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        kv_cache=(
+            torch.empty(3, 1),
+            torch.empty(3, 2, 4, 8),
+            torch.empty(3, 2, 20, 4),
+            torch.empty(3, 2, 20),
+            torch.empty(3, 1, 20, 8),
+        ),
+        ssu_state=MambaReplaySSMLayerState(
+            buffer_len=16,
+            num_spec=3,
+            ring_start=torch.zeros(3, dtype=torch.int32),
+            prev_num_accepted=torch.zeros(3, dtype=torch.int32),
+        ),
     )
-    mixer.conv_weights = torch.empty(0)
-    mixer.conv1d = SimpleNamespace(bias=None)
-    mixer.activation = "silu"
-    mixer.A = torch.empty(2)
-    mixer.dt_bias = torch.empty(2)
-    mixer.D = torch.empty(2)
-    mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
-    mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
-    mixer._replayssm_rand_seed = None
-    mixer._replayssm_rand_seeds = None
-    mixer.kv_cache = (
-        torch.empty(3, 1),
-        torch.empty(3, 2, 4, 8),
-        torch.empty(3, 2, 20, 4),
-        torch.empty(3, 2, 20),
-        torch.empty(3, 1, 20, 8),
-    )
-
     num_decode_tokens = query_start_loc[-1]
     query_start_loc_d = torch.tensor(query_start_loc, dtype=torch.int32)
     metadata = Mamba2AttentionMetadata(
@@ -763,29 +920,23 @@ def test_replayssm_mixer_selects_mtp_layout(
         replayssm_scratch=(torch.empty(0), torch.empty(0), torch.empty(0)),
         replayssm_state_indices_d=torch.tensor([1, 2], dtype=torch.int32),
     )
-
-    def split_hidden_states_B_C(values):
-        tokens = values.size(0)
-        return (
-            torch.empty(tokens, 8),
-            torch.empty(tokens, 8),
-            torch.empty(tokens, 8),
-        )
-
-    mixer.split_hidden_states_B_C_fn = split_hidden_states_B_C
     kernel = Mock()
-    monkeypatch.setattr(
-        mod,
-        "get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={mixer.prefix: metadata}),
-    )
-    monkeypatch.setattr(
-        mod, "causal_conv1d_update", lambda values, *args, **kwargs: values
-    )
-    monkeypatch.setattr(dispatch, "_flashinfer_replayssm_kernel", kernel)
+    monkeypatch.setattr(ssu_dispatch, "_checkpointing_ssu", lambda: kernel)
+    x = torch.empty(num_decode_tokens, 2, 4)
+    B = torch.empty(num_decode_tokens, 1, 8)
 
-    mixer.conv_ssm_forward(
-        torch.empty(num_decode_tokens, 3), torch.empty(num_decode_tokens, 8)
+    FlashInferReplaySSMKernel.forward(
+        layer,
+        metadata,
+        layer.kv_cache[1],
+        x,
+        torch.empty_like(x),
+        torch.empty(2, 4, 8),
+        B,
+        torch.empty_like(B),
+        torch.empty(2, 4),
+        torch.empty(2, 4),
+        torch.empty_like(x),
     )
 
     args = kernel.call_args.args
@@ -803,13 +954,8 @@ def test_replayssm_mixer_selects_mtp_layout(
 
 def test_replayssm_ring_shape_extends_groups_for_head_shards():
     """B_cache retains one replicated group on each head shard."""
-    base_shapes = ((2, 64), (2, 64, 128))
-    shapes = MambaStateShapeCalculator.append_replayssm_ring(
-        base_shapes,
-        n_groups=1,
-        tp_world_size=2,
-        logical_window=16,
-        backend=MambaBackendEnum.TRITON,
+    shapes = MambaStateShapeCalculator.replayssm_ring_shapes(
+        (2, 64, 128), n_groups=1, tp_world_size=2, ring_len=16
     )
 
-    assert shapes == (*base_shapes, (2, 16, 64), (2, 16), (1, 16, 128))
+    assert shapes == ((2, 16, 64), (2, 16), (1, 16, 128))

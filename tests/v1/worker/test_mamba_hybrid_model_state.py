@@ -59,6 +59,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
 
     positions = torch.tensor([1536], dtype=torch.int64)
     input_batch = SimpleNamespace(
@@ -127,6 +128,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
     # A verify decode, a padded prompt tail (128 of 129 prompt tokens already
@@ -192,6 +194,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state.prefix_caching = False
     state._use_replayssm_trackers = False
     state.recoverssm = None
+    state._step_lifecycles = []
     # A request that accepted 3 drafts (plus the bonus token) on the previous
     # step; the others have never had a draft accepted.
     state.num_accepted_tokens_gpu = torch.tensor([4, 1, 1], dtype=torch.int32)

@@ -24,8 +24,6 @@ def _make_vllm_config(
         else None
     )
     return SimpleNamespace(
-        use_flashinfer_replayssm=False,
-        use_replayssm_trackers=False,
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=False,

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
+    from .lifecycle import GroupLayers, StepLifecycle
+
 logger = init_logger(__name__)
 
 
@@ -31,8 +33,11 @@ class LinearAttnSelectorConfig:
     dtype: torch.dtype | None = None
     use_stochastic_rounding: bool = False
     use_ssu_algorithm: bool = False
+    use_replayssm: bool = False
+    replayssm_buffer_len: int = 0
     num_speculative_tokens: int = 0
     use_pipeline_parallel: bool = False
+    use_prefix_caching: bool = False
 
     @classmethod
     def from_current_platform(
@@ -48,6 +53,7 @@ class LinearAttnSelectorConfig:
             capability = None
         model_config = vllm_config.model_config
         mamba_config = vllm_config.mamba_config
+        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
         return cls(
             current_platform._enum,
@@ -56,8 +62,11 @@ class LinearAttnSelectorConfig:
             model_config.dtype if model_config is not None else None,
             use_stochastic_rounding=mamba_config.enable_stochastic_rounding,
             use_ssu_algorithm=mamba_config.ssu_algorithm is not None,
+            use_replayssm=cache_config.use_replayssm,
+            replayssm_buffer_len=cache_config.replayssm_buffer_len,
             num_speculative_tokens=vllm_config.num_speculative_tokens,
             use_pipeline_parallel=parallel_config.pipeline_parallel_size > 1,
+            use_prefix_caching=cache_config.enable_prefix_caching,
         )
 
 
@@ -108,6 +117,14 @@ class LinearAttnKernel:
         """Return why this kernel can't run under `cfg` for reasons the
         `supports_*` checks don't cover, such as layer shapes."""
         return []
+
+    @classmethod
+    def make_step_lifecycle(
+        cls, layers_by_group: "Sequence[GroupLayers]"
+    ) -> "StepLifecycle | None":
+        """Build the per-step work this kernel needs outside the forward, for
+        its layers by KV cache group; None if it needs none."""
+        return None
 
 
 def select_linear_attn_kernel(

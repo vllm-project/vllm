@@ -7,7 +7,6 @@ from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -38,23 +37,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
-    mamba_state_alignment,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
-    selective_state_update_replayssm_output_only,
-)
-from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
-    selective_state_update_replayssm_spec,
-)
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    plan_replayssm_decode,
-    selective_state_update_replayssm_flashinfer,
-)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -76,12 +64,6 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
-
-
-def _view_mtp_decode_tensor(
-    tensor: torch.Tensor, decode_batch: int, spec_query_len: int
-) -> torch.Tensor:
-    return tensor.view(decode_batch, spec_query_len, *tensor.shape[1:])
 
 
 # Added by the IBM Team, 2024
@@ -536,42 +518,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-        self.use_replayssm = (
-            cache_config.use_replayssm if cache_config is not None else False
-        )
-        self.replayssm_buffer_len = (
-            cache_config.replayssm_buffer_len
-            if cache_config is not None and cache_config.use_replayssm
-            else None
-        )
-        self.mamba_config = vllm_config.mamba_config
-        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
-        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
-        self.state_alignment = mamba_state_alignment(vllm_config)
-        if self.use_replayssm and self.num_heads % self.tp_size != 0:
-            raise ValueError(
-                "--use-replayssm requires tensor-parallel heads to divide evenly"
-            )
-        # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
-        _n_state = 5 if self.use_replayssm else 2
-        self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
-        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
-        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        # Triton plans each decode step in one layer per cache group.
-        self._plans_replayssm_decode = True
-        # Stochastic-rounding seed slot, bound by
-        # initialize_replayssm_ring_trackers(); the first layer also
-        # holds the whole buffer and refreshes it once per step.
-        self._replayssm_rand_seed: torch.Tensor | None = None
-        self._replayssm_rand_seeds: torch.Tensor | None = None
-
-        self.num_spec = vllm_config.num_speculative_tokens
         self.vllm_config = vllm_config
-        # The decode kernel's extra cache states shape the page, so they come
-        # from the config alone, before the layer's spec exists. Selecting
-        # again with the spec below can only pick a kernel with the same layout.
+        self.mamba_config = vllm_config.mamba_config
+        self.num_spec = vllm_config.num_speculative_tokens
+        # The decode kernel's extra cache states and alignment shape the page,
+        # so they come from the config alone, before the layer's spec exists.
+        # Selecting again with the spec below can only pick a kernel with the
+        # same layout.
         self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, None)
         self.ssu_state = self.ssu_kernel.make_layer_state(vllm_config)
+        self.state_alignment = self.ssu_kernel.state_alignment
+        self.kv_cache = tuple(torch.tensor([]) for _ in self.get_state_shape())
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -678,8 +635,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         attn_metadata_raw = forward_context.attn_metadata
 
         assert self.cache_config is not None
-        use_spec_decode = self.num_spec > 0
-        ring_start = prev_num_accepted = None
 
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
@@ -696,18 +651,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
-            if self.use_replayssm:
-                x_cache, dt_cache, B_cache = self.kv_cache[2:5]
-                ring_start = self._replayssm_ring_start
-                if self.use_replayssm_trackers:
-                    prev_num_accepted = self._replayssm_prev_num_accepted
-            else:
-                x_cache = dt_cache = B_cache = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-            replayssm_state_indices_d = attn_metadata.replayssm_state_indices_d
             num_accepted_tokens = attn_metadata.num_accepted_tokens
             query_start_loc_d = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
@@ -799,14 +746,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     cu_seqlens=query_start_loc_p,
                     recurrent_rows=attn_metadata.checkpoint_chunk_idx,
                 )
-            if (
-                ring_start is not None
-                and not self.use_replayssm_trackers
-                and self._plans_replayssm_decode
-            ):
-                # Triton decode appends to the ring that prefill leaves empty.
-                assert state_indices_tensor_p is not None
-                ring_start.index_fill_(0, state_indices_tensor_p.long(), 0)
 
         # Process decode requests
         if has_decode:
@@ -822,13 +761,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 conv_state_indices=state_indices_tensor_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
-                # ReplaySSM keeps one physical state block while a speculative
-                # decode call still processes the full target + draft window.
-                max_query_len=(
-                    1 + self.num_spec
-                    if self.use_replayssm and use_spec_decode
-                    else state_indices_tensor_d.size(-1)
-                ),
+                # The full verify window, even when the decode kernel keeps one
+                # state block per request.
+                max_query_len=1 + self.num_spec,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -859,157 +794,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
             preallocated_ssm_out_d = preallocated_ssm_out_d.view(
                 num_decode_tokens, -1, self.head_dim
             )
-            if self.use_replayssm:
-                assert self.replayssm_buffer_len is not None
-                if self.use_replayssm_trackers:
-                    # Both kernels replay a window of ring_len - (1 + num_spec).
-                    assert x_cache is not None
-                    assert (
-                        x_cache.size(2) == self.replayssm_buffer_len + 1 + self.num_spec
-                    )
-                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-                    assert ring_start is not None
-                    assert prev_num_accepted is not None
-                    assert attn_metadata.replayssm_scratch is not None
-                    fi_cu_seqlens = query_start_loc_d
-                    fi_max_seqlen = None
-                    if use_spec_decode:
-                        spec_query_len = 1 + self.num_spec
-                        fi_max_seqlen = spec_query_len
-                        assert replayssm_state_indices_d is not None
-                        decode_batch = replayssm_state_indices_d.size(0)
-                        if num_decode_tokens == decode_batch * spec_query_len:
-                            hidden_states_d = _view_mtp_decode_tensor(
-                                hidden_states_d, decode_batch, spec_query_len
-                            )
-                            dt_d = _view_mtp_decode_tensor(
-                                dt_d, decode_batch, spec_query_len
-                            )
-                            B_d = _view_mtp_decode_tensor(
-                                B_d, decode_batch, spec_query_len
-                            )
-                            C_d = _view_mtp_decode_tensor(
-                                C_d, decode_batch, spec_query_len
-                            )
-                            preallocated_ssm_out_d = _view_mtp_decode_tensor(
-                                preallocated_ssm_out_d,
-                                decode_batch,
-                                spec_query_len,
-                            )
-                            fi_cu_seqlens = None
-                            fi_max_seqlen = None
-                    if self._replayssm_rand_seeds is not None:
-                        self._replayssm_rand_seeds.random_(0, 2**32)
-                    selective_state_update_replayssm_flashinfer(
-                        ssm_state,
-                        hidden_states_d,
-                        dt_d,
-                        A_d,
-                        B_d,
-                        C_d,
-                        preallocated_ssm_out_d,
-                        x_cache,
-                        B_cache,
-                        dt_cache,
-                        ring_start,
-                        prev_num_accepted,
-                        D=D_d,
-                        dt_bias=dt_bias,
-                        dt_softplus=True,
-                        state_batch_indices=replayssm_state_indices_d,
-                        scratch=attn_metadata.replayssm_scratch,
-                        enable_stochastic_rounding=(
-                            self.mamba_config.enable_stochastic_rounding
-                        ),
-                        stochastic_rounding_philox_rounds=(
-                            self.mamba_config.stochastic_rounding_philox_rounds
-                        ),
-                        rand_seed=self._replayssm_rand_seed,
-                        cu_seqlens=fi_cu_seqlens,
-                        max_seqlen=fi_max_seqlen,
-                        enable_pdl=False,
-                    )
-                elif self.use_replayssm_trackers:
-                    assert ring_start is not None
-                    assert prev_num_accepted is not None
-                    assert replayssm_state_indices_d is not None
-                    assert query_start_loc_d is not None
-                    selective_state_update_replayssm_spec(
-                        ssm_state,
-                        x_cache,
-                        B_cache,
-                        dt_cache,
-                        ring_start,
-                        prev_num_accepted,
-                        hidden_states_d,
-                        dt_d,
-                        A_d,
-                        B_d,
-                        C_d,
-                        preallocated_ssm_out_d,
-                        cu_seqlens=query_start_loc_d,
-                        max_seqlen=1 + self.num_spec,
-                        state_batch_indices=replayssm_state_indices_d,
-                        D=D_d,
-                        dt_bias=dt_bias,
-                        dt_softplus=True,
-                    )
-                else:
-                    assert ring_start is not None
-                    assert attn_metadata.write_pos_d is not None
-                    assert attn_metadata.is_flush_d is not None
-                    if self._plans_replayssm_decode:
-                        # Plan this step once per cache group: every layer of
-                        # the group reads the same write_pos/is_flush rows.
-                        plan_replayssm_decode(
-                            ring_start,
-                            state_indices_tensor_d,
-                            attn_metadata.write_pos_d,
-                            attn_metadata.is_flush_d,
-                            buffer_len=self.replayssm_buffer_len,
-                            seq_lens=attn_metadata.replayssm_seq_lens_d,
-                            align_block_size=attn_metadata.replayssm_align_block_size,
-                        )
-                    selective_state_update_replayssm_output_only(
-                        ssm_state,
-                        hidden_states_d,
-                        dt_d,
-                        A_d,
-                        B_d,
-                        C_d,
-                        D_d,
-                        dt_bias,
-                        dt_softplus=True,
-                        x_cache=x_cache,
-                        dt_cache=dt_cache,
-                        B_cache=B_cache,
-                        bc_pre=attn_metadata.bc_pre_scratch,
-                        write_pos=attn_metadata.write_pos_d,
-                        is_flush=attn_metadata.is_flush_d,
-                        max_cache_len=self.replayssm_buffer_len,
-                        state_batch_indices=state_indices_tensor_d,
-                        out=preallocated_ssm_out_d,
-                        enable_stochastic_rounding=(
-                            self.mamba_config.enable_stochastic_rounding
-                        ),
-                        cache_philox_rounds=(
-                            self.mamba_config.stochastic_rounding_philox_rounds
-                        ),
-                    )
-            else:
-                self.ssu_kernel.forward(
-                    self,
-                    attn_metadata,
-                    ssm_state,
-                    hidden_states_d,
-                    dt_d,
-                    A_d,
-                    B_d,
-                    C_d,
-                    D_d,
-                    dt_bias,
-                    preallocated_ssm_out_d,
-                )
+            self.ssu_kernel.forward(
+                self,
+                attn_metadata,
+                ssm_state,
+                hidden_states_d,
+                dt_d,
+                A_d,
+                B_d,
+                C_d,
+                D_d,
+                dt_bias,
+                preallocated_ssm_out_d,
+            )
 
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The block-boundary state can be exported from inside one forward
@@ -1026,10 +823,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_replayssm:
-            base_dtype = MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, self.model_config.dtype
-            )
         return (
             *base_dtype,
             *self.ssu_kernel.extra_state_dtypes(self.model_config.dtype),
@@ -1047,19 +840,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
-        shapes: tuple[tuple[int, ...], ...] = base_shape
-        if self.use_replayssm:
-            assert self.replayssm_buffer_len is not None
-            shapes = MambaStateShapeCalculator.append_replayssm_ring(
-                base_shapes=base_shape,
-                n_groups=self.n_groups,
-                tp_world_size=tp_world_size,
-                logical_window=self.replayssm_buffer_len,
-                backend=self.mamba_config.backend,
-                num_speculative_tokens=self.num_spec,
-            )
         return (
-            *shapes,
+            *base_shape,
             *self.ssu_kernel.extra_state_shapes(
                 self.vllm_config, base_shape, self.n_groups
             ),
