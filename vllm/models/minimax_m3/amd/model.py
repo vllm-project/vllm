@@ -98,11 +98,11 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
     pp_splits_layer_sharing,
     spec_decode_needs_target_embed,
@@ -422,26 +422,6 @@ def _aiter_moe_fused_shared_experts_enabled(
         and is_fused_shared_expert_enabled
         and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
     )
-
-
-def _redirect_fused_shared_experts(
-    weights: Iterable[tuple[str, torch.Tensor]], model: nn.Module
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Load fused shared experts into the routed slot after the local experts."""
-    shared_id = model.config.num_local_experts
-    for name, weight in weights:
-        if (
-            ".shared_experts." in name
-            and extract_layer_index(name) in model.fused_shared_expert_layers
-        ):
-            name = name.replace(
-                ".shared_experts.gate_proj.", f".experts.{shared_id}.w1."
-            )
-            name = name.replace(".shared_experts.up_proj.", f".experts.{shared_id}.w3.")
-            name = name.replace(
-                ".shared_experts.down_proj.", f".experts.{shared_id}.w2."
-            )
-        yield name, weight
 
 
 class MiniMaxM3MoE(nn.Module):
@@ -2101,7 +2081,21 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.model.fused_shared_expert_layers
             and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         ):
-            redirect = partial(_redirect_fused_shared_experts, model=self.model)
+            # Fused shared experts load into the routed slot after the local
+            # experts; the routed experts name them w1=gate, w2=down, w3=up.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=config.num_local_experts,
+                n_shared_experts=1,
+                fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+                ckpt_prefix="block_sparse_moe.shared_experts",
+                experts_prefix="block_sparse_moe.experts",
+                ckpt_proj_names={
+                    "gate_proj": "w1",
+                    "up_proj": "w3",
+                    "down_proj": "w2",
+                },
+            )
             transforms = WeightsMapper(weights_transforms=[redirect])
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         self.logits_processor = LogitsProcessor(config.vocab_size)

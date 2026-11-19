@@ -576,21 +576,29 @@ def maybe_fuse_shared_experts(
     n_shared_experts: int,
     fused_shared_expert_layers: frozenset[int],
     ckpt_prefix: str = "mlp.shared_experts",
+    experts_prefix: str = "mlp.experts",
+    ckpt_proj_names: dict[str, str] | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
     When AITER fused-shared-experts is active, shared experts are packed into
     the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
     as a single (possibly widened) tensor; this splits it into
-    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
-    the `RoutedExperts` loader treats them as extra experts. Yields the input
-    unchanged when the fusion is inactive, so callers can wrap unconditionally.
+    `n_shared_experts` chunks named `{experts_prefix}.{n_routed_experts + j}`
+    so the `RoutedExperts` loader of their layer treats them as extra experts.
+    That loader resolves the parameters per layer, e.g. the online quantization
+    staging parameters, which a model-wide expert mapping cannot. Yields the
+    input unchanged when the fusion is inactive, so callers can wrap
+    unconditionally.
 
     Args:
         weights: Iterable of `(name, tensor)` checkpoint pairs.
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
+        experts_prefix: Module name of the routed experts.
+        ckpt_proj_names: Renames the shared experts' projections to the routed
+            experts' checkpoint names, e.g. `{"gate_proj": "w1"}`.
         fused_shared_expert_layers: Layer indices whose shared expert was fused
             at construction time, as returned by
             `get_fused_shared_expert_layers`. Only weights belonging to these
@@ -623,6 +631,10 @@ def maybe_fuse_shared_experts(
                 f"{split_dim}, not divisible by n_shared_experts={n_shared_experts}."
             )
         chunk = total // n_shared_experts
+        suffix = name.split(prefix, 1)[1]
+        if ckpt_proj_names:
+            projection, dot, rest = suffix.partition(".")
+            suffix = ckpt_proj_names.get(projection, projection) + dot + rest
         for j in range(n_shared_experts):
             sl = slice(j * chunk, (j + 1) * chunk)
             if loaded_weight.ndim == 1:
@@ -632,7 +644,8 @@ def maybe_fuse_shared_experts(
             else:
                 chunk_weight = loaded_weight[:, sl]
             yield (
-                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                name.split(prefix, 1)[0]
+                + f"{experts_prefix}.{n_routed_experts + j}.{suffix}",
                 chunk_weight,
             )
 

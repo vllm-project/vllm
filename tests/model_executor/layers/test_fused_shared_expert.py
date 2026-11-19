@@ -1335,7 +1335,16 @@ def _load_minimax_m3_weights(
     model: nn.Module, weights: list[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Load like `MiniMaxM3SparseForCausalLM`; the inner model has no loader."""
-    redirect = partial(minimax_m3_model._redirect_fused_shared_experts, model=model)
+    # As `MiniMaxM3SparseForCausalLM`'s weights mapper with fused shared experts.
+    redirect = partial(
+        maybe_fuse_shared_experts,
+        n_routed_experts=model.config.num_local_experts,
+        n_shared_experts=1,
+        fused_shared_expert_layers=model.fused_shared_expert_layers,
+        ckpt_prefix="block_sparse_moe.shared_experts",
+        experts_prefix="block_sparse_moe.experts",
+        ckpt_proj_names={"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"},
+    )
     mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
     mapper = mapper | WeightsMapper(weights_transforms=[redirect])
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
