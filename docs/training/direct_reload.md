@@ -2,18 +2,14 @@
 
 Direct reload updates a running model's weights in place. It is the default
 (`VLLM_RELOAD_MODE=auto`) for engines with runtime weight updates
-(`--weight-transfer-config`), except for the configurations below and online
-quantization, which reload layerwise (see [Layerwise (Re)loading](layerwise.md)).
-`VLLM_RELOAD_MODE=direct` also enables it for disk `reload_weights` and for the
-online quantization schemes listed below; `layerwise` disables it.
-
-!!! tip
-    Prefer direct reload for RL weight updates. Use layerwise reload only for
-    the configurations direct reload refuses (see below).
-
-```bash
-VLLM_RELOAD_MODE=direct vllm serve <model>
-```
+(`--weight-transfer-config`): their weight-transfer updates and disk
+`reload_weights` calls reload directly, and each must load every weight.
+The configurations and models listed under
+[Refused Configurations](#refused-configurations), and online quantization,
+reload layerwise instead (see [Layerwise (Re)loading](layerwise.md)), with a
+startup log saying why. `VLLM_RELOAD_MODE=direct` enables direct reload without
+weight transfer and for the online quantization schemes below;
+`VLLM_RELOAD_MODE=layerwise` disables it.
 
 ## How It Works
 
@@ -55,17 +51,27 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-In `auto` mode the following reload layerwise. With `VLLM_RELOAD_MODE=direct`,
-the configurations raise an error at startup and the modules reload layerwise:
+In `auto` mode the following reload layerwise, with a log saying why.
 
-- Online quantization not in the table above: `mxfp4` and `mxfp4_hadamard32`
-  linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
-  lm_head, activation overrides, `hadamard_size`, and re-quantization of
-  checkpoint-quantized layers.
-- gpt-oss models with online quantization.
-- `fp8_per_block` linear layers whose tensor-parallel shards are not
-  multiples of 128.
-- The NCCL weight transfer load plan (`use_load_plan`) with online
-  quantization.
-- `torchao` quantization, Humming kernels, weight offloading,
-  `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.
+Engine configurations (with `VLLM_RELOAD_MODE=direct` they raise an error at
+startup):
+
+- Weight offloading, `torchao` quantization, `draft_lm_head_quantization`, and
+  the `sharded_rdt` weight transfer backend.
+- In `auto` only: LoRA and the `sparse_nccl` backend (which updates weights
+  without a reload).
+
+Models (with `VLLM_RELOAD_MODE=direct` they raise an error when loaded):
+
+- Layers with online quantization. Under `VLLM_RELOAD_MODE=direct` the schemes
+  in the table above quantize on load instead, except `mxfp4` and
+  `mxfp4_hadamard32` linear layers, `int8_per_channel_weight_only`, `lut_b_moe`,
+  a quantized lm_head, activation overrides, `hadamard_size`, re-quantization
+  of checkpoint-quantized layers, gpt-oss models, and `fp8_per_block` linear
+  layers whose tensor-parallel shards are not multiples of 128.
+- Layers using Humming kernels.
+- A draft model sharing tensors with a target that reloads layerwise follows
+  the target (`auto`), or raises at its first update (`direct`).
+
+The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
+refuses online quantization.

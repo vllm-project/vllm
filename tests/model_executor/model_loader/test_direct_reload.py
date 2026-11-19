@@ -36,6 +36,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     direct_reload_enabled,
     finish_direct_reload,
+    layerwise_reason,
     record_checkpoint_layout,
     reloads_directly,
     track_loaded_params,
@@ -391,10 +392,19 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_quantization_refused(self, monkeypatch):
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_online_quantization_refused(self, monkeypatch, wrapped):
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
+        from vllm.model_executor.layers.quantization.input_hadamard import (
+            InputHadamardLinearMethod,
+        )
+
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        if wrapped:
+            wrapper = object.__new__(InputHadamardLinearMethod)
+            wrapper.quant_method = online
+            online = wrapper
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -402,9 +412,8 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        model = _ToyModel()
-        record_checkpoint_layout(model)
-        assert not reloads_directly(model)  # reloads layerwise
+        with pytest.raises(RuntimeError, match="online quantization"):
+            _cold_start(_checkpoint())
 
     def test_online_shared_experts_refused(self, monkeypatch):
         # post-load processing deletes the staging parameters a reload loads
@@ -415,9 +424,8 @@ class TestRefusals:
             self.proj.shared_expert_online_loader = object()
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        model = _ToyModel()
-        record_checkpoint_layout(model)
-        assert not reloads_directly(model)  # reloads layerwise
+        with pytest.raises(RuntimeError, match="online quantization"):
+            _cold_start(_checkpoint())
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
     def test_humming_refused(self, monkeypatch, method_cls):
@@ -432,9 +440,8 @@ class TestRefusals:
             self.proj.quant_method = humming
 
         monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        model = _ToyModel()
-        record_checkpoint_layout(model)
-        assert not reloads_directly(model)  # reloads layerwise
+        with pytest.raises(RuntimeError, match="humming"):
+            _cold_start(_checkpoint())
 
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
@@ -751,8 +758,6 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
 
 
 _IPC = SimpleNamespace(backend="ipc")
-_TORCHAO = SimpleNamespace(quantization="torchao")
-_ONLINE = SimpleNamespace(quantization="fp8_per_tensor", quantization_config={})
 
 
 @pytest.mark.parametrize(
@@ -760,25 +765,16 @@ _ONLINE = SimpleNamespace(quantization="fp8_per_tensor", quantization_config={})
     [
         ("auto", {"weight_transfer_config": _IPC}, True),
         ("auto", {}, False),
+        ("auto", {"weight_transfer_config": _IPC, "lora_config": object()}, False),
         (
             "auto",
-            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
             False,
         ),
-        ("auto", {"weight_transfer_config": _IPC, "model_config": _TORCHAO}, False),
-        ("auto", {"weight_transfer_config": _IPC, "model_config": _ONLINE}, False),
         ("direct", {}, True),
         ("layerwise", {"weight_transfer_config": _IPC}, False),
     ],
-    ids=[
-        "updates",
-        "no-updates",
-        "sharded-rdt",
-        "torchao",
-        "online",
-        "direct",
-        "layerwise",
-    ],
+    ids=["updates", "no-updates", "lora", "sparse-nccl", "direct", "layerwise"],
 )
 def test_direct_reload_enabled(monkeypatch, mode, overrides, expected):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
@@ -787,15 +783,15 @@ def test_direct_reload_enabled(monkeypatch, mode, overrides, expected):
     assert direct_reload_enabled() is expected
 
 
-def test_refused_module_reloads_layerwise(monkeypatch):
-    """A refused module leaves no layout, so updates reload layerwise."""
+def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
     from vllm.model_executor.model_loader.reload import lifecycle
 
-    model = _cold_start(_checkpoint())
-    del model._ckpt_param_names
-    model.shared_expert_online_loader = object()  # fused shared experts refuse
-    record_checkpoint_layout(model)
-    assert not reloads_directly(model)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "auto")
+    config = _config(weight_transfer_config=_IPC)
+    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    target = _ToyModel()
+    target.proj.shared_expert_online_loader = object()  # refused in direct mode
+    record_checkpoint_layout(target)
     calls = []
     monkeypatch.setattr(
         lifecycle, "initialize_layerwise_reload", lambda m: calls.append("init")
@@ -803,11 +799,16 @@ def test_refused_module_reloads_layerwise(monkeypatch):
     monkeypatch.setattr(
         lifecycle, "finalize_layerwise_reload", lambda m, c: calls.append("finalize")
     )
-    start_reload(model)
-    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    start_reload(target)
+    finish_reload(target, _MODEL_CONFIG, _DEVICE)
     assert calls == ["init", "finalize"]
-    # a direct draft holding the layerwise model's tensors refuses to reload
+    # a direct draft holding the target's tensors follows it; `direct` raises
     draft = _cold_start(_checkpoint())
-    draft.attn = model.attn
+    draft.attn = target.attn
+    assert not reloads_directly(draft)
+    assert "shared" in layerwise_reason(draft)
+    draft = _cold_start(_checkpoint())
+    draft.attn = target.attn
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     with pytest.raises(RuntimeError, match="reloads layerwise"):
         begin_direct_reload(draft)
