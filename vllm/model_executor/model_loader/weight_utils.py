@@ -290,6 +290,9 @@ def get_quant_config(
         if (
             model_config.quantization == "modelopt_mixed"
             and "quantized_layers" not in hf_quant_config
+        ) or (
+            # Inkling2's per-tensor precisions are only in hf_quant_config.json.
+            model_config.quantization == "inkling2" and "model" not in hf_quant_config
         ):
             pass  # fall through to file-based loading below
         else:
