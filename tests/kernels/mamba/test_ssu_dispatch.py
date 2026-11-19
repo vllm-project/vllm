@@ -370,7 +370,9 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     # padded slot; padded request.
     _postprocess_replayssm_kernel[(4, 1)](
         _device_ints([1, 2, 0, -1]),
-        _device_ints([0, 48, 52, 68, 68]) if post_step else _device_ints([48, 4, 16, 0]),
+        _device_ints([0, 48, 52, 68, 68])
+        if post_step
+        else _device_ints([48, 4, 16, 0]),
         _device_ints([16, 48, 32]) if post_step else _device_ints([0, 0, 28]),
         _device_ints([1, 1, 4]),
         torch.tensor([True, False, True, True], device=DEVICE),
@@ -635,7 +637,9 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
             if post_step
             else _device_ints([query_len]),
             query_metadata_is_cumulative=post_step,
-            num_computed_tokens=_device_ints([computed_after if post_step else computed]),
+            num_computed_tokens=_device_ints(
+                [computed_after if post_step else computed]
+            ),
             num_computed_is_post_step=post_step,
             num_accepted_tokens=_device_ints([accepted]),
             is_prefilling=torch.tensor([prefilling], device=DEVICE),
