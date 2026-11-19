@@ -114,6 +114,9 @@ def initialize_layerwise_reload(
     With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
     for layer in model.modules():
+        if getattr(layer, "_skip_layerwise_reload", False):
+            continue
+
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
