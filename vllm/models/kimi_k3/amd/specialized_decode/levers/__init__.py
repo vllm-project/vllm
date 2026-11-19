@@ -10,16 +10,20 @@ stock).
 
 The levers that change vLLM's v1 engine code run as patches installed here on
 activation (``install``): ``dspark`` (Markov sampling, the draft-only attention
-groups), ``mla`` (the bs1 MLA planner, the sparse MLA indptr) and ``runner``
-(the logits rows slice, the target step's mark for the draft-only groups). The
+groups), ``mla`` (the bs1 MLA planner, the sparse MLA indptr), ``runner``
+(the logits rows slice, the target step's mark for the draft-only groups),
+``tpgather`` (the draft's TP-split fc, the logits all-gather, the Markov
+launches' TP split) and ``ctxkv`` (the draft's context K/V store). The
 Kimi-K3 model state (``model_state``) and the model's own paths read
 ``lever_on`` directly."""
 
 import vllm.envs as envs
 
-# DSpark's sequential Markov draft steps as one launch each (ops/markov_sample).
+# DSpark's sequential Markov draft steps as one launch each (ops/markov_sample),
+# for the preview's MLA draft and the release's GQA sliding-window draft.
 MARKOV = "VLLM_K31_BEAT_MARKOV"
-# The target step skips draft-only attention groups; the bs1 MLA planner.
+# The target step skips draft-only attention groups; the bs1 MLA planner (AITER
+# MLA groups only: the preview's MLA draft; a GQA draft plans no schedule).
 DRAFTMETA = "VLLM_K31_BEAT_DRAFTMETA"
 # The mono kernels' cheap spin waits and bounded router ranking.
 K2SYNC = "VLLM_K31_BEAT_K2SYNC"
@@ -31,6 +35,17 @@ KDAK1 = "VLLM_K31_BEAT_KDAK1"
 SAMPLED_TOPK = "VLLM_K3_INDEXER_SAMPLED_TOPK"
 # D1a also runs the MXFP4 indexer's prep.
 PROLOGUE_INDEXER = "VLLM_KIMI_SD_DSA_PROLOGUE_INDEXER"
+# A DFlash-family draft's replicated aux-hidden fc split over TP by output
+# columns, then all-gathered (``tpgather``).
+DRAFTFC = "VLLM_K31_BEAT_DRAFTFC"
+# The lm_head logits all-gather over the TP group's AITER IPC all-gather
+# (``tpgather``).
+LOGITSAG = "VLLM_K31_BEAT_LOGITSAG"
+# The fused Markov launches split the vocabulary over TP (``tpgather``).
+MARKOVTP = "VLLM_K31_BEAT_MARKOVTP"
+# A DFlash-family draft's context K norm, RoPE and cache writes as one launch
+# (``ctxkv``).
+CTXKV = "VLLM_K31_BEAT_CTXKV"
 
 LEVERS = (
     MARKOV,
@@ -40,6 +55,10 @@ LEVERS = (
     KDAK1,
     SAMPLED_TOPK,
     PROLOGUE_INDEXER,
+    DRAFTFC,
+    LOGITSAG,
+    MARKOVTP,
+    CTXKV,
 )
 
 _active = False
@@ -81,14 +100,18 @@ def install() -> None:
     if _installed:
         return
     from vllm.models.kimi_k3.amd.specialized_decode.levers import (
+        ctxkv,
         dspark,
         mla,
         runner,
+        tpgather,
     )
 
     dspark.install()
     mla.install()
     runner.install()
+    tpgather.install()
+    ctxkv.install()
     _installed = True
 
 
