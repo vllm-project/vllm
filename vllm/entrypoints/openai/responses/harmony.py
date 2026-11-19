@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Harmony ↔ Responses API conversion utilities.
+"""Harmony ↔ Responses API conversion utilities.
 
 Handles two directions:
   1. Response Input → Harmony Messages  (input parsing)
@@ -40,6 +39,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -88,7 +88,10 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     """Parse an OpenAI chat-format dict into Harmony messages."""
     role = chat_msg.get("role")
     if role is None:
-        raise ValueError(f"Message has no 'role' key: {chat_msg}")
+        raise VLLMValidationError(
+            f"Message has no 'role' key: {chat_msg}",
+            parameter="input",
+        )
 
     # Assistant message with tool calls
     tool_calls = chat_msg.get("tool_calls")
@@ -151,12 +154,17 @@ def response_input_to_harmony(
 ) -> Message | None:
     """Convert a single ResponseInputOutputItem into a Harmony Message.
 
-    Returns None for reasoning items with empty or absent content so
-    the caller can skip them.
+    Returns None for system/developer messages with empty content so
+    the caller can skip them. Reasoning items with empty or absent
+    content (e.g. placeholders from history replay) are converted to
+    empty assistant messages to preserve the conversation structure.
     """
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
-    if "type" not in response_msg or response_msg["type"] == "message":
+
+    item_type = response_msg.get("type")
+
+    if item_type == "message" or (item_type is None and "role" in response_msg):
         role = response_msg["role"]
         content = response_msg["content"]
         if role in ("system", "developer"):
@@ -173,7 +181,7 @@ def response_input_to_harmony(
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
-    elif response_msg["type"] == "function_call_output":
+    elif item_type == "function_call_output":
         call_id = response_msg["call_id"]
         call_response: ResponseFunctionToolCall | None = None
         for prev_response in reversed(prev_responses):
@@ -184,28 +192,37 @@ def response_input_to_harmony(
                 call_response = prev_response
                 break
         if call_response is None:
-            raise ValueError(f"No call message found for {call_id}")
+            raise VLLMValidationError(
+                f"No call message found for {call_id}",
+                parameter="input",
+            )
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient("assistant")
-    elif response_msg["type"] == "reasoning":
+    elif item_type == "reasoning" or (item_type is None and "summary" in response_msg):
         content = response_msg.get("content")
         if content and len(content) >= 1:
             reasoning_text = "\n".join(item["text"] for item in content)
             msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_text)
             msg = msg.with_channel("analysis")
         else:
-            return None
-    elif response_msg["type"] == "function_call":
+            # Reasoning item without content (e.g. placeholder from history
+            # replay) — emit an empty assistant message so the conversation
+            # structure is preserved.
+            msg = Message.from_role_and_content(Role.ASSISTANT, "")
+    elif item_type == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient(f"functions.{response_msg['name']}")
         msg = msg.with_content_type("json")
     else:
-        raise ValueError(f"Unknown input type: {response_msg['type']}")
+        raise VLLMValidationError(
+            f"Unknown input type: {item_type}",
+            parameter="input",
+        )
     return msg
 
 
@@ -293,7 +310,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
         action = ActionFind(
             pattern=browser_call.get("pattern", ""),
             url=f"cursor:{browser_call.get('url', '')}",
-            type="find",
+            type="find_in_page",
         )
     else:
         raise ValueError(f"Unknown browser action: {recipient}")
@@ -424,7 +441,7 @@ def _parse_message_no_recipient(
         # See: https://cookbook.openai.com/articles/openai-harmony
         return [_parse_final_message(message, incomplete=incomplete)]
 
-    raise ValueError(f"Unknown channel: {message.channel}")
+    raise VLLMValidationError(f"Unknown channel: {message.channel}")
 
 
 # ---------------------------------------------------------------------------

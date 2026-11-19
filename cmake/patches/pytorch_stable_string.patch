@@ -1,0 +1,15 @@
+diff --git a/torch/csrc/stable/stableivalue_conversions.h b/torch/csrc/stable/stableivalue_conversions.h
+--- a/torch/csrc/stable/stableivalue_conversions.h
++++ b/torch/csrc/stable/stableivalue_conversions.h
+@@ -807 +807 @@
+-// Returns a new std::string; the string in val is deleted.
++// Returns a std::string which owns its memory; the string in val is deleted.
+@@ -819 +819 @@
+-    auto strptr = new std::string(data, length);
++    const auto str = std::string(data, length);
+@@ -821 +821 @@
+-    // delete the old string before returning new string
++    // delete the old string
+@@ -823 +823 @@
+-    return *strptr;
++    return str;

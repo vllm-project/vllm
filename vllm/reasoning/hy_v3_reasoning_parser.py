@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 from vllm.tokenizers import TokenizerLike
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
 logger = init_logger(__name__)
 
 
 class HYV3ReasoningParser(BaseThinkingReasoningParser):
-    """
-    HYV3 parser that delegates to either HYV3ReasoningParser or
+    """HYV3 parser that delegates to either HYV3ReasoningParser or
     IdentityReasoningParser based on `reasoning_effort`.
 
     The HYV3 model uses <think>...</think> tokens to denote reasoning text.

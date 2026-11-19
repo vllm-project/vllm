@@ -3,64 +3,126 @@
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
+from vllm.exceptions import VLLMValidationError
+
+OMITTED = object()
+NAMED_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": "get_weather"},
+}
+MISSING_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": "missing_tool"},
+}
+
+SAMPLE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+        },
+    },
+}
 
 
-def test_chat_completion_request_with_no_tools():
-    # tools key is not present
-    request = ChatCompletionRequest.model_validate(
-        {
-            "messages": [{"role": "user", "content": "Hello"}],
-            "model": "facebook/opt-125m",
-        }
-    )
-    assert request.tool_choice == "none"
-
-    # tools key is None
-    request = ChatCompletionRequest.model_validate(
-        {
-            "messages": [{"role": "user", "content": "Hello"}],
-            "model": "facebook/opt-125m",
-            "tools": None,
-        }
-    )
-    assert request.tool_choice == "none"
-
-    # tools key present but empty -- should be rejected
-    with pytest.raises(ValueError, match="must not be an empty array"):
-        ChatCompletionRequest.model_validate(
-            {
-                "messages": [{"role": "user", "content": "Hello"}],
-                "model": "facebook/opt-125m",
-                "tools": [],
-            }
-        )
+def _request_payload(tools, tool_choice):
+    payload = {
+        "messages": [{"role": "user", "content": "Hello"}],
+        "model": "facebook/opt-125m",
+    }
+    if tools is not OMITTED:
+        payload["tools"] = tools
+    if tool_choice is not OMITTED:
+        payload["tool_choice"] = tool_choice
+    return payload
 
 
-@pytest.mark.parametrize("tool_choice", ["auto", "required"])
-def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
-    with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
-    ):
-        ChatCompletionRequest.model_validate(
-            {
-                "messages": [{"role": "user", "content": "Hello"}],
-                "model": "facebook/opt-125m",
-                "tool_choice": tool_choice,
-            }
-        )
+TOOLS_CASES = [
+    ("omitted", OMITTED),
+    ("null", None),
+    ("empty", []),
+    ("provided", [SAMPLE_TOOL]),
+]
+TOOL_CHOICE_CASES = [
+    ("omitted", OMITTED),
+    ("null", None),
+    ("none", "none"),
+    ("auto", "auto"),
+    ("required", "required"),
+    ("named", NAMED_TOOL_CHOICE),
+    ("missing", MISSING_TOOL_CHOICE),
+]
+EXPECTED: dict[str, dict[str, tuple[bool, str | None] | None]] = {
+    "omitted": {
+        "omitted": (False, "none"),
+        "null": (False, "none"),
+        "none": (False, "none"),
+        "auto": (False, "none"),
+        "required": None,
+        "named": None,
+        "missing": None,
+    },
+    "null": {
+        "omitted": (False, "none"),
+        "null": (False, "none"),
+        "none": (False, "none"),
+        "auto": (False, "none"),
+        "required": None,
+        "named": None,
+        "missing": None,
+    },
+    "empty": {
+        "omitted": (False, "none"),
+        "null": (False, "none"),
+        "none": (False, "none"),
+        "auto": (False, "none"),
+        "required": None,
+        "named": None,
+        "missing": None,
+    },
+    "provided": {
+        "omitted": (True, "auto"),
+        "null": (True, "auto"),
+        "none": (True, "none"),
+        "auto": (True, "auto"),
+        "required": (True, "required"),
+        "named": (True, "named"),
+        "missing": None,
+    },
+}
 
-    with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
-    ):
-        ChatCompletionRequest.model_validate(
-            {
-                "messages": [{"role": "user", "content": "Hello"}],
-                "model": "facebook/opt-125m",
-                "tool_choice": tool_choice,
-                "tools": None,
-            }
-        )
+
+@pytest.mark.parametrize("tools_name,tools", TOOLS_CASES)
+@pytest.mark.parametrize("tool_choice_name,tool_choice", TOOL_CHOICE_CASES)
+def test_chat_completion_request_tool_choice_matrix(
+    tools_name, tools, tool_choice_name, tool_choice
+):
+    """Validate tool_choice defaults and requirements for every tool state."""
+    expected = EXPECTED[tools_name][tool_choice_name]
+    payload = _request_payload(tools, tool_choice)
+    if expected is None:
+        with pytest.raises(VLLMValidationError):
+            ChatCompletionRequest.model_validate(payload)
+        return
+
+    expected_has_tools, expected_tool_choice = expected
+    request = ChatCompletionRequest.model_validate(payload)
+    assert (request.tools is not None) is expected_has_tools
+    if expected_has_tools:
+        assert len(request.tools) == 1
+
+    if expected_tool_choice == "named":
+        assert isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+        assert request.tool_choice.function.name == "get_weather"
+    else:
+        assert request.tool_choice == expected_tool_choice
 
 
 def test_reasoning_content_normalized_to_reasoning():
@@ -118,23 +180,10 @@ def test_no_reasoning_fields_unchanged():
     assert "reasoning_content" not in assistant_msg
 
 
-SAMPLE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the weather",
-        "parameters": {
-            "type": "object",
-            "properties": {"location": {"type": "string"}},
-        },
-    },
-}
-
-
 def test_structured_outputs_with_named_tool_choice_rejected():
     """structured_outputs cannot be combined with a named tool_choice."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="structured outputs or tools, not both",
     ):
         ChatCompletionRequest.model_validate(
@@ -168,7 +217,7 @@ def test_structured_outputs_with_auto_tool_choice_allowed():
 def test_multiple_structured_outputs_rejected():
     """Only one kind of structured output constraint is allowed."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="You can only use one kind of constraints",
     ):
         ChatCompletionRequest.model_validate(

@@ -7,24 +7,31 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingGroupConfig:
     # Total token span covered by one block across all workers
     # (accounts for context parallelism).
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Original KVCacheConfig group index.
+    group_id: int
+    # Chunks of this group the tier keeps for one request, or None when
+    # attention reaches back without a bound (a full layer).
+    sliding_window_size_in_chunks: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingModelConfig:
     # Model identifier (e.g. HuggingFace model path).
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Longest request the engine accepts, in tokens. 0 when not known.
+    max_model_len: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingCacheConfig:
     # Tokens per block hash.
     tokens_per_hash: int
@@ -32,7 +39,7 @@ class OffloadingCacheConfig:
     blocks_per_chunk: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingParallelConfig:
     # Worker index in [0, world_size). 0 on the scheduler side.
     rank: int
@@ -48,12 +55,19 @@ class OffloadingParallelConfig:
     dcp_size: int
     # Data parallel replica index of this engine.
     data_parallel_index: int
-    # True when concatenating a block's data across all workers yields
-    # the same result regardless of the parallelism configuration.
+    # Number of data parallel replicas.
+    data_parallel_size: int
+    # Local rank of the data parallel group, set only in SPMD mode.
+    data_parallel_rank_local: int | None
+    # True when the bytes that will be persisted for a block are portable
+    # across parallelism configurations: for the direct layout, concatenating
+    # the block's data across all workers in rank order yields the same bytes
+    # under any topology; for the canonical layout, the canonical page itself
+    # is topology-free.
     is_parallelism_agnostic: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingConfig:
     groups: tuple[OffloadingGroupConfig, ...]
     # KV bytes stored by one worker per block.
@@ -68,3 +82,14 @@ class OffloadingConfig:
     model: OffloadingModelConfig
     cache: OffloadingCacheConfig
     parallel: OffloadingParallelConfig
+    # True when the offloaded bytes of every worker are expected to be
+    # byte-identical per block (pure-MLA model, single-node TP-only
+    # parallelism), enabling a single-copy host layout in backends that
+    # support it. Aggregate layout decision; per-layer replication metadata
+    # is planned for CanonicalKVCacheRef (#48408).
+    replicated_layout: bool = False
+    # True when the canonical per-layer host byte layout was requested via
+    # kv_connector_extra_config; certified per-layer at worker registration.
+    canonical_layout: bool = False
+    # Resolved KVCacheLayout name of the worker KV cache.
+    kv_cache_layout: str | None = None

@@ -17,6 +17,11 @@ const METRICS: &[MetricDef] = &[
         lower_is_better: false,
     },
     MetricDef {
+        label: "Input throughput (inputs/s)",
+        key: "input_sequence_throughput",
+        lower_is_better: false,
+    },
+    MetricDef {
         label: "Output throughput (tok/s)",
         key: "output_throughput",
         lower_is_better: false,

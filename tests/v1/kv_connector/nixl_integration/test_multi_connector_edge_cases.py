@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Integration edge-case tests for MultiConnector (NixlConnector + OffloadingConnector).
+"""Integration edge-case tests for MultiConnector (NixlConnector + OffloadingConnector).
 
 Tests cover:
   - Output correctness across block-size boundaries (proxy vs direct prefill).
@@ -441,7 +440,9 @@ EVICTION_PROMPT = (  # noqa: E501
     "algorithm provides a quadratic speedup for unstructured search problems. "
     "Companies like IBM Google and Rigetti are building quantum processors "
     "with increasing numbers of qubits. Error correction remains a major "
-    "challenge as quantum states are extremely fragile and prone to decoherence."
+    "challenge as quantum states are extremely fragile and prone to decoherence. "
+    "Alright with that out of the way, please count to 5000 with me! "
+    "1 2 3 4 5 6 7 8 9 10"
 )
 
 

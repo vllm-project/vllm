@@ -6,11 +6,16 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+# Small inputs use all-gather to avoid all-to-all launch overhead on PCIe XPUs.
+# Above 4 MiB, sharding reduces communication volume and redundant summation.
+_BATCH_INVARIANT_GATHER_MAX_BYTES = 4 * 1024 * 1024
 
 
 class XpuCommunicator(DeviceCommunicatorBase):
@@ -20,13 +25,22 @@ class XpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+        )
         self.ca_comm: None = None
         if self.use_all2all:
-            if self.all2all_backend in ("naive", "allgather_reducescatter"):
+            if self.all2all_backend in (
+                "naive",
+                "allgather_reducescatter",
+                "alltoall_batched",
+            ):
                 from .all2all import AgRsAll2AllManager
 
+                # alltoall_batched dispatches via all_to_all_single directly and
+                # only needs this manager for group metadata.
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
@@ -42,7 +56,107 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
+    def _sum_gathered(self, gathered: torch.Tensor) -> torch.Tensor:
+        accumulation_dtype = (
+            torch.float32
+            if gathered.dtype in (torch.float16, torch.bfloat16)
+            else gathered.dtype
+        )
+        output = gathered[0].to(dtype=accumulation_dtype, copy=True)
+        for rank in range(1, self.world_size):
+            output.add_(gathered[rank])
+        return output.to(gathered.dtype)
+
+    def _fixed_rank_sum(self, input_: torch.Tensor) -> torch.Tensor:
+        flat_input = input_.reshape(-1)
+        gathered = torch.empty(
+            (self.world_size, flat_input.numel()),
+            dtype=input_.dtype,
+            device=input_.device,
+        )
+        dist.all_gather_single(gathered.view(-1), flat_input, group=self.device_group)
+        if input_.dtype in (torch.float16, torch.bfloat16, torch.float32):
+            from vllm.model_executor.determinism.batch_invariant import (
+                _fixed_order_sum_kernel,
+            )
+            from vllm.triton_utils import triton
+
+            output = torch.empty_like(flat_input)
+            numel = output.numel()
+            if numel:
+                _fixed_order_sum_kernel[(triton.cdiv(numel, 1024),)](
+                    gathered,
+                    output,
+                    numel,
+                    numel,
+                    WORLD_SIZE=self.world_size,
+                    BLOCK_SIZE=1024,
+                    LARGE=gathered.numel() > 2**31,
+                )
+            return output.view(input_.shape)
+        return self._sum_gathered(gathered).view(input_.shape)
+
+    def _fixed_rank_reduce_scatter(
+        self, input_: torch.Tensor, sizes: list[int] | None = None
+    ) -> torch.Tensor:
+        if input_.dtype in (torch.float16, torch.bfloat16, torch.float32):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            return reduce_scatter_batch_invariant(
+                input_, self.device_group, sizes=sizes
+            )
+
+        if sizes is None:
+            assert input_.shape[0] % self.world_size == 0
+            sizes = [input_.shape[0] // self.world_size] * self.world_size
+        rows = sizes[self.rank_in_group]
+        gathered = torch.empty(
+            (self.world_size * rows, *input_.shape[1:]),
+            dtype=input_.dtype,
+            device=input_.device,
+        )
+        # Exchange only the owned shard; XCCL must not choose the sum order.
+        dist.all_to_all_single(
+            gathered,
+            input_.contiguous(),
+            input_split_sizes=sizes,
+            output_split_sizes=[rows] * self.world_size,
+            group=self.device_group,
+        )
+        return self._sum_gathered(
+            gathered.view(self.world_size, rows, *input_.shape[1:])
+        )
+
+    def _fixed_rank_sum_sharded(self, input_: torch.Tensor) -> torch.Tensor:
+        flat_input = input_.reshape(-1)
+        numel = flat_input.numel()
+        if self.world_size == 1 or numel == 0:
+            return input_.clone()
+        chunk_size = (numel + self.world_size - 1) // self.world_size
+        padded_numel = chunk_size * self.world_size
+        if padded_numel != numel:
+            padded = flat_input.new_zeros(padded_numel)
+            padded[:numel].copy_(flat_input)
+            flat_input = padded
+        reduced = self._fixed_rank_reduce_scatter(flat_input)
+        output = flat_input.new_empty(padded_numel)
+        dist.all_gather_single(output, reduced, group=self.device_group)
+        return output[:numel].view(input_.shape)
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT:
+            # XCCL changes its reduction order with message size. Both paths
+            # accumulate in rank order, independent of the token batch.
+            if (
+                input_.numel() * input_.element_size()
+                <= _BATCH_INVARIANT_GATHER_MAX_BYTES
+            ):
+                return self._fixed_rank_sum(input_)
+            else:
+                return self._fixed_rank_sum_sharded(input_)
+
         output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
@@ -62,11 +176,21 @@ class XpuCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
-
-        dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
+        if envs.VLLM_BATCH_INVARIANT:
+            if (
+                input_tensor.numel() * input_tensor.element_size()
+                <= _BATCH_INVARIANT_GATHER_MAX_BYTES
+            ):
+                reduced = self._fixed_rank_sum(input_tensor)
+                start = self.rank_in_group * chunk_size
+                output = reduced.narrow(0, start, chunk_size).clone()
+            else:
+                output = self._fixed_rank_reduce_scatter(input_tensor)
+        else:
+            output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -91,17 +215,55 @@ class XpuCommunicator(DeviceCommunicatorBase):
         else:
             assert input_tensor.shape[0] % world_size == 0
             chunk_size = input_tensor.shape[0] // world_size
+
+        if envs.VLLM_BATCH_INVARIANT:
+            # Avoid uneven all-to-all during capture or with restricted visibility.
+            if (
+                input_tensor.numel() * input_tensor.element_size()
+                <= _BATCH_INVARIANT_GATHER_MAX_BYTES
+                or (
+                    sizes is not None
+                    and sizes.count(sizes[0]) != world_size
+                    and (
+                        torch.xpu.device_count() < world_size
+                        or torch.xpu.is_current_stream_capturing()
+                    )
+                )
+            ):
+                reduced = self._fixed_rank_sum(input_tensor)
+                start = (
+                    self.rank_in_group * chunk_size
+                    if sizes is None
+                    else sum(sizes[: self.rank_in_group])
+                )
+                output = reduced.narrow(0, start, chunk_size).clone()
+            else:
+                output = self._fixed_rank_reduce_scatter(input_tensor, sizes)
+            return output.movedim(0, dim).contiguous()
+
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
         output = torch.empty(
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
-            # if inputs shape in different ranks is not the same using reduce_scatter
+        if sizes is None or sizes.count(sizes[0]) == len(sizes):
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
+        elif torch.xpu.device_count() < self.world_size:
+            # uneven reduce_scatter is not supported when the
+            # process cannot see every device in the group (
+            # e.g. external-LBDP).
+            max_size = max(sizes)
+            padded = input_tensor.new_zeros(
+                (world_size * max_size,) + input_tensor.shape[1:]
+            )
+            for rank, split in enumerate(input_tensor.split(sizes, dim=0)):
+                padded[rank * max_size : rank * max_size + sizes[rank]] = split
+            padded_output = input_tensor.new_empty((max_size,) + input_tensor.shape[1:])
+            dist.reduce_scatter_tensor(padded_output, padded, group=self.device_group)
+            output = padded_output[:chunk_size]
+        else:
             input_splits = list(input_tensor.split(sizes, dim=0))
             dist.reduce_scatter(output, input_splits, group=self.device_group)
-        else:
-            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
@@ -176,7 +338,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             (self.world_size,) + input_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        dist.all_gather_single(output_tensor, input_, group=self.device_group)
         if self.rank_in_group == dst:
             # Reshape
             output_tensor = output_tensor.movedim(0, dim)
@@ -202,11 +364,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and router logits to the appropriate device.
+        """Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
-
         assert self.all2all_manager is not None
         return self.all2all_manager.dispatch_router_logits(
             hidden_states,
@@ -226,8 +386,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        """Dispatch the hidden states and topk weights/ids to the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
@@ -242,8 +401,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Combine the hidden states and router logits from the appropriate device.
+        """Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None

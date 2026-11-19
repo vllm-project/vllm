@@ -3,8 +3,8 @@
 """Inkling dense SwiGLU MLP (also used as the MoE shared expert).
 
 The checkpoint stores the gate/up projection as a single fused, *interleaved*
-weight (``[gate0, up0, gate1, up1, ...]``), so we use a plain
-``ColumnParallelLinear`` whose contiguous row-sharding keeps each gate/up pair
+weight (`[gate0, up0, gate1, up1, ...]`), so we use a plain
+`ColumnParallelLinear` whose contiguous row-sharding keeps each gate/up pair
 together, and an interleaved SwiGLU activation.
 """
 
@@ -58,6 +58,6 @@ class InklingDenseMLP(nn.Module):
         x = silu_and_mul_triton(gate_up)
         x, _ = self.down_proj(x)
         if self.global_scale is not None:
-            x = x * self.global_scale
+            x.mul_(self.global_scale)
         # TP-partial output: the layer's reduce-scatter fallback consumes it.
         return x

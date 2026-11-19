@@ -11,6 +11,7 @@ from .processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "BaseDummyInputsBuilder",
     "ProcessorInputs",
     "BaseMultiModalProcessor",
+    "cached_encode",
     "EncDecMultiModalProcessor",
     "PromptUpdate",
     "PromptIndexTargets",

@@ -60,8 +60,7 @@ def get_gpu_name(device_id: int | None = None) -> str:
 
 
 def canonicalize_gpu_name(name: str) -> str:
-    """
-    Canonicalize GPU name for use as a platform identifier.
+    """Canonicalize GPU name for use as a platform identifier.
 
     Converts to lowercase, replaces separators with underscores,
     and maps known variant names to their canonical form via _GPU_NAME_ALIASES.

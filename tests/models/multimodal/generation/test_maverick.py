@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Create a reduced-layer version of the Maverick model for testing purposes.
+"""Create a reduced-layer version of the Maverick model for testing purposes.
 
 This script creates a new model with fewer layers by:
 1. Loading the original Maverick model configuration
@@ -21,8 +20,12 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from ....utils import multi_gpu_test
 
@@ -39,7 +42,6 @@ def run_maverick_serving(model: str):
     """Test Llama-4-Maverick model with vLLM LLM class using CLI equivalent
     options with reduced layers.
     """
-
     try:
         sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
@@ -71,8 +73,7 @@ def run_maverick_serving(model: str):
 
 
 def get_rope_layers_config(model_path: str) -> list[int]:
-    """
-    Get the interleaved RoPE configuration from HuggingFace config
+    """Get the interleaved RoPE configuration from HuggingFace config.
 
     Args:
         model_path: Path to the local directory containing the reduced
@@ -81,6 +82,7 @@ def get_rope_layers_config(model_path: str) -> list[int]:
     Returns:
         List of 0 or 1 indicating whether each layer uses RoPE and local attn
         0 indicates that RoPE is not used while 1 indicates that RoPE is used.
+
     """
     config_path = Path(model_path) / "config.json"
     model_config = json.loads(config_path.read_text())
@@ -98,8 +100,7 @@ def create_reduced_maverick_model(
     vision_layers: int = 2,
     force_recreate: bool = False,
 ) -> str:
-    """
-    Create a reduced-layer version of the Maverick model.
+    """Create a reduced-layer version of the Maverick model.
 
     Args:
         original_model_name: Name of the original Maverick model
@@ -111,8 +112,8 @@ def create_reduced_maverick_model(
 
     Returns:
         Path to the created reduced model directory
-    """
 
+    """
     print(
         f"Creating reduced Maverick model with {text_layers} text layers and "
         f"{vision_layers} vision layers..."
@@ -178,7 +179,6 @@ def create_reduced_config(
     original_config: Any, text_layers: int, num_experts: int, vision_layers: int
 ) -> dict[str, Any]:
     """Create a reduced configuration based on the original."""
-
     # Convert config to dictionary
     config_dict = original_config.to_dict()
 
@@ -220,7 +220,6 @@ def create_reduced_config(
 
 def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
-
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             original_model_name, trust_remote_code=True
@@ -233,7 +232,6 @@ def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
 
 def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
-
     # Try to load the original preprocessor config
     try:
         processor = AutoProcessor.from_pretrained(
@@ -253,7 +251,6 @@ def create_reduced_safetensors(
     original_config: Any, reduced_config: dict[str, Any], output_path: Path
 ) -> None:
     """Create safetensors files with weights for the reduced model."""
-
     print("Generating synthetic weights for reduced model...")
 
     text_config = reduced_config["text_config"]
@@ -276,7 +273,6 @@ def create_reduced_safetensors(
 
 def create_text_model_weights(text_config: dict[str, Any]) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the text model with MoE structure."""
-
     weights = {}
 
     vocab_size = text_config["vocab_size"]
@@ -405,7 +401,6 @@ def create_vision_model_weights(
     vision_config: dict[str, Any],
 ) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the vision model."""
-
     weights = {}
 
     hidden_size = vision_config["hidden_size"]
@@ -473,8 +468,7 @@ def create_vision_model_weights(
 def create_shared_weights(
     text_config: dict[str, Any], vision_config: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
-    """Create weights for shared components (vision-language connector)"""
-
+    """Create weights for shared components (vision-language connector)."""
     weights = {}
 
     text_hidden_size = text_config["hidden_size"]
@@ -492,7 +486,6 @@ def save_weights_to_safetensors(
     weights: dict[str, torch.Tensor], output_path: Path
 ) -> None:
     """Save weights to safetensors files and create index."""
-
     # Determine how to shard the weights
     max_shard_size = 5 * 1024 * 1024 * 1024  # 5GB per shard
 
@@ -534,7 +527,7 @@ def save_weights_to_safetensors(
             print(f"Saved shard {i + 1}/{len(shards)}: {filename}")
 
     # Create index file
-    index_data = {
+    index_data: dict[str, Any] = {
         "metadata": {
             "total_size": sum(
                 tensor.numel() * tensor.element_size() for tensor in weights.values()
@@ -561,19 +554,20 @@ def check_attention_spec_interleaved_rope(
 ):
     """Check that the attention spec is correct."""
     assert isinstance(llm.llm_engine.model_executor, Executor)
-    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs()
+    layer_configs_per_rank = llm.llm_engine.model_executor.get_kv_cache_layer_configs()
     for rank in range(num_ranks):
-        kv_cache_specs = kv_cache_specs_per_rank[rank]
-        assert len(kv_cache_specs.keys()) == num_attention_layers
+        layer_configs = layer_configs_per_rank[rank]
+        assert len(layer_configs.keys()) == num_attention_layers
         for i in range(num_attention_layers):
             if rope_layers[i] == 0:
-                expected_spec = FullAttentionSpec
+                expected_manager = FullAttentionManager
             else:
-                expected_spec = ChunkedLocalAttentionSpec
-            assert isinstance(
-                kv_cache_specs[f"language_model.model.layers.{i}.self_attn.attn"],
-                expected_spec,
-            )
+                expected_manager = ChunkedLocalAttentionManager
+            layer_config = layer_configs[
+                f"language_model.model.layers.{i}.self_attn.attn"
+            ]
+            assert layer_config.manager_cls is expected_manager
+            assert isinstance(layer_config.spec, AttentionSpec)
 
 
 def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
@@ -616,6 +610,8 @@ def test_dummy_maverick(
 ) -> None:
     # Disable multiprocessing allows us to access model executor from LLM engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # The forked test process may inherit CUDA state from test collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     model_path = create_reduced_maverick_model(
         original_model_name=original_model_name,
@@ -653,7 +649,6 @@ def test_dummy_maverick(
 
 def main():
     """Main function to create and test the reduced model."""
-
     import argparse
 
     parser = argparse.ArgumentParser(

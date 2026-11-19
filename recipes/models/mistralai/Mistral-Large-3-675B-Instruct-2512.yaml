@@ -1,0 +1,177 @@
+meta:
+  title: "Mistral-Large-3-675B-Instruct"
+  slug: "mistral-large-3-675b-instruct"
+  provider: "Mistral AI"
+  description: "Mistral Large 3 (675B) with FP8 and NVFP4 weights for 8xH200 / 4xB200 deployments"
+  date_added: 2025-12-02
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  related_recipes:
+    - mistralai/Ministral-3-14B-Instruct-2512
+  hardware:
+    h100: verified
+    b200: verified
+
+model:
+  model_id: "mistralai/Mistral-Large-3-675B-Instruct-2512"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "675B"
+  active_parameters: "22B"
+  context_length: 294912
+  base_args:
+    - "--tokenizer_mode"
+    - "mistral"
+    - "--config_format"
+    - "mistral"
+    - "--load_format"
+    - "mistral"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 810
+    description: "FP8 weights on 8xH200 (recommended for fine-tuning; up to 256K context)"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "8"
+
+  nvfp4:
+    model_id: "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 405
+    description: "NVFP4 weights on 4xB200 (use for <64K context; B200-native, Marlin fallback on A100/H100)"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "4"
+  fp8:
+    model_id: "mistralai/Mistral-Large-3-675B-Instruct-2512-FP8"
+    precision: fp8
+    vram_minimum_gb: 810
+    description: "FP8 quantized weights for Hopper/Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 405
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Mistral-Large-3-675B-Instruct-2512 is available in FP8 and NVFP4 formats:
+
+  - **FP8** (`mistralai/Mistral-Large-3-675B-Instruct-2512`): up to 256K context, 8xH200
+  - **NVFP4** (`mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4`): best for <64K context, 4xB200
+
+  NVFP4 gives significant speed-up on B200 (native FP4 support). On older GPUs (A100/H100),
+  vLLM falls back to Marlin FP4, which matches FP8 speed while saving memory.
+
+  For large contexts (>64K) we observed a performance regression on NVFP4 — use FP8 in
+  those cases. A minor regression on vision datasets is expected with NVFP4 (calibration
+  was mainly on text).
+
+  ## Prerequisites
+
+  - Hardware: 8xH200 for FP8, 4xB200 for NVFP4
+  - vLLM >= 0.11.0
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Launch commands
+
+  FP8 on 8xH200:
+
+  ```bash
+  vllm serve mistralai/Mistral-Large-3-675B-Instruct-2512 \
+    --tensor-parallel-size 8 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral
+  ```
+
+  NVFP4 on 4xB200:
+
+  ```bash
+  vllm serve mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4 \
+    --tensor-parallel-size 4 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral
+  ```
+
+  Additional flags:
+  - `--max-model-len`: default 262144; reduce to save memory
+  - `--max-num-batched-tokens`: balance throughput vs. latency
+  - `--limit-mm-per-prompt.image 0`: skip vision encoder for text-only tasks
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  response = client.chat.completions.create(
+      model="mistralai/Mistral-Large-3-675B-Instruct-2512",
+      messages=[{"role": "user", "content": "Write a sentence..."}],
+      temperature=0.15, max_tokens=262144,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - Accuracy regression with NVFP4 at long context: switch to FP8 variant.
+  - OOM: reduce `--max-model-len` or adjust TP size.
+
+  ## References
+
+  - [Mistral-Large-3 FP8](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512)
+  - [Mistral-Large-3 NVFP4](https://huggingface.co/mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4)

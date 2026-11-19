@@ -33,7 +33,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     }
 )
 
-MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
+MODELS = ["vllm-project/dse-qwen2-2b-mrl-v1"]
 
 
 def get_messages(image: Image.Image, text: str, embed_text: bool):
@@ -87,7 +87,7 @@ def _run_test(
     *,
     dtype: str,
 ) -> None:
-    """SET PYTHONPATH"""
+    """SET PYTHONPATH."""
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -180,7 +180,7 @@ def test_models_text(
         hf_runner,
         vllm_runner,
         input_texts,
-        input_images,  # type: ignore
+        input_images,
         embed_texts,
         model,
         dtype=dtype,

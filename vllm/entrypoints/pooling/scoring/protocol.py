@@ -7,13 +7,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
-from .typing import ScoreContentPartParam, ScoreInput
+from .types import ScoreContentPartParam, ScoreInput
 
 
 class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):

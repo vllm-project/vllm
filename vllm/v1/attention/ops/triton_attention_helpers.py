@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared ``@triton.jit`` helpers used by the unified attention kernel
-and ``reduce_segments``.
+"""Shared `@triton.jit` helpers used by the unified attention kernel
+and `reduce_segments`.
 
 These are plain attention-loop helpers — mask building, ALiBi / QQ-bias
 score post-processing, online-softmax bookkeeping, tile-loop bounds,
@@ -28,12 +28,16 @@ def cdiv_fn(x, y):
 def apply_softcap(S, x):
     """Softcap (aka tanh-style clamp) used to bound attention scores.
 
-    ``x * tanh(S / x)`` rewritten to avoid a direct ``tanh`` call.
+    `x * tanh(S / x)` computed without a direct `tanh` call.
+
+    Use `tanh(y) = 1 - 2 / (exp(2y) + 1)` rather than
+    `(exp(y) - exp(-y)) / (exp(y) + exp(-y))`. The symmetric-exponential
+    form overflows to `inf` for `|y| > ~88` and then evaluates to
+    `inf / inf = NaN`, poisoning the attention row. The single-exponential
+    form saturates cleanly at +/-1 for either sign.
     """
-    Sdiv = S / x
-    p1 = tl.exp(Sdiv)
-    p2 = tl.exp(-Sdiv)
-    return x * (p1 - p2) / (p1 + p2)
+    y = S / x
+    return x * (1.0 - 2.0 / (tl.exp(2.0 * y) + 1.0))
 
 
 # ===========================================================================
@@ -52,14 +56,14 @@ def resolve_seq_and_query_len(
     """Resolve the (sequence, q-block-within-sequence) pair and load the
     per-sequence lengths.
 
-    Shared across every attention kernel — the ``q_block_global_idx``
-    program id indexes into the flattened ``(seq, q_block_in_seq)``
-    space, and a binary search over ``query_start_len_ptr`` recovers
+    Shared across every attention kernel — the `q_block_global_idx`
+    program id indexes into the flattened `(seq, q_block_in_seq)`
+    space, and a binary search over `query_start_len_ptr` recovers
     the (seq, local-q-block) pair.
 
-    Returns ``(seq_idx, q_block_local_idx, cur_batch_in_all_start_index,
-    cur_batch_query_len, seq_len)``.  Callers must still early-return
-    when ``q_block_local_idx * BLOCK_Q >= cur_batch_query_len`` (Triton
+    Returns `(seq_idx, q_block_local_idx, cur_batch_in_all_start_index,
+    cur_batch_query_len, seq_len)`.  Callers must still early-return
+    when `q_block_local_idx * BLOCK_Q >= cur_batch_query_len` (Triton
     helpers cannot return from the caller).
     """
     # find_seq_idx is defined below; forward use is fine inside @triton.jit.
@@ -85,11 +89,11 @@ def find_seq_idx(
 ):
     """Binary search over the cumulative query-length prefix.
 
-    When ``use_q_block_mode`` is True, the prefix values are reshaped
-    into units of ``BLOCK_Q`` plus one entry per boundary — matching
+    When `use_q_block_mode` is True, the prefix values are reshaped
+    into units of `BLOCK_Q` plus one entry per boundary — matching
     the q-block grid laid out by the attention kernels.  When False
     we search the plain cumulative-length prefix (used by
-    ``reduce_segments`` which iterates over raw query tokens).
+    `reduce_segments` which iterates over raw query tokens).
     """
     left: tl.int32 = 0
     right = num_seqs
@@ -116,15 +120,15 @@ def init_softmax_M(
     USE_SINKS: tl.constexpr,
     IS_3D: tl.constexpr,
 ):
-    """Initial row-max ``M`` for the online softmax.
+    """Initial row-max `M` for the online softmax.
 
-    Without sinks: ``-inf``.  With sinks: load the per-head sink bias
-    once.  In 3D mode only segment 0 loads — ``reduce_segments`` adds
+    Without sinks: `-inf`.  With sinks: load the per-head sink bias
+    once.  In 3D mode only segment 0 loads — `reduce_segments` adds
     the sink contribution exactly once across segments, so other
-    segments must start from ``-inf``.
+    segments must start from `-inf`.
 
-    ``segm_idx_or_0`` is the 3D segment index or 0 for 2D (caller
-    passes ``0`` when ``IS_3D`` is False).
+    `segm_idx_or_0` is the 3D segment index or 0 for 2D (caller
+    passes `0` when `IS_3D` is False).
     """
     M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     if USE_SINKS:
@@ -157,22 +161,29 @@ def compute_tile_loop_bounds(
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_R_SWA: tl.constexpr = False,
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    MAX_MM_RANGES: tl.constexpr = 0,
+    mm_prefix_range_ptr=None,
+    seq_idx=0,
 ):
-    """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
-    derived ``max_seq_prefix_len`` used for per-tile masking.
+    """Compute the tile-loop bounds `(loop_lo, loop_hi)` and the
+    derived `max_seq_prefix_len` used for per-tile masking.
 
     Combines three concerns into one helper:
 
     1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
+       Clamped to `seq_len` (causal) or extended to it when
        mm_prefix is active or non-causal sequences need the full
        sequence.
-    2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
-       only tiles that can contain an allowed key under SWA.
-       For non-causal sequences, the window extends in both directions.
-    3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+    2. Sliding-window pruning: narrows `[tile_start, tile_end)` to
+       only tiles that can contain an allowed key under SWA. For non-causal
+       sequences, the window extends in both directions. For Gemma4's
+       window-clamped multimodal prefix mask, the bounds include the union of
+       the base mask and each image range intersecting the query block.
+    3. 3D scoping: when `IS_3D` is True, further narrows to the
+       segment's slice via `(segm_idx * tiles_per_segment,
+       (segm_idx + 1) * tiles_per_segment)`.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -182,7 +193,7 @@ def compute_tile_loop_bounds(
         + (BLOCK_M - 1) // num_queries_per_kv
         + 1
     )
-    if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+    if USE_MM_PREFIX or USE_R_SWA or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
         # Read the full sequence but never past seq_len: the causal-style
         # formula above can overshoot for non-causal sequences, and slots
         # >= seq_len are unwritten KV (last-block tail) that may hold NaN
@@ -198,8 +209,13 @@ def compute_tile_loop_bounds(
     # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
-    # TODO(Isotr0py): sliding window pruning with image bidirectional mask
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
+    # Prefix ranges normally override the sliding window, so they require the
+    # complete sequence. Gemma4 instead clamps prefix attention to the left
+    # edge of the sliding window. In that case, the union of possible keys is
+    # bounded by the normal left window and the end of any multimodal range
+    # intersecting this query block.
+    can_prune_sliding = (not USE_R_SWA) and ((not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW)
+    if SLIDING_WINDOW > 0 and can_prune_sliding:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
@@ -218,12 +234,40 @@ def compute_tile_loop_bounds(
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         if USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
             # Non-causal: keys can be AHEAD of query within the window
-            last_allowed_key = tl.minimum(
-                context_len + qpos_hi + SLIDING_WINDOW - 1,
-                seq_len - 1,
-            )
+            last_allowed_key = context_len + qpos_hi + SLIDING_WINDOW - 1
         else:
             last_allowed_key = context_len + qpos_hi
+        if USE_MM_PREFIX and MM_PREFIX_CLAMP_SW:
+            query_abs_lo = context_len + qpos_lo
+            query_abs_hi = context_len + qpos_hi
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+                intersects_query_block = (
+                    (range_start < range_end)
+                    & (range_start <= query_abs_hi)
+                    & (range_end >= query_abs_lo)
+                )
+                mm_first_allowed_key = tl.maximum(
+                    range_start, query_abs_lo - SLIDING_WINDOW + 1
+                )
+                first_allowed_key = tl.minimum(
+                    first_allowed_key,
+                    tl.where(
+                        intersects_query_block,
+                        mm_first_allowed_key,
+                        first_allowed_key,
+                    ),
+                )
+                last_allowed_key = tl.maximum(
+                    last_allowed_key,
+                    tl.where(intersects_query_block, range_end, last_allowed_key),
+                )
+        last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
@@ -252,7 +296,7 @@ def store_segm_reduce_scalars(
     num_query_heads: tl.constexpr,
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
 ):
-    """Store per-segment ``M`` and ``L`` for ``reduce_segments`` to
+    """Store per-segment `M` and `L` for `reduce_segments` to
     combine into the final softmax.
 
     Shared across every 3D attention epilogue; the per-token output
@@ -291,17 +335,17 @@ def compute_kv_seq_mask(
     """Build the KV mask for one tile.
 
     Causal (key <= query) by default; AND-ed with either chunked
-    attention (``CHUNK_LOOKBACK >= 0``) or sliding window
-    (``SLIDING_WINDOW > 0``); OR-ed with the bidirectional ranges from
-    ``mm_prefix_range`` when PrefixLM / multimodal attention is active.
-    Order matches FlexAttention: ``(causal AND window) OR mm_prefix``.
+    attention (`CHUNK_LOOKBACK >= 0`) or sliding window
+    (`SLIDING_WINDOW > 0`); OR-ed with the bidirectional ranges from
+    `mm_prefix_range` when PrefixLM / multimodal attention is active.
+    Order matches FlexAttention: `(causal AND window) OR mm_prefix`.
     Chunked attention takes precedence over sliding window when both
-    are non-default — the launcher zeros ``CHUNK_LOOKBACK`` whenever
+    are non-default — the launcher zeros `CHUNK_LOOKBACK` whenever
     sliding window is disabled.
 
-    When ``USE_PER_SEQ_CAUSAL`` is set, each sequence carries its own
-    causal flag via ``per_seq_causal_ptr``; non-causal sequences use a
-    simple ``key < seq_len`` bound instead.  ``USE_CAUSAL=False``
+    When `USE_PER_SEQ_CAUSAL` is set, each sequence carries its own
+    causal flag via `per_seq_causal_ptr`; non-causal sequences use a
+    simple `key < seq_len` bound instead.  `USE_CAUSAL=False`
     disables causal masking entirely.
     """
     if USE_PER_SEQ_CAUSAL:
@@ -418,23 +462,23 @@ def load_qq_bias_tile(
 def softmax_step(S, M, L):
     """Online softmax update for one tile.
 
-    Returns ``(M_new, L_new, P, alpha)``.  Caller is responsible for
-    rescaling its accumulator(s) by ``alpha[:, None]`` — done outside so
+    Returns `(M_new, L_new, P, alpha)`.  Caller is responsible for
+    rescaling its accumulator(s) by `alpha[:, None]` — done outside so
     kernels with a different number / shape of accumulators can reuse
     the same step.
     """
     # compute running maximum
     # m_j : (BLOCK_M,)
     m_j = tl.maximum(M, tl.max(S, axis=1))
-    # For sliding window there's a chance the max is -inf due to masking of
-    # the entire row. In this case we need to set m_j 0 to avoid NaN
-    m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
+    # Keep an empty row's maximum at -inf for later tiles; use a finite shift
+    # only for the exponent arithmetic below.
+    safe_m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
     # P : (BLOCK_M, TILE_SIZE)
-    P = tl.exp(S - m_j[:, None])
+    P = tl.exp(S - safe_m_j[:, None])
     # l_j : (BLOCK_M,)
     l_j = tl.sum(P, axis=1)
     # alpha : (BLOCK_M, )
-    alpha = tl.exp(M - m_j)
+    alpha = tl.exp(M - safe_m_j)
     # update constants
     L_new = L * alpha + l_j
     return m_j, L_new, P, alpha

@@ -21,8 +21,7 @@ def _sample_frame_indices(total_frames: int, num_frames: int) -> npt.NDArray:
 
 @lru_cache
 def download_video_asset(filename: str) -> str:
-    """
-    Download and open an image from huggingface
+    """Download and open an image from huggingface
     repo: raushan-testing-hf/videos-test
     """
     video_directory = get_cache_dir() / "video-example-data"
@@ -141,8 +140,7 @@ class VideoAsset:
         return ret
 
     def get_audio(self, sampling_rate: float | None = None) -> npt.NDArray:
-        """
-        Read audio data from the video asset, used in Qwen2.5-Omni examples.
+        """Read audio data from the video asset, used in Qwen2.5-Omni examples.
 
         See also: examples/generate/multimodal/qwen2_5_omni/only_thinker.py
         """

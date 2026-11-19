@@ -6,16 +6,23 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
-@dataclass
+
+@dataclass(slots=True)
 class Mxfp8LinearLayerConfig:
     """Configuration for an MXFP8 linear layer.
 
     All MXFP8 layers share the same structure: FP8-E4M3 weights with
     uint8 (E8M0) per-block scales at block size 32.
+
+    Attributes:
+        weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
+
     """
 
-    pass
+    weight_shape: tuple[int, int]
+    bmm_batch_size: int | None = None
 
 
 class Mxfp8LinearKernel(ABC):
@@ -25,10 +32,20 @@ class Mxfp8LinearKernel(ABC):
     Marlin, emulation).
     """
 
+    supports_pre_processed_weights: bool = False
+    """True if `process_weights_after_loading` only rewrites parameters, so
+    weights exported by the weight cache daemon can be used as-is."""
+
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
         self.config = c
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Return the input quantization key supported by this kernel. If the kernel
+        does not support input quantization outside of the kernel, return None.
+        """
+        return None
 
     @classmethod
     @abstractmethod
@@ -38,9 +55,24 @@ class Mxfp8LinearKernel(ABC):
         raise NotImplementedError
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
+
+    @classmethod
     @abstractmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the batch."""
+        return False
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -19,9 +19,9 @@ INVALID_REPO_NAME = "thisrepodoesnotexist"
 
 # Repo with only one LoRA in the root dir
 LORA_REPO_MODEL_NAME = "meta-llama/Llama-2-7b-hf"
-LORA_REPO = "yard1/llama-2-7b-sql-lora-test"
+LORA_REPO = "vllm-project/llama-2-7b-sql-lora-test"
 REPO_DOWNLOAD_DIR = os.path.join(
-    HF_HUB_CACHE, "models--yard1--llama-2-7b-sql-lora-test"
+    HF_HUB_CACHE, "models--vllm-project--llama-2-7b-sql-lora-test"
 )
 
 
@@ -31,6 +31,7 @@ async def test_hf_resolver_with_direct_path():
     assert hf_resolver is not None
 
     lora_request = await hf_resolver.resolve_lora(LORA_REPO_MODEL_NAME, LORA_REPO)
+    assert lora_request is not None
     assert lora_request.lora_name == LORA_REPO
     assert REPO_DOWNLOAD_DIR in lora_request.lora_path
     assert "adapter_config.json" in os.listdir(lora_request.lora_path)

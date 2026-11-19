@@ -5,6 +5,9 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CompilationConfig, VllmConfig
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_num_speculative_blocks,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -16,7 +19,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 class LinearAttentionBackend(AttentionBackend):
@@ -46,19 +49,20 @@ class LinearAttentionMetadata:
 
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
+    kv_cache_spec: MambaSpec
     reorder_batch_threshold: int = 1
 
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        assert isinstance(kv_cache_spec, MambaSpec)
+        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
 
     def build(
         self,
@@ -74,6 +78,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -120,13 +125,13 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
     def get_cudagraph_support(
         cls,
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -199,6 +204,7 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

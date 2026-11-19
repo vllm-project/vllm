@@ -230,8 +230,12 @@ def mteb_test_rerank_models(
     hf_runner=HFMtebCrossEncoder,
     vllm_extra_kwargs=None,
     vllm_mteb_encoder=VllmMtebCrossEncoder,
-    atol=MTEB_RERANK_TOL,
+    atol: float | None = None,
 ):
+    if atol is None:
+        atol = (
+            model_info.mteb_tol if model_info.mteb_tol is not None else MTEB_RERANK_TOL
+        )
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     # Maybe load chat_template.
@@ -308,4 +312,8 @@ def mteb_test_rerank_models(
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert st_main_score - vllm_main_score < atol
+    diff = st_main_score - vllm_main_score
+    assert diff < atol, (
+        f"diff={diff:.6g} tol={atol} model={model_info.name} "
+        f"(st={st_main_score}, vllm={vllm_main_score})"
+    )

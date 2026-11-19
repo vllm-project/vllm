@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: SIM117
 
+from functools import partial
+
 import pytest
 
 from ...utils import EmbedModelInfo
@@ -24,6 +26,22 @@ rope_theta = 1000
 factor = 4.0
 original_max_position_embeddings = 2048
 max_model_len = int(original_max_position_embeddings * factor)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def predownload_models():
+    """Warm the HF cache so engine startup never hits transient hub errors."""
+    from vllm.transformers_utils.repo_utils import hf_api, with_retry
+
+    for model_info in MODELS:
+        with_retry(
+            partial(
+                hf_api().snapshot_download,
+                model_info.name,
+                revision=model_info.revision,
+            ),
+            f"Error downloading {model_info.name}",
+        )
 
 
 @pytest.mark.parametrize("model_info", MODELS)
@@ -90,7 +108,7 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_use_rope_scaling_legal(model_info, vllm_runner):
+def test_use_rope_parameters_legal(model_info, vllm_runner):
     hf_overrides = {
         "rope_parameters": {
             "rope_theta": rope_theta,

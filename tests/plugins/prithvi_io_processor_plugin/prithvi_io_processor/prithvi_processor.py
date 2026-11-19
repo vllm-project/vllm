@@ -58,6 +58,7 @@ def save_geotiff(image: torch.Tensor, meta: dict, out_format: str) -> str | byte
         image: np.ndarray with shape (bands, height, width)
         output_path: path where to save the image
         meta: dict with meta info.
+
     """
     if out_format == "path":
         # create temp file
@@ -100,8 +101,8 @@ def read_geotiff(
     Returns:
         np.ndarray with shape (bands, height, width)
         meta info dict
-    """
 
+    """
     if all([x is None for x in [file_path, path_type, file_data]]):
         raise Exception("All input fields to read_geotiff are None")
     write_to_file: bytes | None = None
@@ -168,9 +169,9 @@ def load_image(
     Returns:
         np.array containing created example
         list of meta info for each image in *file_paths*
-    """
 
-    imgs = []
+    """
+    imgs: list[np.ndarray] = []
     metas = []
     temporal_coords = []
     location_coords = []
@@ -209,11 +210,11 @@ def load_image(
         except Exception:
             logger.exception("Could not extract timestamp for %s", file)
 
-    imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
-    imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
-    imgs = np.expand_dims(imgs, axis=0)  # add batch di
+    stacked = np.stack(imgs, axis=0)  # num_frames, H, W, C
+    stacked = np.moveaxis(stacked, -1, 0).astype("float32")  # C, num_frames, H, W
+    stacked = np.expand_dims(stacked, axis=0)  # add batch di
 
-    return imgs, temporal_coords, location_coords, metas
+    return stacked, temporal_coords, location_coords, metas
 
 
 class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput]):
@@ -327,7 +328,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
                 }
             )
 
-        return prompts
+        return prompts  # type: ignore[return-value]
 
     def post_process(
         self,

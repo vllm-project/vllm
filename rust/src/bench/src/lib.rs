@@ -10,6 +10,7 @@ mod datasets;
 mod error;
 mod hub;
 mod metrics;
+mod mm_processor;
 mod multi_run;
 mod multi_turn;
 mod output;
@@ -25,6 +26,7 @@ pub use cli::{
     BackendKind, BenchServeArgs, DatasetName, LoraAssignment, RampUpStrategy, SpeedBenchConfig,
 };
 use config::BenchConfig;
+pub use mm_processor::{MmProcessorArgs, run_mm_processor};
 
 /// Prepare process-wide resources for a benchmark run.
 pub fn prepare_process() {
@@ -33,7 +35,7 @@ pub fn prepare_process() {
     if let Ok(new) = rlimit::increase_nofile_limit(u64::MAX)
         && new > 1024
     {
-        eprintln!("Open-file limit: {new}");
+        tracing::info!(soft_limit = new, "raised open-file limit");
     }
 }
 

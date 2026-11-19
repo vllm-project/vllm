@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Generate docker/versions.json from Dockerfile ARG defaults.
+"""Generate docker/versions.json from Dockerfile ARG defaults.
 
 This script parses the Dockerfile and extracts ARG defaults to create
 a bake-native versions.json file that can be used directly with:

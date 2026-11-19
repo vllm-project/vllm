@@ -143,7 +143,7 @@ pub fn generate_multi_turn_random(
                 );
 
                 let (prompt, adjusted) =
-                    gen_prompt_to_target_len(tokenizer, &inner_seq, target_len)?;
+                    gen_prompt_to_target_len(tokenizer, &inner_seq, target_len, &allowed_tokens)?;
                 let (prompt, token_len) = if turn_idx == 0 && !shared_prefix_text.is_empty() {
                     let combined = format!("{}{}", &*shared_prefix_text, prompt);
                     let token_len = tokenizer.encode(&combined, false)?.len();
@@ -216,7 +216,7 @@ fn generate_prefix_sharing_conversations(
     let global_text: Arc<str> = if global_len > 0 {
         let offset: usize = rng.random_range(0..at_len);
         let seq = make_token_seq(allowed_tokens, offset, global_len);
-        let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, global_len)?;
+        let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, global_len, allowed_tokens)?;
         Arc::from(text)
     } else {
         Arc::from("")
@@ -228,7 +228,7 @@ fn generate_prefix_sharing_conversations(
         for conv_idx in 0..num_conversations {
             let offset: usize = rng.random_range(0..at_len);
             let seq = make_token_seq(allowed_tokens, offset + conv_idx, conv_len);
-            let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, conv_len)?;
+            let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, conv_len, allowed_tokens)?;
             texts.push(Arc::from(text));
         }
         texts
@@ -275,7 +275,8 @@ fn generate_prefix_sharing_conversations(
                         offset + conv_idx * max_turns + turn_idx,
                         turn_unique_len,
                     );
-                    let (text, _) = gen_prompt_to_target_len(tokenizer, &seq, turn_unique_len)?;
+                    let (text, _) =
+                        gen_prompt_to_target_len(tokenizer, &seq, turn_unique_len, allowed_tokens)?;
                     text
                 } else {
                     String::new()
@@ -320,7 +321,7 @@ fn generate_shared_prefix_text(
     let tokens: Vec<u32> = (0..prefix_len)
         .map(|_| allowed_tokens[rng.random_range(0..allowed_tokens.len())])
         .collect();
-    let (text, _) = gen_prompt_to_target_len(tokenizer, &tokens, prefix_len)?;
+    let (text, _) = gen_prompt_to_target_len(tokenizer, &tokens, prefix_len, allowed_tokens)?;
     Ok(Arc::from(text))
 }
 
@@ -350,6 +351,27 @@ pub fn load_sharegpt_multi_turn(
         .as_array()
         .ok_or_else(|| BenchError::Config("ShareGPT file must contain a JSON array".into()))?;
 
+    load_sharegpt_multi_turn_from_rows(
+        tokenizer,
+        entries,
+        num_conversations,
+        output_len_override,
+        max_turns,
+        seed,
+        request_id_prefix,
+    )
+}
+
+/// Load multi-turn conversations from deserialized ShareGPT rows.
+pub fn load_sharegpt_multi_turn_from_rows(
+    tokenizer: &TokenizerKind,
+    entries: &[serde_json::Value],
+    num_conversations: usize,
+    output_len_override: Option<usize>,
+    max_turns: Option<usize>,
+    seed: u64,
+    request_id_prefix: &str,
+) -> Result<Vec<MultiTurnConversation>> {
     // Filter entries with at least 4 messages (2 turns: user+assistant+user+assistant)
     let mut filtered: Vec<&serde_json::Value> = entries
         .iter()
@@ -445,9 +467,10 @@ pub fn load_sharegpt_multi_turn(
             conv.conversation_id = format!("{request_id_prefix}conv-{}", original_len + i);
             conversations.push(conv);
         }
-        println!(
-            "Oversampled multi-turn conversations from {original_len} to {} total.",
-            conversations.len()
+        tracing::info!(
+            original_conversations = original_len,
+            conversations = conversations.len(),
+            "oversampled multi-turn conversations"
         );
     }
 
@@ -459,6 +482,7 @@ fn gen_prompt_to_target_len(
     tokenizer: &TokenizerKind,
     token_sequence: &[u32],
     target_len: usize,
+    allowed_tokens: &[u32],
 ) -> Result<(String, Vec<u32>)> {
     let max_retry = 20;
     let mut tokens = token_sequence.to_vec();
@@ -482,16 +506,15 @@ fn gen_prompt_to_target_len(
         if tokens.len() == target_len {
             return Ok((prompt, tokens));
         } else if tokens.len() < target_len {
-            let allowed = tokenizer.get_allowed_tokens();
             let needed = target_len - tokens.len();
-            if allowed.is_empty() {
+            if allowed_tokens.is_empty() {
                 let vocab_size = tokenizer.vocab_size() as usize;
                 for j in 0..needed {
                     tokens.push(((tokens.len() + j) % vocab_size) as u32);
                 }
             } else {
                 for j in 0..needed {
-                    tokens.push(allowed[(tokens.len() + j) % allowed.len()]);
+                    tokens.push(allowed_tokens[(tokens.len() + j) % allowed_tokens.len()]);
                 }
             }
         } else {
@@ -505,6 +528,42 @@ fn gen_prompt_to_target_len(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_hf_rows() {
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
+        let rows = vec![serde_json::json!({
+            "conversations": [
+                {"from": "human", "value": "hello"},
+                {"from": "gpt", "value": "hi"},
+                {"from": "human", "value": "how are you?"},
+                {"from": "gpt", "value": "great"}
+            ]
+        })];
+
+        let conversations =
+            load_sharegpt_multi_turn_from_rows(&tokenizer, &rows, 1, Some(7), None, 42, "hf-")
+                .unwrap();
+        let actual = conversations
+            .iter()
+            .map(|conversation| {
+                (
+                    conversation.conversation_id.as_str(),
+                    conversation
+                        .turns
+                        .iter()
+                        .map(|turn| (turn.user_message.as_ref(), turn.expected_output_len))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![("hf-conv-0", vec![("hello", 7), ("how are you?", 7)])]
+        );
+    }
 
     fn common_prefix_bytes(strings: &[&str]) -> usize {
         if strings.is_empty() {
@@ -525,10 +584,12 @@ mod tests {
         len
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_prefix_sharing_structure() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_prefix_sharing_structure() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 5,
@@ -610,10 +671,12 @@ mod tests {
         println!("All prefix sharing checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_default_mode() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_default_mode() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 4,
@@ -650,10 +713,12 @@ mod tests {
         println!("per_turn_input_len default-mode checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_range() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_range() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 50,
@@ -684,10 +749,12 @@ mod tests {
         println!("variable_turns_range checks passed! counts: {distinct_counts:?}");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_variable_turns_fixed() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_variable_turns_fixed() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         let cfg = MultiTurnRandomConfig {
             num_conversations: 10,
@@ -709,10 +776,12 @@ mod tests {
         println!("variable_turns_fixed checks passed!");
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_per_turn_input_len_prefix_sharing() {
-        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None).unwrap();
+    async fn test_per_turn_input_len_prefix_sharing() {
+        let tok = crate::tokenizer::load_tokenizer("nvidia/Kimi-K2.5-NVFP4", false, None)
+            .await
+            .unwrap();
 
         // Turn 0 input_len=1000, turns 1+ per_turn_input_len=600
         // global_len ≈ 100 (10%), conv_len ≈ 800 (80%), unique ≈ 100
