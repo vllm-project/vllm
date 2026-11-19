@@ -157,9 +157,13 @@ the generate server may need `VLLM_HTTP_MAX_REQUEST_BODY_SIZE` raised above
 its 32 MiB default to accept them. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
-be sent to generate. Pass `--language-model-only` to skip multimodal
-processing, and set `--limit-mm-per-prompt` to the engine's limits so that
-render rejects the same requests.
+be sent to generate. `"mm_payload": "metadata"` drops the processed tensors but
+keeps each item's `keep_on_cpu` fields as `mm_metadata`, for prefill that loads
+the embeddings through the EC connector: generate accepts such features only
+with `ec_transfer_params`, and render returns a 400 if a modality has no such
+field. Pass `--language-model-only` to skip multimodal processing, and set
+`--limit-mm-per-prompt` to the engine's limits so that render rejects the same
+requests.
 
 Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is
