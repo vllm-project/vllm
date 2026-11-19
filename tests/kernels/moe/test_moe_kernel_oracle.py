@@ -770,6 +770,7 @@ def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
     monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
     monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_BOUND", None)
     monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_EXPLICIT_NULL", False)
+    monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_INSTANCE_ID", None)
     yield
     os.environ.pop("AITER_BF16_FP8_MOE_BOUND", None)
 
@@ -893,6 +894,31 @@ def test_aiter_activation_bound_handles_conflicting_requests(
                 rocm_aiter_ops.set_bf16_fp8_moe_bound()
     if expected is not ValueError:
         assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected
+
+
+@pytest.mark.parametrize(
+    "strict, first, second, expected",
+    [
+        pytest.param("1", _MXFP8_MOE, _NULL_MOE, _NO_ACTIVATION_BOUND, id="strict"),
+        pytest.param("0", _NULL_MOE, {"moe": "mxfp4"}, "0", id="null-not-sticky"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_aiter_activation_bound_resets_on_model_reload(
+    strict, first, second, expected, monkeypatch
+) -> None:
+    """A new model loaded in the same process does not inherit the previous
+    model's activation requests."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
+    for config in (first, second):
+        vllm_config = VllmConfig()
+        vllm_config.model_config = ModelConfig()
+        vllm_config.model_config.quantization_config = quant_config_args(**config)
+        with set_current_vllm_config(vllm_config):
+            rocm_aiter_ops.set_bf16_fp8_moe_bound()
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected
 
 
 @pytest.mark.skipif(

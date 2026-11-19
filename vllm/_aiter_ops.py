@@ -2272,6 +2272,8 @@ class rocm_aiter_ops:
     _ALWAYS_BF16_BOUND = str(2**31 - 1)
     _BF16_FP8_MOE_BOUND: str | None = None
     _BF16_FP8_MOE_EXPLICIT_NULL = False
+    # `VllmConfig.instance_id` that recorded the requests above.
+    _BF16_FP8_MOE_INSTANCE_ID: str | None = None
 
     @classmethod
     def set_bf16_fp8_moe_bound(cls) -> None:
@@ -2288,13 +2290,20 @@ class rocm_aiter_ops:
             kMxfp8Dynamic,
         )
 
-        if os.environ.get("AITER_BF16_FP8_MOE_BOUND") != cls._BF16_FP8_MOE_BOUND:
-            # An external override or removal invalidates our recorded requests.
+        vllm_config = get_current_vllm_config_or_none()
+        instance_id = vllm_config.instance_id if vllm_config is not None else None
+        if (
+            os.environ.get("AITER_BF16_FP8_MOE_BOUND") != cls._BF16_FP8_MOE_BOUND
+            or instance_id != cls._BF16_FP8_MOE_INSTANCE_ID
+        ):
+            # An external override or removal, or a new model loaded in the same
+            # process, invalidates our recorded requests.
             cls._BF16_FP8_MOE_BOUND = None
             cls._BF16_FP8_MOE_EXPLICIT_NULL = False
+            cls._BF16_FP8_MOE_INSTANCE_ID = instance_id
 
         requested_activation_key, requested = user_activation_override(
-            "moe", get_current_vllm_config_or_none()
+            "moe", vllm_config
         )
         explicit_null = requested and requested_activation_key is None
         if requested_activation_key == kMxfp8Dynamic:
@@ -2307,7 +2316,8 @@ class rocm_aiter_ops:
             # Adding activation quantization to a weight-only request is forbidden.
             bound = cls._ALWAYS_BF16_BOUND
         else:
-            # TODO: This silently overrides the model-requested activation key.
+            # No activation request: keep the historical MXFP8 default (gfx950).
+            # Use `activation: null` or VLLM_STRICT_QUANT_SCHEME=1 for BF16.
             bound = "0"
         previous = cls._BF16_FP8_MOE_BOUND
         if previous is not None and previous != bound:

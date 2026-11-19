@@ -55,6 +55,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -217,6 +218,7 @@ def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
     """Unset the process-wide bound and restore its original value afterwards."""
     monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
     monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_BOUND", None)
+    monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_INSTANCE_ID", None)
     monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_EXPLICIT_NULL", False)
     yield
     os.environ.pop("AITER_BF16_FP8_MOE_BOUND", None)
@@ -503,8 +505,13 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
 )
 @pytest.mark.parametrize(
     "first, strict",
-    [("mxfp8", "1"), (None, "0")],
-    ids=["strict-raises", "explicit-null-wins"],
+    [("mxfp8", "1"), (None, "1"), ("mxfp8", "0"), (None, "0")],
+    ids=[
+        "strict-mxfp8-then-null-raises",
+        "strict-null-then-mxfp8-raises",
+        "mxfp8-then-explicit-null-wins",
+        "explicit-null-then-mxfp8-wins",
+    ],
 )
 def test_online_mxfp4_aiter_mixed_targets_activation_conflict(
     first,
@@ -1591,6 +1598,7 @@ def test_online_requantized_moe_reload(
         is_act_and_mul=True,
         tp_size=1,
         use_mxfp4_w4a4_dsv4=False,
+        activation=MoEActivation.SILU,
     )
     target_methods = {
         "fp8_per_tensor": (Fp8PerTensorOnlineMoEMethod, "fp8"),
@@ -2411,6 +2419,14 @@ def test_online_quantization(
         rocm_aiter_ops.refresh_env_variables()
         if not use_rocm_aiter and "activation" in str(online_quant_args):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
+        if (
+            use_rocm_aiter
+            and expected_moe_cls is Mxfp4OnlineMoEMethod
+            and ("'activation': None" in str(online_quant_args))
+        ):
+            # AITER's default CK 2-stage dispatch has no BF16 x MXFP4 kernel; BF16
+            # activations only run for shapes in AITER's tuned fMoE configs.
+            pytest.skip("AITER has no untuned BF16 x MXFP4 MoE kernel for Granite.")
 
     if current_platform.is_xpu():
         if quant_scheme in ("fp8_per_block", "fp8_per_channel"):
