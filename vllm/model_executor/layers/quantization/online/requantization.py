@@ -9,6 +9,10 @@ import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
+)
+from vllm.model_executor.model_loader.reload.meta import to_meta_tensor
 
 _requantization_source: ContextVar[bool] = ContextVar(
     "requantization_source", default=False
@@ -70,7 +74,6 @@ class OnlineRequantizationMixin:
     def set_requantization_source(self, source_method: QuantizeMethodBase) -> None:
         """Configure serialized-weight conversion before online quantization."""
         self.requantization_source = source_method
-        self.uses_meta_device = False
 
     def create_requantization_source_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
@@ -90,14 +93,26 @@ class OnlineRequantizationMixin:
             for name, parameter in layer._parameters.items()
             if name not in existing_parameter_names and parameter is not None
         }
-        for parameter in self.requantization_source_parameters.values():
+        for name, parameter in self.requantization_source_parameters.items():
             # `replace_parameter` then registers new params over these.
             parameter.requantization_source = True
+            # The serialized weights live on the meta device and are materialized
+            # one layer at a time by the layerwise processing loader: a layer is
+            # requantized as soon as it is loaded, so the peak memory is the
+            # quantized model plus one layer of serialized weights.
+            meta_parameter = to_meta_tensor(parameter)
+            layer.register_parameter(name, meta_parameter)
+            self.requantization_source_parameters[name] = meta_parameter
+        initialize_online_processing(layer)
         return True
 
     def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:
         """Release serialized parameters after successful requantization."""
-        for name, source_parameter in self.requantization_source_parameters.items():
-            if layer._parameters.get(name) is source_parameter:
+        for name in self.requantization_source_parameters:
+            # Materialization re-creates the parameter, keeping its attributes.
+            parameter = layer._parameters.get(name)
+            if parameter is not None and getattr(
+                parameter, "requantization_source", False
+            ):
                 delattr(layer, name)
         self.requantization_source_parameters.clear()

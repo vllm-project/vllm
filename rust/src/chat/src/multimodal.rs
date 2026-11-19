@@ -26,6 +26,7 @@ use llm_multimodal::{
     TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -316,6 +317,16 @@ pub struct MultimodalConfigFiles<'a> {
     pub processor_config: Option<&'a Path>,
 }
 
+/// A modality's processor config as the checkpoint writes it, kept as JSON
+/// until startup options are merged in, so they use the checkpoint's own key
+/// names (`resample`, not the parsed config's `resampling`).
+#[derive(Debug, Clone, Default)]
+struct CheckpointProcessorConfig {
+    /// Where the config came from, for parse errors.
+    source: String,
+    config: serde_json::Map<String, Value>,
+}
+
 /// Load a modality's section from the combined processor config, falling back
 /// to its legacy standalone file.
 fn load_preprocessor_config(
@@ -323,19 +334,17 @@ fn load_preprocessor_config(
     dedicated_name: &str,
     processor_config_path: Option<&Path>,
     processor_section: &str,
-) -> Result<Option<PreProcessorConfig>> {
+) -> Result<Option<CheckpointProcessorConfig>> {
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
-            let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
-                multimodal!(
-                    "failed to parse {processor_section} from processor_config.json: {error}"
-                )
-            })?;
-            return Ok(Some(config));
+            let source = format!("{processor_section} from processor_config.json");
+            let config = serde_json::from_value(processor.clone())
+                .map_err(|error| multimodal!("failed to parse {source}: {error}"))?;
+            return Ok(Some(CheckpointProcessorConfig { source, config }));
         }
     }
     let Some(path) = dedicated_path else {
@@ -343,9 +352,56 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = PreProcessorConfig::from_json(&text)
+    let config = serde_json::from_str(&text)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
-    Ok(Some(config))
+    Ok(Some(CheckpointProcessorConfig {
+        source: dedicated_name.to_owned(),
+        config,
+    }))
+}
+
+/// Resolve startup options into an effective config.
+fn resolve_processor_config_overrides(
+    checkpoint: CheckpointProcessorConfig,
+    kwargs: &HashMap<String, Value>,
+    scope: &str,
+) -> Result<PreProcessorConfig> {
+    if kwargs.get("text_kwargs").is_some_and(|value| {
+        !value.is_null() && !value.as_object().is_some_and(|values| values.is_empty())
+    }) {
+        bail_multimodal!("mm_processor_kwargs.text_kwargs is not supported");
+    }
+    let flat = kwargs
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "images_kwargs" | "videos_kwargs" | "audio_kwargs" | "text_kwargs"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut effective = Value::Object(checkpoint.config);
+    merge_processor_config(&mut effective, &Value::Object(flat));
+    if let Some(scoped) = kwargs.get(scope).filter(|value| !value.is_null()) {
+        if !scoped.is_object() {
+            bail_multimodal!("mm_processor_kwargs.{scope} must be an object");
+        }
+        merge_processor_config(&mut effective, scoped);
+    }
+    PreProcessorConfig::from_value(effective)
+        .map_err(|error| multimodal!("failed to parse {}: {error}", checkpoint.source))
+}
+
+/// Recursively merge mappings; other values replace the checkpoint value.
+fn merge_processor_config(config: &mut Value, overrides: &Value) {
+    if let (Value::Object(config), Value::Object(overrides)) = (&mut *config, overrides) {
+        for (key, value) in overrides {
+            merge_processor_config(config.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    } else {
+        *config = overrides.clone();
+    }
 }
 
 /// Request-scoped fetched media, split per modality with tracker UUID
@@ -389,6 +445,7 @@ impl MultimodalModelInfo {
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        mm_processor_kwargs: &HashMap<String, serde_json::Value>,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -431,9 +488,21 @@ impl MultimodalModelInfo {
 
         Self::from_loaded(
             context,
-            preprocessor_config,
-            video_preprocessor_config,
-            audio_preprocessor_config,
+            resolve_processor_config_overrides(
+                preprocessor_config,
+                mm_processor_kwargs,
+                "images_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                video_preprocessor_config,
+                mm_processor_kwargs,
+                "videos_kwargs",
+            )?,
+            resolve_processor_config_overrides(
+                audio_preprocessor_config,
+                mm_processor_kwargs,
+                "audio_kwargs",
+            )?,
             limit_mm_per_prompt,
         )
     }
@@ -1170,6 +1239,7 @@ mod tests {
     use std::sync::Arc;
 
     use llm_multimodal::TokenId;
+    use serde_json::json;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1779,6 +1849,62 @@ mod tests {
     }
 
     #[test]
+    fn model_specific_values_survive_scoped_config_merging() {
+        let kwargs = serde_json::from_value(json!({
+            "custom_options": {"width": 512, "height": 256},
+            "images_kwargs": {"custom_options": {"width": 1024}},
+            "audio_kwargs": {"max_samples": 16000},
+        }))
+        .unwrap();
+        let checkpoint = CheckpointProcessorConfig {
+            source: "preprocessor_config.json".to_owned(),
+            config: serde_json::from_value(json!({"custom_options": {"checkpoint": true}}))
+                .unwrap(),
+        };
+        let config = |scope| {
+            resolve_processor_config_overrides(checkpoint.clone(), &kwargs, scope)
+                .unwrap()
+                .extra
+        };
+        let configs = json!({
+            "audio": config("audio_kwargs"),
+            "image": config("images_kwargs"),
+            "video": config("videos_kwargs"),
+        });
+        assert_eq!(
+            configs,
+            json!({
+                "audio": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                    "max_samples": 16000,
+                },
+                "image": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 1024},
+                },
+                "video": {
+                    "custom_options": {"checkpoint": true, "height": 256, "width": 512},
+                },
+            })
+        );
+    }
+
+    /// Options use the HF key names the checkpoint config uses, including
+    /// ones the parsed config renames (`resample` → `resampling`).
+    #[test]
+    fn processor_kwargs_override_checkpoint_keys_by_hf_name() {
+        let kwargs = serde_json::from_value(json!({"resample": 3})).unwrap();
+        for checkpoint in [json!({"resample": 2}), json!({})] {
+            let checkpoint = CheckpointProcessorConfig {
+                source: "preprocessor_config.json".to_owned(),
+                config: serde_json::from_value(checkpoint).unwrap(),
+            };
+            let config =
+                resolve_processor_config_overrides(checkpoint, &kwargs, "images_kwargs").unwrap();
+            assert_eq!(config.resampling, Some(3));
+        }
+    }
+
+    #[test]
     fn processor_sections_take_precedence_over_legacy_files() {
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join("preprocessor_config.json");
@@ -1798,7 +1924,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(24000));
+            assert_eq!(config.config["sampling_rate"], 24000);
         }
         fs::write(&combined, "{}").unwrap();
         let config = load_preprocessor_config(
@@ -1809,7 +1935,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+        assert_eq!(config.config["sampling_rate"], 8000);
     }
 
     #[tokio::test]
@@ -1848,6 +1974,7 @@ mod tests {
             },
             Arc::new(muse_spark_tokenizer()),
             HashMap::new(),
+            &std::collections::HashMap::new(),
         )
         .unwrap()
         .unwrap();
