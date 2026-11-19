@@ -938,12 +938,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
             # The kernel emits the normed output, so out_proj cannot quantize it.
             or not isinstance(self.out_proj.quant_method, UnquantizedLinearMethod)
+            or self.speculative_config is not None
         ):
             return (
                 "the fused AITER kernel requires a BF16 GDN model with K=V=128, "
                 "2 or 3 value heads per key head, conv width 4, SiLU conv and gate "
                 "activations, a BF16 convolution cache, a BF16 or FP32 recurrent "
-                "state and an unquantized out_proj"
+                "state, an unquantized out_proj and no speculative decoding"
             )
         return None
 
