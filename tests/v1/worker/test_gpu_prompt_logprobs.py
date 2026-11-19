@@ -90,7 +90,7 @@ def _token_ids(num_reqs, width, device):
 def _expected(lm_head, hidden, target_ids, k):
     reference = lm_head.reference(hidden).log_softmax(-1)
     ids = torch.cat((target_ids[:, None].long(), reference.topk(k).indices), dim=1)
-    return ids, reference.gather(1, ids)
+    return ids.int(), reference.gather(1, ids)
 
 
 @pytest.fixture
