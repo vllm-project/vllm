@@ -17,6 +17,26 @@ LMCache integrates with vLLM v1 in two ways:
   distributed KV storage and for sharing KV cache across instances. See the
   [LMCache docs](https://docs.lmcache.ai) for the full MP setup.
 
+### MP mode options
+
+The connector built into vLLM requires `lmcache >= 0.5.7.post1` (see
+`requirements/kv_connectors.txt`) and is used when the installed `lmcache`
+package does not provide a connector for this vLLM version. It reads these
+keys from `kv_connector_extra_config`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `lmcache.mp.host`, `lmcache.mp.port` | `tcp://localhost`, `5555` | The single LMCache server to connect to. |
+| `lmcache.mp.server_urls` | unset | A list or comma-separated string of server URLs, one per node; takes precedence over `host`/`port`. Not supported with data parallelism or pipeline parallelism. |
+| `lmcache.mp.mq_timeout` | `300` | Timeout in seconds for requests to the server. |
+| `lmcache.mp.heartbeat_interval` | `10` | Seconds between server heartbeat pings. |
+| `lmcache.mp.eager_prefetch` | `false` | Submit the LMCache lookup as soon as a request enters the waiting queue. |
+| `lmcache.mp.save_decode_cache` | `false` | Also store chunks that contain generated tokens; by default only complete prompt chunks are stored. |
+| `lmcache.mp.lazy_offload` | `false` | Buffer stores and offload them by LMCache's policy; requires prefix caching. |
+
+Models with cross-attention, recurrent-state (Mamba) or host-resident KV cache
+groups are rejected at startup.
+
 ### MP mode with the extensible KV cache
 
 vLLM's extensible KV cache (`--enable-extensible-kv-cache`) allocates the KV
