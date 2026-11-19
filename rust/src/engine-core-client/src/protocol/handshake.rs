@@ -149,6 +149,10 @@ pub struct EngineCoreReadyResponse {
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]
     pub supports_prompt_logprobs: bool,
+    /// The engine is an EC or KV consumer and accepts multimodal items that
+    /// carry placeholder metadata without pixels or embeddings.
+    #[serde(default)]
+    pub allow_missing_mm_embeddings: bool,
 }
 
 fn supports_prompt_logprobs_default() -> bool {

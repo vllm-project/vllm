@@ -163,6 +163,10 @@ class EngineCoreReadyResponse:
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.
     supports_prompt_logprobs: bool = True
+    # `MultiModalConfig.allow_missing_mm_embeddings`: this engine is an EC or
+    # KV consumer and accepts multimodal items that carry placeholder metadata
+    # without pixels or embeddings, like the Python frontend does.
+    allow_missing_mm_embeddings: bool = False
 
 
 class EngineCoreRequest(
