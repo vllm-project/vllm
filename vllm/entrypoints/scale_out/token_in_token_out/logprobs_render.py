@@ -145,15 +145,17 @@ async def render_tokens_logprobs(
     them adds no throughput, only memory, as each holds its partial output.
     """
     rows = container.rows()
-    if lock is None or rows is None or rows[0].size <= RENDER_BLOCK_ENTRIES:
-        return await _render_tokens_logprobs(sampled_token_ids, container)
+    if rows is None:
+        return None
+    if lock is None or rows[0].size <= RENDER_BLOCK_ENTRIES:
+        return await _render_tokens_logprobs(sampled_token_ids, rows)
     async with lock:
-        return await _render_tokens_logprobs(sampled_token_ids, container)
+        return await _render_tokens_logprobs(sampled_token_ids, rows)
 
 
 async def _render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
-    container: FlatLogprobs,
+    engine_rows: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> list[bytes] | None:
     """Render the `GenerateLogProbs` JSON of one choice, as parts whose
     concatenation is the JSON.
@@ -169,9 +171,6 @@ async def _render_tokens_logprobs(
     not in slot 0, repeated top-k ids, a value JSON cannot represent): the
     caller then uses the per-entry path.
     """
-    engine_rows = container.rows()
-    if engine_rows is None:
-        return None
     token_ids, logprobs, engine_ranks = engine_rows
     n = len(sampled_token_ids)
     if n != len(token_ids):

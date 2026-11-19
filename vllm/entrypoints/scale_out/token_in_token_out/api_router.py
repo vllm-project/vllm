@@ -5,7 +5,6 @@
 import asyncio
 import json
 from http import HTTPStatus
-from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -48,13 +47,6 @@ def engine_client(request: Request) -> EngineClient:
 router = APIRouter()
 
 
-class _RenderedJSONResponse(JSONResponse):
-    """A body already rendered to JSON, sent with `JSONResponse` headers."""
-
-    def render(self, content: Any) -> bytes:
-        return content
-
-
 @router.post(
     "/inference/v1/generate",
     dependencies=[Depends(validate_json_request)],
@@ -80,7 +72,7 @@ async def generate(request: GenerateRequest, raw_request: Request):
         )
 
     elif isinstance(generator, RenderedGenerateResponse):
-        return _RenderedJSONResponse(content=generator.body)
+        return Response(content=generator.body, media_type="application/json")
 
     elif isinstance(generator, GenerateResponseBase):
         return JSONResponse(content=generator.model_dump())

@@ -21,9 +21,6 @@ from tests.entrypoints.scale_out.token_in_token_out.test_generate_stream import 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.scale_out.token_in_token_out import logprobs_render
 from vllm.entrypoints.scale_out.token_in_token_out import serving as serving_mod
-from vllm.entrypoints.scale_out.token_in_token_out.api_router import (
-    _RenderedJSONResponse,
-)
 from vllm.entrypoints.scale_out.token_in_token_out.logprobs_render import (
     format_float_reprs,
 )
@@ -248,14 +245,6 @@ def test_float_reprs_match_repr():
     assert format_float_reprs(values) == [repr(v).encode() for v in values.tolist()]
 
 
-def test_rendered_response_headers_match_json_response():
-    content = {"a": [1, 2.5, None]}
-    body = JSONResponse(content=content).body
-    rendered = _RenderedJSONResponse(content=body)
-    assert rendered.body == body
-    assert rendered.headers.items() == JSONResponse(content=content).headers.items()
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stream,output_mode,logprobs,prompt_logprobs,expected",
@@ -366,9 +355,9 @@ async def test_large_renders_run_one_at_a_time(monkeypatch):
     render = logprobs_render._render_tokens_logprobs
     events = []
 
-    async def traced(sampled_token_ids, container):
+    async def traced(sampled_token_ids, engine_rows):
         events.append(("start", len(sampled_token_ids)))
-        parts = await render(sampled_token_ids, container)
+        parts = await render(sampled_token_ids, engine_rows)
         events.append(("end", len(sampled_token_ids)))
         return parts
 
