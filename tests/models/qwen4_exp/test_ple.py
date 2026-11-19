@@ -32,6 +32,7 @@ from vllm.config import (
 )
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.distributed.engram_pool import verbs
 from vllm.distributed.parallel_state import (
     cleanup_dist_env_and_memory,
     init_distributed_environment,
@@ -1262,7 +1263,7 @@ def _make_ple_from_checkpoint(
     return module
 
 
-def _check_nvlink_ple(rank: int, path: Path, store: str) -> None:
+def _check_pool_ple(rank: int, path: Path, store: str, transport, host: bool) -> None:
     torch.accelerator.set_device_index(rank)
     path = path / f"rank-{rank}" / "model.safetensors"
     model_config = ModelConfig(
@@ -1273,7 +1274,8 @@ def _check_nvlink_ple(rank: int, path: Path, store: str) -> None:
         engram_config=EngramConfig(
             peer_group_size=2,
             peer_group_store=store,
-            cpu_offload=False,
+            peer_group_transport=transport,
+            cpu_offload=host,
         ),
     )
 
@@ -1322,7 +1324,7 @@ def _check_nvlink_ple(rank: int, path: Path, store: str) -> None:
         assert embedding.weight.shape == (12, 32)
         start = embedding.table.row_start
         assert torch.equal(
-            embedding.weight.view(torch.uint8),
+            embedding.weight.view(torch.uint8).to(reference.weight.device),
             reference.weight[start : start + 12].view(torch.uint8),
         )
         ids = torch.tensor([[0, 11], [12, 23]], dtype=torch.long, device="cuda")
@@ -1350,9 +1352,18 @@ def _check_nvlink_ple(rank: int, path: Path, store: str) -> None:
     not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
     reason="requires two CUDA GPUs",
 )
-def test_nvlink_ple_checkpoint_shards_and_cuda_graph(tmp_path: Path) -> None:
-    if not imex_channel_available():
+@pytest.mark.parametrize(
+    "transport,host", [("nvlink", False), ("rdma", False), ("rdma", True)]
+)
+def test_ple_pool_checkpoint_shards_and_cuda_graph(
+    tmp_path: Path, transport, host: bool
+) -> None:
+    if transport == "nvlink" and not imex_channel_available():
         pytest.skip("requires CUDA FABRIC handles")
+    if transport == "rdma" and not any(
+        device.startswith("mlx5") for device in verbs.active_devices()
+    ):
+        pytest.skip("requires an active mlx5 RDMA device")
     text_config = Qwen4ExpTextConfig(
         vocab_size=64,
         hidden_size=64,
@@ -1378,8 +1389,8 @@ def test_nvlink_ple_checkpoint_shards_and_cuda_graph(tmp_path: Path) -> None:
     _save_ple_checkpoint(path, "fp8", parts=3)
     os.link(path, tmp_path / "rank-1" / "model.safetensors")
     torch.multiprocessing.spawn(
-        _check_nvlink_ple,
-        args=(tmp_path, str(tmp_path / "peers")),
+        _check_pool_ple,
+        args=(tmp_path, str(tmp_path / "peers"), transport, host),
         nprocs=2,
     )
 

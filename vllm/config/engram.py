@@ -162,10 +162,9 @@ class EngramConfig:
                 "peer_group_size requires a model with Engram pool support"
             )
         if self.peer_group_size and field == "ple_layer_ids":
-            if self.peer_group_transport != "nvlink" or self.peer_group_fetch != "sync":
+            if self.peer_group_fetch != "sync":
                 raise ValueError(
-                    "Qwen4Exp Engram pool requires peer_group_transport='nvlink' "
-                    "and peer_group_fetch='sync'"
+                    "Qwen4Exp Engram pool requires peer_group_fetch='sync'"
                 )
             if self.disk_offload or self.embedding_across_dp:
                 raise ValueError(

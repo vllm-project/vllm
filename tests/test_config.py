@@ -2227,7 +2227,13 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
             "Qwen4ExpForConditionalGeneration",
             "ple_layer_ids",
             {"peer_group_transport": "rdma"},
-            "peer_group_transport",
+            None,
+        ),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma", "cpu_offload": True},
+            None,
         ),
         (
             "Qwen4ExpForCausalLM",

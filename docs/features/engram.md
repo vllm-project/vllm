@@ -225,8 +225,9 @@ compute stream, started before the decoder layers with each Engram layer
 waiting for its own rows; `async` on a side stream. Full CUDA graphs capture
 both; piecewise ones break at the start and at each Engram layer's wait.
 
-For Qwen3.8-Flash-Next-FP8, use the same options with `peer_group_transport`
-set to `nvlink` and `peer_group_fetch` set to `sync`. Start every engine
+For Qwen3.8-Flash-Next-FP8, use `peer_group_fetch=sync` with either transport.
+For a cross-node group, set `peer_group_transport=rdma`. Set `cpu_offload=true`
+for pinned host shards or false for HBM shards. Start every engine
 with the same checkpoint and revision. Each worker loads the FP8 PLE rows
 assigned to its peer rank and keeps a local copy of the table's scale. The PLE
 layer reads from the pool on the compute stream. Set `disk_offload` and
