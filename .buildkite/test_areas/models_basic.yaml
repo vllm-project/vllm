@@ -548,8 +548,6 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/models/nemotron_shortcut/
-  - vllm/transformers_utils/configs/nemotron_shortcut.py
-  - vllm/transformers_utils/processors/nemotron_shortcut.py
   - tests/models/nemotron_shortcut/
   commands:
   - pytest -v -s models/nemotron_shortcut/

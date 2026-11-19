@@ -20,6 +20,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -54,7 +55,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutTextConfig
 
 from .gdp import NemotronShortcutGDPMixer, gdp_state_dtype, gdp_state_shape
 from .mlp import NemotronShortcutMLP
@@ -73,7 +73,7 @@ logger = init_logger(__name__)
 class NemotronShortcutAttention(nn.Module):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -138,7 +138,7 @@ class NemotronShortcutAttention(nn.Module):
 class NemotronShortcutSparseAttention(nn.Module):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         prefix: str,
@@ -218,7 +218,7 @@ class NemotronShortcutSparseAttention(nn.Module):
 class NemotronShortcutWideResidualRead(nn.Module):
     """Mixes the residual streams down to one backbone-width activation."""
 
-    def __init__(self, config: NemotronShortcutTextConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
         self.num_streams = config.wide_residual_num_streams
         self.logit = nn.Parameter(torch.empty(self.num_streams))
@@ -232,7 +232,7 @@ class NemotronShortcutWideResidualRead(nn.Module):
 class NemotronShortcutWideResidualConnection(nn.Module):
     """Per-branch read and write ports into the residual streams."""
 
-    def __init__(self, config: NemotronShortcutTextConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
         self.num_streams = config.wide_residual_num_streams
         self.retention_max_forget = config.wide_residual_retention_max_forget
@@ -269,7 +269,7 @@ class NemotronShortcutPlainResidualRead(nn.Module):
     checkpoint has no read logits and the read is the identity.
     """
 
-    def __init__(self, config: NemotronShortcutTextConfig | None = None) -> None:
+    def __init__(self, config: PreTrainedConfig | None = None) -> None:
         super().__init__()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -279,7 +279,7 @@ class NemotronShortcutPlainResidualRead(nn.Module):
 class NemotronShortcutPlainResidualConnection(nn.Module):
     """Ordinary pre-norm residual behind the wide-residual port interface."""
 
-    def __init__(self, config: NemotronShortcutTextConfig | None = None) -> None:
+    def __init__(self, config: PreTrainedConfig | None = None) -> None:
         super().__init__()
 
     def read(self, hidden_states: torch.Tensor, norm: RMSNorm) -> torch.Tensor:
@@ -292,7 +292,7 @@ class NemotronShortcutPlainResidualConnection(nn.Module):
 class NemotronShortcutGDPLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -319,7 +319,7 @@ class NemotronShortcutGDPLayer(nn.Module):
 class NemotronShortcutMLPLayer(nn.Module):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -346,7 +346,7 @@ class NemotronShortcutMLPLayer(nn.Module):
 class NemotronShortcutAttentionLayer(nn.Module):
     @staticmethod
     def attention(
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         prefix: str,
@@ -394,7 +394,7 @@ class ShortcutMoELayer(nn.Module):
 
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -469,7 +469,7 @@ class ShortcutMoELayer(nn.Module):
 class ShortcutMoEAttentionLayer(ShortcutMoELayer):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -511,7 +511,7 @@ class NemotronShortcutMoEAttentionLayer(nn.Module):
 
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -544,7 +544,7 @@ class NemotronShortcutMoEAttentionLayer(nn.Module):
 class ShortcutMoEGDPLayer(ShortcutMoELayer):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -641,7 +641,7 @@ def check_supported(vllm_config: VllmConfig) -> None:
 ALL_LAYER_TYPES = {
     "linear_attention": NemotronShortcutGDPLayer,
     "mlp": NemotronShortcutMLPLayer,
-    "attn": NemotronShortcutAttentionLayer,
+    "full_attention": NemotronShortcutAttentionLayer,
     "shortcut_moe_attn": ShortcutMoEAttentionLayer,
     "shortcut_moe_gdp": ShortcutMoEGDPLayer,
 }
@@ -652,7 +652,7 @@ class NemotronShortcutTextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         check_supported(vllm_config)
-        config: NemotronShortcutTextConfig = vllm_config.model_config.hf_text_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_text_config
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -677,7 +677,7 @@ class NemotronShortcutTextModel(nn.Module):
                 vllm_config.quant_config,
                 vllm_config.parallel_config,
             )
-            if layer_type in ("attn", "shortcut_moe_attn"):
+            if layer_type in ("full_attention", "shortcut_moe_attn"):
                 return ALL_LAYER_TYPES[layer_type](
                     *args, prefix=prefix, sdsa_buffers=self.sdsa_buffers
                 )

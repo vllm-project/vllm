@@ -1244,6 +1244,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Nemotron4ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NemotronShortcut",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
@@ -1894,6 +1895,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "NemotronShortcutMTPModel": _HfExamplesInfo(
         "nvidia/NemotronShortcut",
         speculative_model="nvidia/NemotronShortcut",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "OpenPanguMTPModel": _HfExamplesInfo(

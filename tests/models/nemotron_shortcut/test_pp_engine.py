@@ -6,11 +6,14 @@ Nemotron Shortcut with `residual_in_fp32`, whose stages exchange fp32 streams.""
 import random
 
 from tests.conftest import VllmRunner
-from tests.models.nemotron_shortcut.utils import make_config, realistic_weights
+from tests.models.nemotron_shortcut.utils import (
+    make_config,
+    realistic_weights,
+    save_checkpoint_config,
+)
 from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_marks
 from vllm import SamplingParams
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutConfig
 
 pytestmark = multi_gpu_marks(num_gpus=2)
 
@@ -45,7 +48,7 @@ def test_pp_matches_one_stage(tmp_path, monkeypatch) -> None:
     # apply_model sends realistic_weights to the workers by pickle.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     # No MoE layers: router near-ties would flip experts between the two runs.
-    layers = ["linear_attention", "mlp", "attn", "mlp"]
+    layers = ["linear_attention", "mlp", "full_attention", "mlp"]
     text = make_config(
         layer_types=layers * 2,
         vocab_size=VOCAB,
@@ -61,15 +64,7 @@ def test_pp_matches_one_stage(tmp_path, monkeypatch) -> None:
         tie_word_embeddings=False,
         residual_in_fp32=True,
     )
-    NemotronShortcutConfig(
-        text_config=text,
-        image_token_id=VOCAB - 1,
-        spatial_merge_size=2,
-        vision_feature_layer=-1,
-        multimodal_projector_bias=False,
-        projector_hidden_act="gelu_fast",
-        projector_norm_eps=1e-5,
-    ).save_pretrained(tmp_path)
+    save_checkpoint_config(tmp_path, text, image_token_id=VOCAB - 1)
 
     check_logprobs_close(
         outputs_0_lst=run(tmp_path, 1),

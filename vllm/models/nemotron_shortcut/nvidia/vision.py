@@ -8,6 +8,7 @@ spatial merger, in front of the Nemotron Shortcut language model.
 """
 
 import bisect
+import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
@@ -15,7 +16,7 @@ from typing import Any, cast
 
 import torch
 from torch import nn
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature, PreTrainedConfig, ProcessorMixin
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 
 from vllm.config import VllmConfig
@@ -36,7 +37,10 @@ from vllm.model_executor.models.mistral3 import (
     Mistral3MultiModalProjector,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.pixtral import PixtralHFVisionModel
+from vllm.model_executor.models.pixtral import (
+    TRANSFORMERS_WITH_AXIAL_ROPE,
+    PixtralHFVisionModel,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -63,12 +67,6 @@ from vllm.multimodal.video_decoders import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutConfig
-from vllm.transformers_utils.processors.nemotron_shortcut import (
-    NemotronShortcutImageProcessor,
-    NemotronShortcutProcessor,
-)
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .model import NemotronShortcutForCausalLM, check_sdsa_indexer_loaded
 from .sdsa import SdsaKVCacheGrouping
@@ -77,12 +75,6 @@ logger = init_logger(__name__)
 
 _DEFAULT_MAX_VIDEO_FRAMES = 16
 
-# Defaults for checkpoints whose processor_config.json does not name the tokens.
-_LEGACY_IMAGE_TOKENS = {
-    "image_token": "<img>",
-    "image_break_token": "<image_break>",
-    "image_end_token": "</img>",
-}
 _VIDEO_TOKEN = "<nemo:video>"
 _LEGACY_VIDEO_TOKEN = "<video>"
 
@@ -591,37 +583,8 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
-    def get_hf_config(self) -> NemotronShortcutConfig:
-        return self.ctx.get_hf_config(NemotronShortcutConfig)
-
-    @cached_property
-    def image_tokens(self) -> dict[str, str]:
-        """Image special tokens named by the checkpoint's processor_config.json.
-
-        Checkpoints rename these tokens without changing their ids: some use
-        `<nemo:img>`, `<nemo:img_break>` and `<nemo:/img>`, others `<img>`,
-        `<image_break>` and `</img>`.
-        """
-        model_config = self.ctx.model_config
-        processor_config = (
-            get_hf_file_to_dict(
-                "processor_config.json", model_config.model, model_config.revision
-            )
-            or {}
-        )
-        tokens = {
-            key: processor_config.get(key, default)
-            for key, default in _LEGACY_IMAGE_TOKENS.items()
-        }
-        image_token_id = self.get_hf_config().image_token_id
-        tokenizer_id = self.get_tokenizer().convert_tokens_to_ids(tokens["image_token"])
-        if tokenizer_id != image_token_id:
-            raise ValueError(
-                f"Nemotron Shortcut image token {tokens['image_token']!r} has "
-                f"tokenizer id {tokenizer_id}, but config.json sets image_token_id="
-                f"{image_token_id}. Set image_token in processor_config.json."
-            )
-        return tokens
+    def get_hf_config(self) -> PreTrainedConfig:
+        return self.ctx.get_hf_config()
 
     @cached_property
     def video_token(self) -> str:
@@ -630,21 +593,7 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
         return _LEGACY_VIDEO_TOKEN
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
-        config = self.get_hf_config()
-        assert isinstance(config.vision_config, PixtralVisionConfig)
-        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
-        image_processor = NemotronShortcutImageProcessor(
-            size=merged_kwargs.get("size", NemotronShortcutImageProcessor.size),
-        )
-        return self.ctx.init_processor(
-            NemotronShortcutProcessor,
-            image_processor=image_processor,
-            tokenizer=self.ctx.tokenizer,
-            patch_size=config.vision_config.patch_size,
-            spatial_merge_size=config.spatial_merge_size,
-            **self.image_tokens,
-            **kwargs,
-        )
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_video_temporal_patch_size(self) -> int:
         return get_video_temporal_patch_size(self.get_hf_config())
@@ -970,9 +919,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
 
 
 class NemotronShortcutMultiModalProjector(Mistral3MultiModalProjector):
-    def __init__(
-        self, config: NemotronShortcutConfig, quant_config=None, prefix: str = ""
-    ):
+    def __init__(self, config: PreTrainedConfig, quant_config=None, prefix: str = ""):
         if config.vision_feature_layer != -1:
             raise ValueError(
                 "Nemotron Shortcut currently supports vision_feature_layer=-1"
@@ -1034,8 +981,14 @@ class NemotronShortcutForConditionalGeneration(
         )
         self.video_temporal_patch_size = get_video_temporal_patch_size(config)
         with self._mark_tower_model(vllm_config, {"image", "video"}):
+            vision_config = config.vision_config
+            rope = dict(vision_config.rope_parameters or {})
+            if rope.get("rope_type") == "axial" and not TRANSFORMERS_WITH_AXIAL_ROPE:
+                # Before 5.17, Pixtral's default RoPE computes the same 2D angles.
+                vision_config = copy.deepcopy(vision_config)
+                vision_config.rope_parameters = {**rope, "rope_type": "default"}
             self.vision_tower = PixtralHFVisionModel(
-                config.vision_config,
+                vision_config,
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

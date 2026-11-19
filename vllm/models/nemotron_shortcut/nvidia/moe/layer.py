@@ -33,9 +33,7 @@ from vllm.models.nemotron_shortcut.nvidia.moe.runner import (
 )
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.configs.nemotron_shortcut import (
-        NemotronShortcutTextConfig,
-    )
+    from transformers import PreTrainedConfig
 
 
 class NemotronShortcutMoEOutput(nn.Module):
@@ -71,7 +69,7 @@ class NemotronShortcutMoE(nn.Module):
 
     def __init__(
         self,
-        config: "NemotronShortcutTextConfig",
+        config: "PreTrainedConfig",
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
@@ -135,7 +133,7 @@ class NemotronShortcutMoE(nn.Module):
             # and applies the bias and routed_scaling_factor itself.
             custom_routing_function=(
                 self.route_logit_space
-                if config.moe_router_bias_space == "logit"
+                if getattr(config, "moe_router_bias_space", "score") == "logit"
                 else None
             ),
             scoring_func="sigmoid",

@@ -13,6 +13,7 @@ import importlib
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.cache import MambaDType
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutTextConfig
 from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -216,7 +216,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -306,7 +306,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         )
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-        self.g_clamp_value = config.gdp_g_clamp_value
+        self.g_clamp_value = getattr(config, "gdp_g_clamp_value", None)
         self.norm = RMSNormGated(
             self.value_dim,
             eps=config.gdp_norm_eps,

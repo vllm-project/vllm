@@ -3,14 +3,16 @@
 """A small Nemotron Shortcut config and module builder for the tests."""
 
 import math
+from pathlib import Path
 
 import torch
 
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutTextConfig
+
+from .configuration_nemotron4 import Nemotron4Config, Nemotron4TextConfig
 
 
-def make_config(**overrides) -> NemotronShortcutTextConfig:
+def make_config(**overrides) -> Nemotron4TextConfig:
     kwargs = dict(
         vocab_size=128,
         hidden_size=32,
@@ -23,6 +25,8 @@ def make_config(**overrides) -> NemotronShortcutTextConfig:
         mlp_hidden_act="relu2",
         activation_clamp_value=4.0,
         layer_types=["linear_attention", "mlp", "shortcut_moe_gdp"],
+        index_topk=None,
+        index_head_dim=128,
         gdp_num_heads=4,
         gdp_num_groups=4,
         gdp_head_dim=8,
@@ -44,7 +48,24 @@ def make_config(**overrides) -> NemotronShortcutTextConfig:
         residual_in_fp32=False,
     )
     kwargs.update(overrides)
-    return NemotronShortcutTextConfig(**kwargs)
+    return Nemotron4TextConfig(**kwargs)
+
+
+def save_checkpoint_config(
+    path: Path, text_config: Nemotron4TextConfig, image_token_id: int
+) -> None:
+    """config.json for a tiny random-weight model, with the stand-in config
+    module next to it as remote code, as checkpoints ship theirs."""
+    Nemotron4Config.register_for_auto_class()
+    Nemotron4Config(
+        text_config=text_config,
+        image_token_id=image_token_id,
+        spatial_merge_size=2,
+        vision_feature_layer=-1,
+        multimodal_projector_bias=False,
+        projector_hidden_act="gelu_fast",
+        projector_norm_eps=1e-5,
+    ).save_pretrained(path)
 
 
 def build(factory):

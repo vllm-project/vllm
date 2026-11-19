@@ -27,6 +27,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -53,7 +54,6 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutTextConfig
 
 from .model import (
     NemotronShortcutMoEAttentionLayer,
@@ -68,7 +68,7 @@ class NemotronShortcutMTPLayer(nn.Module):
 
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         layer_idx: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
@@ -90,7 +90,7 @@ class NemotronShortcutMTPLayer(nn.Module):
         )
         # Outside the residual streams: no learned stream ports in the checkpoint.
         self.block: nn.Module
-        if config.moe_shortcut_disable_mtp:
+        if getattr(config, "moe_shortcut_disable_mtp", False):
             self.block = NemotronShortcutMoEAttentionLayer(
                 config,
                 layer_idx,
@@ -236,11 +236,11 @@ class NemotronShortcutMTP(
         # reach the draft's config, so take the target's SDSA fields.
         target_config = vllm_config.model_config.hf_text_config
         config.index_topk = target_config.index_topk
-        config.sdsa_indexer_dtype = target_config.sdsa_indexer_dtype
-        config.sdsa_decode_core = target_config.sdsa_decode_core
-        config.sdsa_decode_fused = target_config.sdsa_decode_fused
-        config.sdsa_prefill_core = target_config.sdsa_prefill_core
-        config.sdsa_prefill_fused = target_config.sdsa_prefill_fused
+        config.sdsa_indexer_dtype = getattr(target_config, "sdsa_indexer_dtype", "auto")
+        config.sdsa_decode_core = getattr(target_config, "sdsa_decode_core", "auto")
+        config.sdsa_decode_fused = getattr(target_config, "sdsa_decode_fused", "auto")
+        config.sdsa_prefill_core = getattr(target_config, "sdsa_prefill_core", "auto")
+        config.sdsa_prefill_fused = getattr(target_config, "sdsa_prefill_fused", "auto")
 
         self.model = NemotronShortcutMultiTokenPredictor(
             vllm_config=vllm_config,

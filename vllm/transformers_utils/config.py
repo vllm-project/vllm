@@ -161,7 +161,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
     nemo_speechlm="Nemotron3_5TranscribeConfig",
-    nemotron4="NemotronShortcutConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     openvla="OpenVLAConfig",

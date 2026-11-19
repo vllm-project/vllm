@@ -18,9 +18,8 @@ from vllm.models.nemotron_shortcut.nvidia.sdsa.attention import (
     SDSA_INDEXER_OP,
     _split_at_indexer,
 )
-from vllm.transformers_utils.configs.nemotron_shortcut import (
-    NemotronShortcutTextConfig as TextConfig,
-)
+
+from ..configuration_nemotron4 import Nemotron4TextConfig as TextConfig
 
 # Stand-ins for the indexer's key projection: BF16, quantized or not.
 UNQUANTIZED = SimpleNamespace(
@@ -30,7 +29,8 @@ QUANTIZED = SimpleNamespace(quant_method=object(), params_dtype=torch.bfloat16)
 
 
 def test_sdsa_config_comes_from_the_model_config() -> None:
-    """K is index_topk and the sdsa_* fields set the rest. An "auto" k cache
+    """K is index_topk and the sdsa_* fields set the rest, "auto" when the
+    config does not have them, as checkpoints' configs do not. An "auto" k cache
     dtype is NVFP4 if the checkpoint quantizes the indexer's key projection,
     BF16 if not; a set one wins."""
     config = TextConfig(index_topk=512, sdsa_prefill_core="token")

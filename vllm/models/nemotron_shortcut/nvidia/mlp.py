@@ -8,17 +8,17 @@ apart from both the model and the MoE package.
 
 import torch
 from torch import nn
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.transformers_utils.configs.nemotron_shortcut import NemotronShortcutTextConfig
 
 
 class NemotronShortcutClampedActivation(nn.Module):
     """Soft-clamps the pre-activation to `activation_clamp_value` before relu2."""
 
-    def __init__(self, config: NemotronShortcutTextConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
         self.clamp_value = config.activation_clamp_value
         self.act_fn = get_act_fn(config.mlp_hidden_act)
@@ -34,7 +34,7 @@ class NemotronShortcutClampedActivation(nn.Module):
 class NemotronShortcutMLP(nn.Module):
     def __init__(
         self,
-        config: NemotronShortcutTextConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,

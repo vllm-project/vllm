@@ -139,8 +139,9 @@ class SdsaConfig:
 
 def get_sdsa_config(text_config: Any, k_proj: LinearBase) -> SdsaConfig:
     """The one place that builds an SDSA layer's config, from the model's text
-    config: K is `index_topk`, and the `sdsa_*` fields set the others.
-    `--hf-overrides` overrides any of them, for example
+    config: K is `index_topk`, and the `sdsa_*` fields set the others, each
+    "auto" when the checkpoint's config does not have it.
+    `--hf-overrides` sets any of them, for example
     `--hf-overrides '{"text_config": {"sdsa_prefill_core": "token"}}'`.
     `sdsa_indexer_dtype` "auto" gives NVFP4 if the checkpoint quantizes the
     indexer's key projection `k_proj`, and BF16 if not. The config is frozen."""
@@ -149,7 +150,9 @@ def get_sdsa_config(text_config: Any, k_proj: LinearBase) -> SdsaConfig:
             f"SDSA serves index_topk {list(RANK_AND_CAPACITY)}, "
             f"got {text_config.index_topk}"
         )
-    indexer_dtype = text_config.sdsa_indexer_dtype
+    indexer_dtype: Literal["auto", "nvfp4", "bf16"] = getattr(
+        text_config, "sdsa_indexer_dtype", "auto"
+    )
     source = "config"
     if indexer_dtype == "auto" and isinstance(
         k_proj.quant_method, UnquantizedLinearMethod
@@ -164,10 +167,10 @@ def get_sdsa_config(text_config: Any, k_proj: LinearBase) -> SdsaConfig:
     sdsa_config = SdsaConfig(
         top_k=text_config.index_topk,
         indexer_dtype=indexer_dtype,
-        decode_core=text_config.sdsa_decode_core,
-        decode_fused=text_config.sdsa_decode_fused,
-        prefill_core=text_config.sdsa_prefill_core,
-        prefill_fused=text_config.sdsa_prefill_fused,
+        decode_core=getattr(text_config, "sdsa_decode_core", "auto"),
+        decode_fused=getattr(text_config, "sdsa_decode_fused", "auto"),
+        prefill_core=getattr(text_config, "sdsa_prefill_core", "auto"),
+        prefill_fused=getattr(text_config, "sdsa_prefill_fused", "auto"),
     )
     logger.info_once(
         "SDSA: %s; k cache + indexer dot product dtype from %s",
