@@ -425,7 +425,7 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
                 .enumerate()
                 .map(|(content_part_index, part)| match part {
                     ChatContentPart::Text { text } => json!({"type": "text", "text": text}),
-                    ChatContentPart::ImageUrl { .. } => json!({"type": "image", "message_index": message_index, "content_part_index": content_part_index}),
+                    ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => json!({"type": "image", "message_index": message_index, "content_part_index": content_part_index}),
                     ChatContentPart::VideoUrl { .. } => json!({"type": "video", "message_index": message_index, "content_part_index": content_part_index}),
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                         json!({"type": "audio", "message_index": message_index, "content_part_index": content_part_index})

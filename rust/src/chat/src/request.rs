@@ -62,9 +62,17 @@ pub enum ChatContentPart {
     /// result. Renderers that support it expand or name the referenced tool;
     /// the others reject it.
     ToolReference { name: String },
+    /// One `image_embeds` content block: an image whose encoder output comes
+    /// from elsewhere. Only the metadata-only form is supported, which sizes
+    /// the image's placeholder from the payload's model-specific metadata
+    /// (e.g. its patch grid) for an engine consuming the encoder output from
+    /// an EC or KV transfer.
+    ImageEmbeds {
+        image_embeds: Value,
+        uuid: Option<String>,
+    },
     // ImageData...
     // VideoData...
-    // ImageEmbeds...
 }
 
 impl ChatContentPart {
@@ -121,6 +129,7 @@ impl ChatContentPart {
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
+            Self::ImageEmbeds { .. } => Err(Error::UnsupportedMultimodalContent("image_embeds")),
             Self::ToolReference { .. } => Err(Error::UnsupportedContentPart("tool_reference")),
         }
     }
@@ -137,7 +146,8 @@ impl ChatContentPart {
             Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
-            | Self::AudioUrl { .. } => true,
+            | Self::AudioUrl { .. }
+            | Self::ImageEmbeds { .. } => true,
         }
     }
 }

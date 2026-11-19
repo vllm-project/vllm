@@ -52,6 +52,8 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error("{message}")]
+    InvalidImageEmbeds { message: String },
     #[error(
         "`{modality}` features without encoder inputs require an engine that consumes encoder outputs from an EC or KV transfer"
     )]
@@ -171,6 +173,7 @@ impl Error {
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::InvalidImageEmbeds { .. }
             | Self::MissingEncoderInput { .. }
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed

@@ -369,6 +369,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     uuid,
                 }),
                 ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
+                ContentPart::ImageEmbeds { image_embeds, uuid } => {
+                    Ok(ChatContentPart::ImageEmbeds { image_embeds, uuid })
+                }
             })
             .try_collect()
             .map(ChatContent::Parts),

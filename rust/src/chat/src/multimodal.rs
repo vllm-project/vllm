@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use itertools::{Either, izip};
+use itertools::{Either, Itertools as _, izip};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
@@ -33,13 +33,14 @@ use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, M
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use crate::error::{Error, Result, bail_invalid_image_embeds, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
 mod expand;
 mod image;
+mod image_embeds;
 mod input;
 mod item;
 mod models;
@@ -748,6 +749,12 @@ fn extract_media_parts(
                 url: audio_url.clone(),
                 uuid: uuid.clone(),
             }),
+            ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
+                Ok(MediaContentPart::ImageEmbeds {
+                    payload: image_embeds.clone(),
+                    uuid: uuid.clone(),
+                })
+            }
         })
         .collect()
 }
@@ -881,6 +888,15 @@ impl MultimodalModelInfo {
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
     ) -> Result<()> {
+        // Metadata-only image embeddings serve chat requests only; a
+        // token-level request sends an image without encoder input as a
+        // feature.
+        if media_parts
+            .iter()
+            .any(|part| matches!(part, MediaContentPart::ImageEmbeds { .. }))
+        {
+            return Err(Error::UnsupportedMultimodalContent("image_embeds"));
+        }
         let start = features
             .iter()
             .map(|feature| feature.mm_position.offset + feature.mm_position.length)
@@ -965,9 +981,25 @@ impl MultimodalModelInfo {
         let media_parts_len = media_parts.len();
         self.validate_mm_limits(&media_parts)?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
+        // The tracker does not take image embeddings; they need no fetch.
+        let (image_embeds, media_parts): (Vec<_>, Vec<_>) =
+            media_parts.into_iter().partition_map(|part| match part {
+                MediaContentPart::ImageEmbeds { payload, uuid } => Either::Left((payload, uuid)),
+                part => Either::Right(part),
+            });
+        if !image_embeds.is_empty()
+            && media_parts
+                .iter()
+                .any(|part| media_part_limit_modality(part) == Some(MmModality::Image))
+        {
+            bail_invalid_image_embeds!("Mixing raw image and embedding inputs is not allowed");
+        }
+        let mut prepared = Vec::new();
+        if !image_embeds.is_empty() {
+            prepared.push(self.prepare_image_embeds(image_embeds, vision_context.token_budget)?);
+        }
         let fetched = self.fetch_media(media_parts).await?;
 
-        let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
             prepared.push(
                 self.prepare_images(

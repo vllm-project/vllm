@@ -571,6 +571,12 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
                     Ok(TemplateContentPart::Image)
                 }
+                ChatContentPart::ImageEmbeds { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_embeds"))?;
+                    Ok(TemplateContentPart::Image)
+                }
                 ChatContentPart::VideoUrl { .. } => {
                     multimodal
                         .and_then(|multimodal| multimodal.video_token.as_ref())
@@ -610,6 +616,9 @@ fn to_template_string_content(
                     ChatContentPart::ImageUrl { .. } => multimodal
                         .and_then(|multimodal| multimodal.image_token.as_deref())
                         .ok_or(Error::UnsupportedMultimodalContent("image_url")),
+                    ChatContentPart::ImageEmbeds { .. } => multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_embeds")),
                     ChatContentPart::VideoUrl { .. } => multimodal
                         .and_then(|multimodal| multimodal.video_token.as_deref())
                         .ok_or(Error::UnsupportedMultimodalContent("video_url")),
