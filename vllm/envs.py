@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_GEMMA4_HD512_DECODE: bool = False
     VLLM_GEMMA4_HD512_CHUNK: bool = False
+    VLLM_GEMMA4_HD512_CASCADE: bool = False
     VLLM_GEMMA4_HD512_CHUNK_PREFIX: int = 7000
     VLLM_GEMMA4_HD512_CHUNK_SEGS: int = 8
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1361,6 +1362,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # unified attention.
     "VLLM_GEMMA4_HD512_DECODE": lambda: (
         os.getenv("VLLM_GEMMA4_HD512_DECODE", "False").lower() in ("true", "1")
+    ),
+    # gfx942 (MI300X/MI325X): shared-prefix-group (cascade) extension of the
+    # split-KV MFMA decode kernel: sibling requests share one attention+LSE
+    # pass over their common prefix blocks; each request's private tail goes
+    # through the split-KV kernel and the two partials are LSE-folded.
+    # Requires the same geometry as VLLM_GEMMA4_HD512_DECODE and replaces
+    # that path when set.
+    "VLLM_GEMMA4_HD512_CASCADE": lambda: (
+        os.getenv("VLLM_GEMMA4_HD512_CASCADE", "False").lower() in ("true", "1")
     ),
     # gfx942 (MI300X/MI325X): route head_size 512 prefill/chunk rows with a
     # long-enough prefix through the split-KV MFMA chunk kernel in

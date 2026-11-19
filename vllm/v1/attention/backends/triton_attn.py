@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
@@ -45,6 +46,9 @@ from vllm.v1.attention.ops.hd512_mfma_chunk import (
 from vllm.v1.attention.ops.hd512_mfma_decode import (
     HD512MixedSplit,
     hd512_build_split,
+    hd512_cascade_attention,
+    hd512_cascade_groups,
+    hd512_cascade_scratch_shape,
     hd512_decode_attention,
     hd512_decode_rows,
     hd512_get_kernel,
@@ -72,6 +76,25 @@ logger = init_logger(__name__)
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
+
+
+class HD512CascadeBufs:
+    """Persistent device buffers for the hd512 cascade decode path
+    (VLLM_GEMMA4_HD512_CASCADE); written per step by the builder from the
+    runner-side group detection, captured into decode CUDA graphs."""
+
+    __slots__ = (
+        "it_row",
+        "it_mem",
+        "it_sblk",
+        "grp_flag",
+        "sq_shifted",
+        "bt_shifted",
+        "grp_part_o",
+        "grp_part_ml",
+        "max_items",
+        "capacity",
+    )
 
 
 @dataclass
@@ -112,6 +135,11 @@ class TritonAttentionMetadata:
     hd512_part_o: torch.Tensor | None = None
     hd512_part_ml: torch.Tensor | None = None
     hd512_capacity: int = 0
+
+    # gfx942 hd512 cascade (VLLM_GEMMA4_HD512_CASCADE): the group's
+    # persistent descriptor/scratch snapshot; presence arms the cascade
+    # dispatch in TritonAttentionImpl.forward.
+    hd512_cascade: "HD512CascadeBufs | None" = None
     # Mixed-batch (chunked prefill + decode) support for the same kernel:
     # CPU query offsets for the per-step partition plan, cached on the
     # shared metadata object so every hd512 layer of the group reuses it.
@@ -259,7 +287,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.hd512_part_ml: torch.Tensor | None = None
         self.hd512_capacity = 0
         if (
-            envs.VLLM_GEMMA4_HD512_DECODE
+            (envs.VLLM_GEMMA4_HD512_DECODE or envs.VLLM_GEMMA4_HD512_CASCADE)
             and current_platform.is_rocm()
             and kv_cache_spec.head_size == 512
             and kv_cache_spec.dtype == torch.bfloat16
@@ -280,6 +308,60 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             # Compile the HIP kernels up front (~2-4 min on first build;
             # cached afterwards) so it happens outside graph capture.
             hd512_get_kernel()
+
+        # gfx942 hd512 cascade (VLLM_GEMMA4_HD512_CASCADE): descriptor
+        # buffers (fixed shapes, CUDA-graph safe), pinned H2D staging and a
+        # dedicated A-pass scratch. max_items == capacity // 2: every item
+        # holds >= 2 members. Capacity matches the split-KV scratch.
+        self.hd512_cascade_bufs: HD512CascadeBufs | None = None
+        self._cascade_pin: dict | None = None
+        self._cascade_step = None
+        if (
+            envs.VLLM_GEMMA4_HD512_CASCADE
+            and current_platform.is_rocm()
+            and kv_cache_spec.head_size == 512
+            and kv_cache_spec.dtype == torch.bfloat16
+            and kv_cache_spec.num_kv_heads == 2
+        ):
+            max_reqs = vllm_config.scheduler_config.max_num_seqs
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
+            if capture_sizes:
+                max_reqs = max(max_reqs, max(capture_sizes))
+            max_items = max_reqs // 2
+            max_blk = (
+                model_config.max_model_len + self.block_size - 1
+            ) // self.block_size
+            bufs = HD512CascadeBufs()
+            bufs.max_items = max_items
+            bufs.capacity = max_reqs
+            bufs.it_row = torch.zeros(max_items, dtype=torch.int32, device=device)
+            bufs.it_mem = torch.full(
+                (max_items * 4,), -1, dtype=torch.int32, device=device
+            )
+            bufs.it_sblk = torch.zeros(max_items, dtype=torch.int32, device=device)
+            bufs.grp_flag = torch.zeros(max_reqs, dtype=torch.int32, device=device)
+            # Safe defaults for CUDA-graph capture builds, which skip the
+            # per-step hook: no groups, one-token effective lengths.
+            bufs.sq_shifted = torch.ones(max_reqs, dtype=torch.int32, device=device)
+            bufs.bt_shifted = torch.zeros(
+                (max_reqs, max_blk), dtype=torch.int32, device=device
+            )
+            o_elems, ml_elems = hd512_cascade_scratch_shape(max_reqs)
+            bufs.grp_part_o = torch.zeros(o_elems, dtype=torch.float32, device=device)
+            bufs.grp_part_ml = torch.zeros(ml_elems, dtype=torch.float32, device=device)
+            self.hd512_cascade_bufs = bufs
+            self._cascade_pin = {
+                "it_row": torch.zeros(max_items, dtype=torch.int32, pin_memory=True),
+                "it_mem": torch.full(
+                    (max_items * 4,), -1, dtype=torch.int32, pin_memory=True
+                ),
+                "it_sblk": torch.zeros(max_items, dtype=torch.int32, pin_memory=True),
+                "grp_flag": torch.zeros(max_reqs, dtype=torch.int32, pin_memory=True),
+                "sq_shifted": torch.ones(max_reqs, dtype=torch.int32, pin_memory=True),
+                "bt_shifted": torch.zeros(
+                    (max_reqs, max_blk), dtype=torch.int32, pin_memory=True
+                ),
+            }
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -361,6 +443,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata.hd512_part_o = self.hd512_part_o
         attn_metadata.hd512_part_ml = self.hd512_part_ml
         attn_metadata.hd512_capacity = self.hd512_capacity
+        attn_metadata.hd512_cascade = self.hd512_cascade_bufs
+        if self.hd512_cascade_bufs is not None:
+            self._hd512_cascade_commit()
         attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         attn_metadata.seq_lens_cpu_ub = common_attn_metadata.seq_lens_cpu_upper_bound
         attn_metadata.num_reqs = num_reqs
@@ -368,6 +453,110 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
         pass
+
+    def hd512_cascade_set_step(
+        self, block_table, num_reqs: int, seq_lens_cpu_np
+    ) -> None:
+        """Runner-side per-step hook (VLLM_GEMMA4_HD512_CASCADE): sibling
+        group detection from the CPU block table; staged into pinned
+        buffers for build() to copy to the device. Runs only on groups
+        whose builder allocated cascade buffers (head_size 512)."""
+        self.hd512_cascade_set_step_np(
+            block_table.get_numpy_array(),
+            block_table.num_blocks_per_row,
+            num_reqs,
+            seq_lens_cpu_np,
+        )
+
+    def hd512_cascade_set_step_np(
+        self, bt_np, nblk_np, num_reqs: int, seq_lens_cpu_np
+    ) -> None:
+        """Same as hd512_cascade_set_step but takes the batch-ordered CPU
+        block table and per-row block counts directly (the V2 model runner
+        keeps no runner-side CPU block_table object)."""
+        bufs = self.hd512_cascade_bufs
+        if bufs is None:
+            return
+        (
+            it_row,
+            it_mem,
+            it_sblk,
+            grp_flag,
+            bt_sh,
+            sq_sh,
+            n_groups,
+            n_items,
+            max_sqb,
+        ) = hd512_cascade_groups(
+            bt_np[:num_reqs],
+            nblk_np[:num_reqs],
+            seq_lens_cpu_np[:num_reqs],
+            bufs.max_items,
+        )
+        self._cascade_step = (
+            num_reqs,
+            it_row,
+            it_mem,
+            it_sblk,
+            grp_flag,
+            bt_sh,
+            sq_sh,
+            max_sqb,
+        )
+        if os.environ.get("VLLM_GEMMA4_HD512_CASCADE_DEBUG") == "1":
+            _c = getattr(self, "_cascade_dbg_n", 0) + 1
+            self._cascade_dbg_n = _c
+            if _c <= 4 or _c % 500 == 0:
+                import sys
+
+                print(
+                    f"[cascade-dbg set_step #{_c} n={num_reqs}"
+                    f" groups={n_groups} items={n_items}"
+                    f" max_sqb={max_sqb}]",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def _hd512_cascade_commit(self) -> None:
+        """Copy this step's cascade descriptors to the persistent device
+        buffers (or the zeroed defaults when the hook did not run, e.g.
+        CUDA-graph capture). build() calls this every step."""
+        bufs = self.hd512_cascade_bufs
+        pin = self._cascade_pin
+        step = self._cascade_step
+        self._cascade_step = None
+        if step is None:
+            # No hook this step (CUDA-graph capture builds, draft-decode
+            # refresh): the persistent buffers hold the previous step's
+            # values or the zeroed defaults from __init__; emitting device
+            # ops here would capture them into decode CUDA graphs, where
+            # they would zero this step's committed descriptors on replay.
+            return
+        n, it_row, it_mem, it_sblk, grp_flag, bt_sh, sq_sh, max_sqb = step
+        pin["it_row"].zero_()
+        pin["it_row"].copy_(torch.from_numpy(it_row), non_blocking=False)
+        pin["it_mem"].fill_(-1)
+        pin["it_mem"].copy_(torch.from_numpy(it_mem), non_blocking=False)
+        pin["it_sblk"].zero_()
+        pin["it_sblk"].copy_(torch.from_numpy(it_sblk), non_blocking=False)
+        pin["grp_flag"][:n].copy_(torch.from_numpy(grp_flag), non_blocking=False)
+        pin["grp_flag"][n:].zero_()
+        pin["sq_shifted"][:n].copy_(torch.from_numpy(sq_sh), non_blocking=False)
+        # bt_sh is trimmed to the longest row's block count; a single
+        # (ungrouped) row whose length is block-aligned makes
+        # max_sqb == bt_sh.shape[1], so the max_sqb + 1 slice would
+        # overrun it. Every B-pass block index is < sq_shifted's bound,
+        # so columns past bt_sh's width are never read.
+        wbt = min(max_sqb + 1, bt_sh.shape[1])
+        pin["bt_shifted"][:n, :wbt].copy_(
+            torch.from_numpy(bt_sh[:, :wbt]), non_blocking=False
+        )
+        bufs.it_row.copy_(pin["it_row"], non_blocking=True)
+        bufs.it_mem.copy_(pin["it_mem"], non_blocking=True)
+        bufs.it_sblk.copy_(pin["it_sblk"], non_blocking=True)
+        bufs.grp_flag.copy_(pin["grp_flag"], non_blocking=True)
+        bufs.sq_shifted.copy_(pin["sq_shifted"], non_blocking=True)
+        bufs.bt_shifted[:, :wbt].copy_(pin["bt_shifted"][:, :wbt], non_blocking=True)
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -673,6 +862,22 @@ class TritonAttentionImpl(AttentionImpl):
             and (logits_soft_cap or 0.0) == 0.0
         )
 
+        # gfx942 hd512 cascade decode (VLLM_GEMMA4_HD512_CASCADE): same
+        # kernel geometry as _hd512_mfma_decode, armed by its own flag.
+        self._hd512_mfma_cascade = (
+            envs.VLLM_GEMMA4_HD512_CASCADE
+            and current_platform.is_rocm()
+            and head_size == 512
+            and num_heads == 8
+            and num_kv_heads == 2
+            and attn_type == AttentionType.DECODER
+            and self.sliding_window == (-1, -1)
+            and kv_cache_dtype in ("auto", "bfloat16")
+            and self.alibi_slopes is None
+            and sinks is None
+            and (logits_soft_cap or 0.0) == 0.0
+        )
+
         # gfx942 hd512 MFMA chunk kernel (VLLM_GEMMA4_HD512_CHUNK): same
         # covered set as the decode kernel; routes this layer's prefill/chunk
         # rows above a prefix threshold to it.
@@ -738,6 +943,42 @@ class TritonAttentionImpl(AttentionImpl):
             return output.fill_(0)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # gfx942 hd512 cascade decode (VLLM_GEMMA4_HD512_CASCADE):
+        # sibling-group shared-prefix pass + effective-context B pass +
+        # flagged LSE fold. Replaces the plain split-KV dispatch below;
+        # rows without a group keep byte-identical math to it.
+        if (
+            self._hd512_mfma_cascade
+            and attn_metadata.max_query_len == 1
+            and attn_metadata.hd512_cascade is not None
+            and num_actual_tokens <= attn_metadata.hd512_cascade.capacity
+            and kv_cache.shape[2] == 16
+            and kv_cache.dtype == torch.bfloat16
+            and kv_cache.stride(3) == 1
+            and query.dtype == torch.bfloat16
+            and query.is_contiguous()
+            and output.is_contiguous()
+        ):
+            _bufs = attn_metadata.hd512_cascade
+            hd512_cascade_attention(
+                q=query[:num_actual_tokens],
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                it_row=_bufs.it_row,
+                it_mem=_bufs.it_mem,
+                it_sblk=_bufs.it_sblk,
+                grp_flag=_bufs.grp_flag,
+                bt_shifted=_bufs.bt_shifted,
+                sq_shifted=_bufs.sq_shifted,
+                grp_part_o=_bufs.grp_part_o,
+                grp_part_ml=_bufs.grp_part_ml,
+                part_o=attn_metadata.hd512_part_o,
+                part_ml=attn_metadata.hd512_part_ml,
+                out=output[:num_actual_tokens],
+                softmax_scale=self.scale,
+            )
+            return output
 
         # gfx942 hd512 MFMA split-KV decode (VLLM_GEMMA4_HD512_DECODE):
         # pure-decode batches only (one query token per request, so
