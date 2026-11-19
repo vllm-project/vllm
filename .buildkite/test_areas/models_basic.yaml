@@ -483,6 +483,7 @@ steps:
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 20
@@ -541,6 +542,7 @@ steps:
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 30

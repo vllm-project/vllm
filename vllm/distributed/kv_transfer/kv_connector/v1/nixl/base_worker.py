@@ -74,6 +74,7 @@ from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
     nixl_agent_config,
+    nixl_thread_sync_t,
     nixlRemoteDisconnectError,
 )
 from vllm.distributed.parallel_state import (
@@ -186,6 +187,9 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+
+    # Default UCX `num_threads` (kv_connector_extra_config can override it).
+    _DEFAULT_NUM_THREADS: int = 4
 
     # Push additionally supports MLA HMA and packed PP; attention-only HMA
     # pull uses the shared layer pairing without these paths.
@@ -827,7 +831,7 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", self._DEFAULT_NUM_THREADS
         )
         if nixl_agent_config is None:
             config = None
@@ -849,6 +853,10 @@ class NixlBaseConnectorWorker:
         )
         if sleep_mode or explicit_backends:
             config = nixl_agent_config(backends=[], capture_telemetry=True)
+        if config is not None and nixl_thread_sync_t is not None:
+            # Handshake threads load remote agents while others post, and NIXL
+            # only locks the agent given a sync mode. RW keeps posting concurrent.
+            config.sync_mode = nixl_thread_sync_t.NIXL_THREAD_SYNC_RW
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         if sleep_mode:
             # Keep slept pages unpinned, for this agent only; UCX_* env vars win.
@@ -3587,8 +3595,11 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        # Blocks still being sent stay leased until their transfer ends.
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires and not self._has_inflight_send(req_id)
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
@@ -3603,6 +3614,10 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _has_inflight_send(self, req_id: str) -> bool:
+        """Whether this worker is still sending the request's KV blocks."""
+        return False
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -4217,9 +4232,16 @@ class NixlBaseConnectorWorker:
             return
 
         now = time.perf_counter()
+        stale = [
+            eid
+            for eid, last_active in list(self._engine_last_active.items())
+            if now - last_active > self._engine_ttl
+        ]
+        if not stale:
+            return
         busy = self._engines_with_inflight_transfers()
-        for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl and eid not in busy:
+        for eid in stale:
+            if eid not in busy:
                 self._cleanup_remote_engine(eid)
 
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
@@ -4231,7 +4253,8 @@ class NixlBaseConnectorWorker:
         """
         return {
             meta.remote.engine_id
-            for req_id in self._recving_transfers
+            # Snapshot: push evicts from its writer thread too.
+            for req_id in list(self._recving_transfers)
             if (meta := self._recving_metadata.get(req_id)) is not None
             and meta.remote is not None
         }

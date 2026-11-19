@@ -9,12 +9,17 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(100):
-    pytest.skip("Inkling2 MoE requires Blackwell", allow_module_level=True)
+if not (
+    current_platform.is_device_capability_family(100)
+    or current_platform.is_device_capability(90)
+):
+    pytest.skip("Inkling2 MoE requires Hopper or Blackwell", allow_module_level=True)
 
 import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
+import vllm.models.inkling2.nvidia.ops.moe_sm90 as moe_sm90  # noqa: E402
 import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
 from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
+from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.activation import (  # noqa: E402
     _div_rn,
     _sigmoid_approx,
@@ -257,12 +262,19 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int):
         device="cuda",
     )
     swizzle = swizzle_block_scales if tile >= 128 else r8c4_block_scales
-    out = trtllm_bmm.bmm(
+    if use_sm100_kernels():
+        bmm = trtllm_bmm.bmm
+        weight_scale_in = swizzle_block_scales(shuffle_rows(weight_scale))
+        weight_in = shuffle_rows(weight)
+    else:
+        # The Hopper GEMMs take row-major weights and block scales.
+        bmm, weight_in, weight_scale_in = moe_sm90.bmm, weight, weight_scale
+    out = bmm(
         act,
         swizzle(act_scale),
         row_scale,
-        shuffle_rows(weight),
-        swizzle_block_scales(shuffle_rows(weight_scale)),
+        weight_in,
+        weight_scale_in,
         torch.ones(len(counts), device="cuda"),
         tiles,
         plan,
@@ -418,9 +430,11 @@ def _moe_reference(moe: Inkling2MoE, x: torch.Tensor, cfg) -> torch.Tensor:
     exp = moe.experts
 
     def linear(a, name, e):
-        w = unshuffle_rows(getattr(exp, f"{name}_weight")[e])
-        s = unswizzle_block_scales(getattr(exp, f"{name}_weight_scale")[e])
-        s = unshuffle_rows(s)
+        w = getattr(exp, f"{name}_weight")[e]
+        s = getattr(exp, f"{name}_weight_scale")[e]
+        if exp.sm100:
+            w = unshuffle_rows(w)
+            s = unshuffle_rows(unswizzle_block_scales(s))
         if exp.nvfp4:
             av, as_, aa = nvfp4_quantize(a)
             out = dequant_nvfp4(av, as_).double() @ dequant_nvfp4(w, s).double().T

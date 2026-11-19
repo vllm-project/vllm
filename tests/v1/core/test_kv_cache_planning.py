@@ -1545,6 +1545,60 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     }
 
 
+def test_draft_only_bucket_does_not_set_the_group_size():
+    """Muse Spark shape: 46 sliding-window + 16 full-attention target layers and a
+    5-layer DSpark drafter whose tail-only manager gets its own bucket. Groups are
+    sized from the target's buckets (16), so the full-attention layers fill one
+    unpadded group; sizing from the draft bucket (5) would pad them to 20."""
+    spec = new_kv_cache_spec()
+    specs = {}
+    for i in range(62):
+        specs[f"target.{i}.attn"] = (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+    for i in range(5):
+        specs[f"draft.{i}.attn"] = replace(
+            DFlashSlidingWindowManager.layer_config(
+                spec,
+                sliding_window=128,
+                num_speculative_tokens=3,
+                num_lookahead_tokens=3,
+            ),
+            is_draft=True,
+        )
+    assert sum(lc.manager_cls is FullAttentionManager for lc in specs.values()) == 16
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    full_groups = [g for g in groups if g.manager_cls is FullAttentionManager]
+    assert [len(g.layer_names) for g in full_groups] == [16]
+    sw_groups = [g for g in groups if g.manager_cls is SlidingWindowManager]
+    assert sorted(len(g.layer_names) for g in sw_groups) == [15, 15, 16]
+    draft_groups = [g for g in groups if g.manager_cls is DFlashSlidingWindowManager]
+    assert [len(g.layer_names) for g in draft_groups] == [5]
+    assert len(groups) == 5
+
+
+def test_full_attention_draft_only_bucket_still_sets_the_group_size():
+    """A draft-only full-attention bucket (here split off by its DCP layout) is
+    unbounded, so it still sizes the groups instead of being padded per token."""
+    spec = new_kv_cache_spec()
+    specs = {
+        f"target.{i}.attn": (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+        for i in range(62)
+    }
+    specs["draft.0.attn"] = replace(
+        full_layer(replace(spec, dcp_sharded=False)), is_draft=True
+    )
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert {len(g.layer_names) for g in groups} == {1}
+    assert len(groups) == 63
+
+
 @pytest.mark.parametrize("draft_dcp_sharded", [True, False])
 def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
     """A windowed DSpark draft next to a sparse MLA target gets its own group,
