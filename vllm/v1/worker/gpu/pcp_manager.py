@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.lora.layers import FusedMoEWithLoRA
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -154,6 +155,17 @@ class PCPManager:
         )
 
     @staticmethod
+    def validate_lora_modules(lora_modules: Iterable[torch.nn.Module]) -> None:
+        # PCP gathers MoE tokens across ranks, so a rank's token LoRA mapping
+        # does not describe the tokens its experts see.
+        if any(isinstance(module, FusedMoEWithLoRA) for module in lora_modules):
+            raise NotImplementedError(
+                "MRV2 PCP currently supports attention-only LoRA; LoRA on MoE "
+                "experts is not supported. Restrict --lora-target-modules to "
+                "attention modules."
+            )
+
+    @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
@@ -172,8 +184,6 @@ class PCPManager:
             )
         if supports_mm_inputs:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and (
             reason := speculative_config.speculator_config.pcp_unsupported_reason(

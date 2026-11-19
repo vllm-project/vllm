@@ -9,7 +9,9 @@ import torch
 
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.forward_context import set_forward_context
+from vllm.lora.layers import FusedMoE3DWithLoRA
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.attention.ops import pcp as attention_pcp
@@ -73,6 +75,22 @@ def _make_capture_manager(block_table: torch.Tensor):
 )
 def test_validate_config_accepts_decode_only_full_graphs(cudagraph_mode):
     PCPManager.validate_config(_make_config(cudagraph_mode), supports_mm_inputs=False)
+
+
+def test_validate_config_accepts_lora():
+    """LoRA is not rejected by config alone; expert LoRA is checked on load."""
+    config = _make_config(CUDAGraphMode.NONE)
+    config.lora_config = LoRAConfig(target_modules=["q_proj", "o_proj"])
+    PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+def test_validate_lora_modules_rejects_expert_lora():
+    """PCP gathers MoE tokens across ranks, so expert LoRA must be refused."""
+    attn_lora = object()
+    expert_lora = object.__new__(FusedMoE3DWithLoRA)
+    PCPManager.validate_lora_modules([attn_lora])
+    with pytest.raises(NotImplementedError, match="attention-only LoRA"):
+        PCPManager.validate_lora_modules([attn_lora, expert_lora])
 
 
 def test_validate_config_rejects_full_graph_for_prefills():

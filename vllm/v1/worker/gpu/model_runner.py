@@ -425,6 +425,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
+                if self.pcp_manager is not None:
+                    self.pcp_manager.validate_lora_modules(self.model.modules())
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
@@ -1968,12 +1970,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.lora_config:
                 # Activate LoRA adapters.
-                lora_inputs = self.lora_state.make_lora_inputs(
-                    input_batch.req_ids,
-                    input_batch.idx_mapping_np,
-                    input_batch.num_scheduled_tokens,
-                    np.diff(input_batch.cu_num_logits_np),
-                )
+                if self.pcp_manager is not None:
+                    # The model runs on this rank's chunks, but sampling uses
+                    # the restored global batch.
+                    global_batch = self.pcp_manager.global_batch
+                    lora_inputs = self.lora_state.make_lora_inputs(
+                        input_batch.req_ids,
+                        input_batch.idx_mapping_np,
+                        input_batch.num_scheduled_tokens,
+                        np.diff(global_batch.cu_num_logits_np),
+                        prompt_req_ids=global_batch.req_ids,
+                        prompt_idx_mapping=global_batch.idx_mapping_np,
+                    )
+                else:
+                    lora_inputs = self.lora_state.make_lora_inputs(
+                        input_batch.req_ids,
+                        input_batch.idx_mapping_np,
+                        input_batch.num_scheduled_tokens,
+                        np.diff(input_batch.cu_num_logits_np),
+                    )
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.

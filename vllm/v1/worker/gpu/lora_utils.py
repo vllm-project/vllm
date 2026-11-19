@@ -106,13 +106,36 @@ class LoraState:
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
         num_logits: np.ndarray,
+        prompt_req_ids: list[str] | None = None,
+        prompt_idx_mapping: np.ndarray | None = None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+        """Build the LoRA mappings for a forward pass.
+
+        Args:
+            req_ids: Requests of the batch the model runs on.
+            idx_mapping: Request state slot of each batch request.
+            num_scheduled_tokens: Tokens per batch request.
+            num_logits: Logits rows per sampled request.
+            prompt_req_ids: Requests that are sampled, when they differ from
+                the batch the model runs on (PCP samples the global batch).
+            prompt_idx_mapping: Request state slot of each sampled request.
+
+        """
+        if (prompt_req_ids is None) != (prompt_idx_mapping is None):
+            raise ValueError(
+                "prompt_req_ids and prompt_idx_mapping must be passed together."
+            )
         lora_ids = self.lora_ids[idx_mapping]
+        prompt_lora_ids = lora_ids
+        if prompt_idx_mapping is not None:
+            prompt_lora_ids = self.lora_ids[prompt_idx_mapping]
         # One lm_head id per logits row: 1 + num_drafts rows per request
         # under spec decode.
-        prompt_lora_mapping = tuple(lora_ids.repeat(num_logits))
+        prompt_lora_mapping = tuple(prompt_lora_ids.repeat(num_logits))
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
-        active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
+        active_lora_requests = self.get_activate_loras(req_ids)
+        if prompt_req_ids is not None:
+            active_lora_requests |= self.get_activate_loras(prompt_req_ids)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
 
     def get_activate_loras(self, req_ids: list[str]) -> set[LoRARequest]:
