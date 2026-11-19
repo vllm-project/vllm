@@ -768,6 +768,23 @@ class AiterMxfp4Experts(AiterExperts):
         return True
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        if (
+            moe_config.activation == MoEActivation.RELU2_NO_MUL
+            and activation_key == kMxfp4Dynamic
+        ):
+            return False, (
+                "kernel does not support fp4-activation relu2 (no AITER "
+                "GEMM kernel backs this combination; use AITER_MXFP4_BF16 "
+                "instead)"
+            )
+        return super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
