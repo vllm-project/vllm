@@ -332,10 +332,6 @@ async def test_generate_stream(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not apply --enable-force-include-usage to generate",
-)
 @pytest.mark.parametrize("server", [["--enable-force-include-usage"]], indirect=True)
 async def test_generate_stream_force_include_usage(client):
     """`--enable-force-include-usage` adds usage without `stream_options`."""
