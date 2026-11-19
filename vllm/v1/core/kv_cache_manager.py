@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -196,6 +196,10 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.try_preallocate: (
+            Callable[[str, int, int, int, int], dict[int, list[KVCacheBlock]] | None]
+            | None
+        ) = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -603,14 +607,26 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
-            # Cannot allocate new blocks
-            return None
-
-        if (
+        attach_computed = (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
-        ):
+        )
+        preallocated = None
+        if required_blocks > available_blocks:
+            # Prefix hits must be touched before allocating any groups.
+            if attach_computed or self.try_preallocate is None:
+                return None
+            preallocated = self.try_preallocate(
+                request.request_id,
+                num_tokens_need_slot,
+                num_tokens_main_model,
+                num_blocks_to_allocate,
+                available_blocks - watermark_blocks,
+            )
+            if preallocated is None:
+                return None
+
+        if attach_computed:
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
@@ -626,6 +642,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            preallocated,
         )
 
         # P/D: delay caching blocks if we have to recv from

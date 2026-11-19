@@ -939,15 +939,15 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     gross_budget = 2 + 4 * num_resident_groups
     assert 2 * num_resident_groups <= free < gross_budget
 
-    observed_budgets = []
+    predicted_releases = []
     observed_releases = []
-    get_budget = manager.coordinator.get_num_blocks_to_allocate
+    get_reclaimable = coordinator.get_num_reclaimable_blocks
     update_residency = coordinator.update_residency
 
-    def record_budget(*args, **kwargs) -> int:
-        budget = get_budget(*args, **kwargs)
-        observed_budgets.append(budget)
-        return budget
+    def record_reclaim(request_id: str, available: int) -> int:
+        count = get_reclaimable(request_id, available)
+        predicted_releases.append(count)
+        return count
 
     def record_released_blocks(request_id: str) -> None:
         before = manager.block_pool.get_num_free_blocks()
@@ -955,14 +955,12 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         observed_releases.append(manager.block_pool.get_num_free_blocks() - before)
         assert coordinator.request_states[request_id].unpinned_pages == set(range(4))
 
-    monkeypatch.setattr(
-        manager.coordinator, "get_num_blocks_to_allocate", record_budget
-    )
+    monkeypatch.setattr(coordinator, "get_num_reclaimable_blocks", record_reclaim)
     monkeypatch.setattr(coordinator, "update_residency", record_released_blocks)
     blocks = manager.allocate_slots(request, 2 * HISPARSE_BLOCK_SIZE)
 
     if len(completed_pages) < 6 or len(shared_pages) == 4:
-        assert observed_budgets == [gross_budget]
+        assert predicted_releases == [0]
         assert not observed_releases
         assert blocks is None
         assert all(
@@ -970,9 +968,8 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
         )
         return
 
-    (budget,) = observed_budgets
-    assert gross_budget - budget == (4 - len(shared_pages)) * num_resident_groups
-    assert observed_releases == [gross_budget - budget]
+    assert predicted_releases == [(4 - len(shared_pages)) * num_resident_groups]
+    assert observed_releases == predicted_releases
     assert blocks is not None
     assert all(hot.has_hot(request.request_id) for hot in coordinator.hot_managers)
     assert all(
@@ -1166,7 +1163,13 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
 
 
 def _make_hisparse_scheduler(
-    tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
+    tmp_path,
+    host_num_blocks: int,
+    matched_tokens: int,
+    *,
+    num_gpu_blocks: int = 32,
+    num_resident_groups: int = 1,
+    **kwargs,
 ) -> tuple[Scheduler, KVCacheManager]:
     """A scheduler over a HiSparse manager whose async mock connector matches
     `matched_tokens`."""
@@ -1183,7 +1186,10 @@ def _make_hisparse_scheduler(
         **kwargs,
     )
     manager = make_hisparse_kv_cache_manager(
-        32, host_num_blocks, vllm_config=scheduler.vllm_config
+        num_gpu_blocks,
+        host_num_blocks,
+        num_resident_groups=num_resident_groups,
+        vllm_config=scheduler.vllm_config,
     )
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
@@ -1203,6 +1209,32 @@ def _add_hisparse_request(
     scheduler.add_request(request)
     scheduler.schedule()
     return request
+
+
+def test_hisparse_async_import_preserves_hot_transition_reservation(tmp_path):
+    block = HISPARSE_BLOCK_SIZE
+    scheduler, manager = _make_hisparse_scheduler(
+        tmp_path, 64, 2 * block, num_gpu_blocks=38, num_resident_groups=3
+    )
+    first = make_request("first", list(range(8 * block)), block, sha256)
+    assert _allocate_scheduled(manager, first, 6 * block) is not None
+    first.num_computed_tokens = 6 * block
+    _publish_hisparse_pages(manager)
+    coordinator = get_hisparse_coordinator(manager)
+    for hot in coordinator.hot_managers:
+        hot.require_hot(first.request_id)
+    scheduler._reserve_parked(first)
+
+    # Thirteen blocks are free. The import would take eleven; the first
+    # request needs six for Hot before it can release twelve resident blocks.
+    assert manager.block_pool.get_num_free_blocks() == 13
+    second = _add_hisparse_request(scheduler, "second", 2, offset=1000)
+    assert second.status == RequestStatus.WAITING
+    assert scheduler._request_remaining_blocks(first) == 14
+    assert manager.block_pool.get_num_free_blocks() == 13
+    assert manager.allocate_slots(first, 2 * block, reserved_blocks=8) is None
+    assert manager.block_pool.get_num_free_blocks() == 13
+    assert manager.allocate_slots(first, 2 * block) is not None
 
 
 def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):

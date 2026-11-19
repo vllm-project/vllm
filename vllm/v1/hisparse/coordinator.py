@@ -14,7 +14,6 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -471,7 +470,7 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
-    def get_num_reclaimable_blocks(self, request_id: str) -> int:
+    def get_num_reclaimable_blocks(self, request_id: str, available: int) -> int:
         """Clean resident blocks a hot-first allocation can release immediately."""
         if not self.hot_managers or not all(
             request_id in manager.hot_required for manager in self.hot_managers
@@ -480,8 +479,7 @@ class HiSparseCoordinator:
         hot_blocks = sum(
             manager.get_num_required_blocks(request_id) for manager in self.hot_managers
         )
-        assert self.gpu_pool is not None
-        if not hot_blocks or hot_blocks > self.gpu_pool.get_num_free_blocks():
+        if not hot_blocks or hot_blocks > available:
             return 0
         state = self.request_states.get(request_id)
         if state is None:
@@ -494,40 +492,30 @@ class HiSparseCoordinator:
             for block in blocks
         )
 
-    def adjust_allocation_budget(self, request_id: str, required: int) -> int:
-        if self.gpu_pool is None or required > self.gpu_pool.num_gpu_blocks:
-            return required
-        return max(0, required - self.get_num_reclaimable_blocks(request_id))
-
-    def allocate_new_blocks(
+    def try_preallocate_hot(
         self,
         request_id: str,
         num_tokens: int,
         num_tokens_main_model: int,
-        num_encoder_tokens: int = 0,
-    ) -> tuple[list[KVCacheBlock], ...]:
-        """Allocate hot groups before releasing pages to fund the next chunk."""
-        hot_blocks: dict[int, list[KVCacheBlock]] = {}
-        if self.get_num_reclaimable_blocks(request_id):
-            hot_blocks = {
-                manager.kv_cache_group_id: manager.allocate_new_blocks(
-                    request_id, num_tokens, num_tokens_main_model
-                )
-                for manager in self.hot_managers
-            }
-            self.update_residency(request_id)
-        return tuple(
-            hot_blocks[group_id]
-            if group_id in hot_blocks
-            else manager.allocate_new_blocks(
-                request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
-                num_tokens_main_model,
+        required: int,
+        available: int,
+    ) -> dict[int, list[KVCacheBlock]] | None:
+        """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
+        if self.gpu_pool is None or required > self.gpu_pool.num_gpu_blocks:
+            return None
+        if (
+            self.get_num_reclaimable_blocks(request_id, available)
+            < required - available
+        ):
+            return None
+        hot_blocks = {
+            manager.kv_cache_group_id: manager.allocate_new_blocks(
+                request_id, num_tokens, num_tokens_main_model
             )
-            for group_id, manager in enumerate(self.managers)
-        )
+            for manager in self.hot_managers
+        }
+        self.update_residency(request_id)
+        return hot_blocks
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
@@ -1147,8 +1135,5 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    kv_cache_manager.coordinator.allocation_budget_hook = (
-        coordinator.adjust_allocation_budget
-    )
-    kv_cache_manager.coordinator.allocation_hook = coordinator.allocate_new_blocks
+    kv_cache_manager.try_preallocate = coordinator.try_preallocate_hot
     return coordinator
