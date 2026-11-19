@@ -21,7 +21,7 @@ class PromptEmbedsState:
     `inputs_embeds` each step, with no python loops or per-request H2D copies.
 
     A request's embeddings are dropped after the step that computes its last
-    prompt position, unless `keep_until_finished`. The scheduler admits
+    prompt position; a request rolled back below it is re-sent. The scheduler admits
     requests so that the rows held here stay within `max_model_len`, which
     memory profiling reserves.
     """
@@ -33,10 +33,8 @@ class PromptEmbedsState:
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
-        keep_until_finished: bool = False,
     ):
         self.hidden_size = hidden_size
-        self.keep_until_finished = keep_until_finished
         self.dtype = dtype
         self.device = device
 
@@ -120,8 +118,7 @@ class PromptEmbedsState:
             TOKEN_BLOCK=TOKEN_BLOCK,
             BLOCK_SIZE=1024,
         )
-        if not self.keep_until_finished:
-            self._drop_computed(input_batch)
+        self._drop_computed(input_batch)
 
     def _drop_computed(self, input_batch: InputBatch) -> None:
         # Freeing is stream-ordered after the kernel above, which reads them.
