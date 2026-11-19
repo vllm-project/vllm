@@ -204,17 +204,6 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def supports_fp8_ds_mla_sliding_window(cls) -> bool:
-        """Packed DeepSeek FP8 MLA KV on a sliding-window layer.
-
-        Dense sliding-window MLA does not implement the 656-byte layout.
-        An indexed sparse backend that already runs the paged FP8 kernel
-        and does not gather evicted pages may opt in. `nvfp4_ds_mla`
-        stays unsupported.
-        """
-        return False
-
-    @classmethod
     def supports_rswa(cls) -> bool:
         return False
 
