@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 APPROX_VALUE_SUFFIX = ".approx_value"
+VALUES_SUFFIX = ".values"
 
 
 def decoder_layer_index(path: str) -> int | None:
@@ -219,6 +220,18 @@ class ConstantExpertSubstitution(nn.Module):
                 f"shape {tuple(loaded_weight.shape)}, expected {tuple(row.shape)}"
             )
         row.copy_(loaded_weight)
+
+    def load_all_values(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        """Load the packed ``[num_substituted, hidden_size]`` constant tensor.
+
+        Rows are in ascending substituted-expert-ID order, matching ``values``.
+        """
+        if loaded_weight.shape != param.shape:
+            raise ValueError(
+                f"values for layer {self.layer_idx} have shape "
+                f"{tuple(loaded_weight.shape)}, expected {tuple(param.shape)}"
+            )
+        param.data.copy_(loaded_weight)
 
     def validate_loaded_values(self, prefix: str) -> None:
         missing_rows = torch.isnan(self.values).any(dim=1).nonzero().flatten().tolist()
