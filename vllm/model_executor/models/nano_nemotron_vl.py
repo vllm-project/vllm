@@ -217,12 +217,19 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         # Not accepted by NanoNemotronVLProcessor.__init__
         kwargs.pop("truncation", None)
 
+        image_processor_config = self.ctx.get_hf_image_processor_config()
         return self.ctx.init_processor(
             NanoNemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             video_token=self.get_video_token(),
             video_pruning_rate=self.get_video_pruning_rate(),
+            video_target_num_patches=image_processor_config.get(
+                "video_target_num_patches"
+            ),
+            video_maintain_aspect_ratio=image_processor_config.get(
+                "video_maintain_aspect_ratio"
+            ),
             max_model_len=self.ctx.model_config.max_model_len,
             **kwargs,
         )
@@ -410,12 +417,8 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
-        video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
-
         return dict(
-            pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_num_patches
-            ),
+            pixel_values_flat_video=MultiModalFieldConfig.batched("video"),
             pixel_values_raw_video=MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             ),
@@ -1598,8 +1601,8 @@ class NemotronH_Nano_VL_V2(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         sizes = kwargs.get("video_frame_sizes")
         if isinstance(sizes, torch.Tensor) and len(sizes.unique(dim=0)) > 1:
-            # device_resize videos of different frame sizes cannot share one
-            # frame tensor: embed them one at a time (all fields are per video).
+            # Videos of different frame sizes cannot share one frame tensor:
+            # embed them one at a time (all fields are per video).
             return [
                 embedding
                 for i in range(len(sizes))
