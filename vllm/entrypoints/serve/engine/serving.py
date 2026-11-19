@@ -11,10 +11,10 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.pooling.types import AnyPoolingRequest
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.engine.types import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
@@ -72,10 +72,13 @@ class BaseServing:
             ):
                 error_response = load_result
 
+        model_name = request.model
+        if model_name and len(model_name) > 256:
+            model_name = model_name[:256] + "..."
         served_names = ", ".join(model.name for model in self.models.base_model_paths)
         return error_response or self.create_error_response(
             message=(
-                f"The model `{request.model}` does not exist. "
+                f"The model `{model_name}` does not exist. "
                 f"Valid aliases: {served_names}."
             ),
             err_type="NotFoundError",

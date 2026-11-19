@@ -9,16 +9,16 @@ outputs — logprobs, token ranks, text decoding — are computed faithfully
 from the real logit distribution for that token.
 
 How it works:
-  1. Start the engine with ``--enable-trace-replay`` (or
-     ``LLM(..., enable_trace_replay=True)``).
-  2. Set ``SamplingParams.trace_decode_token_ids`` to the list of decode
+  1. Start the engine with `--enable-trace-replay` (or
+     `LLM(..., enable_trace_replay=True)`).
+  2. Set `SamplingParams.trace_decode_token_ids` to the list of decode
      token IDs you want to force.
-  3. The engine will output exactly those tokens and stop.  ``max_tokens``
+  3. The engine will output exactly those tokens and stop.  `max_tokens`
      is overwritten with the trace length, and the trace is truncated if it
-     does not fit within ``max_model_len``.  EOS tokens inside the trace
+     does not fit within `max_model_len`.  EOS tokens inside the trace
      sequence do **not** halt generation early.
 
-Requires model runner V2.  Requests are rejected with ``ValueError`` when
+Requires model runner V2.  Requests are rejected with `ValueError` when
 combined with any of:
   * n > 1                     * Speculative decoding
   * prompt_logprobs           * Structured outputs
@@ -167,8 +167,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="Fraction of GPU memory to use",
+        default=None,
+        help="Fraction of GPU memory to use (default: vLLM's default)",
     )
     parser.add_argument(
         "--max-model-len",

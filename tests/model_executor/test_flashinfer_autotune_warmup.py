@@ -16,14 +16,148 @@ import torch
 
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
-from vllm.config.utils import hash_config
+from vllm.config import MultiModalConfig
+from vllm.config.utils import hash_config, hash_factors
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    _flashinfer_mm_encoder_autotune_hash,
+    get_flashinfer_mm_encoder_autotune_config,
+)
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
+    _flashinfer_mm_encoder_autotune_num_items,
     _run_flashinfer_autotune_dummy_runs,
     flashinfer_autotune,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "mode,num_items,tp_size,expected",
+    [
+        ("data", 1, 2, 0),
+        ("data", 3, 2, 2),
+        ("data", 4, 2, 4),
+        ("data", 1, 4, 0),
+        ("data", 3, 1, 3),
+        ("weights", 3, 2, 3),
+    ],
+)
+def test_encoder_autotune_dummy_items_balance_rank_shapes(
+    mode, num_items, tp_size, expected
+):
+    """Balance data-mode tuning without exceeding the profiled item count."""
+    from vllm.model_executor.models.vision import get_load_balance_assignment
+
+    count = _flashinfer_mm_encoder_autotune_num_items(
+        num_items, MultiModalConfig(mm_encoder_tp_mode=mode), tp_size
+    )
+    assert count == expected
+    assert count <= num_items
+    if mode == "data" and count:
+        _, counts, loads = get_load_balance_assignment([256] * count, tp_size)
+        assert min(counts) > 0
+        assert len(set(counts)) == len(set(loads)) == 1
+
+
+def test_encoder_autotune_identity_ignores_ipc():
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(mm_tensor_ipc="torch_shm"), enable_chunked_prefill=True
+    ) == _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(), enable_chunked_prefill=True
+    )
+
+
+def test_encoder_autotune_identity_tracks_chunked_prefill():
+    mm_config = MultiModalConfig()
+    chunked = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=True
+    )
+    unchunked = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=False
+    )
+    assert chunked != unchunked
+
+
+@pytest.fixture
+def encoder_autotune_config(tmp_path):
+    from transformers import Qwen2_5_VLConfig
+
+    from vllm.config import DeviceConfig, KernelConfig, ModelConfig, VllmConfig
+
+    Qwen2_5_VLConfig().save_pretrained(tmp_path)
+    return VllmConfig(
+        model_config=ModelConfig(
+            str(tmp_path), skip_tokenizer_init=True, max_model_len=512
+        ),
+        device_config=DeviceConfig("cpu"),
+        kernel_config=KernelConfig(enable_flashinfer_mm_encoder_autotune=True),
+    )
+
+
+@pytest.mark.parametrize("excluded_by", [None, "disabled", "skip_profiling"])
+def test_encoder_autotune_eligibility(
+    encoder_autotune_config, monkeypatch, excluded_by
+):
+    config = encoder_autotune_config
+    mm_config = config.model_config.get_multimodal_config()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    if excluded_by == "disabled":
+        config.kernel_config.enable_flashinfer_mm_encoder_autotune = False
+    elif excluded_by == "skip_profiling":
+        mm_config.skip_mm_profiling = True
+
+    expected = mm_config if excluded_by is None else None
+    assert get_flashinfer_mm_encoder_autotune_config(config) is expected
+
+
+def test_encoder_autotune_processor_cache_capacity_preserves_both_hash_components(
+    encoder_autotune_config,
+):
+    """Processor cache capacity must not change either part of the cache key."""
+    config = encoder_autotune_config
+    mm_config = config.model_config.get_multimodal_config()
+    config_hash = hash_factors(config.compile_factors(include_version=False))
+    encoder_hash = _flashinfer_mm_encoder_autotune_hash(
+        mm_config, enable_chunked_prefill=True
+    )
+
+    assert mm_config.mm_processor_cache_gb > 0
+    mm_config.mm_processor_cache_gb = 0
+    assert hash_factors(config.compile_factors(include_version=False)) == config_hash
+    assert (
+        _flashinfer_mm_encoder_autotune_hash(mm_config, enable_chunked_prefill=True)
+        == encoder_hash
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"mm_processor_kwargs": {"size": {"longest_edge": 256}}},
+        {"limit_per_prompt": {"image": {"count": 1, "width": 256}}},
+        {"limit_per_prompt": {"video": {"count": 1, "num_frames": 4}}},
+        {"mm_encoder_tp_mode": "data"},
+        {"mm_encoder_attn_backend": "TORCH_SDPA"},
+        {"video_pruning_rate": 0.5},
+    ],
+)
+def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(**overrides), enable_chunked_prefill=True
+    ) != _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(), enable_chunked_prefill=True
+    )
+
+
+def test_encoder_autotune_identity_tracks_video_pruning_method():
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(video_pruning_rate=0.5, video_pruning_method="evs"),
+        enable_chunked_prefill=True,
+    ) != _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(video_pruning_rate=0.5, video_pruning_method="vidcom2"),
+        enable_chunked_prefill=True,
+    )
 
 
 class _FakeMoERunner:
@@ -47,6 +181,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            model_config=None,
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
@@ -59,6 +194,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
             return_value=SimpleNamespace(modules=Mock(return_value=modules))
         ),
         _dummy_run=Mock(),
+        speculator=None,
     )
 
 
@@ -93,11 +229,10 @@ def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
 
 @pytest.mark.parametrize("skip_attn", [False, True])
 def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2Runner
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner as V1Runner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     runner = _make_runner([])
-    dummy_run_signature = signature((V2Runner if skip_attn else V1Runner)._dummy_run)
+    dummy_run_signature = signature(GPUModelRunner._dummy_run)
     runner._dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
         None, **kwargs
     )
@@ -297,7 +432,7 @@ def test_flashinfer_autotune_lifecycle(
     [(1, False, 1), (2, False, 1), (1, True, 1), (1, False, 2)],
 )
 @pytest.mark.parametrize("world_size,rank", [(1, 0), (2, 0), (2, 1)])
-@pytest.mark.parametrize("model_runner_v2,max_reqs", [(False, 2), (True, 1), (True, 2)])
+@pytest.mark.parametrize("max_reqs", [1, 2])
 def test_sparse_autotune_respects_cache_selection(
     monkeypatch,
     tmp_path,
@@ -306,14 +441,12 @@ def test_sparse_autotune_respects_cache_selection(
     pp_size,
     world_size,
     rank,
-    model_runner_v2,
     max_reqs,
 ):
     import vllm.model_executor.warmup.flashinfer_sparse_mla_warmup as sparse
 
     runner = _make_runner([])
     runner.max_num_reqs = max_reqs
-    runner.vllm_config.use_v2_model_runner = model_runner_v2
     runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
@@ -392,7 +525,7 @@ def test_sparse_autotune_respects_cache_selection(
             b"cached" if rank == 0 else None, src=0
         )
         tuner.load_configs.assert_called_once_with(str(cache_path))
-    assert mixed.call_count == (1 if model_runner_v2 and max_reqs >= 2 else 0)
+    assert mixed.call_count == (1 if max_reqs >= 2 else 0)
     assert runner._dummy_run.call_count == (0 if mixed.called else 1)
 
 
@@ -681,3 +814,34 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     # block_size stays significant (the daemon keys on the resolved value).
     resolved = CacheConfig(block_size=32)
     assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)
+
+
+def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
+    """DP runs with MoE padding skip tune the precomputed-routing TRT-LLM MoE
+    ops instead of the logits ops; a cache tuned without them must not hit and
+    skip tuning. Other configs, models without such a layer, and routing
+    simulator runs (which keep the logits ops) keep their key."""
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        flashinfer_autotune_cache_hash,
+    )
+
+    class Routed(RoutedExperts):
+        supports_precomputed_routing = True
+
+    def key(dp: int, skip: str, routed: bool, sim: str = "") -> str:
+        monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", skip)
+        monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", sim)
+        config = VllmConfig(parallel_config=ParallelConfig(data_parallel_size=dp))
+        layers = [torch.nn.Linear(2, 2)] + ([Routed.__new__(Routed)] if routed else [])
+        model = SimpleNamespace(modules=lambda: iter(layers))
+        return flashinfer_autotune_cache_hash(
+            SimpleNamespace(vllm_config=config, get_model=lambda: model)
+        )
+
+    assert key(1, "1", routed=True) == key(1, "0", routed=True)
+    assert key(2, "1", routed=True) != key(2, "0", routed=True)
+    assert key(2, "1", routed=False) == key(2, "0", routed=False)
+    sim = "uniform_random"
+    assert key(2, "1", routed=True, sim=sim) == key(2, "0", routed=True, sim=sim)

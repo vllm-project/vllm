@@ -223,7 +223,7 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
             )
             image_sync = local_connector.fetch_image(f"file://{temp_dir}/{filename}")
         except FileNotFoundError as e:
-            pytest.fail("Failed to fetch image with space in name: {}".format(e))
+            pytest.fail(f"Failed to fetch image with space in name: {e}")
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
 
@@ -425,8 +425,8 @@ async def test_ssrf_bypass_backslash_in_url(local_asset_server):
     allowed_media_domains check (GHSA-v359-jj2v-j536).
 
     urllib3.parse_url() and aiohttp/yarl disagree on how to parse a
-    backslash before ``@``.  urllib3 treats ``\\`` as part of the path
-    (encoding it as ``%5C``), while yarl treats it as a userinfo
+    backslash before `@`.  urllib3 treats `\\` as part of the path
+    (encoding it as `%5C`), while yarl treats it as a userinfo
     separator, changing the effective host.  The fix normalises the URL
     through urllib3 *before* handing it to aiohttp so both layers agree.
     """

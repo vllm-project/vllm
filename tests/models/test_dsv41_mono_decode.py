@@ -17,6 +17,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.deepseek_v41.amd import mono_decode as md
+from vllm.platforms import current_platform
 
 M = 6
 
@@ -25,6 +26,10 @@ class _Runner:
     def __init__(self):
         self.calls = []
         self.draft = None
+        self.merge = False
+
+    def merges(self, rows):
+        return self.merge
 
     def forward(self, *args, **kwargs):
         self.calls.append((args, {**kwargs, "draft_runner": self.draft}))
@@ -81,7 +86,7 @@ def _inputs(rows=M):
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls)."""
+    `mode` and `metadata`; returns (result, runner calls)."""
 
     def _run(
         mode=CUDAGraphMode.FULL,
@@ -91,6 +96,7 @@ def run(monkeypatch):
         layer=None,
         max_rows=md.MAX_ROWS,
         mono=None,
+        merges=False,
         **inputs,
     ):
         # The row limit depends on the GPU (MAX_ROWS_GFX942 on gfx942), so the
@@ -103,6 +109,7 @@ def run(monkeypatch):
             }
         fc = SimpleNamespace(cudagraph_runtime_mode=mode, attn_metadata=metadata)
         runner = _Runner()
+        runner.merge = merges
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
 
@@ -198,6 +205,49 @@ def test_index_source_selects_between_the_kernels(run):
     assert out == ("mono outputs",) and callable(calls[0][1]["select"])
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+def test_index_source_compressor_writes_its_main_cache_rows():
+    calls = []
+    rotary, indexer_rotary = object(), object()
+
+    class Compressor:
+        fused_wkv_wgate = SimpleNamespace(
+            weight=torch.randn(4, 16, dtype=torch.bfloat16, device="cuda")
+        )
+
+        def __call__(self, kv_score, positions, *args):
+            calls.append(("compress", kv_score.dtype, args))
+            return "latent"
+
+        def insert_cache(self, *args):
+            calls.append(("insert_cache",))
+
+    indexer = SimpleNamespace(
+        _produce_k=lambda latent, positions, rope: calls.append(
+            ("produce_k", latent, rope)
+        ),
+        weights_proj=lambda normed: ("weights", None),
+        forward_q=lambda qr, qr_scale, weights, positions, rope: ("q", None, weights),
+        indexer_op=lambda *args: calls.append(("indexer_op",)),
+    )
+    attn = SimpleNamespace(
+        compressor=Compressor(),
+        indexer=indexer,
+        rotary_emb=rotary,
+        indexer_rotary_emb=indexer_rotary,
+    )
+    normed = torch.randn(7, 16, dtype=torch.bfloat16, device="cuda")
+    md._select(
+        SimpleNamespace(attn=attn), torch.arange(7, device="cuda"), normed, normed
+    )
+
+    assert calls == [
+        ("compress", torch.float32, (rotary,)),
+        ("produce_k", "latent", indexer_rotary),
+        ("indexer_op",),
+    ]
+
+
 def test_padded_decode_step_runs_mono(run):
     """A FULL graph pads the step to its capture size: the kernels take it and
     skip the pad rows (their slot is -1)."""
@@ -248,6 +298,175 @@ def test_padded_decode_step_runs_mono(run):
 def test_other_steps_take_the_original_path(run, case):
     out, calls = run(**case)
     assert out is None and not calls
+
+
+def _link(case):
+    layer, nxt = _layer(), _layer()
+    layer.attn.layer_id, nxt.attn.layer_id = 0, 1
+    layer.mono, nxt.mono = md.MonoDecodeLayer(), md.MonoDecodeLayer()
+    md.link_layers([layer, nxt])
+    kwargs = case(layer, nxt) or {}
+    md.link_layers([layer, nxt], blocked=(2,))
+    return dict(layer=layer, mono=layer.mono, merges=True) | kwargs
+
+
+@pytest.mark.parametrize(
+    ("case", "defers"),
+    [
+        pytest.param(lambda layer, nxt: None, True, id="linked"),
+        pytest.param(lambda layer, nxt: dict(merges=False), False, id="width"),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "engram", object()),
+            False,
+            id="next-engram",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt.attn, "layer_id", 2), False, id="next-aux"
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "mono", md.MonoDecodeLayer(True)),
+            False,
+            id="next-ffn",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "mono", md.MonoDecodeLayer(draft=True)),
+            False,
+            id="next-draft",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt.attn.swa_cache_layer, "prefix", "other"),
+            False,
+            id="next-declines",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(layer, "_forward_hooks", {0: print}),
+            False,
+            id="hook",
+        ),
+        pytest.param(
+            lambda layer, nxt: setattr(nxt, "_forward_pre_hooks", {0: print}),
+            False,
+            id="next-pre-hook",
+        ),
+    ],
+)
+def test_layer_defers_k2_to_the_next_layers_k1(run, case, defers):
+    out, calls = run(**_link(case))
+    assert out == ("mono outputs",) and calls[0][1]["defer"] is defers
+
+
+def _logged(events, name, out=lambda x, *args: x):
+    def call(*args):
+        events.append(name)
+        return out(*args)
+
+    return call
+
+
+def _engram_layer(monkeypatch, run, events):
+    layer = _layer()
+    layer.mhc_post = _logged(events, "mhc_post")
+    layer.engram = _logged(events, "engram")
+    layer.engram.layer_hash_index = 0
+    run(layer=layer, engram_hashes=torch.zeros(M, 2, dtype=torch.int64))
+
+
+def _layers(events, n):
+    return [_logged(events, f"layer {i}", lambda x, *args: (x,) * 5) for i in range(n)]
+
+
+def _target_model(monkeypatch, events, **attrs):
+    from vllm.models.deepseek_v41.amd import model as model_mod
+
+    pp = SimpleNamespace(is_first_rank=True, is_last_rank=False)
+    monkeypatch.setattr(model_mod, "get_pp_group", lambda: pp)
+    model = SimpleNamespace(
+        layers=_layers(events, 4),
+        start_layer=0,
+        end_layer=4,
+        aux_hidden_state_layers=(2,),
+        decoder_replay_layers=None,
+        mhc_post=_logged(events, "mhc_post", lambda x, *args: x.unsqueeze(1)),
+        use_sequence_parallel=False,
+        use_mega_moe=False,
+        engram_hash=None,
+        _link_mono=lambda: None,
+        **attrs,
+    )
+    cls = model_mod.DeepseekV4Model
+    model._run_layers = lambda *args: cls._run_layers(model, *args)
+    return cls, model, torch.zeros(M, 8)
+
+
+def _target_forward(monkeypatch, run, events):
+    cls, model, x = _target_model(monkeypatch, events, decoder_replay_start=4)
+    cls.forward(model, None, x, None, inputs_embeds=x)
+
+
+def _target_replay_layers(monkeypatch, run, events):
+    cls, model, x = _target_model(monkeypatch, events, decoder_replay_start=2)
+    cls._run_replay_layers(model, x, x, None, x, x, x, x)
+
+
+def _draft_forward(monkeypatch, run, events):
+    from vllm.models.deepseek_v41.amd import dspark
+
+    monkeypatch.setattr(dspark, "mhc_post_torch", _logged(events, "mhc_post"))
+    monkeypatch.setattr(
+        dspark.DeepseekV4DecoderLayer, "_hc_collapse", lambda x, pre_mix: x
+    )
+    model = SimpleNamespace(
+        layers=_layers(events, 1),
+        use_sequence_parallel=False,
+        hc_mult=4,
+        _mono_linked=True,
+    )
+    dspark.DSparkDeepseekV4Model.forward(model, None, torch.zeros(M), torch.zeros(M, 8))
+
+
+@pytest.mark.parametrize(
+    ("case", "want"),
+    [
+        pytest.param(
+            lambda monkeypatch, run, events: run(mode=CUDAGraphMode.PIECEWISE),
+            ["flush"],
+            id="declines",
+        ),
+        pytest.param(
+            lambda monkeypatch, run, events: run(
+                residual=None, x=torch.zeros(M, 4, 5120, dtype=torch.bfloat16)
+            ),
+            ["flush"],
+            id="stage-input",
+        ),
+        pytest.param(
+            lambda monkeypatch, run, events: run(ffn_only=True, entry="layer"),
+            ["flush"],
+            id="ffn-layer",
+        ),
+        pytest.param(_engram_layer, ["flush", "mhc_post", "engram"], id="engram"),
+        pytest.param(
+            _target_forward,
+            ["layer 0", "layer 1", "flush", "mhc_post"]
+            + ["layer 2", "layer 3", "flush", "mhc_post"],
+            id="target-forward",
+        ),
+        pytest.param(
+            _target_replay_layers,
+            ["flush", "mhc_post", "layer 2", "layer 3", "flush", "mhc_post"],
+            id="target-replay-layers",
+        ),
+        pytest.param(
+            _draft_forward, ["layer 0", "flush", "mhc_post"], id="draft-forward"
+        ),
+    ],
+)
+def test_reading_a_layers_outputs_flushes_a_deferred_k2(monkeypatch, run, case, want):
+    events: list[str] = []
+    pending = SimpleNamespace(pending=True, flush=lambda: events.append("flush"))
+    monkeypatch.setattr(md, "_runner", pending)
+    case(monkeypatch, run, events)
+    assert events == want
 
 
 def _linear():
@@ -397,7 +616,7 @@ def _config(monokernel=True, **parallel):
 
 def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL).
-    ``target`` is the architecture FlyDSL compiles for, by default the GPU's."""
+    `target` is the architecture FlyDSL compiles for, by default the GPU's."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)

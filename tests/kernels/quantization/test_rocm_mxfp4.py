@@ -10,7 +10,7 @@ This file keeps the ROCm-specific FP4 coverage:
   paths
 
 Generic MXFP4 wrapper/reference checks already live in
-``tests/kernels/quantization/test_quark.py``.
+`tests/kernels/quantization/test_quark.py`.
 """
 
 import importlib
@@ -537,7 +537,7 @@ def test_aiter_hardware_fp4_quant_vs_triton():
     the Triton path.
 
     The packed bytes are not identical on gfx950, but with
-    ``shuffle_scale=False`` the dequantized results match tightly.
+    `shuffle_scale=False` the dequantized results match tightly.
     """
     _assert_aiter_supported()
 
@@ -640,7 +640,6 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     )
 
 
-@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 @pytest.mark.parametrize(
     ("shape", "supported"),
     [
@@ -663,7 +662,6 @@ def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
     assert _asm_fp4_scale_swizzle_supported(weight_scale) is supported
 
 
-@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_asm_fp4_scale_swizzle_rejects_non_2d():
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         _asm_fp4_scale_swizzle_supported,

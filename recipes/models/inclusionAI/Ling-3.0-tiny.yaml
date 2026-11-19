@@ -24,8 +24,6 @@ model:
     - "--trust-remote-code"
     - "--dtype"
     - "bfloat16"
-    - "--gpu-memory-utilization"
-    - "0.85"
     - "--enable-prefix-caching"
 
 features:
@@ -106,7 +104,6 @@ guide: |
     --trust-remote-code \
     --dtype bfloat16 \
     --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.85 \
     --enable-prefix-caching \
     --enable-auto-tool-choice \
     --tool-call-parser ling3 \
@@ -119,13 +116,13 @@ guide: |
   # Serialized block FP8
   vllm serve inclusionAI/Ling-3.0-tiny-fp8 \
     --trust-remote-code --dtype bfloat16 --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.85 --enable-prefix-caching --enable-auto-tool-choice \
+    --enable-prefix-caching --enable-auto-tool-choice \
     --tool-call-parser ling3 --reasoning-parser ling3
 
   # Compressed-tensors INT4
   vllm serve inclusionAI/Ling-3.0-tiny-int4 \
     --trust-remote-code --dtype bfloat16 --tensor-parallel-size 1 \
-    --gpu-memory-utilization 0.85 --enable-prefix-caching --enable-auto-tool-choice \
+    --enable-prefix-caching --enable-auto-tool-choice \
     --tool-call-parser ling3 --reasoning-parser ling3
   ```
 

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode's hooks on ``KimiLinearForCausalLM``, kept here so the
-model only calls them: ``init_specialized_decode`` in ``__init__`` (after the config
-check, which runs before any module allocates weights), ``plan_specialized_decode``
-in ``forward`` and ``after_specialized_decode_step`` in ``compute_logits``. The
-model state (``model_state.KimiK3ModelState``) builds the executor after load."""
+"""The specialized decode's hooks on `KimiLinearForCausalLM`, kept here so the
+model only calls them: `init_specialized_decode` in `__init__` (after the config
+check, which runs before any module allocates weights), `plan_specialized_decode`
+in `forward` and `after_specialized_decode_step` in `compute_logits`. The
+model state (`model_state.KimiK3ModelState`) builds the executor after load."""
 
 from typing import TYPE_CHECKING
 
@@ -21,14 +21,14 @@ if TYPE_CHECKING:
 
 
 class SpecializedDecodeMixin:
-    """``self.model`` is the ``KimiLinearModel`` the executor runs over."""
+    """`self.model` is the `KimiLinearModel` the executor runs over."""
 
     model: torch.nn.Module
     specialized_decode_config: DecodeConfig | None
     specialized_decode: "SpecializedDecode | None"
 
     def init_specialized_decode(self, config: DecodeConfig | None) -> None:
-        """``config``: ``specialized_decode_config(vllm_config)``, None for the
+        """`config`: `specialized_decode_config(vllm_config)`, None for the
         stock decode."""
         self.specialized_decode_config = config
         self.specialized_decode = None
@@ -53,7 +53,7 @@ class SpecializedDecodeMixin:
     def plan_specialized_decode(
         self, positions: torch.Tensor, intermediate_tensors
     ) -> "Step | None":
-        """This step's plan (``Step.layer(i)`` per decoder layer), None for the
+        """This step's plan (`Step.layer(i)` per decoder layer), None for the
         stock forward."""
         decode = self.specialized_decode
         return None if decode is None else decode.plan(positions, intermediate_tensors)
