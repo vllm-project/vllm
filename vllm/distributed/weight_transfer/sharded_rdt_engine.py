@@ -89,16 +89,15 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Pulls each worker keeps in flight."""
 
     workers_per_replica: int = 0
-    """Workers per inference deployment, from the trainer; 0 derives it from
-    `num_replicas`."""
+    """Workers per inference deployment, from the trainer; 0 means one."""
 
     replica_rank: int = 0
     """This inference deployment's index in a fleet of independent ones,
     whose worker indices each restart at 0; set per deployment."""
 
     num_replicas: int = 1
-    """Independent inference deployments in the fleet (uniform); used only
-    when `workers_per_replica` is 0."""
+    """Independent inference deployments in the fleet (uniform); must match
+    the trainer's `workers_per_replica`."""
 
 
 @dataclass
@@ -112,11 +111,8 @@ class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 
 @dataclass(eq=False, slots=True)
 class _Staging:
-    """A fallback's destination: the whole tensor `name` (box `box`), loaded
-    through `load_weights` once its `count` pieces have landed in it. It is
-    allocated when the first lands and freed once loaded, so the caching
-    allocator reuses it (e.g. for post-load processing); a fallback sent in
-    one piece loads straight from the receive slot."""
+    """A fallback's whole tensor `name`, allocated when its first piece lands
+    and loaded through `load_weights` (then freed) once all `count` have."""
 
     name: str
     box: Box
@@ -293,9 +289,15 @@ class ShardedRDTWeightTransferEngine(
         num_consumers = init_info.num_consumers or (
             self.parallel_config.world_size_across_dp
         )
-        per_replica = init_info.workers_per_replica or max(
-            1, num_consumers // max(1, init_info.num_replicas)
-        )
+        per_replica = init_info.workers_per_replica or num_consumers
+        if init_info.num_replicas > 1 and per_replica * init_info.num_replicas != (
+            num_consumers
+        ):
+            raise ValueError(
+                f"Sharded RDT: num_replicas={init_info.num_replicas}, but the "
+                f"trainer splits {num_consumers} workers {per_replica} per "
+                "deployment; set the trainer's workers_per_replica"
+            )
         if len(init_info.name_owner_class) not in (0, len(metas)):
             raise ValueError(
                 f"{len(init_info.name_owner_class)} owner classes for "
@@ -460,11 +462,8 @@ class ShardedRDTWeightTransferEngine(
         return buckets
 
     def _bucket_cap(self, groups: dict[tuple[int, int], list[_Piece]]) -> int:
-        """The one size every bucket is cut to: the largest bucket the pieces
-        within `buffer_bytes` make (or `buffer_bytes` if there are none),
-        raised to hold one row of every larger piece. Cutting the larger
-        pieces to `buffer_bytes` instead grows the receive slot; cutting
-        the others to the cap gives the buckets they get at `buffer_bytes`.
+        """The size every bucket is cut to: the largest bucket the pieces
+        within `buffer_bytes` make, raised to hold one row of every larger one.
 
         Raises:
             RuntimeError: one row of a piece is over `buffer_bytes`.
@@ -745,9 +744,7 @@ def _resolve_producers(init_info: ShardedRDTWeightTransferInitInfo) -> list[Any]
     return actors
 
 
-def _by_destination(
-    piece: _Piece, storages: dict[int, int]
-) -> tuple[int, int, int]:
+def _by_destination(piece: _Piece, storages: dict[int, int]) -> tuple[int, int, int]:
     """Sort key: a piece with one contiguous destination of its dtype by its
     storage's first-use rank and byte offset; every other piece after them,
     in plan order."""
@@ -759,9 +756,7 @@ def _by_destination(
             and dest.is_contiguous()
             and dest.dtype == dtype
         ):
-            rank = storages.setdefault(
-                dest.untyped_storage().data_ptr(), len(storages)
-            )
+            rank = storages.setdefault(dest.untyped_storage().data_ptr(), len(storages))
             return (0, rank, dest.storage_offset() * dest.element_size())
     return (1, 0, 0)
 

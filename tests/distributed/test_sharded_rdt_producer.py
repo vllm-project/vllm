@@ -412,11 +412,18 @@ def test_a_gather_error_releases_every_wait(server):
     assert s.end_sync() == [1]
 
 
-def test_a_dead_consumer_trips_the_watchdog(server):
+def test_a_dead_consumer_trips_the_watchdog(server, monkeypatch):
+    """A pull that arrives before its sync begins is not a stall."""
+    monkeypatch.setattr(trainer_mod, "_STALL_POLL_S", 0.05)
     s = server(stall_timeout_s=0.2)
     s.register_consumer(0, [WHOLE_N])
+    early = _call(s.bucket, 0, 0, 0)
+    with pytest.raises(FuturesTimeout):
+        early.result(timeout=0.5)
+    assert s._error is None
     s.begin_sync([0], 0)
     _publish(s, _weights(), 0)
+    early.result(timeout=5)  # never freed: the consumer died
     with pytest.raises(RuntimeError, match="stall"):
         s.end_sync()
 

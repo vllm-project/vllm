@@ -1285,6 +1285,12 @@ class VllmConfig:
         # not `direct_reload_enabled()`: importing it would load the model
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
+            transfer = self.weight_transfer_config
+            if transfer is not None and transfer.backend == "sharded_rdt":
+                raise ValueError(
+                    "The sharded_rdt weight-transfer backend requires "
+                    "VLLM_RELOAD_MODE=direct."
+                )
             return
         offload = self.offload_config
         if (

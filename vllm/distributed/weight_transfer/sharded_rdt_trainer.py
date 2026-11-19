@@ -17,6 +17,7 @@ import os
 import threading
 import time
 import uuid
+import warnings
 import weakref
 from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Sequence
@@ -94,8 +95,25 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Units the gather loop runs ahead of the consumers."""
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
     """Seconds without progress before a producer fails the sync."""
+    num_rdt_buffers: int | None = None
+    """Deprecated: use `num_buffers`."""
+    buffer_presize_gb: float | None = None
+    """Deprecated and ignored: the arena is sized from `buffer_bytes`."""
 
     def __post_init__(self) -> None:
+        if self.num_rdt_buffers is not None:
+            warnings.warn(
+                "num_rdt_buffers is deprecated; use num_buffers.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.num_buffers = self.num_rdt_buffers
+        if self.buffer_presize_gb is not None:
+            warnings.warn(
+                "buffer_presize_gb is deprecated and ignored.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         validate_int("buffer_bytes", self.buffer_bytes, minimum=1)
         validate_int("num_buffers", self.num_buffers, minimum=1)
         validate_int("num_consumers", self.num_consumers, minimum=1)
@@ -139,17 +157,19 @@ def _splits(
     return (*splits, (nbytes - end) // unit)
 
 
+def _reduce_storage(ust: torch.UntypedStorage, device: torch.device) -> tuple:
+    """CUDA-IPC reduce args for the whole storage `ust`."""
+    base = torch.empty(0, dtype=torch.uint8, device=device)
+    base.set_(ust, 0, (ust.nbytes(),))
+    return reduce_tensor(base)[1]
+
+
 def _sources(
     gen: int, views: list[torch.Tensor], layout: Sequence[FlatPiece], nbytes: int
 ) -> _Sources:
-    """Split a bucket's source boxes into contiguous ones and runs of strided
-    ones. A run is consecutive strided boxes of one shape and stride from one
-    storage, at evenly spaced offsets, landing back to back in the bucket:
-    e.g. the TP column slices of consecutive experts' weights. It is copied
-    as one view with a leading run dimension, one kernel instead of one per
-    box. Contiguous boxes copy as 8-byte words when their address and size
-    allow (pieces start on 16 B in the bucket), which moves far more bytes
-    per element than a byte copy."""
+    """Split a bucket's source boxes into contiguous ones (as 8-byte words
+    where aligned) and runs of evenly spaced strided ones, each run copied as
+    one view."""
     word_idx: list[int] = []
     byte_idx: list[int] = []
     word_srcs, byte_srcs = [], []
@@ -330,7 +350,8 @@ class _RDTProducerServer:
         while blocked() and not failed():
             cond.wait(_STALL_POLL_S)
             stalled = time.monotonic() - self._last_progress
-            if blocked() and not failed() and stalled >= self._stall_timeout:
+            begun = sync_idx is None or sync_idx <= self._sync_idx
+            if blocked() and not failed() and begun and stalled >= self._stall_timeout:
                 msg = (
                     f"RDT stall: no progress for {stalled:.0f}s waiting for "
                     f"{what}. A consumer most likely died mid-sync: "
@@ -364,12 +385,8 @@ class _RDTProducerServer:
 
     def publish_unit(self, unit: int, entries: tuple) -> None:
         """Rebuild one gathered unit's CUDA-IPC tensors and make them
-        servable; never blocks. `entries` is `(storages, views, event, keep)`:
-        one export per storage, per name `(sid, dtype_name, shape, stride,
-        storage_offset)`, the IPC handle of the event the unit's tensors are
-        ready at (or None), which this unit's packs wait for on the device,
-        and the storages that outlive the sync on the trainer, whose import
-        is kept past release.
+        servable; never blocks. `entries` is `(storages, views, event, keep)`,
+        as `_export` returns them.
 
         Raises:
             ValueError: a tensor does not match its metadata.
@@ -541,15 +558,16 @@ class _RDTProducerServer:
             ValueError: an unregistered bucket, or a sync this producer left.
 
         """
-        try:
-            spec = self._buckets[consumer_id][seq]
-        except (KeyError, IndexError):
-            raise ValueError(
-                f"consumer {consumer_id} pulled bucket {seq}, which it never "
-                "registered here"
-            ) from None
         t0 = time.perf_counter()
         with self._lock:
+            try:
+                spec = self._buckets[consumer_id][seq]
+            except (KeyError, IndexError):
+                raise ValueError(
+                    f"consumer {consumer_id} pulled bucket {seq}, which it "
+                    "never registered here"
+                ) from None
+            sources = self._sources[consumer_id]  # the same registration
             self._wait_for(
                 self._unit_cond(spec.unit),
                 lambda: (
@@ -581,7 +599,6 @@ class _RDTProducerServer:
             self._served_count += 1
             tensors, gen = published.tensors, published.gen
             ready = self._ready.get(spec.unit)
-            sources = self._sources[consumer_id]
             self._last_progress = time.monotonic()
         try:
             flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
@@ -1139,9 +1156,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 if cached is not None and not cached[0].expired():
                     reduce_args = cached[1]
                 else:
-                    base = torch.empty(0, dtype=torch.uint8, device=tensor.device)
-                    base.set_(ust, 0, (ust.nbytes(),))
-                    _, reduce_args = reduce_tensor(base)
+                    reduce_args = _reduce_storage(ust, tensor.device)
                     handle_cache[sid] = (StorageWeakRef(ust), reduce_args)
                 storages[sid] = reduce_args
             views[name] = (
@@ -1209,9 +1224,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         sid = ust.data_ptr()
         reduce_args = self._export_ring_args[slot_idx]
         if reduce_args is None:
-            base = torch.empty(0, dtype=torch.uint8, device=device)
-            base.set_(ust, 0, (ust.nbytes(),))
-            _, reduce_args = reduce_tensor(base)
+            reduce_args = _reduce_storage(ust, device)
             self._export_ring_args[slot_idx] = reduce_args
         views: dict[str, tuple] = {}
         refs: dict[str, torch.Tensor] = {}

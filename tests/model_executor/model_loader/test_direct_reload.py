@@ -614,6 +614,11 @@ def _config(**overrides) -> SimpleNamespace:
             {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
             None,
         ),
+        (
+            "layerwise",
+            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            "sharded_rdt",
+        ),
     ],
     ids=[
         "defaults",
@@ -625,6 +630,7 @@ def _config(**overrides) -> SimpleNamespace:
         "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
+        "layerwise-sharded-rdt",
     ],
 )
 def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):

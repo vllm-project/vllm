@@ -27,8 +27,7 @@ stay valid. Each update must send every weight.
 
 The [sharded RDT](weight_transfer/sharded_rdt.md) backend requires direct
 reload: it writes each worker's slices straight into the tensors the load plan
-names; under `VLLM_RELOAD_MODE=layerwise` its engine refuses at
-`init_transfer_engine`, when the trainer first connects.
+names; under any other `VLLM_RELOAD_MODE` the server refuses to start.
 
 ## Online Quantization
 

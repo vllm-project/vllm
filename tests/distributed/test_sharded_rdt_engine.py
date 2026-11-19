@@ -27,7 +27,6 @@ from tests.model_executor.model_loader.test_load_plan import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
-    arena_bytes,
     flat_layout,
     flat_view,
     gather_units,
@@ -537,11 +536,9 @@ def test_ray_version_floor(monkeypatch, installed, ok):
             sharded_rdt_common.check_ray_rdt_version()
 
 
-def test_units_and_arena_sizes():
+def test_gather_units():
     assert gather_units([4, 4, 4, 4], 8) == [0, 0, 1, 1]
     assert gather_units([4, 20, 4], 8) == [0, 1, 2]  # an oversized name alone
-    # `num_buffers` slots per consumer plus one, each `buffer_bytes` + alignment
-    assert arena_bytes(buffer_bytes=100, num_buffers=2, num_consumers=3) == 7 * 116
 
 
 @pytest.mark.parametrize(
