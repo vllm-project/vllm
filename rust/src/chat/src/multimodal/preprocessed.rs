@@ -79,10 +79,10 @@ pub(super) fn validate_batching<'a>(
     Ok(())
 }
 
+/// Validate the inline fields of one item. The map may be empty: a pixel-less
+/// feature carries only the fields the engine reads besides the encoder, and
+/// a model may read none.
 fn validate_kwargs(kwargs: &MmKwargsItem) -> Result<()> {
-    if kwargs.is_empty() {
-        bail_invalid_preprocessed_multimodal!("kwargs must contain at least one field");
-    }
     for (key, elem) in kwargs {
         if key.is_empty() {
             bail_invalid_preprocessed_multimodal!("kwargs field name must be nonempty");
@@ -243,6 +243,19 @@ mod tests {
                 Some(MmKwargValue::Tensor(tensor));
             assert!(info.prepare_preprocessed(vec![item], 4).is_err());
         }
+    }
+
+    /// A pixel-less item of a model that reads no fields besides the encoder
+    /// carries an empty kwargs map; only a missing map means cache-only.
+    #[test]
+    fn inline_features_accept_empty_kwargs() {
+        let info = qwen3_vl_info();
+        let mut item = feature(0, batched());
+        item.data = Some(BTreeMap::new());
+        assert_eq!(
+            info.prepare_preprocessed(vec![item.clone()], 4).unwrap(),
+            [item]
+        );
     }
 
     #[test]

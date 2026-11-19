@@ -380,24 +380,43 @@ async fn setup_grpc_service_with_backend<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
-    setup_grpc_service_with_engine_script(
+    setup_grpc_service_with_ready(
         engine_id,
         default_ready_response(),
+        output_specs,
         backend,
-        None,
-        move |dealer, push| {
-            boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request = decode_add_request(&add);
-                check_request(&request);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
-            })
-        },
+        check_request,
     )
+    .await
+}
+
+async fn setup_grpc_service_with_ready<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
+    setup_grpc_service_with_engine_script(engine_id, ready, backend, None, move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request = decode_add_request(&add);
+            check_request(&request);
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, output_specs),
+            )
+            .await;
+        })
+    })
     .await
 }
 
@@ -1052,6 +1071,75 @@ fn preprocessed_grpc_request(media: Vec<pb::MediaItem>) -> pb::GenerateRequest {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// A feature without the model's encoder input (`pixel_values` here) needs an
+/// engine that takes the encoder output from an EC or KV transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_accepts_features_without_encoder_input_only_on_ec_or_kv_consumers() {
+    let kwargs = BTreeMap::from([(
+        "image_grid_thw".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(
+                WireTensor::from_u32(vec![3], vec![1, 2, 2]).unwrap(),
+            )),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+        },
+    )]);
+    let mut request = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Image,
+        "image-a",
+        1,
+        2,
+    )]);
+    let Some(pb::media_item::Source::Features(feature)) = &mut request.media[0].source else {
+        unreachable!("preprocessed media");
+    };
+    feature.kwargs = Some(rmp_serde::to_vec_named(&kwargs).expect("encode kwargs"));
+
+    for allow_missing_mm_embeddings in [false, true] {
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = allow_missing_mm_embeddings;
+        let expected_kwargs = kwargs.clone();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_ready(
+                b"engine-grpc-missing-encoder-input",
+                ready,
+                default_stream_output_specs(),
+                multimodal_backend(),
+                move |request| {
+                    let features = request.mm_features.as_ref().expect("multimodal features");
+                    assert_eq!(features[0].data.as_ref(), Some(&expected_kwargs));
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+
+        if allow_missing_mm_embeddings {
+            client.generate(request.clone()).await.expect("EC or KV consumer generate");
+            engine_task.await.expect("mock engine task");
+        } else {
+            let unary = client.generate(request.clone()).await.expect_err("unary");
+            let stream = client.generate_stream(request.clone()).await.expect_err("stream");
+            for status in [unary, stream] {
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert_eq!(
+                    status.message(),
+                    "`image` features without encoder inputs require an engine that consumes \
+                     encoder outputs from an EC or KV transfer"
+                );
+            }
+        }
+        server_task.abort();
     }
 }
 

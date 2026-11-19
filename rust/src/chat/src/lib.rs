@@ -68,6 +68,7 @@ use std::time::Instant;
 
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
@@ -466,12 +467,35 @@ impl ChatLlm {
     /// Raw content is preprocessed; inline features are checked against model
     /// capabilities, modality limits, and the final prompt positions. With
     /// both, raw content expands only the tokens after the last feature range.
+    /// Features without the model's encoder input need an engine that allows
+    /// missing multimodal embeddings.
     pub async fn prepare_media(
         &self,
         media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media.into(), token_ids).await
+        let features = self.processor.prepare_media(media.into(), token_ids).await?;
+        self.check_encoder_inputs(features.as_deref().unwrap_or_default())?;
+        Ok(features)
+    }
+
+    /// Reject features without the model's encoder input unless the engine
+    /// allows missing multimodal embeddings, as an EC or KV consumer does.
+    fn check_encoder_inputs(&self, features: &[MmFeatureSpec]) -> Result<()> {
+        if features.is_empty() || self.text.llm().info().allow_missing_mm_embeddings {
+            return Ok(());
+        }
+        let info = self
+            .processor
+            .backend
+            .multimodal_model_info()
+            .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        match features.iter().find(|feature| info.lacks_encoder_input(feature)) {
+            Some(feature) => Err(Error::MissingEncoderInput {
+                modality: feature.modality.as_str().to_owned(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
@@ -505,6 +529,7 @@ impl ChatLlm {
             output_processors,
             prompt_text,
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
+        self.check_encoder_inputs(text_request.mm_features.as_deref().unwrap_or_default())?;
         METRICS.renderer.observe_request_render_duration(
             self.served_model_name(),
             RenderRequestType::Chat,

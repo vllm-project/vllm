@@ -53,6 +53,10 @@ pub enum Error {
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
     #[error(
+        "`{modality}` features without encoder inputs require an engine that consumes encoder outputs from an EC or KV transfer"
+    )]
+    MissingEncoderInput { modality: String },
+    #[error(
         "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
     )]
     MediaAfterPreprocessed {
@@ -167,6 +171,7 @@ impl Error {
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::MissingEncoderInput { .. }
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.

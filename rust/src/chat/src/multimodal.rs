@@ -852,6 +852,20 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Whether `feature` lacks this model's encoder input for its modality,
+    /// such as `pixel_values`: a pixel-less feature that carries only the
+    /// fields the engine reads besides the encoder, so the encoder output must
+    /// come from an EC or KV transfer.
+    pub(crate) fn lacks_encoder_input(&self, feature: &MmFeatureSpec) -> bool {
+        let spec = match feature.modality {
+            MmModality::Image => self.image.as_ref().map(|support| &support.spec),
+            MmModality::Video => self.video.as_ref().map(|support| &support.spec),
+            MmModality::Audio => self.audio.as_ref().map(|support| &support.spec),
+        };
+        spec.zip(feature.data.as_ref())
+            .is_some_and(|(spec, data)| !data.contains_key(spec.primary_key()))
+    }
+
     /// Prepare raw media placed after already-expanded `features` and append
     /// its features.
     ///
@@ -2028,6 +2042,54 @@ mod tests {
             Some("<|media_pad|>")
         );
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    /// The encoder input key comes from the model spec, not from a key name
+    /// guess: DeepSeek-V4.1 images read `patches`, Qwen3-VL images
+    /// `pixel_values`.
+    #[test]
+    fn lacks_encoder_input_checks_the_model_declared_key() {
+        use vllm_engine_core_client::protocol::multimodal::{
+            MmBatchedField, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+        };
+
+        let feature = |keys: &[&str]| MmFeatureSpec {
+            data: Some(
+                keys.iter()
+                    .map(|key| {
+                        let elem = MmFieldElem {
+                            data: Some(MmKwargValue::Int(1)),
+                            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+                        };
+                        (key.to_string(), elem)
+                    })
+                    .collect(),
+            ),
+            modality: MmModality::Image,
+            identifier: "image".to_owned(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 1,
+                is_embed: None,
+            },
+            mm_hash: None,
+        };
+        let qwen3_vl = qwen3_vl_info();
+        let deepseek_v41 = deepseek_v41_info();
+        let cases = [
+            (&qwen3_vl, &["pixel_values", "image_grid_thw"][..], false),
+            (&qwen3_vl, &["image_grid_thw"], true),
+            (&qwen3_vl, &[], true),
+            (&deepseek_v41, &["patches"], false),
+            (&deepseek_v41, &["pixel_values"], true),
+        ];
+        for (info, keys, expected) in cases {
+            assert_eq!(
+                info.lacks_encoder_input(&feature(keys)),
+                expected,
+                "{keys:?}"
+            );
+        }
     }
 
     #[test]
