@@ -166,10 +166,9 @@ label() { docker buildx imagetools inspect "$1" \
 bake()   { docker buildx bake -f docker/docker-bake-rocm.hcl "$@"; }
 
 # infra_failure <bake-log>  — whether a failed bake hit a fault outside the recipe, which a
-# retried step can get past: a package mirror still failing after apt's own retries, or
-# the build's filesystem losing files mid-step (compiler outputs and temporaries vanishing).
+# retried step can get past: a package mirror still failing after apt's own retries.
 infra_failure() {
-  grep -aqE 'E: Failed to fetch [^ ]+ +(408|429|50[0-4]) |unable to rename temporary .*No such file or directory|cannot open output file .*No such file or directory' "$1"
+  grep -aqE 'E: Failed to fetch [^ ]+ +(408|429|50[0-4]) ' "$1"
 }
 
 # meta <get|set> <key> [value]  — Buildkite build metadata

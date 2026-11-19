@@ -398,8 +398,8 @@ VANISHED_TMP = (
     [
         # A mirror still down after apt's own retries: a retried step may get past it.
         (PPA_503, 75),
-        # The build's filesystem losing files mid-compile.
-        (VANISHED_TMP, 75),
+        # Vanished compiler outputs look like a deterministic bug too: no retry.
+        (VANISHED_TMP, 1),
         # A broken recipe fails the same way every time: no retry.
         ("E: Unable to locate package python3.99", 1),
         ("error: use of undeclared identifier 'foo'", 1),
