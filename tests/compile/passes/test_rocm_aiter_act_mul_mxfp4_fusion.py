@@ -59,7 +59,7 @@ def _fusion_pass_under_test(
 
     Compiles with the given custom ops, bfloat16 on the default CUDA/HIP device, and
     a fixed seed. AITER is on and the tuned preshuffled lookup is pinned to
-    ``presh_ws_tuned`` (off by default) until the block exits.
+    `presh_ws_tuned` (off by default) until the block exits.
     """
     torch.set_default_device("cuda")
     torch.set_default_dtype(DTYPE)

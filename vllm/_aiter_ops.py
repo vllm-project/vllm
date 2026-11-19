@@ -5952,10 +5952,10 @@ def act_mxfp4_pass_registered(fuse_act_quant: bool) -> bool:
 
     This is the one rule for it: the pass manager registers the pass when it holds, and
     VllmConfig splits the compile ranges at MXFP4_PRESHUFFLE_MAX_M exactly when it holds.
-    It needs AITER enabled, the pass config's ``fuse_act_quant``, the opt-in env flag
+    It needs AITER enabled, the pass config's `fuse_act_quant`, the opt-in env flag
     VLLM_ROCM_USE_AITER_FP4_ACT_QUANT_FUSION, and a gfx950, the only architecture with the
     asm MXFP4 GEMM the pass rewrites. The default optimization level sets
-    ``fuse_act_quant``, so the env flag is what keeps a default start unchanged.
+    `fuse_act_quant`, so the env flag is what keeps a default start unchanged.
     """
     if not (
         rocm_aiter_ops.is_enabled()

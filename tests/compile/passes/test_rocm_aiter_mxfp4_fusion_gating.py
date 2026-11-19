@@ -3,10 +3,10 @@
 """Gating and registration of the ROCm AITER MXFP4 activation-quant fusion pass.
 
 Covers the opt-in env flag, the gate that says whether the pass is registered
-(``act_mxfp4_pass_registered`` in vllm/_aiter_ops.py: AITER enabled, the flag,
-``fuse_act_quant`` and gfx950), the pass manager's rule for which AITER platforms
+(`act_mxfp4_pass_registered` in vllm/_aiter_ops.py: AITER enabled, the flag,
+`fuse_act_quant` and gfx950), the pass manager's rule for which AITER platforms
 register it, and the compile ranges the pass is limited to: the ranges split at
-``MXFP4_PRESHUFFLE_MAX_M`` tokens exactly when the pass is registered, and the pass
+`MXFP4_PRESHUFFLE_MAX_M` tokens exactly when the pass is registered, and the pass
 applies only above that limit. The pass manager tests stand in for the passes it names,
 because the real ones import only where ROCm and AITER are present. The fusion pass
 itself is tested in test_rocm_aiter_act_mul_mxfp4_fusion.py.
@@ -175,7 +175,7 @@ class _ActMulMxfp4Pass(_StandInPass):
 def configure_manager(monkeypatch, gfx950, rocm_aiter_fusion):
     """Returns configure(*, aiter, rdna, **switches) -> the registered passes.
 
-    ``aiter`` and ``rdna`` answer rocm_aiter_ops.is_enabled() and
+    `aiter` and `rdna` answer rocm_aiter_ops.is_enabled() and
     is_rdna_aiter_enabled(). They are set on the rocm_aiter_ops class, so the pass
     manager and the act pass gate see the same answers. The gfx950 fixture always
     applies (this fixture depends on it), so the modelled GPU is a gfx950 whatever the
