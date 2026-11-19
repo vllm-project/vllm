@@ -2136,7 +2136,11 @@ _ROW_BLOCK, _ROW_KERNEL_BLOCK, _ROW_PAGE = 16, 4, 192
 _ROW_DRAFT_HEADS, _ROW_DRAFT_WIDTH = 2, 5
 
 
-def _whole_row_draft_worker(engine_id, num_blocks=6):
+def _whole_row_draft_worker(
+    engine_id, num_blocks=6, *, layers=("target", "draft"), pp_stage=None
+):
+    """Worker holding `layers`; `pp_stage=(pp_rank, pp_size)` makes it that
+    prefill PP stage, which keeps both groups but only its own layers."""
     from vllm.config import set_current_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -2158,16 +2162,16 @@ def _whole_row_draft_worker(engine_id, num_blocks=6):
         page_size_padded=_ROW_PAGE,
     )
     raw = {
-        name: torch.zeros(num_blocks * _ROW_PAGE, dtype=torch.uint8)
-        for name in ("target", "draft")
+        name: torch.zeros(num_blocks * _ROW_PAGE, dtype=torch.uint8) for name in layers
     }
-    caches = {
-        "target": raw["target"].view(num_blocks * ratio, 1, _ROW_KERNEL_BLOCK, -1),
-        "draft": raw["draft"].as_strided(
+    views = {
+        "target": lambda t: t.view(num_blocks * ratio, 1, _ROW_KERNEL_BLOCK, -1),
+        "draft": lambda t: t.as_strided(
             (num_blocks, _ROW_DRAFT_HEADS, _ROW_BLOCK, _ROW_DRAFT_WIDTH),
             (_ROW_PAGE, _ROW_DRAFT_WIDTH, _ROW_DRAFT_HEADS * _ROW_DRAFT_WIDTH, 1),
         ),
     }
+    caches = {name: views[name](t) for name, t in raw.items()}
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
@@ -2180,13 +2184,22 @@ def _whole_row_draft_worker(engine_id, num_blocks=6):
             for name, t in raw.items()
         ],
         kv_cache_groups=[
-            make_kv_cache_group(["target"], target),
-            make_kv_cache_group(["draft"], draft),
+            KVCacheGroup(
+                {name: spec} if name in layers else {},
+                FullAttentionManager.config(),
+                _ROW_BLOCK,
+                unprojected_specs=(spec,),
+            )
+            for name, spec in (("target", target), ("draft", draft))
         ],
     )
-    vllm_config = create_vllm_config(block_size=_ROW_BLOCK)
+    vllm_config = create_vllm_config(
+        block_size=_ROW_BLOCK, kv_role="kv_producer" if pp_stage else "kv_both"
+    )
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    if pp_stage:
+        vllm_config.parallel_config.pipeline_parallel_size = pp_stage[1]
     backend = MagicMock()
     backend.get_name.return_value = "FLASHMLA"
     backend.full_cls_name.return_value = "fake.FLASHMLA"
@@ -2200,6 +2213,7 @@ def _whole_row_draft_worker(engine_id, num_blocks=6):
         patch.object(bw, "get_current_attn_backends", return_value=[backend]),
         patch.object(bw, "select_common_block_size", return_value=_ROW_KERNEL_BLOCK),
         patch.object(bw, "current_platform", platform),
+        patch("threading.Thread"),
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, engine_id, kv_cache_config)
@@ -2244,6 +2258,37 @@ def test_whole_row_draft_next_to_split_target_pulls_every_row_byte():
     )
     d._recving_metadata["req"] = req
     d._read_blocks_for_req("req", req)
+    _run_recorded_copies(d.nixl_wrapper)
+
+    for name, ids in zip(names, d_ids):
+        for pos, block in enumerate(ids):
+            row = d_raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            assert torch.equal(row, _tag(row, name, pos)), (name, pos)
+            row.zero_()
+    assert not any(t.any() for t in d_raw.values()), "bytes outside the rows changed"
+
+
+@pytest.mark.cpu_test
+def test_whole_row_draft_pulls_every_row_byte_from_prefill_pp_stages():
+    """PP splits layers and leaves each row's layout alone, so a PP=1 decoder
+    reads the target from stage 0 and the whole draft row, pad included, from
+    stage 1, which is the only stage that tiles."""
+    d, d_raw = _whole_row_draft_worker("decode")
+    stages, p_raw = zip(
+        *(
+            _whole_row_draft_worker("prefill", layers=(name,), pp_stage=(rank, 2))
+            for rank, name in enumerate(("target", "draft"))
+        )
+    )
+    assert [s._tiles_whole_kernel_rows for s in stages] == [False, True]
+    names = ["target", "draft"]
+    p_ids, d_ids = [[1, 2], [3, 4]], [[5, 4], [1, 0]]
+    for raw, name, ids in zip(p_raw, names, p_ids):
+        for pos, block in enumerate(ids):
+            row = raw[name][block * _ROW_PAGE : (block + 1) * _ROW_PAGE]
+            row.copy_(_tag(row, name, pos))
+
+    _pull_page_pairs(d, stages, tuple(d_ids), p_ids)
     _run_recorded_copies(d.nixl_wrapper)
 
     for name, ids in zip(names, d_ids):
