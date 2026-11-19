@@ -463,9 +463,8 @@ class MiniMaxM3MoE(nn.Module):
                 f"the number of experts {config.num_local_experts}."
             )
 
-        # MiniMax-M3.1 like checkpoints (`quant_method: mxfp8`, `moe_quant_algo:
-        # NVFP4`) have no native NVFP4 MoE backend on ROCm: the routed experts must be
-        # re-quantized online.
+        # MiniMax-M3.1 checkpoints (quant_method: mxfp8, moe_quant_algo:
+        # NVFP4) need either a native NVFP4 backend or online re-quantization.
         experts_prefix = f"{prefix}.experts"
         if (
             isinstance(quant_config, ModelOptMxFp8Config)
@@ -479,13 +478,24 @@ class MiniMaxM3MoE(nn.Module):
                 is None
             )
         ):
-            raise NotImplementedError(
-                "This MiniMax model with NVFP4 MoE experts "
-                "(`moe_quant_algo: NVFP4`, `moe_quant_format: nvfp4-pack-quantized`) "
-                "is not supported on ROCm. Please use `--quantization-config.moe "
-                "mxfp8` (or `--quantization-config.moe mxfp4`) to re-quantize the "
-                "MoE to MXFP8 (or MXFP4) when loading to serve on ROCm."
-            )
+            # gfx942 has a native NVFP4 MoE backend (AITER_NVFP4)
+            # that keeps experts in packed e2m1.
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not (rocm_aiter_ops.is_enabled() and on_gfx942()):
+                hints = []
+                if not rocm_aiter_ops.is_enabled():
+                    hints.append("AITER is not enabled (set VLLM_ROCM_USE_AITER=1)")
+                if not on_gfx942():
+                    hints.append("device is not gfx942 (CDNA3)")
+                raise NotImplementedError(
+                    "NVFP4 MoE experts require AITER on gfx942 "
+                    "(CDNA3). " + "; ".join(hints) + ". "
+                    "Alternatives: "
+                    "--quantization-config.moe mxfp8 (re-quantize "
+                    "to MXFP8) or --quantization-config.moe mxfp4 "
+                    "(re-quantize to MXFP4)."
+                )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.n_shared_experts = 1
