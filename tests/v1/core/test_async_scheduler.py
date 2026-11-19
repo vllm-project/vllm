@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -507,8 +508,9 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.decode_stagger = scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
+    scheduler.pp_microbatch_cap = PPMicrobatchCap.create(scheduler, pp_size)
     return scheduler
 
 
@@ -872,7 +874,7 @@ def test_decode_awaiting_cadence(max_tokens: int):
 def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
     """Each inner list is a group of prompts arriving before one schedule()."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
-    scheduler.pp_microbatch_min_tokens = 64
+    scheduler.pp_microbatch_cap.min_tokens = 64
     steps = []
     for i, lens in enumerate(arrivals):
         for j, n in enumerate(lens):
@@ -889,7 +891,7 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
     up in the prefix cache again only if its num_tokens changes or more of its
     prefix has been cached."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
-    scheduler.pp_microbatch_min_tokens = 16
+    scheduler.pp_microbatch_cap.min_tokens = 16
     ids = [f"r{i}" for i in range(6)]
     for request in create_requests(6, 400, max_tokens=1, req_ids=ids):
         scheduler.add_request(request)
@@ -903,14 +905,14 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(scheduler.kv_cache_manager, "get_num_cached_tokens", hit)
     # 16 + 0 + 16 + 16 + 16 + 400 = 464 tokens -> ceil(464 / 4).
-    assert scheduler._pp_microbatch_cap(512) == 116
+    assert scheduler.pp_microbatch_cap.apply(512) == 116
     assert looked_up == ids
 
     # Hits are remembered while requests wait, until num_tokens changes.
-    assert scheduler._pp_microbatch_cap(512) == 116
+    assert scheduler.pp_microbatch_cap.apply(512) == 116
     assert looked_up == ids
     scheduler.requests["r2"].append_output_token_ids(0)
-    scheduler._pp_microbatch_cap(512)
+    scheduler.pp_microbatch_cap.apply(512)
     assert looked_up == ids + ["r2"]
 
     # More of r3's prefix is cached since its lookup.
@@ -921,7 +923,7 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
         "extend_cached_prefix",
         lambda request, n: extend(request, n) + 16 * (request.request_id == "r3"),
     )
-    scheduler._pp_microbatch_cap(512)
+    scheduler.pp_microbatch_cap.apply(512)
     assert looked_up == ids + ["r2", "r3"]
 
 
@@ -929,13 +931,13 @@ def test_pp_microbatch_cap_skips_decode_only_steps():
     """Without a prefill to split the cap is the full budget, so steps with only
     decodes don't scan the running requests."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
-    scheduler.pp_microbatch_min_tokens = 128
+    scheduler.pp_microbatch_cap.min_tokens = 128
     for request in create_requests(3, 40, max_tokens=8):
         scheduler.add_request(request)
     assert scheduler.schedule().total_num_scheduled_tokens == 120
     assert not scheduler._inflight_prefills
     scheduler.running = _NoIter(scheduler.running)
-    assert scheduler._pp_microbatch_cap(512) == 512
+    assert scheduler.pp_microbatch_cap.apply(512) == 512
 
 
 class _NoIter(list):
@@ -953,7 +955,8 @@ def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
         max_num_batched_tokens=16384,
         max_model_len=32768,
     )
-    scheduler.pp_size, scheduler.use_pp = 4, True
+    scheduler.use_pp = True
+    scheduler.pp_microbatch_cap = PPMicrobatchCap.create(scheduler, 4)
     scheduler.add_request(create_requests(1, 18000, max_tokens=1)[0])
     steps = [scheduler.schedule().total_num_scheduled_tokens for _ in range(5)]
     assert steps == [4500, 4096, 4096, 4096, 1212]
@@ -970,9 +973,9 @@ def test_pp_microbatch_cap_progress(unchunked: str | None):
         num_spec=0, pp_size=4, num_blocks=1000, **kwargs
     )
     if unchunked:
-        assert scheduler.pp_microbatch_min_tokens == 0
+        assert scheduler.pp_microbatch_cap is None
     else:
-        scheduler.pp_microbatch_min_tokens = 1
+        scheduler.pp_microbatch_cap.min_tokens = 1
     scheduler.num_prefill_lookahead = 4
     scheduler.add_request(create_requests(1, 400, max_tokens=1)[0])
     steps: list[int] = []

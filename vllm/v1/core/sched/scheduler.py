@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-import weakref
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -54,6 +53,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -401,8 +401,7 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
-        self.pp_size = self.parallel_config.pipeline_parallel_size
-        self.use_pp = self.pp_size > 1
+        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -431,19 +430,9 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
-        # 0 disables the PP microbatch cap, which needs freely chunkable prefills.
-        self.pp_microbatch_min_tokens = (
-            self.scheduler_config.pp_microbatch_min_tokens
-            if self.scheduler_config.enable_chunked_prefill
-            and not self.scheduler_config.disable_chunked_mm_input
-            and not self.need_mamba_block_aligned_split
-            else 0
+        self.pp_microbatch_cap = PPMicrobatchCap.create(
+            self, self.parallel_config.pipeline_parallel_size
         )
-        # (num_tokens, prefix-cache hit, probed cached prefix) of waiting requests,
-        # for the cap.
-        self._pp_cached_tokens = weakref.WeakKeyDictionary[
-            Request, tuple[int, int, int]
-        ]()
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -724,51 +713,6 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
-    def _pp_microbatch_cap(self, budget: int) -> int:
-        """Step token budget: the uncached prefill backlog / pp_size (at least
-        `pp_microbatch_min_tokens`) plus running decode tokens."""
-        waiting_queues = (self.kv_holding_waiting, self.waiting, self.async_kv_waiting)
-        # Parked async KV loads are counted with the waiting requests.
-        prefill = sum(
-            max(0, request.num_tokens - request.num_computed_tokens)
-            for request in self._inflight_prefills
-            if request.status == RequestStatus.RUNNING
-        )
-        if not prefill and not any(waiting_queues):
-            return budget  # No prefill to split.
-        decode = sum(
-            1 + len(request.spec_token_ids)
-            for request in self.running
-            if request.num_computed_tokens >= request.num_prompt_tokens
-            and not self._needs_no_more_steps(request)
-        )
-        for request in itertools.chain(*waiting_queues):
-            if prefill >= budget * self.pp_size:
-                break  # cap already at the full budget
-            hit = self._pp_num_cached_tokens(request)
-            prefill += max(0, request.num_tokens - hit)
-        # num_prefill_lookahead: the MTP lookahead reservation must leave a token.
-        cap = max(
-            self.pp_microbatch_min_tokens,
-            self.num_prefill_lookahead,
-            cdiv(prefill, self.pp_size),
-        )
-        return min(budget, cap + decode)
-
-    def _pp_num_cached_tokens(self, request: Request) -> int:
-        """`get_num_cached_tokens`, redone only when num_tokens changes
-        (preemption) or more of the request's prefix has been cached since."""
-        kv_cache_manager = self.kv_cache_manager
-        cached = self._pp_cached_tokens.get(request)
-        if cached is not None and cached[0] == request.num_tokens:
-            _, num_cached, prefix = cached
-            if kv_cache_manager.extend_cached_prefix(request, prefix) == prefix:
-                return num_cached
-        num_cached = kv_cache_manager.get_num_cached_tokens(request)
-        prefix = kv_cache_manager.extend_cached_prefix(request, num_cached)
-        self._pp_cached_tokens[request] = (request.num_tokens, num_cached, prefix)
-        return num_cached
-
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -802,8 +746,8 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
-        if self.use_pp and self.pp_microbatch_min_tokens and token_budget > 0:
-            token_budget = self._pp_microbatch_cap(token_budget)
+        if self.pp_microbatch_cap is not None and token_budget > 0:
+            token_budget = self.pp_microbatch_cap.apply(token_budget)
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
