@@ -142,6 +142,25 @@ def test_v1_v2_parity(server: RemoteOpenAIServer, model_name: str):
     assert cos > 0.9999, f"v1/v2 parity failed, cosine={cos}"
 
 
+def test_text_only_inputs_match_texts(server: RemoteOpenAIServer, model_name: str):
+    """Text-only `inputs` must embed like `texts`, without a chat template."""
+    v2_texts = _cohere_embed(
+        server, model_name, texts=["hello world"], embedding_types=["float"]
+    )
+    body = {
+        "model": model_name,
+        "inputs": [{"content": [{"type": "text", "text": "hello world"}]}],
+        "embedding_types": ["float"],
+    }
+    resp = requests.post(server.url_for("/v2/embed"), json=body)
+    assert resp.status_code == 200, resp.text
+
+    cos = _cosine_sim(
+        v2_texts["embeddings"]["float"][0], resp.json()["embeddings"]["float"][0]
+    )
+    assert cos > 0.9999, f"texts/inputs parity failed, cosine={cos}"
+
+
 def test_embedding_types(server: RemoteOpenAIServer, model_name: str):
     r = _cohere_embed(
         server,

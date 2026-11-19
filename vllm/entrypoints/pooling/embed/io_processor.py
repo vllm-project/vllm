@@ -505,7 +505,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
         as a system prompt. Otherwise they are just prepended to the input text.
 
         Images and mixed inputs are always batch-rendered through the chat
-        template in one `render_chat` call.
+        template in one `render_chat` call. Text-only `inputs` are handled
+        like `texts`.
         """
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
@@ -519,6 +520,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
         input_type = request.input_type
         self._validate_input_type(input_type)
 
+        texts = request.texts
+        if request.inputs is not None and all(
+            item.type == "text" for inp in request.inputs for item in inp.content
+        ):
+            texts = [
+                "\n".join(item.text for item in inp.content if item.text is not None)
+                for inp in request.inputs
+            ]
+
         if request.images is not None:
             input: list[CohereEmbedInput] = [
                 CohereEmbedInput(
@@ -528,10 +538,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
                 for uri in request.images
             ]
-        elif request.inputs is not None:
+        elif texts is None:
+            assert request.inputs is not None
             input = request.inputs
         else:
-            texts = request.texts or []
             task_prefix = self._get_task_instruction_prefix(input_type)
 
             if task_prefix is None:
