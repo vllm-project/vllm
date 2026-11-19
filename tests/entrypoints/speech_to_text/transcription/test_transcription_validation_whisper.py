@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 
+import httpx
 import numpy as np
 import openai
 import pytest
@@ -234,6 +235,74 @@ async def test_stream_options(winning_call, whisper_client):
         else:
             continuous = continuous and hasattr(chunk, "usage")
     assert final and continuous
+
+
+VAD_ENABLED = {"vad_config.enabled": "true"}
+
+
+def _silence_wav(seconds: float = 3.0) -> io.BytesIO:
+    buffer = io.BytesIO()
+    sf.write(buffer, np.zeros(int(seconds * 16000), np.float32), 16000, format="WAV")
+    buffer.seek(0)
+    return buffer
+
+
+async def _post_audio(server, endpoint: str, data: dict) -> httpx.Response:
+    # httpx because the OpenAI client doesn't stream translations.
+    async with httpx.AsyncClient(timeout=30) as client:
+        return await client.post(
+            server.url_for(f"v1/audio/{endpoint}"),
+            headers={"Authorization": f"Bearer {server.DUMMY_API_KEY}"},
+            data={"model": MODEL_NAME, **data},
+            files={"file": ("silence.wav", _silence_wav())},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["transcriptions", "translations"])
+async def test_vad_no_speech(server, endpoint):
+    """With VAD, audio without speech returns an empty result, streamed or
+    not."""
+    response = await _post_audio(server, endpoint, VAD_ENABLED)
+    assert response.status_code == 200, response.text
+    assert response.json()["text"] == ""
+
+    for include_usage in (False, True):
+        response = await _post_audio(
+            server,
+            endpoint,
+            {
+                **VAD_ENABLED,
+                "stream": "true",
+                "stream_include_usage": str(include_usage).lower(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        events = [
+            line.removeprefix("data: ") for line in response.text.splitlines() if line
+        ]
+        assert events[-1] == "[DONE]"
+        chunks = [json.loads(event) for event in events[:-1]]
+        # No text chunks, only the final usage chunk when requested.
+        assert all(not chunk["choices"] for chunk in chunks)
+        assert len(chunks) == int(include_usage)
+        if include_usage:
+            assert chunks[0]["usage"]["completion_tokens"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["transcriptions", "translations"])
+@pytest.mark.parametrize(
+    "vad_params",
+    [
+        {"vad_config.threshold": "1.5"},
+        {"vad_config.min_speech_duration_ms": "-1"},
+        {"vad_config.threshold": "0.3", "vad_config.neg_threshold": "0.5"},
+    ],
+)
+async def test_vad_invalid_params(server, endpoint, vad_params):
+    response = await _post_audio(server, endpoint, {**VAD_ENABLED, **vad_params})
+    assert response.status_code == 400, response.text
 
 
 @pytest.mark.asyncio
