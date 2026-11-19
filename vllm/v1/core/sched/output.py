@@ -342,6 +342,12 @@ class SchedulerOutput:
             free_encoder_mm_hashes=[],
         )
 
+    def shares_requests_with(self, other: "SchedulerOutput") -> bool:
+        """Whether any request is scheduled in both this step and `other`."""
+        return not self.num_scheduled_tokens.keys().isdisjoint(
+            other.num_scheduled_tokens
+        )
+
 
 @dataclass(slots=True)
 class GrammarOutput:
