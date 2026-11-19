@@ -3,6 +3,7 @@
 
 import math
 import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -72,14 +73,44 @@ def get_sentence_transformers_module_file(
         )
 
     model_path = Path(model)
-    if model_path.is_dir() and not (
-        (model_path / relative_path).resolve().is_relative_to(model_path.resolve())
-    ):
-        raise InvalidSentenceTransformersModulePath(
-            "Module path leaves model directory"
-        )
+    if model_path.is_dir():
+        model_path = model_path.resolve()
+        module_file = model_path / relative_path
+        resolved_file = module_file.resolve()
+        if not resolved_file.is_relative_to(model_path) and not _is_hub_cache_blob(
+            model_path, module_file, resolved_file
+        ):
+            raise InvalidSentenceTransformersModulePath(
+                "Module path leaves model directory"
+            )
 
     return relative_path.as_posix()
+
+
+def _is_hub_cache_blob(snapshot: Path, module_file: Path, resolved_file: Path) -> bool:
+    cache_root = Path(constants.HF_HUB_CACHE).resolve()
+    repo = snapshot.parent.parent
+    if not (
+        repo.parent == cache_root
+        and repo.name.startswith("models--")
+        and snapshot.parent.name == "snapshots"
+        and re.fullmatch(r"[0-9a-f]{40}", snapshot.name)
+        and module_file.is_symlink()
+    ):
+        return False
+
+    # Hub snapshots link individual files through their repository's blob directory.
+    parent = module_file.parent.resolve()
+    repo_blobs = repo / "blobs"
+    link_target = Path(os.path.abspath(parent / module_file.readlink()))
+    return (
+        parent.is_relative_to(snapshot)
+        and link_target.parent == repo_blobs
+        and (
+            resolved_file.parent == repo_blobs
+            or resolved_file.parent.parent == cache_root / "blobs"
+        )
+    )
 
 
 CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {

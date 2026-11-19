@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pydantic
 import pytest
 import torch
-from huggingface_hub import ResolvedRevision
+from huggingface_hub import ResolvedRevision, constants
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -2393,6 +2393,47 @@ def test_sentence_transformers_config_rejects_outside_model(
 
     with pytest.raises(InvalidSentenceTransformersModulePath):
         reader(str(model))
+
+
+@pytest.mark.parametrize(
+    ("module_type", "reader", "config", "expected"),
+    [
+        (
+            "sentence_transformers.models.Pooling",
+            get_pooling_config,
+            {"pooling_mode_mean_tokens": True},
+            {"seq_pooling_type": "MEAN", "use_activation": False},
+        ),
+        (
+            "sentence_transformers.models.Dense",
+            try_get_dense_modules,
+            {"out_features": 4},
+            [{"out_features": 4, "folder": "module"}],
+        ),
+    ],
+)
+@pytest.mark.parametrize("shared_blob", [False, True])
+def test_sentence_transformers_config_reads_hub_cache(
+    tmp_path, monkeypatch, module_type, reader, config, expected, shared_blob
+):
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    repo = tmp_path / "models--vllm-project--test-model"
+    model = repo / "snapshots" / ("a" * 40)
+    _write_json(model / "modules.json", [{"type": module_type, "path": "module"}])
+
+    blob = repo / "blobs" / "config-hash"
+    if shared_blob:
+        shared = tmp_path / "blobs" / "ab" / "abcdef"
+        _write_json(shared, config)
+        blob.parent.mkdir()
+        blob.symlink_to(os.path.relpath(shared, blob.parent))
+    else:
+        _write_json(blob, config)
+    config_file = model / "module" / "config.json"
+    config_file.parent.mkdir()
+    config_file.symlink_to(os.path.relpath(blob, config_file.parent))
+
+    assert reader(model) == expected
 
 
 def test_get_pooling_config_from_args():
