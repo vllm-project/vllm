@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import math
 import mmap
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2310,6 +2311,134 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     assert params.num_speculative_tokens == 3
     assert params.max_in_flight_steps == config.max_concurrent_batches
     assert params.num_lookahead_tokens == num_lookahead_tokens
+
+
+def _draft_kv_pool_config(method="dspark") -> VllmConfig:
+    config = VllmConfig(
+        model_config=ModelConfig(max_model_len=1024),
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=8,
+            max_num_batched_tokens=256,
+            max_model_len=1024,
+            is_encoder_decoder=False,
+        ),
+        cache_config=CacheConfig(draft_kv_pool=True),
+    )
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = fake_speculative_config(
+        method=method,
+        num_speculative_tokens=3,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(), architectures=[]
+        ),
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: method == "eagle",
+        use_dflash=lambda: method == "dflash",
+        use_dspark=lambda: method == "dspark",
+        use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
+    )
+    return config
+
+
+def _draft_kv_pool_layers() -> dict[str, KVCacheLayerConfig]:
+    draft = _as_draft(
+        DFlashSlidingWindowManager.layer_config(
+            new_kv_cache_spec(), sliding_window=64, num_speculative_tokens=3
+        )
+    )
+    return {
+        "layers.0": new_kv_cache_layer(),
+        "layers.1": new_sliding_window_layer(sliding_window=64),
+        "layers.2": new_kv_cache_layer(),
+        "draft.0": draft,
+        "draft.1": draft,
+    }
+
+
+@pytest.mark.parametrize("max_loads", [None, 4])
+def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(max_loads):
+    """--draft-kv-pool groups the drafter's layers on their own in pool 1, sized
+    for max_num_seqs requests plus --max-num-inflight-kv-loads async loads at
+    their admission cap plus the cache fraction, and laid out after the shared
+    pool, which gets the memory left."""
+    config = _draft_kv_pool_config()
+    config.scheduler_config.max_num_inflight_kv_loads = max_loads
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**30]
+    )
+
+    *shared_groups, draft_group = kv_cache_config.kv_cache_groups
+    assert draft_group.layer_names == ["draft.0", "draft.1"]
+    assert draft_group.pool_id == 1
+    assert draft_group.manager_cls is DFlashSlidingWindowManager
+    assert not any(group.pool_id for group in shared_groups)
+
+    cap = draft_group.max_allocated_blocks_per_request(config)
+    num_pool_blocks = 1 + math.ceil((8 + (max_loads or 0)) * cap * 1.5)
+    assert kv_cache_config.pool_num_blocks == {1: num_pool_blocks}
+
+    shared_bytes_per_block = kv_cache_planning._pool_bytes_per_block(
+        config, kv_cache_config.kv_cache_groups
+    )
+    pool_bytes_per_block = draft_group.page_size_bytes
+    shared_bytes = kv_cache_config.num_blocks * shared_bytes_per_block
+    pool_bytes = num_pool_blocks * pool_bytes_per_block
+    assert kv_cache_config.num_blocks == (2**30 - pool_bytes) // shared_bytes_per_block
+    assert {t.size for t in kv_cache_config.kv_cache_tensors} == {
+        shared_bytes + pool_bytes
+    }
+    (pool_tensor,) = [t for t in kv_cache_config.kv_cache_tensors if t.pool_id]
+    assert pool_tensor.layers == ["draft.0", "draft.1"]
+    assert pool_tensor.offset == shared_bytes
+    assert pool_tensor.block_stride == pool_bytes_per_block
+
+
+def test_draft_kv_pool_sizes_agree_across_pp_stages():
+    """A PP stage without the drafter holds no pool, keeps its memory for the
+    shared pool, and still agrees with the last stage on the pool's size."""
+    config = _draft_kv_pool_config()
+    layers = _draft_kv_pool_layers()
+    stages = [
+        {name: layers[name] for name in ("layers.0", "layers.1")},
+        {name: layers[name] for name in ("layers.2", "draft.0", "draft.1")},
+    ]
+    first, last = get_kv_cache_configs(config, stages, [2**30, 2**30])
+
+    assert first.pool_num_blocks == last.pool_num_blocks
+    assert first.num_blocks == last.num_blocks
+    assert not any(t.pool_id for t in first.kv_cache_tensors)
+    assert any(t.pool_id for t in last.kv_cache_tensors)
+    scheduler_config = generate_scheduler_kv_cache_config([first, last])
+    assert scheduler_config.kv_cache_groups[-1].pool_id == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "disable_hma", "connector", "error"),
+    [
+        ("eagle", False, None, ValueError),
+        ("dspark", True, None, ValueError),
+        ("dspark", False, "OffloadingConnector", NotImplementedError),
+        ("dspark", False, "NixlConnector", ValueError),
+    ],
+    ids=[
+        "eagle",
+        "no_hybrid_manager",
+        "offloading_connector",
+        "nixl_consumer_without_inflight_load_cap",
+    ],
+)
+def test_draft_kv_pool_refuses_unsupported_configs(
+    method, disable_hma, connector, error
+):
+    config = _draft_kv_pool_config(method)
+    config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
+    if connector is not None:
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector=connector, is_kv_consumer=True
+        )
+    with pytest.raises(error, match="--draft-kv-pool"):
+        get_kv_cache_configs(config, [_draft_kv_pool_layers()], [2**30])
 
 
 _GQA_SPEC = AttentionSpec(

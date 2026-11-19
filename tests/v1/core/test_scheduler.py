@@ -8199,7 +8199,8 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
 
     assert [call.args[0].request_id for call in remaining.call_args_list] == new_ids
     parked = scheduler._parked_reservations
-    assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
+    (reserved,) = scheduler._parked_reserved_blocks
+    assert reserved == sum(remaining(r)[0] for r in parked) > 0
 
 
 def test_failed_load_reservation_keeps_new_async_loads_out():
@@ -8259,7 +8260,10 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     def check_reservations():
         parked = s._parked_reservations
         assert parked == {r: s._request_remaining_blocks(r) for r in parked}
-        assert s._parked_reserved_blocks == sum(parked.values())
+        assert s._parked_reserved_blocks == [
+            sum(blocks[pool_id] for blocks in parked.values())
+            for pool_id in range(len(s._parked_reserved_blocks))
+        ]
         if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
             events.add("promoted_load_held")
 

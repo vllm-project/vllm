@@ -3415,6 +3415,11 @@ class VllmConfig:
                 "it sizes the KV cache from measured memory, which "
                 "num_gpu_blocks_override overrides"
             )
+        elif cache_config.draft_kv_pool:
+            unsupported = (
+                "--draft-kv-pool lays its pool out after the shared pool, at an "
+                "offset fixed when the KV cache is planned"
+            )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "

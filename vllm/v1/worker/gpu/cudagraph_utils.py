@@ -885,7 +885,7 @@ def set_dcp_capture_context(
         block_tables.cp_size * block_tables.cp_interleave,
         # Replays read the real block tables, so the context can sit in the
         # null block: the one an extensible KV cache keeps mapped for capture.
-        1,
+        [1] * len(input_block_tables),
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )
@@ -1143,6 +1143,8 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.model_state._mamba_ctx = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
+    if hasattr(runner, "kv_caches_by_pool"):
+        runner.kv_caches_by_pool.clear()
     if hasattr(runner, "attn_groups"):
         runner.attn_groups.clear()
     if hasattr(runner, "kv_cache_config"):

@@ -8,10 +8,17 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import (
+    new_kv_cache_group,
+    sliding_window_layer,
+    uniform_spec,
+)
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheConfig,
     KVCacheLayout,
+    MambaSpec,
 )
 from vllm.v1.worker import utils as worker_utils
 from vllm.v1.worker.utils import (
@@ -398,3 +405,53 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
             assert (view[b].view(torch.int8) == 1).all(), layout
     zero_bytes = int((raw == 0).sum().item())
     assert zero_bytes == num_layers * spec.page_size_bytes, layout
+
+
+def test_private_pool_groups_are_not_zeroed(monkeypatch):
+    """A private pool's layers index its own blocks, not the shared pool's."""
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+    target = AttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float8_e4m3fn
+    )
+    drafter = AttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+    mamba = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,))
+    groups = [
+        new_kv_cache_group(["target.attn"], target),
+        new_kv_cache_group(["target.mamba"], mamba),
+        new_kv_cache_group(
+            ["draft.attn"], sliding_window_layer(drafter, 16), pool_id=1
+        ),
+    ]
+    config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        pool_num_blocks={1: 5},
+    )
+    assert config.needs_kv_cache_zeroing
+    assert not config.has_mixed_precision_kv_cache
+
+    zeroed_layers: list[str] = []
+    monkeypatch.setattr(
+        gpu_model_runner,
+        "KVBlockZeroer",
+        lambda *args, attn_groups_iter, **kwargs: zeroed_layers.extend(
+            name for g in attn_groups_iter for name in g.layer_names
+        ),
+    )
+    runner = SimpleNamespace(
+        device=torch.device("cpu"),
+        kv_cache_config=config,
+        attn_groups=[
+            [AttentionGroup(None, g.layer_names, uniform_spec(g), i)]
+            for i, g in enumerate(groups)
+        ],
+        kernel_block_sizes=[16, 16, 16],
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    gpu_model_runner.GPUModelRunner._init_kv_zero_meta(runner)
+
+    assert zeroed_layers == ["target.attn", "target.mamba"]
