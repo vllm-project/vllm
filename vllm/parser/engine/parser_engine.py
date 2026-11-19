@@ -143,6 +143,8 @@ class ParserEngine(Parser):
     complete output format for a model (reasoning + tool calls).
     """
 
+    _streaming_engine_cls: type[StreamingParserEngine] = StreamingParserEngine
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -164,7 +166,7 @@ class ParserEngine(Parser):
         self._reasoning_parser = None
         self._tool_parser = None
         self.parser_engine_config = parser_engine_config
-        self._engine = StreamingParserEngine(
+        self._engine = self._streaming_engine_cls(
             parser_engine_config, tokenizer, vocab=self.vocab
         )
 
@@ -1126,6 +1128,13 @@ class ParserEngine(Parser):
 
     # ── Arg conversion helpers ─────────────────────────────────────────
 
+    def _hold_open_value(self, slot) -> None:
+        # Nothing has streamed yet, so the open value is the first one.
+        # Hold it with the extender until its tag closes.
+        if self._arg_value_extender is not None and not slot.streamed_json:
+            slot.extend_open_value = self._arg_value_extender(slot.args)
+            slot.open_value_streams = False
+
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         converter = self._arg_converter
         if converter is None:
@@ -1154,6 +1163,7 @@ class ParserEngine(Parser):
             return None
 
         if not current_json:
+            self._hold_open_value(slot)
             return None
 
         if slot.name:
@@ -1163,6 +1173,7 @@ class ParserEngine(Parser):
         safe_json, value_streams = self._safe_arg_prefix(current_json, slot.string_keys)
 
         if not safe_json:
+            self._hold_open_value(slot)
             return None
         if prev and not safe_json.startswith(prev):
             if self._arg_value_extender is not None:
