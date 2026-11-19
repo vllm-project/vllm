@@ -97,6 +97,7 @@ TokenizerMode = Literal[
     "hf",
     "glm5_next",
     "alpamayo2_super",
+    "hy_v4",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -186,6 +187,7 @@ class ModelConfig:
     - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
       trajectory and special tokens added; selected automatically for
       `nvidia/Alpamayo2-Super`.
+    - "hy_v4" uses the HF tokenizer with HYV4 VL chat rendering.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -451,7 +453,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     language_model_only: InitVar[bool] = False
-    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int | bool]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
@@ -593,7 +595,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         language_model_only: bool,
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -793,6 +795,8 @@ class ModelConfig:
                 "KimiK31ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "kimi_k3"
+            elif arch == "HYV4VLForConditionalGeneration":
+                self.tokenizer_mode = "hy_v4"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch in (
@@ -802,7 +806,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
@@ -1442,6 +1450,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "inkling2",
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
