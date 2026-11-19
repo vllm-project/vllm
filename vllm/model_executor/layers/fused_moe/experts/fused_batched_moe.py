@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm import envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -51,12 +50,11 @@ def _is_capturing_or_compiling() -> bool:
 
 
 def _moe_td_shape_allowed(
-    max_num_tokens: int, block_m: int, td_override: bool | None
+    max_num_tokens: int, block_m: int
 ) -> bool:
     return (
-        td_override is not None
-        or not current_platform.is_cuda()
-        or not current_platform.has_device_capability(100)
+        not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
         or max_num_tokens > block_m
     )
 
@@ -671,16 +669,19 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    td_override = envs.VLLM_TRITON_USE_TD
+    td_enabled = use_tensor_descriptor() or (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+    )
     use_td = (
-        use_tensor_descriptor()
+        td_enabled
         and A.stride(2) == 1
         and B.stride(2) == 1
         and (K * A.element_size()) % 16 == 0
         and (BLOCK_M & (BLOCK_M - 1)) == 0
         and (BLOCK_N & (BLOCK_N - 1)) == 0
         and (BLOCK_K & (BLOCK_K - 1)) == 0
-        and _moe_td_shape_allowed(max_num_tokens, BLOCK_M, td_override)
+        and _moe_td_shape_allowed(max_num_tokens, BLOCK_M)
     )
     if use_td:
         set_triton_allocator(A.device)

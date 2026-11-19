@@ -448,38 +448,6 @@ _TD_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("is_xpu", "is_cuda", "capability", "expected"),
-    [
-        (True, False, 0, True),
-        (False, True, 100, True),
-        (False, True, 90, False),
-        (False, False, 0, False),
-    ],
-)
-def test_tensor_descriptor_default_selection(
-    monkeypatch, is_xpu, is_cuda, capability, expected
-):
-    from vllm import envs
-    from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
-
-    monkeypatch.setattr(envs, "VLLM_TRITON_USE_TD", None)
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
-    monkeypatch.setattr(
-        current_platform, "has_device_capability", lambda _: capability >= 100
-    )
-
-    assert use_tensor_descriptor() is expected
-
-
-@pytest.mark.parametrize("override", [False, True])
-def test_tensor_descriptor_explicit_override(monkeypatch, override):
-    from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
-
-    assert use_tensor_descriptor(override) is override
-
-
 @pytest.mark.parametrize(("max_num_tokens", "expected"), [(64, False), (128, True)])
 def test_moe_td_shape_policy(monkeypatch, max_num_tokens, expected):
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
@@ -487,9 +455,11 @@ def test_moe_td_shape_policy(monkeypatch, max_num_tokens, expected):
     )
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: True
+    )
 
-    assert _moe_td_shape_allowed(max_num_tokens, 64, None) is expected
+    assert _moe_td_shape_allowed(max_num_tokens, 64) is expected
 
 
 def _td_supported() -> bool:

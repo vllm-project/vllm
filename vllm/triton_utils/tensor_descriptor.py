@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 
 def use_tensor_descriptor(override: bool | None = None) -> bool:
-    """Tri-state VLLM_TRITON_USE_TD: unset=auto, 1/0=force on/off."""
+    """Tri-state VLLM_TRITON_USE_TD: unset=auto (on for XPU), 1/0=force on/off."""
     from vllm import envs
     from vllm.platforms import current_platform
 
@@ -16,10 +16,7 @@ def use_tensor_descriptor(override: bool | None = None) -> bool:
         override = envs.VLLM_TRITON_USE_TD
     if override is not None:
         return override
-    return current_platform.is_xpu() or (
-        current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
+    return current_platform.is_xpu()
 
 
 def tensor_descriptor_compatible(*tensors: "torch.Tensor | None") -> bool:
