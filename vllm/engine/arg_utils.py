@@ -707,6 +707,7 @@ class EngineArgs:
     encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
+    kv_cache_valve_threshold: float = SchedulerConfig.kv_cache_valve_threshold
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
     cache_aware_admission_window: int = SchedulerConfig.cache_aware_admission_window
     cache_aware_admission_threshold: float = (
@@ -1815,6 +1816,10 @@ class EngineArgs:
             "--scheduler-reserve-full-isl",
             **scheduler_kwargs["scheduler_reserve_full_isl"],
         )
+        scheduler_group.add_argument(
+            "--kv-cache-valve-threshold",
+            **scheduler_kwargs["kv_cache_valve_threshold"],
+        )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
             "--prefill-schedule-interval",
@@ -2714,6 +2719,7 @@ class EngineArgs:
                 self.long_prefill_token_threshold_adaptive
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
+            kv_cache_valve_threshold=self.kv_cache_valve_threshold,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             cache_aware_admission_window=self.cache_aware_admission_window,
