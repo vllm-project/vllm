@@ -113,6 +113,7 @@ def _pooling_uses_default_gemm() -> bool:
     # Importing a foreign platform can reload torch extension libraries.
     from vllm.platforms.rocm import get_cdna_version
 
+    # FYI: AITER's gfx950 split-K rows are less exact than F.linear, within tolerance.
     return get_cdna_version() in (3, 4)
 
 

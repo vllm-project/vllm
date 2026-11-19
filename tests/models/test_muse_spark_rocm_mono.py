@@ -453,10 +453,13 @@ def test_layer_guards_follow_the_weight_finalize(tiny_model) -> None:
 def test_pooler_uses_the_default_gemm_dispatch_on_the_tiny_model(tiny_model) -> None:
     """The model as built on this GPU (CDNA4) keeps no PyTorch-linear pin."""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.models.muse_spark.amd.model import MuseSparkTorchLinearMethod
 
     moe = tiny_model.layers[1].feed_forward
-    assert type(moe.pooler.quant_method) is UnquantizedLinearMethod
-    assert type(moe.unpooler.quant_method) is UnquantizedLinearMethod
+    # MuseSparkTorchLinearMethod subclasses UnquantizedLinearMethod, so rule it out.
+    for projection in (moe.pooler, moe.unpooler):
+        assert isinstance(projection.quant_method, UnquantizedLinearMethod)
+        assert not isinstance(projection.quant_method, MuseSparkTorchLinearMethod)
 
 
 @requires_gfx950
