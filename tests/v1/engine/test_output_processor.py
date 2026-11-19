@@ -7,6 +7,7 @@ import gc
 import math
 import threading
 import time
+from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -2474,3 +2475,59 @@ async def test_submission_cancelled_again_while_aborting_releases_finished_child
         await task
     engine.output_handler = None
     assert released == [{"0_r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]
+
+
+@pytest.mark.parametrize("queued", [True, False], ids=["queued", "in-flight"])
+def test_llm_engine_releases_the_final_output_of_a_request_aborted_before_it(
+    queued,
+):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="r",
+        external_req_id="r-ext",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, max_tokens=2),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+    sent = [EngineCoreOutputs(outputs=[_final_output("r")])]
+    released = []
+    aborted = []
+
+    def call_utility(method, *args):
+        while sent:
+            client.outputs_queue.put_nowait(sent.pop(0))
+
+    client = object.__new__(SyncMPClient)
+    client.outputs_queue = Queue()
+    client.resources = SimpleNamespace(engine_dead=False)
+    client.engines_running = False
+    client.call_utility = call_utility
+    client.abort_requests = aborted.extend
+    client.release_unreturned_aux_outputs = released.append
+    if queued:
+        call_utility("get_weight_version")
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = None
+    engine.log_stats = False
+    engine.logger_manager = None
+    engine.renderer = SimpleNamespace(mm_processor_cache=None)
+    engine.vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(object_key_prefix="job")
+    )
+    engine.engine_core = client
+    engine.output_processor = output_processor
+
+    engine.abort_request(["r-ext"])
+    for _ in range(3):
+        if not engine.has_unfinished_requests():
+            break
+        assert engine.step() == []
+    assert aborted == ["r"] and not engine.has_unfinished_requests()
+    assert released == [{"r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]

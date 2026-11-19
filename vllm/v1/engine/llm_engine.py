@@ -201,7 +201,10 @@ class LLMEngine:
         return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        has_unfinished = self.output_processor.has_unfinished_requests()
+        has_unfinished = (
+            self.output_processor.has_unfinished_requests()
+            or self.engine_core.has_unread_outputs()
+        )
         if self.dp_group is None:
             return has_unfinished or self.engine_core.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
@@ -225,6 +228,11 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
+        if (
+            request_ids
+            and self.vllm_config.aux_output_config.object_key_prefix is not None
+        ):
+            self.engine_core.wait_for_sent_outputs()
 
     def add_request(
         self,

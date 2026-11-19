@@ -241,6 +241,15 @@ class EngineCoreClient(ABC):
     def release_unreturned_aux_outputs(self, keys: dict[str, list[str]]) -> None:
         raise NotImplementedError
 
+    def has_unread_outputs(self) -> bool:
+        """Whether outputs the client received wait for `get_output`."""
+        return False
+
+    def wait_for_sent_outputs(self) -> None:
+        """Return once the outputs the engine sent before this call are
+        received."""
+        return
+
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
@@ -1176,6 +1185,14 @@ class SyncMPClient(MPClient):
             EngineCoreRequestType.UTILITY,
             (0, call_id, "release_unreturned_aux_outputs", (keys,)),
         )
+
+    def has_unread_outputs(self) -> bool:
+        return not self.outputs_queue.empty()
+
+    def wait_for_sent_outputs(self) -> None:
+        """A utility reply follows the outputs the engine sent before it."""
+        if not self.resources.engine_dead:
+            self.get_weight_version()
 
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
