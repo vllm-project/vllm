@@ -6746,19 +6746,30 @@ def test_abort_drops_only_remote_read_exports(monkeypatch, remote_readers_only):
         monkeypatch.setattr(
             scheduler.connector, name, lambda *a, **k: (True, None), raising=False
         )
-    release = ExportRelease.FREE_NOW if remote_readers_only else ExportRelease.KEPT
+    release = (
+        ExportRelease.FREE_ON_FINISHED_SENDING
+        if remote_readers_only
+        else ExportRelease.KEPT
+    )
+    offered: list[Request] = []
     monkeypatch.setattr(
-        scheduler.connector, "cancel_kv_transfers", lambda exports, imports: release
+        scheduler.connector,
+        "cancel_kv_transfers",
+        lambda exports, imports: offered.extend(exports) or release,
     )
     scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
     assert scheduler.ledger.pins_blocks()
 
     dropped = scheduler.drop_retained_exports()
-    freed = scheduler.kv_cache_manager.block_pool.get_num_free_blocks() > num_free
     assert dropped == int(remote_readers_only)
-    assert freed == remote_readers_only
-    assert scheduler.ledger.pins_blocks() != remote_readers_only
-    assert (request.request_id in scheduler.requests) != remote_readers_only
+    # Dropped or not, the blocks stay pinned until the connector reports the
+    # export finished: a read in flight may still use them.
+    assert scheduler.ledger.pins_blocks()
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == num_free
+    assert request.request_id in scheduler.requests
+    # Either way the export is not offered again.
+    assert scheduler.drop_retained_exports() == 0
+    assert offered == [request]
 
 
 def test_abort_all_frees_dropped_exports_when_connector_reports(monkeypatch):
@@ -6829,7 +6840,7 @@ def test_retract_again_drops_late_exports_and_skips_retracted_loads(monkeypatch)
         lambda exports, imports: (
             dropped.extend(exports)
             or withdrawn.extend(imports)
-            or ExportRelease.FREE_NOW
+            or ExportRelease.FREE_ON_FINISHED_SENDING
         ),
     )
     # The decode's remote load is in flight.
@@ -6847,8 +6858,10 @@ def test_retract_again_drops_late_exports_and_skips_retracted_loads(monkeypatch)
 
     scheduler.retract_kv_transfers()
     assert dropped == [prefill] and withdrawn == [decode]
-    assert not scheduler.ledger.is_referenced(prefill.request_id)
-    assert prefill.request_id not in scheduler.requests
+    # Dropped, but pinned until the connector reports no read uses it.
+    assert scheduler.ledger.pins_blocks()
+    assert not scheduler.ledger.droppable_exports()
+    assert prefill.request_id in scheduler.requests
 
 
 def test_delayed_kv_connector_free_keeps_scheduler_active():

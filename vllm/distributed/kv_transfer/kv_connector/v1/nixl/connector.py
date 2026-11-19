@@ -409,8 +409,10 @@ class NixlPullConnector(NixlBaseConnector):
     def cancel_kv_transfers(
         self, exports: list["Request"], imports: list["Request"]
     ) -> ExportRelease:
-        # A remote read of a freed block is not prevented (no NIXL drop yet).
-        return ExportRelease.FREE_NOW
+        # NIXL cannot revoke a read D has posted, and D reads up to the lease
+        # deadline its own heartbeats extend. Only the read's completion
+        # notification or the lease expiry shows that no read uses the blocks.
+        return ExportRelease.KEPT
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

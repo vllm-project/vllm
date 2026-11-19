@@ -3395,9 +3395,9 @@ class Scheduler(SchedulerInterface):
         of all requests, or a pause that clears the cache). Exports a
         connector also holds for other reasons (e.g. an async save) are kept.
 
-        The connector decides how their blocks are freed (`ExportRelease`).
-        Freed now, a completion it reports later is ignored (no entry).
-        Returns how many exports were dropped."""
+        The connector decides whether it can cancel them (`ExportRelease`).
+        Either way their blocks are freed only on its finished_sending, once
+        no read in flight uses them. Returns how many exports were dropped."""
         entries = self.ledger.droppable_exports()
         if not entries:
             return 0
@@ -3409,12 +3409,6 @@ class Scheduler(SchedulerInterface):
             return 0
         for entry in entries:
             entry.state = TransferState.DROPPING
-        if release == ExportRelease.FREE_ON_FINISHED_SENDING:
-            return len(entries)
-        for entry in entries:
-            self.ledger.close(entry.request_id, TransferDirection.EXPORT)
-            if entry.request.request_id in self.requests:
-                self._free_if_unreferenced(entry.request)
         return len(entries)
 
     def retract_kv_transfers(self) -> None:

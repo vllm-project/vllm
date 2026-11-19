@@ -714,10 +714,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> ExportRelease:
         # The blocks are freed only once no child needs them any more.
         releases = {c.cancel_kv_transfers(exports, imports) for c in self._connectors}
-        for release in (ExportRelease.KEPT, ExportRelease.FREE_ON_FINISHED_SENDING):
-            if release in releases:
-                return release
-        return ExportRelease.FREE_NOW
+        if ExportRelease.KEPT in releases:
+            return ExportRelease.KEPT
+        return ExportRelease.FREE_ON_FINISHED_SENDING
 
     def has_pending_push_work(self) -> bool:
         return any(c.has_pending_push_work() for c in self._connectors)
