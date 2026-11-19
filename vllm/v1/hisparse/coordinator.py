@@ -485,12 +485,10 @@ class HiSparseCoordinator:
     def try_preallocate_hot(
         self,
         request_id: str,
-        num_tokens: int,
-        num_tokens_main_model: int,
         shortfall: int,
         available: int,
         has_new_computed_kv: bool,
-    ) -> dict[int, list[KVCacheBlock]] | None:
+    ) -> bool:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
         # Computed KV must be attached before any group grows. Empty groups
         # without new computed tokens can come from a retained streaming request.
@@ -499,7 +497,7 @@ class HiSparseCoordinator:
             or not self.resident_managers
             or shortfall + available > self.gpu_pool.num_gpu_blocks
         ):
-            return None
+            return False
         upfront = 0
         for manager in self.hot_managers:
             missing = manager.get_num_required_blocks(request_id)
@@ -509,17 +507,13 @@ class HiSparseCoordinator:
             if request_id not in manager.hot_required:
                 shortfall += missing
         if not upfront or upfront > available:
-            return None
+            return False
         if self.get_num_reclaimable_blocks(request_id) < shortfall:
-            return None
-        hot_blocks = {}
+            return False
         for manager in self.hot_managers:
-            manager.require_hot(request_id)
-            hot_blocks[manager.kv_cache_group_id] = manager.allocate_new_blocks(
-                request_id, num_tokens, num_tokens_main_model
-            )
+            manager.preallocate(request_id)
         self.update_residency(request_id)
-        return hot_blocks
+        return True
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.

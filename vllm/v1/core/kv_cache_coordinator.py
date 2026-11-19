@@ -320,7 +320,6 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
-        preallocated: dict[int, list[KVCacheBlock]] | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """Allocate new blocks for the request to give it at least `num_tokens`
         token slots.
@@ -334,16 +333,13 @@ class KVCacheCoordinator(ABC):
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
-            preallocated: Blocks already allocated by group ID for this step.
 
         Returns:
             The new allocated blocks.
 
         """
         return tuple(
-            preallocated[manager.kv_cache_group_id]
-            if preallocated and manager.kv_cache_group_id in preallocated
-            else manager.allocate_new_blocks(
+            manager.allocate_new_blocks(
                 request_id,
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)

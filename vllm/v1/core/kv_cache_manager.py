@@ -196,12 +196,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        self.try_preallocate: (
-            Callable[
-                [str, int, int, int, int, bool], dict[int, list[KVCacheBlock]] | None
-            ]
-            | None
-        ) = None
+        self.try_preallocate: Callable[[str, int, int, bool], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -613,13 +608,10 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        shortfall = full_sequence_shortfall > 0 or required_blocks > available_blocks
-        preallocated = None
-        if shortfall and self.try_preallocate is not None:
-            preallocated = self.try_preallocate(
+        if (full_sequence_shortfall > 0 or required_blocks > available_blocks) and (
+            self.try_preallocate is None
+            or not self.try_preallocate(
                 request.request_id,
-                num_tokens_need_slot,
-                num_tokens_main_model,
                 max(
                     required_blocks - available_blocks,
                     full_sequence_shortfall + reserved_blocks
@@ -633,7 +625,7 @@ class KVCacheManager:
                     or any(new_computed_block_list)
                 ),
             )
-        if shortfall and preallocated is None:
+        ):
             return None
 
         if (
@@ -655,7 +647,6 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
-            preallocated,
         )
 
         # P/D: delay caching blocks if we have to recv from
