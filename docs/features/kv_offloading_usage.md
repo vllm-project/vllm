@@ -132,7 +132,8 @@ are no LoRA adapter support guarantees. The backend must be `cpu`. All replicas
 must agree on the model, KV layout, capacity, prefix hash algorithm, and hash
 seed. SHA-256 variants work with the default seed; xxHash variants require the
 same numeric `PYTHONHASHSEED` on every replica. Incompatible configurations fail
-at startup. Cache salts continue to isolate request prefixes.
+at startup. Cache salts continue to isolate request prefixes. Shared mode uses
+ordinary shared-memory pages; `cpu_hugepage_block_size` must be unset or `"none"`.
 
 Sharing is **node-local**. A two-node DP2/TP1/EP deployment with one GPU per node
 creates two independent pools and cannot reuse one node's CPU KV on the other.
