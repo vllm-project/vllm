@@ -8,6 +8,7 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
@@ -19,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
@@ -115,10 +117,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
-        self.use_replayssm = vllm_config.cache_config.use_replayssm
+        self.use_replayssm = (
+            vllm_config.cache_config.use_replayssm
+            and kv_cache_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+        )
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
-        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
-        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        # GDN ReplaySSM has its own builder, so Mamba2 follows --mamba-backend.
+        self.use_flashinfer_replayssm = (
+            self.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self.use_replayssm_trackers = self.use_replayssm and (
+            self.use_flashinfer_replayssm or self.use_spec_decode
+        )
 
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs

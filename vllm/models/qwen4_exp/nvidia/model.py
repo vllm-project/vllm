@@ -34,12 +34,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
 from vllm.model_executor.models.qwen3_5 import (
@@ -722,6 +724,7 @@ class Qwen4ExpForCausalLM(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
@@ -844,17 +847,24 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_gdn_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
+    ) -> tuple[torch.dtype, ...]:
+        dtypes: tuple[torch.dtype, ...] = (
+            MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+                vllm_config.model_config.dtype,
+                vllm_config.cache_config.mamba_cache_dtype,
+                vllm_config.cache_config.mamba_ssm_cache_dtype,
+            )
         )
+        if vllm_config.is_gdn_replayssm_enabled():
+            dtypes += MambaStateDtypeCalculator.gated_delta_net_replayssm_ring_dtypes(
+                vllm_config.model_config.dtype
+            )
+        return dtypes
 
     @classmethod
     def get_gdn_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -863,7 +873,7 @@ class Qwen4ExpForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
             hf_config.linear_num_value_heads,
@@ -872,18 +882,27 @@ class Qwen4ExpForCausalLM(
             hf_config.linear_conv_kernel_dim,
             num_spec,
         )
+        if vllm_config.is_gdn_replayssm_enabled():
+            shapes += MambaStateShapeCalculator.gated_delta_net_replayssm_ring_shapes(
+                tp_size,
+                hf_config.linear_num_key_heads,
+                hf_config.linear_num_value_heads,
+                hf_config.linear_key_head_dim,
+                hf_config.linear_value_head_dim,
+            )
+        return shapes
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return cls.get_gdn_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         return cls.get_gdn_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
@@ -1160,14 +1179,14 @@ class Qwen4ExpForConditionalGeneration(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return Qwen4ExpForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> MambaStateShapes:
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
