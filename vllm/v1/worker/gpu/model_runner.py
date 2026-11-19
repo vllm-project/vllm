@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -419,6 +420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
+            log_layer_backends(self.model, self.vllm_config.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -435,6 +437,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 with self.draft_context(), self.jit_warmup_registry.activate():
                     self.speculator.load_model(self.model)
                     assert self.speculative_config is not None
+                    log_layer_backends(
+                        self.speculator.model,
+                        self.speculative_config.draft_model_config,
+                    )
                     # The drafter never runs its MoE layers in this mode.
                     if not self.speculative_config.prefill_context_kv_only:
                         eplb_models_added = self.eplb.maybe_register_speculator(
@@ -627,6 +633,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if draft_model is not None:
             with set_current_vllm_config(self.vllm_config):
                 refresh_quantized_lm_heads(draft_model)
+                # Drafts that precompute weights from the target's (e.g. a
+                # folded LM head) re-derive them in place.
+                refresh = getattr(draft_model, "refresh_derived_weights", None)
+                if refresh is not None:
+                    refresh()
 
     def reload_weights(
         self,
@@ -1329,6 +1340,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
+            mrope_position_delta = self.model_state.get_mrope_position_delta(req_index)
+            if mrope_position_delta is not None:
+                self.kv_connector.record_mrope_position_delta(
+                    req_id, mrope_position_delta
+                )
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
