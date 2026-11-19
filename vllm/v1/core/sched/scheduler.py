@@ -1067,6 +1067,8 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
+            # Set once a prompt_embeds request does not fit the budget.
+            prompt_embeds_blocked = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1143,7 +1145,12 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
-                if not self._prompt_embeds_fit(request):
+                if request.prompt_embeds is not None and (
+                    prompt_embeds_blocked or not self._prompt_embeds_fit(request)
+                ):
+                    # Admit no later prompt_embeds request this step, so the
+                    # budget drains for the first one that does not fit and is waiting.
+                    prompt_embeds_blocked = True
                     skip_request(request_queue)
                     continue
 
