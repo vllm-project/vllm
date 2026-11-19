@@ -860,9 +860,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             # The fp8_ds_mla branch of forward_mqa routes to aiter's Triton
             # sparse_mla_fwd, which reads the fp8_dsv32_mla layout on gfx950
             # and, in gfx942's native fnuz, on gfx942.
-            from vllm.platforms.rocm import on_gfx942, on_gfx950
+            from vllm.platforms.rocm import get_cdna_version
 
-            if not (on_gfx942() or on_gfx950()):
+            if get_cdna_version() not in (3, 4):
                 raise NotImplementedError(
                     "ROCM_AITER_MLA_SPARSE with kv_cache_dtype=fp8_ds_mla "
                     "requires gfx942 or gfx950 (aiter Triton sparse_mla_fwd, "
