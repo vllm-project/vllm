@@ -386,21 +386,32 @@ class ServingTokens(GenerateBaseServing):
                 return error
 
             if "image" in mm_kwargs:
+                renderer = self.online_renderer.renderer
+                processor = renderer.mm_processor
+                allow_shm_handles = isinstance(
+                    renderer.mm_processor_cache, ShmObjectStoreSenderCache
+                )
                 ec_config = (
                     self.engine_client.vllm_config.ec_transfer_config
                     if request.ec_transfer_params
                     else None
                 )
+                items = mm_kwargs["image"]
                 try:
+                    payloads = (features.kwargs_data or {}).get("image")
+                    if processor is not None and payloads is not None:
+                        for payload, item in zip(payloads, items, strict=True):
+                            if payload is None or item is None:
+                                continue
+                            if allow_shm_handles and "address" in item:
+                                continue
+                            processor.validate_mm_field_layout("image", item)
                     validate_qwen_image_features(
                         features,
-                        mm_kwargs["image"],
+                        items,
                         self.model_config.hf_config,
                         allow_ec_metadata=bool(ec_config and ec_config.is_ec_consumer),
-                        allow_shm_handles=isinstance(
-                            self.online_renderer.renderer.mm_processor_cache,
-                            ShmObjectStoreSenderCache,
-                        ),
+                        allow_shm_handles=allow_shm_handles,
                     )
                 except ValueError as exc:
                     return self.create_error_response(exc, param="features")

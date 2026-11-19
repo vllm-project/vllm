@@ -155,6 +155,10 @@ exposes placeholder-metadata or `keep_on_cpu` fields (for example
 `mm_metadata` entry is a base64-encoded `MultiModalKwargsItem` containing
 only those fields, not encoder inputs such as `pixel_values`.
 
+The Python generate endpoint checks the batching layout of inline image fields
+against the active model's processor before sending them to the engine.
+Forward the field layouts as returned by render.
+
 The arrays in `mm_hashes`, `mm_placeholders`, `kwargs_data`, and
 `mm_metadata` use the same per-modality item order. Downstream workers
 should split those fields:

@@ -7,8 +7,16 @@ token_in_token_out generate endpoint.
 import pytest
 import torch
 from pydantic import ValidationError
-from transformers import Qwen2_5_VLConfig, Qwen2VLConfig
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import (
+    Qwen2_5_VLConfig,
+    Qwen2VLConfig,
+    SmolVLMConfig,
+    TokenizersBackend,
+)
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -30,6 +38,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     PlaceholderRangeInfo,
 )
 from vllm.inputs import mm_input
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -39,6 +48,34 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+
+
+def test_validate_transport_layout_uses_model_processor(tmp_path):
+    SmolVLMConfig(architectures=["SmolVLMForConditionalGeneration"]).save_pretrained(
+        tmp_path
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    config = ModelConfig(str(tmp_path), dtype="float32", max_model_len=512)
+    processor = MULTIMODAL_REGISTRY.create_processor(config, tokenizer=tokenizer)
+    embeds = torch.zeros(2, 3)
+
+    item = MultiModalKwargsItem(
+        {"image_embeds": MultiModalFieldElem(embeds, MultiModalBatchedField())}
+    )
+    processor.validate_mm_field_layout("image", item)
+
+    item = MultiModalKwargsItem(
+        {
+            "image_embeds": MultiModalFieldElem(
+                embeds, MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="Invalid batching layout.*image_embeds"):
+        processor.validate_mm_field_layout("image", item)
 
 
 @pytest.mark.parametrize("config_cls", [Qwen2VLConfig, Qwen2_5_VLConfig])
