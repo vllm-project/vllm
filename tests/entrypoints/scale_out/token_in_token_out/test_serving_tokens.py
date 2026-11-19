@@ -249,7 +249,7 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(
     request = {"model": MODEL_NAME, "token_ids": [1] * 8 if speculative else [1, 2, 3]}
     # The repeated prompt and singleton target support make ngram acceptance
     # deterministic, so the test exercises rejection sampling with emitted drafts.
-    allowed_tokens = {"allowed_token_ids": [1]} if speculative else {}
+    allowed_token_ids = [1] if speculative else None
     rollout = {
         **request,
         "sampling_params": {
@@ -258,7 +258,7 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(
             "top_k": 5,
             "temperature": 1.0,
             "seed": 0,
-            **allowed_tokens,
+            "allowed_token_ids": allowed_token_ids,
         },
     }
     eval_request = {
@@ -269,7 +269,7 @@ async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(
             "temperature": 0.0,
             "return_sampling_mask": False,
             "logprobs": 0,
-            **allowed_tokens,
+            "allowed_token_ids": allowed_token_ids,
         },
     }
     rollout_response, eval_response = await asyncio.gather(
