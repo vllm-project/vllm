@@ -159,6 +159,7 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
         prefill_token_ids=list(range(32)),
         block_ids=([0, 1],),
         block_hashes=[f"h{i}".encode() for i in range(32 // hash_block_size)],
+        num_tokens=32,
     )
     return SimpleNamespace(
         request=request,
@@ -477,6 +478,7 @@ def test_fresh_consumer_first_decode_save_can_backfill_missing_prompt():
     request.block_ids = ([0, 1, 2],)
     request.block_hashes = [b"h0", b"h1", b"h2"]
     request.all_token_ids = list(range(48))
+    request.num_tokens = len(request.all_token_ids)
     request.num_output_placeholders = 0
     scheduler._unfinished_requests["req-0"] = (request, request.block_ids)
 
@@ -647,6 +649,7 @@ def _make_resumed_unfinished_request(
 ) -> None:
     request = SimpleNamespace(
         all_token_ids=token_ids,
+        num_tokens=len(token_ids),
         num_prompt_tokens=32,
         block_hashes=block_hashes,
         num_computed_tokens=num_computed_tokens,
@@ -1973,3 +1976,84 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+def _make_first_decode_step_output(
+    *, prompt_len: int, num_drafts: int
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """A P/D decode request whose whole prompt was loaded, scheduled for the
+    first time.
+
+    The step recomputes the last prompt token and is padded with spec-decode
+    draft slots, so num_computed_tokens + num_scheduled_tokens runs past the
+    request's real tokens. Drafts are not tokens yet and have no block hashes.
+    """
+    request = SimpleNamespace(
+        req_id="req-0",
+        num_computed_tokens=prompt_len - 1,
+        prompt_token_ids=list(range(prompt_len)),
+        num_prompt_tokens=prompt_len,
+        prefill_token_ids=list(range(prompt_len)),
+        block_ids=([0, 1, 2, 3],),
+        block_hashes=[b"h%d" % i for i in range(prompt_len // 16)],
+        all_token_ids=list(range(prompt_len)),
+        num_tokens=prompt_len,
+        num_output_placeholders=0,
+    )
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[], new_block_ids=[], num_computed_tokens=[]
+        ),
+        num_scheduled_tokens={"req-0": 1 + num_drafts},
+        scheduled_spec_decode_tokens={"req-0": list(range(100, 100 + num_drafts))},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2, 3],)),
+    )
+    return request, output
+
+
+@pytest.mark.parametrize("prompt_len", [44, 45, 46, 47, 48])
+def test_new_request_save_does_not_count_scheduled_drafts(prompt_len):
+    num_drafts = 3
+    scheduler = _make_bare_scheduler(kv_role="kv_both", save_decode_cache=True)
+    scheduler.enable_kv_events = True
+    request, output = _make_first_decode_step_output(
+        prompt_len=prompt_len, num_drafts=num_drafts
+    )
+    scheduler._unfinished_requests["req-0"] = (request, request.block_ids)
+
+    meta = scheduler.build_connector_meta(output)
+
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.token_len == prompt_len
+    for req_meta in meta.requests:
+        assert req_meta.token_len_chunk // 16 <= len(request.block_hashes)
+
+    # The step accepts every draft plus a bonus token. The next step's save must
+    # carry the token ids of the positions it saves; counting the drafts in
+    # the first step's token_len would skip them when slicing all_token_ids.
+    num_tokens = prompt_len + num_drafts + 1
+    request.all_token_ids = list(range(num_tokens))
+    request.num_tokens = num_tokens
+    request.block_hashes = [b"h%d" % i for i in range(num_tokens // 16)]
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"], new_block_ids=[()], num_computed_tokens=[num_tokens - 1]
+        ),
+        num_scheduled_tokens={"req-0": 1 + num_drafts},
+        scheduled_spec_decode_tokens={"req-0": list(range(100, 100 + num_drafts))},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2, 3],)),
+    )
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert tracker.token_ids == list(range(num_tokens))
+    for req_meta in meta.requests:
+        assert req_meta.token_ids == list(
+            range(req_meta.token_ids_start, req_meta.token_len_chunk)
+        )
