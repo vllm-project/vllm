@@ -222,6 +222,36 @@ def test_unlimited_ocr2_batched_pages(
 
 
 @pytest.mark.core_model
+def test_unlimited_ocr2_starts_with_default_kv_cache(vllm_runner):
+    image = Image.new("RGB", (1024, 1024), "white")
+    ImageDraw.Draw(image).text(
+        (70, 200),
+        "The access code is ORANGE 2468.",
+        fill="black",
+        font=ImageFont.load_default(size=40),
+    )
+    with vllm_runner(
+        "baidu/Unlimited-OCR-2",
+        max_model_len=4096,
+        gpu_memory_utilization=0.5,
+        enable_prefix_caching=False,
+        mm_encoder_attn_backend="TORCH_SDPA",
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"crop_mode": False},
+    ) as runner:
+        outputs = runner.llm.generate(
+            [
+                {
+                    "prompt": "<PAGE><image>Multi page parsing.",
+                    "multi_modal_data": {"image": [image]},
+                }
+            ],
+            SamplingParams(temperature=0, max_tokens=180, skip_special_tokens=False),
+        )
+    assert "The access code is ORANGE 2468." in outputs[0].outputs[0].text
+
+
+@pytest.mark.core_model
 @pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
     vllm_runner, monkeypatch, backend
