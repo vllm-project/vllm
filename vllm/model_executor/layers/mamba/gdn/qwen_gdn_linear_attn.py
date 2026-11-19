@@ -1792,6 +1792,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
             and not is_conv_state_dim_first()
+            and not self.use_replayssm
         ):
             return self._forward_core_decode_aiter(
                 qkvz=qkvz,
