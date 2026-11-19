@@ -320,6 +320,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVQuantMode,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -1654,6 +1655,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
+            cache_role=(
+                SparseCacheRole.SPARSE if self.topk_buffer_width is not None else None
+            ),
             topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
         )
