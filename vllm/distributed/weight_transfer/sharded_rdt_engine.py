@@ -137,11 +137,7 @@ class _Bucket:
     unit: int
     pieces: list[tuple[str, Box]]
     nbytes: int
-    # Built once by `prepare`, used every sync: where each piece sits in the
-    # bucket; contiguous destinations of the sent dtype as bytes, runs of
-    # pieces adjacent in both the bucket and memory merged into one, with
-    # the (offset, nbytes) of the bucket each copies; the other
-    # destinations; the stagings, with the slices of each the piece fills.
+    # The copy-out, built once by `prepare`.
     layout: list[FlatPiece] = field(default_factory=list)
     byte_dsts: list[torch.Tensor] = field(default_factory=list)
     byte_srcs: list[tuple[int, int]] = field(default_factory=list)
@@ -532,8 +528,16 @@ class ShardedRDTWeightTransferEngine(
             RuntimeError: no plan (call `start_weight_update` first).
 
         """
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_active,
+        )
+
         validate_int("sync_idx", update_info.sync_idx, minimum=0)
-        if not self._planned or self._hooks is None:
+        if (
+            not self._planned
+            or self._hooks is None
+            or not direct_reload_active(self.model)
+        ):
             raise RuntimeError(
                 "Sharded RDT: no load plan; call start_weight_update() first."
             )
@@ -665,7 +669,13 @@ class ShardedRDTWeightTransferEngine(
             return ref
 
         def wait(refs: list[Any]) -> list[Any]:
-            return ray.wait(refs, num_returns=1)[0]
+            # a pull lands in its slot only in `get`
+            ready, rest = ray.wait(refs, num_returns=1, fetch_local=False)
+            if rest:
+                ready += ray.wait(
+                    rest, num_returns=len(rest), timeout=0, fetch_local=False
+                )[0]
+            return ready
 
         def get(refs: list[Any], targets: list[torch.Tensor]) -> None:
             for tensors, target in zip(ray.get(refs), targets, strict=True):
@@ -762,10 +772,8 @@ def _by_destination(piece: _Piece, storages: dict[int, int]) -> tuple[int, int, 
 
 
 def _rows(piece: _Piece, cap: int) -> list[_Piece]:
-    """A piece over `cap` cut along dim 0 of its box into segments of the
-    most whole rows that fit `cap` (with their alignment): ordinary pieces,
-    whose destinations are the same rows of the piece's, so every segment is
-    a view on both sides (a staging is indexed by the segment's box).
+    """A piece over `cap` cut along dim 0 into segments of whole rows that
+    fit `cap`, each a view on both sides.
 
     Raises:
         RuntimeError: a destination's rows are not rows of the box.
@@ -815,10 +823,8 @@ def _component_unit_rank(
     router: RdtRouter,
     components: list[int],
 ) -> dict[int, dict[int, int]]:
-    """Per coupling component, each unit's index among the units its ranks
-    gather. Ordering pulls by it keeps every component in gather order (so
-    no rank waits on a unit its consumers pull later) while independent
-    components, pipeline stages, pull side by side."""
+    """Per coupling component, each unit's index in its ranks' gather order,
+    so pulls follow the gathers and independent stages pull side by side."""
     rank: dict[int, dict[int, int]] = defaultdict(dict)
     for meta in metas:
         comp = components[router.owners(meta.name)[0]]

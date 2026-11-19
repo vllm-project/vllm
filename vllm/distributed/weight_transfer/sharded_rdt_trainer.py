@@ -39,6 +39,7 @@ from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
+    dtype_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
@@ -94,22 +95,20 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
     """Units the gather loop runs ahead of the consumers."""
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
-    """Seconds without progress before a producer fails the sync."""
+    """Seconds without progress before a producer fails the sync; the first
+    sync's planning on the workers counts too."""
     num_rdt_buffers: int | None = None
-    """Deprecated: use `num_buffers`."""
+    """Deprecated and ignored: use `num_buffers`."""
     buffer_presize_gb: float | None = None
     """Deprecated and ignored: the arena is sized from `buffer_bytes`."""
 
     def __post_init__(self) -> None:
         if self.num_rdt_buffers is not None:
-            if self.num_buffers not in (DEFAULT_NUM_BUFFERS, self.num_rdt_buffers):
-                raise ValueError("set num_buffers only; num_rdt_buffers is deprecated")
             warnings.warn(
-                "num_rdt_buffers is deprecated; use num_buffers.",
+                "num_rdt_buffers is deprecated and ignored; use num_buffers.",
                 DeprecationWarning,
                 stacklevel=3,
             )
-            self.num_buffers = self.num_rdt_buffers
         if self.buffer_presize_gb is not None:
             warnings.warn(
                 "buffer_presize_gb is deprecated and ignored.",
@@ -266,9 +265,7 @@ class _RDTProducerServer:
         self._bucket_bytes = int(bucket_bytes)
         self._stall_timeout = float(stall_timeout_s)
 
-        # One lock; a pull waits on its unit's condition, then on arena room,
-        # and the engine-facing calls on releases, so each event wakes only
-        # the waits it can unblock.
+        # One lock; each event wakes only the waits it can unblock.
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)  # releases
         self._room = threading.Condition(self._lock)  # freed arena blocks
@@ -417,8 +414,8 @@ class _RDTProducerServer:
                 cached = self._base_cache[reduce_args] = rebuild_cuda_tensor(*args)
             bases[sid] = cached
         rebuilt: dict[str, torch.Tensor] = {}
-        for name, (sid, dtype_name, shape, stride, offset) in views.items():
-            dtype = getattr(torch, dtype_name)
+        for name, (sid, wire_dtype, shape, stride, offset) in views.items():
+            dtype = getattr(torch, wire_dtype)
             rebuilt[name] = torch.as_strided(
                 bases[sid].view(dtype), shape, stride, offset
             )
@@ -518,7 +515,7 @@ class _RDTProducerServer:
                     )
                 dtype, shape = self._served[name]
                 if len(box) != len(shape) or any(
-                    not 0 <= a < b <= n for (a, b), n in zip(box, shape)
+                    not 0 <= a <= b <= n for (a, b), n in zip(box, shape)
                 ):
                     raise ValueError(f"{name!r}: box {box} is outside {shape}")
                 pieces.append((name, box_slices(box)))
@@ -846,7 +843,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 trainer_actor_names=self._server_names,
                 trainer_actor_namespace=ii.trainer_actor_namespace,
                 names=[m.name for m in self._meta],
-                dtype_names=[_dtype_name(m.dtype) for m in self._meta],
+                dtype_names=[dtype_name(m.dtype) for m in self._meta],
                 shapes=[list(m.shape) for m in self._meta],
                 owner_sets=self._owner_sets,
                 name_owner_class=self._name_owner_class,
@@ -974,7 +971,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
             env_vars["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
         served = {
-            m.name: (_dtype_name(m.dtype), tuple(m.shape))
+            m.name: (dtype_name(m.dtype), tuple(m.shape))
             for m in self._meta
             if m.name in self._owned_names
         }
@@ -1165,7 +1162,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 storages[sid] = reduce_args
             views[name] = (
                 sid,
-                _dtype_name(tensor.dtype),
+                dtype_name(tensor.dtype),
                 list(tensor.shape),
                 list(tensor.stride()),
                 tensor.storage_offset(),
@@ -1237,7 +1234,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             refs[name] = ref
             views[name] = (
                 sid,
-                _dtype_name(t.dtype),
+                dtype_name(t.dtype),
                 list(ref.shape),
                 list(ref.stride()),
                 ref.storage_offset(),
@@ -1275,7 +1272,3 @@ class ShardedRDTTrainerWeightTransferEngine(
             ray.kill(self._server)
         self._server = None
         self._inflight.clear()
-
-
-def _dtype_name(dtype: torch.dtype) -> str:
-    return str(dtype).removeprefix("torch.")

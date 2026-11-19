@@ -24,6 +24,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
     WeightTransferEngine,
     WeightTransferUpdateInfo,
+    dtype_name,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
@@ -135,11 +136,6 @@ def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
     return {m.name: (m.dtype, tuple(m.shape)) for m in metadata}
 
 
-def _dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
-    return str(dtype).split(".")[-1]
-
-
 def _check_manifest(
     manifest: Manifest, sent: Iterable[tuple[str, torch.dtype, Sequence[int]]]
 ) -> None:
@@ -164,7 +160,7 @@ def _check_manifest(
 def _metadata_payload(
     metadata: Iterable[ParamMeta],
 ) -> list[tuple[str, str, list[int]]]:
-    return [(m.name, _dtype_name(m.dtype), list(m.shape)) for m in metadata]
+    return [(m.name, dtype_name(m.dtype), list(m.shape)) for m in metadata]
 
 
 class NCCLWeightTransferEngine(
@@ -582,7 +578,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         else:
             update_info = NCCLWeightTransferUpdateInfo(
                 names=[m.name for m in meta],
-                dtype_names=[_dtype_name(m.dtype) for m in meta],
+                dtype_names=[dtype_name(m.dtype) for m in meta],
                 shapes=[list(m.shape) for m in meta],
                 src=src,
             )
