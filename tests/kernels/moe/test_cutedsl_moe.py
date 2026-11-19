@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import dataclasses
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -16,14 +18,32 @@ import torch
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+    FlashInferCuteDSLBatchedExperts,
     flashinfer_cutedsl_moe_masked,
+    flashinfer_cutedsl_mxfp8_moe_masked,
+    swizzle_mxfp8_moe_weight_scales,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+    mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
 )
 from vllm.utils.flashinfer import (
+    mxfp8_grouped_quantize,
     scaled_fp4_grouped_quantize,
 )
 
@@ -522,6 +542,282 @@ def test_flashinfer_cutedsl_moe_masked(
 
 
 @pytest.mark.parametrize(
+    "num_experts, max_m, hidden_dim, inter_dim",
+    [(8, 64, 256, 128), (16, 128, 512, 384)],
+)
+@pytest.mark.parametrize("quantized_input", [False, True])
+@torch.inference_mode()
+def test_flashinfer_cutedsl_mxfp8_moe_masked(
+    num_experts: int,
+    max_m: int,
+    hidden_dim: int,
+    inter_dim: int,
+    quantized_input: bool,
+):
+    torch.manual_seed(42)
+    device = "cuda"
+    hidden_states = torch.randn(
+        num_experts, max_m, hidden_dim, dtype=torch.bfloat16, device=device
+    )
+    # Empty, partially filled and full experts.
+    masked_m = torch.randint(
+        0, max_m + 1, (num_experts,), dtype=torch.int32, device=device
+    )
+    masked_m[0], masked_m[-1] = 0, max_m
+    w1 = torch.randn(
+        num_experts, 2 * inter_dim, hidden_dim, dtype=torch.bfloat16, device=device
+    ) / (hidden_dim**0.5)
+    w2 = torch.randn(
+        num_experts, hidden_dim, inter_dim, dtype=torch.bfloat16, device=device
+    ) / (inter_dim**0.5)
+    w1_fp8, w1_scale = mxfp8_e4m3_quantize(w1)
+    w2_fp8, w2_scale = mxfp8_e4m3_quantize(w2)
+    w1_fp8 = w1_fp8.view(num_experts, 2 * inter_dim, hidden_dim)
+    w1_scale = w1_scale.view(num_experts, 2 * inter_dim, hidden_dim // 32)
+    w2_fp8 = w2_fp8.view(num_experts, hidden_dim, inter_dim)
+    w2_scale = w2_scale.view(num_experts, hidden_dim, inter_dim // 32)
+
+    moe_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = hidden_states
+    if quantized_input:
+        # Activations that the dispatch already quantized to MXFP8.
+        x_fp8, x_scale = mxfp8_grouped_quantize(hidden_states, masked_m, backend="cuda")
+        moe_input = (x_fp8.permute(2, 0, 1), x_scale)
+
+    out = torch.empty_like(hidden_states)
+    flashinfer_cutedsl_mxfp8_moe_masked(
+        moe_input,
+        w1_fp8,
+        swizzle_mxfp8_moe_weight_scales(w1_scale),
+        w2_fp8,
+        swizzle_mxfp8_moe_weight_scales(w2_scale),
+        masked_m,
+        torch.empty(
+            num_experts, max_m, 2 * inter_dim, dtype=torch.bfloat16, device=device
+        ),
+        out,
+    )
+
+    # reference: both GEMM inputs are MXFP8 quantize-dequantized and the gate/up
+    # output is rounded to bf16, as in the kernel.
+    w1_ref = dequant_mxfp8_to_bf16(w1_fp8, w1_scale).float()
+    w2_ref = dequant_mxfp8_to_bf16(w2_fp8, w2_scale).float()
+    for i, m in enumerate(masked_m.tolist()):
+        if m == 0:
+            continue
+        x_q, x_s = mxfp8_e4m3_quantize(hidden_states[i, :m])
+        gate_up = dequant_mxfp8_to_bf16(x_q, x_s.view(m, -1)).float() @ w1_ref[i].T
+        gate_up = gate_up.to(torch.bfloat16)
+        act = F.silu(gate_up[:, :inter_dim].float()) * gate_up[:, inter_dim:]
+        act_q, act_s = mxfp8_e4m3_quantize(act.to(torch.bfloat16))
+        ref = dequant_mxfp8_to_bf16(act_q, act_s.view(m, -1)).float() @ w2_ref[i].T
+        torch.testing.assert_close(out[i, :m], ref.to(out.dtype), atol=3e-2, rtol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "overrides, supported",
+    [
+        pytest.param({}, True, id="supported"),
+        pytest.param({"has_bias": True}, False, id="bias"),
+        pytest.param({"swiglu_limit": 7.0}, False, id="swiglu_limit"),
+        pytest.param({"swiglu_alpha": 1.702}, False, id="swiglu_alpha"),
+        pytest.param({"swiglu_beta": 1.0}, False, id="swiglu_beta"),
+        pytest.param({"hidden_dim": 192}, False, id="unaligned_hidden"),
+        pytest.param({"intermediate_size": 192}, False, id="unaligned_inter"),
+    ],
+)
+def test_flashinfer_cutedsl_batched_mxfp8_supported_config(
+    overrides: dict, supported: bool
+):
+    """MXFP8 needs plain SiLU-and-mul without expert biases, and 128-aligned
+    hidden and intermediate sizes."""
+    overrides = dict(overrides)
+    moe_config = make_dummy_moe_config(
+        hidden_dim=overrides.pop("hidden_dim", 256),
+        intermediate_size=overrides.pop("intermediate_size", 128),
+    )
+    moe_config.moe_parallel_config = dataclasses.replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        dp_size=2,
+        ep_size=2,
+        use_ep=True,
+        all2all_backend="deepep_low_latency",
+    )
+    for name, value in overrides.items():
+        setattr(moe_config, name, value)
+
+    result, reason = FlashInferCuteDSLBatchedExperts.is_supported_config(
+        FlashInferCuteDSLBatchedExperts,
+        moe_config,
+        kMxfp8Static,
+        kMxfp8Dynamic,
+        mk.FusedMoEActivationFormat.BatchedExperts,
+    )
+    assert result == supported
+    if not supported:
+        assert reason is not None and "mxfp8" in reason
+
+
+def _mxfp8_quant_config() -> FusedMoEQuantConfig:
+    return FusedMoEQuantConfig.make(
+        "mxfp8",
+        w1_scale=torch.ones(1, device="cuda"),
+        w2_scale=torch.ones(1, device="cuda"),
+        block_shape=[1, 32],
+        is_scale_swizzled=False,
+    )
+
+
+@pytest.mark.parametrize("all2all_backend", ["deepep_low_latency", "nixl_ep"])
+@torch.inference_mode()
+def test_batched_dispatch_keeps_mxfp8_activations_unquantized(all2all_backend: str):
+    """The DeepEP low-latency and NIXL EP dispatches hand MXFP8 activations to
+    the experts in bfloat16, without scales."""
+    num_experts, max_tokens, hidden_dim = 4, 16, 256
+    if all2all_backend == "deepep_low_latency":
+        pytest.importorskip("deep_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
+            DeepEPLLPrepareAndFinalize,
+        )
+
+        prepare_finalize = DeepEPLLPrepareAndFinalize(
+            buffer=None, max_tokens_per_rank=max_tokens, num_dispatchers=2
+        )
+    else:
+        pytest.importorskip("nixl_ep")
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (
+            NixlEPPrepareAndFinalize,
+        )
+
+        prepare_finalize = NixlEPPrepareAndFinalize(
+            buffer=None,
+            max_tokens_per_rank=max_tokens,
+            num_dispatchers=2,
+            expert_capacity=num_experts,
+        )
+    x = torch.randn(
+        num_experts, max_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    expert_num_tokens = torch.tensor(
+        [0, 3, max_tokens, 7], dtype=torch.int32, device="cuda"
+    )
+
+    out, scales = prepare_finalize._do_quant(
+        x, torch.bfloat16, _mxfp8_quant_config(), expert_num_tokens
+    )
+
+    assert scales is None
+    torch.testing.assert_close(out, x, atol=0, rtol=0)
+
+
+class _FakeDeepEPBuffer:
+    """A `deep_ep.Buffer` stand-in whose dispatch can quantize to MXFP8. It
+    returns `expert_x` and records the options of the call."""
+
+    def __init__(self, expert_x: tuple[torch.Tensor, torch.Tensor] | None = None):
+        self.expert_x = expert_x
+        self.dispatch_options: dict = {}
+
+    def low_latency_dispatch(
+        self, x, topk_idx, max_tokens_per_rank, num_experts, use_mxfp8=False, **options
+    ):
+        self.dispatch_options = dict(options, use_mxfp8=use_mxfp8)
+        expert_num_tokens = torch.zeros(num_experts, dtype=torch.int32, device=x.device)
+        return self.expert_x, expert_num_tokens, None, None, lambda: None
+
+
+class _FakeDeepEPBufferWithoutMxfp8:
+    def low_latency_dispatch(
+        self, x, topk_idx, max_tokens_per_rank, num_experts, **options
+    ):
+        raise NotImplementedError
+
+
+def _make_deepep_ll_prepare_finalize(buffer, quant_dtype: str):
+    """Set up the DeepEP low-latency dispatch of `buffer` for
+    FlashInferCuteDSLBatchedExperts of the given quantization."""
+    pytest.importorskip("deep_ep")
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
+        DeepEPLLPrepareAndFinalize,
+    )
+
+    experts = FlashInferCuteDSLBatchedExperts(
+        make_dummy_moe_config(),
+        FusedMoEQuantConfig.make(quant_dtype),
+        max_num_tokens=16,
+        num_dispatchers=2,
+    )
+    prepare_finalize = DeepEPLLPrepareAndFinalize(
+        buffer=buffer, max_tokens_per_rank=16, num_dispatchers=2
+    )
+    prepare_finalize.post_init_setup(experts)
+    return prepare_finalize
+
+
+@torch.inference_mode()
+def test_deepep_ll_mxfp8_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """With VLLM_DEEPEPLL_MXFP8_DISPATCH=1, DeepEP quantizes the dispatched
+    activations to MXFP8 and the experts get its values and scales as they
+    are."""
+    monkeypatch.setenv("VLLM_DEEPEPLL_MXFP8_DISPATCH", "1")
+    num_experts, max_tokens, hidden_dim = 4, 16, 2048
+    values = torch.empty(
+        num_experts, max_tokens, hidden_dim, dtype=torch.float8_e4m3fn, device="cuda"
+    )
+    scales = torch.empty(
+        32, 4, 1, 4, hidden_dim // 128, num_experts, dtype=torch.uint8, device="cuda"
+    )
+    buffer = _FakeDeepEPBuffer((values, scales))
+    prepare_finalize = _make_deepep_ll_prepare_finalize(buffer, "mxfp8")
+
+    expert_x, expert_x_scale, *_ = prepare_finalize.prepare(
+        torch.randn(8, hidden_dim, dtype=torch.bfloat16, device="cuda"),
+        topk_weights=torch.ones(8, 1, device="cuda"),
+        topk_ids=torch.zeros(8, 1, dtype=torch.int64, device="cuda"),
+        num_experts=num_experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        quant_config=_mxfp8_quant_config(),
+    )
+
+    assert buffer.dispatch_options["use_mxfp8"]
+    assert not buffer.dispatch_options["use_fp8"]
+    assert expert_x is values
+    assert expert_x_scale is scales
+
+
+@pytest.mark.parametrize(
+    "flag, quant_dtype",
+    [
+        pytest.param("0", "mxfp8", id="flag_off"),
+        pytest.param("1", "nvfp4", id="experts_take_no_mxfp8"),
+    ],
+)
+def test_deepep_ll_mxfp8_dispatch_disabled(
+    monkeypatch: pytest.MonkeyPatch, flag: str, quant_dtype: str
+):
+    """DeepEP dispatches in bfloat16 unless VLLM_DEEPEPLL_MXFP8_DISPATCH=1
+    and the experts take activations that the dispatch quantized to MXFP8."""
+    monkeypatch.setenv("VLLM_DEEPEPLL_MXFP8_DISPATCH", flag)
+
+    prepare_finalize = _make_deepep_ll_prepare_finalize(
+        _FakeDeepEPBuffer(), quant_dtype
+    )
+
+    assert not prepare_finalize.use_mxfp8_dispatch
+
+
+def test_deepep_ll_mxfp8_dispatch_requires_deepep_support(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_DEEPEPLL_MXFP8_DISPATCH=1 fails at setup with a DeepEP build
+    whose dispatch cannot quantize to MXFP8."""
+    monkeypatch.setenv("VLLM_DEEPEPLL_MXFP8_DISPATCH", "1")
+
+    with pytest.raises(RuntimeError, match="VLLM_DEEPEPLL_MXFP8_DISPATCH"):
+        _make_deepep_ll_prepare_finalize(_FakeDeepEPBufferWithoutMxfp8(), "mxfp8")
+
+
+@pytest.mark.parametrize(
     "bs, hidden_dim, inter_dim, topk", [(2, 128, 256, 2), (16, 128, 512, 5)]
 )
 @torch.inference_mode()
@@ -583,4 +879,6 @@ def test_grouped_gemm_nt_masked(
 
 if __name__ == "__main__":
     test_flashinfer_cutedsl_moe_masked(16, 128, 512, 4)
+    test_flashinfer_cutedsl_mxfp8_moe_masked(16, 128, 512, 384, False)
+    test_flashinfer_cutedsl_mxfp8_moe_masked(16, 128, 512, 384, True)
     test_grouped_gemm_nt_masked(16, 128, 512, 4)
