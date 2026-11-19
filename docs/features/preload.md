@@ -463,6 +463,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   compressed-tensors
   schemes, block sizes, transform wrappers, linear backends and MoE are not
   enabled by this support.
+  Serialized `compressed-tensors` WNA16 linear layers can reuse Marlin-packed
+  weights with FP16/BF16 activations. Humming, other WNA16 backends and MoE
+  are not enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
