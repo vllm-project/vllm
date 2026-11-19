@@ -13,15 +13,21 @@ for arch in x86_64 aarch64; do
     [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
     sources+=("$staging@$digest")
 done
-tag=${1:?expected nightly or a version tag}
-if [[ $tag == nightly ]]; then
-    tag="nightly-$BUILDKITE_COMMIT"
-    moving=nightly
-else
-    moving=latest
-fi
+case "${1:-}" in
+    nightly) tag="nightly-$BUILDKITE_COMMIT"; moving=nightly ;;
+    release)
+        version=$(buildkite-agent meta-data get release-version)
+        tag="v${version#v}"
+        moving=latest ;;
+    *) echo "Usage: $0 {nightly|release}" >&2; exit 2 ;;
+esac
+engine=vllm/vllm-openai
+engine_pinned=$(manifest_digest "$engine:$tag")
+docker buildx imagetools inspect "$engine@$engine_pinned" --format '{{json .Image}}' | jq -e \
+    --arg commit "$BUILDKITE_COMMIT" 'all(."linux/amd64", ."linux/arm64"; .config.Labels["org.opencontainers.image.revision"] == $commit)'
 
-index="$staging:$BUILDKITE_COMMIT-rust-frontend"
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${staging%/*}"
+index="$staging:$BUILDKITE_BUILD_ID-$moving-rust-frontend"
 docker buildx imagetools create -t "$index" "${sources[@]}"
 digest=$(manifest_digest "$index")
 index="$staging@$digest"
@@ -45,13 +51,10 @@ fi
 test "$(manifest_digest "$hub:$tag")" = "$digest"
 if [[ $moving == latest ]]; then
     docker buildx imagetools create -t "vllm/vllm:$tag-rust-frontend" "$hub@$digest"
-    # A patch on an older release branch must not move the current stable tag.
-    newest=$( { git tag -l 'v[0-9]*'; echo "$tag"; } | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
-    [[ $newest == "$tag" ]] || exit 0
-else
-    # A late retry of an older nightly must not roll the frontend back.
-    engine_pinned=$(manifest_digest "vllm/vllm-openai:$tag")
-    engine_current=$(manifest_digest vllm/vllm-openai:nightly)
-    [[ $engine_pinned == "$engine_current" ]] || exit 0
+    # Release candidates get a versioned tag only.
+    [[ $tag =~ ^v[0-9]+(\.[0-9]+){2,}(\.post[0-9]+)?$ ]] || exit 0
 fi
+# Only advance the alias while the engine still advertises the matching build.
+engine_current=$(manifest_digest "$engine:$moving")
+[[ $engine_pinned == "$engine_current" ]] || exit 0
 docker buildx imagetools create -t "$hub:$moving" -t "vllm/vllm:$moving-rust-frontend" "$hub@$digest"

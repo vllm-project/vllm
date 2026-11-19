@@ -515,13 +515,13 @@ steps:
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu" release-manifests'
 
       - label: "Publish nightly Rust frontend to Docker Hub"
+        key: publish-nightly-rust-frontend
         depends_on: [build-rust-frontend-x86, build-rust-frontend-arm64, publish-nightly-engine-dockerhub]
         if: build.env("NIGHTLY") == "1"
         agents: {queue: small_cpu_queue_release}
         concurrency: 1
         concurrency_group: rust-frontend-nightly-publish
         commands:
-          - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
           - bash .buildkite/scripts/publish-rust-frontend-image.sh nightly
           - bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-rust-frontend
         secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
@@ -747,8 +747,6 @@ steps:
   - block: "Publish release images to DockerHub"
     key: block-publish-release-images
     depends_on:
-      - build-rust-frontend-x86
-      - build-rust-frontend-arm64
       - create-multi-arch-manifest
       - create-manifest-xpu
       - build-rocm100-release-image
@@ -775,7 +773,6 @@ steps:
     commands:
       - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
     matrix:
-      - "rust-frontend"
       - "cuda-13-0"
       # AWS EFA variant; skipped if no EFA image was built, fails on a partial build.
       - "cuda-13-0-efa"
@@ -791,6 +788,25 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllm"
+
+  - label: "Publish release Rust frontend to Docker Hub"
+    key: publish-release-rust-frontend
+    depends_on:
+      - block-publish-release-images
+      - build-rust-frontend-x86
+      - build-rust-frontend-arm64
+      # Check the published default engine even if another matrix entry failed.
+      - step: publish-release-images-dockerhub
+        allow_failure: true
+    agents: {queue: small_cpu_queue_release}
+    concurrency: 1
+    concurrency_group: rust-frontend-release-publish
+    command: bash .buildkite/scripts/publish-rust-frontend-image.sh release
+    secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllm
+          password-env: RELEASE_DOCKERHUB_TOKEN
 
   - group: "Publish wheels"
     key: "publish-wheels"

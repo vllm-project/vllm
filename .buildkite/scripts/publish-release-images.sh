@@ -10,9 +10,9 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  cuda-13-0 | cuda-13-0-efa | rocm | xpu | cpu | rust-frontend | all) ;;
+  cuda-13-0 | cuda-13-0-efa | rocm | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-13-0-efa|rocm|xpu|cpu|rust-frontend|all}"
+    echo "Usage: $0 {cuda-13-0|cuda-13-0-efa|rocm|xpu|cpu|all}"
     exit 2
     ;;
 esac
@@ -104,10 +104,6 @@ echo "========================================"
 # Login to ECR to pull staging images
 aws ecr-public get-login-password --region us-east-1 | \
   docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-
-if target_enabled rust-frontend; then
-  bash .buildkite/scripts/publish-rust-frontend-image.sh "v${RELEASE_VERSION}"
-fi
 
 # ---- CUDA (default: 13.0) ----
 
