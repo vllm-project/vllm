@@ -81,36 +81,30 @@ class PackedQKVFuser(RewriteFuser):
         `x[..., q + kv:]` on `node` itself, so slices of anything derived from
         it (e.g. rotary) never match.
         """
-        if len(node.users) != 3:
-            return None
-        bounds = []
+        stops: dict[object, object] = {}
         for user in node.users:
-            if not is_fn(user, operator.getitem) or user.args[0] is not node:
-                return None
-            index = user.args[1]
+            index = user.args[1] if is_fn(user, operator.getitem) else None
             if not (
                 isinstance(index, tuple)
                 and len(index) == 2
                 and index[0] is Ellipsis
-                and isinstance(index[1], slice)
-                and index[1].step is None
+                and isinstance(part := index[1], slice)
+                and part.step is None
             ):
                 return None
-            start, stop = index[1].start, index[1].stop
-            # Bounds derived from a traced tensor are fx nodes, not ints
-            if not all(b is None or isinstance(b, int) for b in (start, stop)):
-                return None
-            bounds.append((start, stop))
-        bounds.sort(key=lambda b: -1 if b[0] is None else b[0])
-        (q_lo, q_hi), (k_lo, k_hi), (v_lo, v_hi) = bounds
-        if q_lo is not None or v_hi is not None or None in (q_hi, k_lo, k_hi, v_lo):
+            stops[part.start] = part.stop
+        q_size = stops.get(None)
+        k_end = stops.get(q_size)
+        if not (
+            len(stops) == len(node.users) == 3
+            and isinstance(q_size, int)
+            and isinstance(k_end, int)
+            and k_end in stops
+            and stops[k_end] is None
+        ):
             return None
-        q_size, kv_size = q_hi, k_hi - q_hi
-        if k_lo != q_size or v_lo != k_hi:
-            return None
-        if kv_size <= 0 or q_size < kv_size:
-            return None
-        return q_size, kv_size
+        kv_size = k_end - q_size
+        return (q_size, kv_size) if 0 < kv_size <= q_size else None
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "PackedQKVFuser | None":
@@ -174,46 +168,27 @@ class PackedQKVFuser(RewriteFuser):
             for node in ast.walk(funcdef)
             if isinstance(node, ast.Assign) and node.value is call
         ]
-        if len(assigns) != 1 or not (
-            len(assigns[0].targets) == 1 and isinstance(assigns[0].targets[0], ast.Name)
-        ):
+        target = assigns[0].targets[0] if len(assigns) == 1 else None
+        if not isinstance(target, ast.Name):
             raise ValueError(f"{self.qkv_name} output is not bound to a single name")
-        name = assigns[0].targets[0].id
-        refs = [
-            node
-            for node in ast.walk(funcdef)
-            if isinstance(node, ast.Name) and node.id == name
-        ]
-        loads = [ref for ref in refs if isinstance(ref.ctx, ast.Load)]
-        subscripts = [
-            node
-            for node in ast.walk(funcdef)
-            if isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == name
-        ]
-        if len(refs) - len(loads) != 1 or len(loads) != 3 or len(subscripts) != 3:
-            raise ValueError(f"{name} is rebound or not only sliced three ways")
+        name = target.id
+        # The fx match checked the bounds; q has no lower and v no upper bound
         position: dict[int, ast.Subscript] = {}
-        for subscript in subscripts:
-            index = subscript.slice
-            if not (
-                isinstance(index, ast.Tuple)
-                and len(index.elts) == 2
-                and isinstance(index.elts[0], ast.Constant)
-                and index.elts[0].value is Ellipsis
-                and isinstance(index.elts[1], ast.Slice)
-                and index.elts[1].step is None
+        loads = 0
+        for node in ast.walk(funcdef):
+            if isinstance(node, ast.Name) and node.id == name:
+                loads += isinstance(node.ctx, ast.Load)
+            elif (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == name
+                and isinstance(node.slice, ast.Tuple)
+                and isinstance(part := node.slice.elts[-1], ast.Slice)
             ):
-                raise ValueError(f"{name} has a slice that is not [..., a:b]")
-            part = index.elts[1]
-            # q has no lower bound, k has both, v has no upper bound
-            pos = {(False, True): 0, (True, True): 1, (True, False): 2}.get(
-                (part.lower is not None, part.upper is not None)
-            )
-            if pos is None or pos in position:
-                raise ValueError(f"{name} slices are not a q, k, v partition")
-            position[pos] = subscript
+                pos = 0 if part.lower is None else 2 if part.upper is None else 1
+                position[pos] = node
+        if loads != 3 or len(position) != 3:
+            raise ValueError(f"{name} is not only sliced into q, k and v")
 
         # name = self.qkv(x)  ->  name = self.qkv(x).split((q, kv, kv), dim=-1)
         # name[..., a:b]      ->  name[0], name[1], name[2]
