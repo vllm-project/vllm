@@ -1112,8 +1112,9 @@ class NixlBaseConnectorWorker:
         # explicitly because aliased layers share a region keyed by address, so
         # e.g. a scratch page lands in the region of the page it overlays.
         self._group_region_indices = list[list[int] | None]()
-        # Whether an attention view keeps whole logical rows that NIXL addresses
-        # as `_physical_blocks_per_logical_kv_block` dense pages.
+        # Whether some attention view keeps one row per logical block, which NIXL
+        # registers as `_physical_blocks_per_logical_kv_block` byte pages (see
+        # `register_kv_caches`). Such pages line up only with an identical peer.
         self._tiles_whole_kernel_rows = False
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
@@ -1806,14 +1807,30 @@ class NixlBaseConnectorWorker:
                     and block_stride == ratio * physical_page_size
                     and _view_span_bytes(cache[0]) <= block_stride
                 ):
-                    # The ratio comes from one kernel block size for all groups,
-                    # but the model runner picks it per group. A group whose own
-                    # block size its backend accepts (e.g. a FLASH_ATTN draft
-                    # beside 64-token MLA pages) keeps whole logical rows. The
-                    # row is this layer's page, possibly padded to a shared page
-                    # size, so address it as `ratio` dense pages. Block ids
-                    # always expand to all `ratio` pages of a row, so every byte
-                    # moves whatever the layout inside the row.
+                    # Tile a whole kernel row into `ratio` byte pages.
+                    #
+                    # `ratio` comes from one kernel block size picked for all
+                    # groups, but the model runner picks one per group. A group
+                    # whose backend accepts the full logical block size keeps
+                    # one row per logical block. Kimi K3 with a FLASH_ATTN draft
+                    # (1792-token logical blocks, ratio 28):
+                    #
+                    #   MLA target | p0 | p1 | ... | p27 |  28 x 64-token pages
+                    #   FA draft   | 1792 tokens x 4 heads | pad |  one row
+                    #              0                917504   1032192 = 28 x 36864
+                    #
+                    # NIXL counts `ratio` blocks per row (num_blocks = rows *
+                    # ratio), but this view's stride is a whole row, so it does
+                    # not split into blocks of `physical_page_size`. Register
+                    # the row as `ratio` byte ranges of that size instead. A
+                    # range need not match the backend's page (range 0 is tokens
+                    # 0-71 of the draft, and the pad starts inside range 24
+                    # here). That is fine because a logical block id always
+                    # expands to all `ratio` page ids of its row
+                    # (`_logical_to_kernel_block_ids`), so every transfer copies
+                    # the whole row, padding included, byte for byte. The copy
+                    # is correct only if the peer's row has the same layout,
+                    # which `_validate_remote_agent_handshake` checks.
                     block_stride = physical_page_size
                     self._tiles_whole_kernel_rows = True
                 # A connector that registers the backing as one memory region
@@ -2992,8 +3009,10 @@ class NixlBaseConnectorWorker:
             or block_size_ratio != 1
             or remote_physical_per_logical != self._physical_blocks_per_logical_kv_block
         ):
-            # Dense pages cut a row at byte offsets, not at heads or tokens, so
-            # they line up only with a peer that has the same row geometry.
+            # Byte pages cut a row at fixed offsets. With a different TP the
+            # peer's row holds other heads; with a different DCP, block size or
+            # ratio it holds other tokens. Page k would then name different KV
+            # on each side, so refuse instead of copying the wrong bytes.
             raise NotImplementedError(
                 "KV cache groups with different kernel block sizes require "
                 "matching TP, DCP and block sizes on both NIXL peers: "
