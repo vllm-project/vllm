@@ -316,6 +316,9 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # The scheduler rejected this chunk before merging it into the session.
+    streaming_update_dropped: bool = False
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

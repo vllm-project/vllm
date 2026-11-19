@@ -1754,9 +1754,9 @@ def _add_streaming_request_with_queued_chunk(
     return queue
 
 
-def test_streaming_input_stop_is_chunk_boundary():
-    """STOP is a per-chunk boundary: finished is forced False, the queued
-    chunk is applied, and the request state stays alive."""
+@pytest.mark.parametrize("abort_next_chunk", [False, True])
+def test_streaming_input_stop_is_chunk_boundary(abort_next_chunk: bool):
+    """STOP keeps the session alive for the next input chunk."""
     processor = OutputProcessor(None, log_stats=False)
     queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
 
@@ -1776,9 +1776,13 @@ def test_streaming_input_stop_is_chunk_boundary():
     assert output is not None
     assert output.finished is False
     assert output.outputs[0].finish_reason == "stop"
-    req_state = processor.request_states["stream-req"]
-    assert req_state.prompt_token_ids is not None
-    assert req_state.prompt_token_ids[-2:] == [7, 8]
+    if abort_next_chunk:
+        processor.abort_requests(["stream-req"], internal=True)
+    else:
+        processor.process_outputs([EngineCoreOutput("stream-req", [9])])
+    next_output = queue.get_nowait()
+    assert isinstance(next_output, RequestOutput)
+    assert next_output.prompt_token_ids == [1, 2, 3, 7, 8]
 
 
 @pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.ERROR])

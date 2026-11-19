@@ -1978,7 +1978,12 @@ class Scheduler(SchedulerInterface):
         # End the reply to each dropped update with an empty turn.
         for req in self.dropped_streaming_updates:
             outputs[req.client_index].append(
-                EngineCoreOutput(req.request_id, [], finish_reason=FinishReason.LENGTH)
+                EngineCoreOutput(
+                    req.request_id,
+                    [],
+                    finish_reason=FinishReason.LENGTH,
+                    streaming_update_dropped=True,
+                )
             )
         self.dropped_streaming_updates.clear()
 
