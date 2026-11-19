@@ -723,6 +723,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ) = None,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        if vllm_config.cache_config.use_replayssm and not self.use_replayssm:
+            # Derived models can inherit SupportsReplaySSM from an allowlisted
+            # Qwen class without being in the FlashInfer GDN ReplaySSM scope.
+            raise ValueError(
+                "--use-replayssm is not supported for architecture "
+                f"{vllm_config.model_config.architecture!r}"
+            )
 
         self.num_k_heads = config.linear_num_key_heads
         self.num_v_heads = config.linear_num_value_heads

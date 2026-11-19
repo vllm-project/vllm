@@ -1111,6 +1111,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         HAS_IDX_MAPPING=False,
         MATERIALIZE_PREFIXES=cache_mode == "align",
         LIVE_COL_IS_ZERO=True,
+        EXECUTED_QUERY_WIDTH=0,
     )
     assert starts.tolist() == [7, 0, 7]
     assert committed.tolist() == [3, 0, 3]
