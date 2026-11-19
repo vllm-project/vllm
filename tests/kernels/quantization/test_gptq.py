@@ -47,7 +47,7 @@ def gptq_gemm_peak_bytes(size_m, use_exllama, bit):
         device="cuda",
         dtype=torch.int32,
     )
-    zeros = torch.zeros((32, 512), device="cuda", dtype=torch.int32)
+    zeros = torch.zeros((32, 4096 * bit // 32), device="cuda", dtype=torch.int32)
     scales = torch.rand((32, 4096), device="cuda", dtype=torch.float16)
     args = (a, weight, zeros, scales, use_exllama, False, bit)
 
