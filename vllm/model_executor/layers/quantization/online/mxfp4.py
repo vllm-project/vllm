@@ -22,8 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
-    _backend_activation_key,
-    _serves_requested_activation,
+    _runs_activation,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -182,19 +181,12 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         )
         # The oracle may fall back to a backend computing another activation
         # format (EMULATION computes MXFP4): reject an override it cannot honour.
-        backend_key = (
-            kMxfp4Dynamic
-            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
-            else _backend_activation_key(self.mxfp4_backend)
-        )
-        honours_activation = (
-            _serves_requested_activation(
+        if self.activation_quant_key != kMxfp4Dynamic and (
+            self.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+            or not _runs_activation(
                 self.mxfp4_backend, self.activation_quant_key, self.moe
             )
-            if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            else self.activation_quant_key == backend_key
-        )
-        if self.activation_quant_key != kMxfp4Dynamic and not honours_activation:
+        ):
             raise NotImplementedError(
                 f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
                 f"activation={self.activation_quant_key} for this layer's "

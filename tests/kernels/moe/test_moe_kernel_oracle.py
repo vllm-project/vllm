@@ -68,7 +68,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     Mxfp4MoEKernelOracle,
     _filter_by_activation,
-    _serves_requested_activation,
+    _runs_activation,
     make_mxfp4_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
@@ -902,9 +902,7 @@ def test_aiter_activation_matching_uses_the_layer_layout(
             )
             config.use_mxfp4_w4a4_dsv4 = dsv4
             matches = requested_key in served
-            assert (
-                _serves_requested_activation(backend, requested_key, config) is matches
-            )
+            assert _runs_activation(backend, requested_key, config) is matches
             with layer_target_spec_scope(spec):
                 selected = _filter_by_activation([backend], requested_key, config)
             # A layout that executes BF16 is a fallback for any other request,

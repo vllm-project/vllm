@@ -514,13 +514,16 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
-def _serves_requested_activation(
+def _runs_activation(
     backend: Mxfp4MoeBackend,
     requested_activation_key: QuantKey | None,
     config: FusedMoEConfig,
 ) -> bool:
-    """Whether AITER's layer-specific layout executes the requested activation."""
-    if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16 or not current_platform.is_rocm():
+    """Whether `backend` computes with `requested_activation_key` activations for
+    this layer: its fixed key, or AITER_MXFP4_BF16's layer-specific layout."""
+    if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        return _backend_activation_key(backend) == requested_activation_key
+    if not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx950
 
@@ -620,7 +623,7 @@ def _applies_requested_activation(
     if backend == Mxfp4MoeBackend.HUMMING:
         return requested_activation_key == _user_moe_activation_override()
     # AITER_MXFP4_BF16 runs BF16 or MXFP8 depending on the layer's layout.
-    return _serves_requested_activation(backend, requested_activation_key, config)
+    return _runs_activation(backend, requested_activation_key, config)
 
 
 def _warn_on_bf16_fallback(
@@ -684,22 +687,14 @@ def _filter_by_activation(
     config: FusedMoEConfig,
 ) -> list[Mxfp4MoeBackend]:
     """Prefer matching activations, then actual BF16 fallbacks unless strict."""
-
-    def runs_activation(b: Mxfp4MoeBackend, key: QuantKey | None) -> bool:
-        """Whether `b` computes with `key` activations for this layer."""
-        if b == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-            # Its activation depends on the layer's layout, not a fixed key.
-            return _serves_requested_activation(b, key, config)
-        return _backend_activation_key(b) == key
-
     # Backends that compute with BF16 activations for this layer.
-    bf16 = [b for b in backends if runs_activation(b, None)]
+    bf16 = [b for b in backends if _runs_activation(b, None, config)]
     if requested_activation_key is not None:
         # Backends that compute with the requested activation (EMULATION runs any).
         matching = [
             b
             for b in backends
-            if runs_activation(b, requested_activation_key)
+            if _runs_activation(b, requested_activation_key, config)
             or b == Mxfp4MoeBackend.EMULATION
         ]
         if envs.VLLM_STRICT_QUANT_SCHEME:

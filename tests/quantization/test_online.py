@@ -65,8 +65,7 @@ from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    _backend_activation_key,
-    _serves_requested_activation,
+    _runs_activation,
     convert_weight_to_mxfp4_moe_kernel_format,
 )
 from vllm.model_executor.layers.linear import (
@@ -361,17 +360,9 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     if layer_kind == "linear":
         assert method.kernel.config.activation_quant_key == activation_quant_key
     elif activation_quant_key != kMxfp4Dynamic:  # The default may run BF16.
-        computed_key = (
-            kMxfp4Dynamic
-            if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
-            else _backend_activation_key(method.mxfp4_backend)
-        )
-        if method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-            assert _serves_requested_activation(
-                method.mxfp4_backend, activation_quant_key, method.moe
-            )
-        else:
-            assert computed_key == activation_quant_key
+        # EMULATION computes MXFP4.
+        assert method.mxfp4_backend != Mxfp4MoeBackend.EMULATION
+        assert _runs_activation(method.mxfp4_backend, activation_quant_key, method.moe)
 
 
 @pytest.fixture
