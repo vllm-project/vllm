@@ -292,7 +292,7 @@ def _write_minimal_moe_config(
     else:
         config["model_type"] = (
             "deepseek_v3"
-            if "V3" in architecture
+            if "V3" in architecture or architecture == "MistralLarge3ForCausalLM"
             else "deepseek_v32"
             if architecture == "DeepseekV32ForCausalLM"
             else "deepseek_v2"
@@ -506,19 +506,21 @@ def _moe_checkpoint(
     style). Otherwise Quark MXFP4 routed and BF16 shared experts.
     """
     minimax = architecture.startswith("MiniMaxM3")
+    # Mistral's own checkpoint names, which its weights mapper renames.
+    mistral = architecture == "MistralLarge3ForCausalLM"
     moe_attr = "block_sparse_moe" if minimax else "mlp"
     shared_name = (
         "shared_expert" if architecture.startswith("Qwen") else ("shared_experts")
     )
     expert_names = (
         {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
-        if minimax
+        if minimax or mistral
         else {name: name for name in ("gate_proj", "up_proj", "down_proj")}
     )
     shape = (_MOE_DIM, _MOE_DIM)
     weights: list[tuple[str, torch.Tensor]] = []
     for layer in range(num_layers):
-        prefix = f"model.layers.{layer}.{moe_attr}"
+        prefix = f"layers.{layer}" if mistral else f"model.layers.{layer}.{moe_attr}"
         for expert in range(4):
             for ckpt_name in expert_names.values():
                 name = f"{prefix}.experts.{expert}.{ckpt_name}"
@@ -556,7 +558,8 @@ def _moe_checkpoint(
                     ]
         shared = torch.full(shape, _shared_value(layer), dtype=torch.bfloat16)
         for projection in expert_names:
-            name = f"{prefix}.{shared_name}.{projection}"
+            shared_projection = expert_names[projection] if mistral else projection
+            name = f"{prefix}.{shared_name}.{shared_projection}"
             if routed_requantized:
                 weight, scale = mxfp8_e4m3_quantize(
                     shared.to(current_platform.device_type),
@@ -633,6 +636,7 @@ def _assert_mxfp4_constant(
         "Glm5NextForCausalLM",
         "GlmMoeDsaForCausalLM",
         "MiniMaxM3SparseForCausalLM",
+        "MistralLarge3ForCausalLM",
         "Qwen3NextForCausalLM",
         "Qwen3_5MoeForCausalLM",
         "Qwen4ExpForCausalLM",
