@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scratch shared by sequential DEP2 layers, never by concurrent executors."""
+"""Scratch shared by sequential DEP layers, never by concurrent executors."""
 
 import math
 

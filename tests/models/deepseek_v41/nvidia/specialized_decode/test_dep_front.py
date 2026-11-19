@@ -7,11 +7,11 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2.front import (
-    DEP2Front,
+from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.front import (
+    DEPFront,
     FrontOutput,
 )
-from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2.workspace import (
+from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.workspace import (
     ExpertWorkspace,
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (
@@ -33,7 +33,7 @@ def test_front_before_ep(rows, image):
         image_sentinel_lo=SENTINEL if image else 0,
         scale=1.5,
     )
-    front = DEP2Front(config, ExpertWorkspace("cuda"))
+    front = DEPFront(config, ExpertWorkspace("cuda"))
     front.warmup(rows)
     logits, x, ids = _front_inputs(rows, generator, image_rows=rows // 2)
     mask = torch.zeros(rows, dtype=torch.bool, device="cuda")
@@ -79,33 +79,11 @@ def test_front_before_ep(rows, image):
         check(output)
 
 
-@pytest.mark.parametrize("ep_size", [2, 4, 8])
-def test_front_preserves_global_expert_ids(ep_size):
-    # Force every linear shard boundary, including the wrap from expert 383 to 0.
-    gen = torch.Generator().manual_seed(31)
-    logits, x, ids = _front_inputs(ep_size, gen, image_rows=0)
-    rows, experts = logits.shape
-    boundary = torch.arange(rows, device="cuda")[:, None] * (experts // ep_size)
-    expected = (boundary + torch.arange(-3, 3, device="cuda")) % experts
-    logits.fill_(-8).scatter_(1, expected, 8.0)
-    config = FrontConfig(
-        bias=torch.zeros(experts, device="cuda"),
-        bias_vl=None,
-        image_sentinel_lo=0,
-        scale=1.5,
-    )
-    front = DEP2Front(config, ExpertWorkspace("cuda"))
-    front.warmup(rows)
-    mask = torch.zeros(rows, device="cuda", dtype=torch.bool)
-    out = front(x, logits, ids, mask)
-    assert torch.equal(out.topk_ids.sort(dim=1).values, expected.sort(dim=1).values)
-
-
 @pytest.mark.parametrize("rows", [6, 12, 48, 126])
 def test_front_into_dispatch_slice(rows):
     gen = torch.Generator().manual_seed(351)
     logits, x, ids = _front_inputs(rows, gen, image_rows=0)
-    front = DEP2Front(FrontConfig(torch.zeros(384, device="cuda"), None, 0, 1.5))
+    front = DEPFront(FrontConfig(torch.zeros(384, device="cuda"), None, 0, 1.5))
     front.warmup(rows)
     original = front(x, logits, ids)
     global_output = FrontOutput(

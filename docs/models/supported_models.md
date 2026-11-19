@@ -365,7 +365,7 @@ print(output)
 See [this page](generative_models.md) for more information on how to use generative models.
 
 For DeepSeek-V4.1 on two, four, or eight SM103 GPUs, see the experimental
-[DP + EP specialized decode](deepseek_v41_dep2_decode.md) configuration.
+[DP + EP specialized decode](deepseek_v41_dep_decode.md) configuration.
 
 #### Text Generation
 

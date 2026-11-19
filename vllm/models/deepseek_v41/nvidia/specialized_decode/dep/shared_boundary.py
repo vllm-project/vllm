@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused local shared-expert addition and mHC for the isolated DEP2 executor.
+"""Fused local shared-expert addition and mHC for the DEP executor.
 
 The caller must establish producer completion and protect peer buffers until
 both consumers finish. This kernel does not implement a communication protocol.

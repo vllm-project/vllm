@@ -139,7 +139,7 @@ from .specialized_decode.hopper import is_hopper
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
-    from .specialized_decode.dep2.runtime import DEP2Decode
+    from .specialized_decode.dep.runtime import DEPDecode
     from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
 logger = init_logger(__name__)
@@ -1886,7 +1886,7 @@ class DeepseekV41LLMForCausalLM(
         # decode_backend=latency_specialized: a decode executor over self.model, built
         # by the model state once the weights are loaded.
         self.specialized_decode_config = specialized_decode_config(vllm_config)
-        self.specialized_decode: SpecializedDecode | DEP2Decode | None = None
+        self.specialized_decode: SpecializedDecode | DEPDecode | None = None
         # SM80 and SM90 record the metadata builds of FULL decode steps.
         self.records_decode_metadata = records_decode_metadata(vllm_config)
         expert_dtype = getattr(config, "expert_dtype", "fp4")
@@ -1961,15 +1961,15 @@ class DeepseekV41LLMForCausalLM(
     ) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
-    def build_specialized_decode(self) -> "SpecializedDecode | DEP2Decode":
+    def build_specialized_decode(self) -> "SpecializedDecode | DEPDecode":
         from .specialized_decode.logits.logits import SpecializedDecodeLogitsProcessor
         from .specialized_decode.runtime.decode import SpecializedDecode
 
         assert self.specialized_decode_config is not None
-        if getattr(self.specialized_decode_config, "dep2", False):
-            from .specialized_decode.dep2.runtime import DEP2Decode
+        if getattr(self.specialized_decode_config, "dep", False):
+            from .specialized_decode.dep.runtime import DEPDecode
 
-            self.specialized_decode = DEP2Decode.for_target(
+            self.specialized_decode = DEPDecode.for_target(
                 self.model, self.specialized_decode_config, self.lm_head
             )
         else:

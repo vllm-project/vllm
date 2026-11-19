@@ -154,7 +154,7 @@ class DeepseekV41MetadataGraphModelState(DeepseekV41ModelState):
         decode = getattr(self, "decode", None)
         return (
             decode is None
-            or not getattr(decode, "is_dep2", False)
+            or not getattr(decode, "is_dep", False)
             or (0 < rows <= decode.config.max_rows)
         )
 

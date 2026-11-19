@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
     from ...dspark import DSparkDeepseekV4Model
     from ...model import DeepseekV4DecoderLayer, DeepseekV4Model
-    from ..dep2.runtime import DEP2Decode
+    from ..dep.runtime import DEPDecode
     from .draft import DraftDecode
 
 DecodeOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]
@@ -83,7 +83,7 @@ class DecodeStep(NamedTuple):
     low_batch: bool
     # The attention side projections run on aux streams.
     overlap_inputs: bool
-    executor: "SpecializedDecode | DraftDecode | DEP2Decode"
+    executor: "SpecializedDecode | DraftDecode | DEPDecode"
 
     def run(
         self,
@@ -108,7 +108,7 @@ class DecodeStep(NamedTuple):
 
 
 def step_gates(
-    rows: int, executor: "SpecializedDecode | DraftDecode | DEP2Decode"
+    rows: int, executor: "SpecializedDecode | DraftDecode | DEPDecode"
 ) -> DecodeStep:
     """The step of `rows` rows (0 < rows <= `FUSED_MHC_MAX_ROWS`)."""
     return DecodeStep(

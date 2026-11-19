@@ -37,7 +37,7 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
     store_lamport_sentinel_u32x4,
     to_cute,
 )
-from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2.shared_boundary import (
+from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.shared_boundary import (
     _FusedMHCDeviceKernel,
 )
 

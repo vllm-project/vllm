@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prepare DEP2 local kernels outside capture; never run EP collectives here."""
+"""Prepare DEP local kernels outside capture; never run EP collectives here."""
 
 import torch
 
@@ -34,7 +34,7 @@ from .shared_boundary import LocalMoEOutput
 
 def prepare_rows(decode, rows):
     if not 0 < rows <= decode.config.max_rows:
-        raise ValueError("DEP2 row capacity exceeded")
+        raise ValueError("DEP row capacity exceeded")
     with torch.inference_mode():
         for plan in decode.plans:
             attn = plan.attention.attn

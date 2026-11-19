@@ -422,7 +422,7 @@ class SparseMlaDecodeCute:
         n = self.n
         tid, _, _ = cute.arch.thread_idx()
         chunk, token, head_group = cute.arch.block_idx()
-        # DEP2 has TP1 attention: four independent 16-head groups. Preserve
+        # DEP has TP1 attention: four independent 16-head groups. Preserve
         # the MMA, shared-memory layout and per-cluster reductions.
         q_ptr = q_ptr + Int64(head_group * HEADS * HEAD_DIM)
         out_ptr = out_ptr + Int64(head_group * HEADS * HEAD_DIM * 2)

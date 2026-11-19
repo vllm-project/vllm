@@ -20,7 +20,7 @@ from .owner import EPReduceScatterMHC
 from .transport import FinalizeOwnerPublish, PeerFrontDispatch
 
 if TYPE_CHECKING:
-    from .moe import DEP2MoEStep
+    from .moe import DEPMoEStep
 
 
 def gemm_args(moe, data):
@@ -75,7 +75,7 @@ class DEPCommunication:
     def _warm_deferred(self):
         if self.warmed:
             return
-        representatives: dict[tuple, DEP2MoEStep] = {}
+        representatives: dict[tuple, DEPMoEStep] = {}
         for plan in self.plans:
             moe = plan.moe
             if moe.communication is not self:

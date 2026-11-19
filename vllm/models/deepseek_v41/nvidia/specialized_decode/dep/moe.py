@@ -35,7 +35,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
     padding_mask,
 )
 
-from .front import DEP2Front
+from .front import DEPFront
 from .owner import OwnerOutput, uniform_owner_layout
 from .shared_boundary import LocalMoEOutput
 
@@ -161,7 +161,7 @@ class PreparedDispatch(MoEPrepareAndFinalizeNaiveDPEPModular):
         self.owner_partial = partials
 
 
-class DEP2MoEStep:
+class DEPMoEStep:
     def __init__(self, ffn, workspace, max_rows=128):
         self.ffn = ffn
         self.runner = runner = ffn.experts
@@ -206,7 +206,7 @@ class DEP2MoEStep:
         self.front = None
         front = _front_config(runner)
         if isinstance(front, FrontConfig):
-            self.front = DEP2Front(front, workspace)
+            self.front = DEPFront(front, workspace)
             for rows in (8, 16, 32, 64, max_rows):
                 self.front.warmup(rows)
         self.front_config = front if isinstance(front, FrontConfig) else None

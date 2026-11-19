@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DEP2 target and draft layer loops, opt-in, without a TP mailbox."""
+"""DEP target and draft layer loops, opt-in, without a TP mailbox."""
 
 from types import SimpleNamespace
 
@@ -26,21 +26,21 @@ from ..attention.step import AttentionStep
 from .attention.projections import ProjectionBank
 from .boundary import LocalBoundaries
 from .communication import DEPCommunication
-from .moe import DEP2MoEStep
+from .moe import DEPMoEStep
 from .workspace import ExpertWorkspace
 
 
-class DEP2Decode:
+class DEPDecode:
     embedding = None
     all_gather = None
-    is_dep2 = True
+    is_dep = True
 
     def __init__(self, backbone, config, lm_head=None, target=None):
         if backbone.use_sequence_parallel or (
             target is None and backbone.use_native_mega_moe
         ):
             raise ValueError(
-                "DEP2 specialized decode requires modular TRTLLM MoE, no SP"
+                "DEP specialized decode requires modular TRTLLM MoE, no SP"
             )
         self.backbone, self.config, self.lm_head = backbone, config, lm_head
         self.is_draft = target is not None
@@ -107,7 +107,7 @@ class DEP2Decode:
                     all_gather=None,
                     projection_bank=self.projections,
                 ),
-                moe=DEP2MoEStep(layer.ffn, self.workspace, config.max_rows),
+                moe=DEPMoEStep(layer.ffn, self.workspace, config.max_rows),
             )
             for i, layer, attn in zip(layer_ids, layers, attns)
         ]
@@ -128,7 +128,7 @@ class DEP2Decode:
         if rows in self._prepared_rows:
             return
         if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("DEP2 shape was not prepared before capture")
+            raise RuntimeError("DEP shape was not prepared before capture")
         from .warmup import prepare_rows
 
         prepare_rows(self, rows)

@@ -96,7 +96,7 @@ class LocalBoundaries(Boundaries):
                 shared=state.pending.shared,
             )
         if not isinstance(state.pending, torch.Tensor):
-            raise TypeError("DEP2 boundary requires finalized EP output")
+            raise TypeError("DEP boundary requires finalized EP output")
         result = self.local_reduce(
             state.pending,
             state.residual,

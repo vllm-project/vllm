@@ -22,7 +22,7 @@ Other model limits, tokenizer and memory settings remain deployment choices.
 Set `decode_backend` back to `auto` to disable the executor.
 
 For a different group size, change `--data-parallel-size`. The same
-`latency_specialized_dep` backend selects the matching DEP executor. Keep
+`latency_specialized_dep` backend uses the configured DP/EP group size. Keep
 `--tensor-parallel-size 1` and `--enable-expert-parallel`; these are not the
 TP4/TP8 executors.
 
@@ -32,10 +32,8 @@ TP4/TP8 executors.
 | 4 | 4 | 96 |
 | 8 | 8 | 48 |
 
-The explicit `latency_specialized_dep2`, `latency_specialized_dep4` and
-`latency_specialized_dep8` names remain accepted for existing launch files;
-their size must match the DP group. Unsupported layouts fail at startup.
-Global expert IDs are preserved through dispatch.
+Unsupported layouts fail at startup. Global expert IDs are preserved through
+dispatch.
 
 ## Supported Scope
 

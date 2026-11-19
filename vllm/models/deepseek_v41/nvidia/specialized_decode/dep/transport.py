@@ -66,7 +66,9 @@ class PeerFrontDispatch:
             raise RuntimeError("prepare dispatch before capture")
         self.width, self.rank = dist.get_world_size(group), dist.get_rank(group)
         if self.width not in (2, 4, 8) or not 2 <= rows <= 128 or rows % 2:
-            raise ValueError("uniform even DEP2/4/8 rows in 2..128 required")
+            raise ValueError(
+                "uniform even DEP rows in 2..128 across 2/4/8 ranks required"
+            )
         self.rows = rows
         self.global_output = FrontOutput(
             *(

@@ -17,8 +17,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @dataclass(frozen=True, slots=True)
-class DEP2Config(DecodeConfig):
-    dep2: bool = True
+class DEPConfig(DecodeConfig):
+    dep: bool = True
     # Larger captures keep the stock layer loop; the full-model sweep regressed.
     max_rows: int = 128
     wide_c8_attention: bool = False
@@ -74,7 +74,8 @@ def requirements(config: VllmConfig, dp_size: int):
     }
 
 
-def dep_config(config: VllmConfig, dp_size: int) -> DEP2Config:
+def dep_config(config: VllmConfig) -> DEPConfig:
+    dp_size = config.parallel_config.data_parallel_size
     dp_group = get_dp_group()
     missing = [key for key, ok in requirements(config, dp_size).items() if not ok]
     if dp_group.world_size != dp_size:
@@ -86,7 +87,7 @@ def dep_config(config: VllmConfig, dp_size: int) -> DEP2Config:
     dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=dp_group.cpu_group)
     if not supported.item():
         raise ValueError(
-            f"latency_specialized_dep{dp_size} requires "
+            "latency_specialized_dep requires "
             + ("; ".join(missing) or "support on all DP ranks")
         )
     k = config.kernel_config
@@ -96,7 +97,7 @@ def dep_config(config: VllmConfig, dp_size: int) -> DEP2Config:
     )
     if not isinstance(wide_c8, bool):
         raise ValueError("dep_wide_c8_attention must be a boolean")
-    return DEP2Config(
+    return DEPConfig(
         k.enable_flashinfer_autotune is not False,
         bool(k.enable_jit_warmup),
         wide_c8_attention=wide_c8,

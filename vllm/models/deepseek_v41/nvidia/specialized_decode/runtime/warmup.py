@@ -38,19 +38,19 @@ from .decode import SpecializedDecode
 from .draft import DraftDecode
 
 if TYPE_CHECKING:
-    from ..dep2.runtime import DEP2Decode
+    from ..dep.runtime import DEPDecode
 
 
 def warm_up(
-    decode: "SpecializedDecode | DEP2Decode",
+    decode: "SpecializedDecode | DEPDecode",
     vllm_config: VllmConfig,
-    drafts: "Sequence[DraftDecode | DEP2Decode]" = (),
+    drafts: "Sequence[DraftDecode | DEPDecode]" = (),
 ) -> None:
     """Tune (unless FlashInfer autotuning is off) and compile the GEMMs of the
     executor and of the DSpark draft's (`drafts`) for every row count they
     run them at."""
-    if getattr(decode, "is_dep2", False):
-        cast("DEP2Decode", decode).warm_up(vllm_config, drafts)
+    if getattr(decode, "is_dep", False):
+        cast("DEPDecode", decode).warm_up(vllm_config, drafts)
         return
     decode = cast(SpecializedDecode, decode)
     steps = [plan.attention for plan in decode.plans]

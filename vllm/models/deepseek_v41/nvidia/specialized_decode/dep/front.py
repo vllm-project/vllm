@@ -71,7 +71,7 @@ def _tensor(t, shape, dtype, device):
     )
 
 
-class DEP2Front:
+class DEPFront:
     def __init__(self, config: FrontConfig, workspace=None):
         self.config = config
         self.workspace = workspace

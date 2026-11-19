@@ -21,12 +21,12 @@ def _worker(rank, width, port):
     from vllm.models.deepseek_v41.nvidia.specialized_decode.boundary.boundary import (
         empty_quantized_layer_input,
     )
-    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2 import shared_boundary
-    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2.owner import (
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep import shared_boundary
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.owner import (
         EPReduceScatterMHC,
         uniform_owner_layout,
     )
-    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep2.transport import (
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.transport import (
         FinalizeOwnerPublish,
         PeerFrontDispatch,
     )

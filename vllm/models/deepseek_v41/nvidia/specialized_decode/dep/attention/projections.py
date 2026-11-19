@@ -74,7 +74,7 @@ class PreparedProjection:
                 or recipe.tactic
                 not in self.runner.get_valid_tactics(self.inputs(qa), None)
             ):
-                raise ValueError("unsupported DEP2 projection tactic")
+                raise ValueError("unsupported DEP projection tactic")
         elif recipe.backend == "wide":
             tile = (self.rows + 15) // 16 * 16
             if not 8 < self.rows <= 48 or qa.orig_dtype != torch.bfloat16:
