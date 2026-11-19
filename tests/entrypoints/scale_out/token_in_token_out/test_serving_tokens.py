@@ -305,6 +305,10 @@ async def test_generate_logprobs(client, logprobs_value):
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
     resp.raise_for_status()
+    # Rendered from the engine rows and sent in parts, with a length.
+    assert resp.headers["content-type"] == "application/json"
+    assert resp.headers["content-length"] == str(len(resp.content))
+    assert "transfer-encoding" not in resp.headers
     data = resp.json()
     choice = data["choices"][0]
     assert choice["logprobs"] is not None

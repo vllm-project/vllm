@@ -695,10 +695,9 @@ class ServingTokens(GenerateBaseServing):
                     )
 
         if fragments:
-            parts = render_json_with_fragments(
-                response.model_dump(), "logprobs", fragments
+            return RenderedGenerateResponse(
+                render_json_with_fragments(response.model_dump(), "logprobs", fragments)
             )
-            return RenderedGenerateResponse(b"".join(parts))
         return response
 
     def _build_response_fields(

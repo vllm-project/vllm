@@ -103,7 +103,7 @@ def _body(serving, k, outputs, finish_reason="length"):
         )
     )
     if isinstance(response, RenderedGenerateResponse):
-        return response.body, True
+        return b"".join(response.parts), True
     assert isinstance(response, GenerateResponseBase)
     return JSONResponse(content=response.model_dump()).body, False
 
@@ -347,7 +347,7 @@ async def test_large_render_yields_to_the_event_loop(monkeypatch):
     blocked = await _serve_full(serving, rows)
     ticker.cancel()
     assert ticks - before >= 9
-    assert blocked.body == whole.body
+    assert blocked.parts == whole.parts
 
 
 @pytest.mark.asyncio

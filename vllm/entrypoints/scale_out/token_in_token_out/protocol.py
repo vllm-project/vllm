@@ -681,10 +681,11 @@ class GenerateDerenderResponse(GenerateResponseBase):
 
 @dataclass
 class RenderedGenerateResponse:
-    """A non-streaming generate response already rendered to its JSON body:
-    the bytes `JSONResponse` gives for the equivalent `GenerateResponse`."""
+    """A non-streaming generate response already rendered to JSON: the JSON
+    of the equivalent `GenerateResponse`, as parts to concatenate. Kept as
+    parts so the body is sent without first joining it into one copy."""
 
-    body: bytes
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
