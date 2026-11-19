@@ -197,8 +197,9 @@ _ci_otel_on_exit() {
   _CI_INFRA_OTEL_EXIT_STATUS=$?
   trap - 0
   ci_otel_finish "${_CI_INFRA_OTEL_EXIT_STATUS}" || :
+  # Above ci_otel.py's FLUSH_MAX_SECONDS, which bounds the upload itself.
   if command -v timeout >/dev/null 2>&1; then
-    PYTHONDONTWRITEBYTECODE=1 timeout 4s \
+    PYTHONDONTWRITEBYTECODE=1 timeout 25s \
       "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   else
     PYTHONDONTWRITEBYTECODE=1 \
