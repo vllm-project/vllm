@@ -10,7 +10,10 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
+    moriio_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     MoRIIOMode,
@@ -466,6 +469,8 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     worker._has_mamba = has_mamba
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
 
     worker._record_failed_recv("req")
 
@@ -614,6 +619,8 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
     return worker
 
 
@@ -842,6 +849,43 @@ def test_write_consumer_start_load_kv_does_not_wait_for_compute_stream(
     worker.start_load_kv(_read_step_metadata(True, "a"))
 
     assert stream_events == []
+
+
+def _failed_read_worker_meta(stream_events, dst_block_ids, unzeroed_block_ids):
+    worker = _consumer_worker(stream_events, MoRIIOMode.READ)
+    worker._has_mamba = False
+    worker._recving_local_blocks = {"a": dst_block_ids}
+    worker._invalid_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
+    metadata = _read_step_metadata(False, "a")
+    metadata.unzeroed_read_block_ids = unzeroed_block_ids
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.connector_worker = worker
+
+    worker.start_load_kv(metadata)
+    worker._record_failed_recv("a")
+    return connector.build_connector_worker_meta(), connector
+
+
+def test_failed_read_returns_its_unzeroed_destinations_once(stream_events):
+    worker_meta, connector = _failed_read_worker_meta(
+        stream_events, [1, 2, 3], {2, 3, 9}
+    )
+
+    assert worker_meta is not None
+    assert isinstance(worker_meta, moriio_common.MoRIIOConnectorWorkerMetadata)
+    assert worker_meta.blocks_to_zero == {2, 3}
+    assert connector.build_connector_worker_meta() is None
+
+
+def test_unzeroed_destinations_of_every_rank_are_merged(stream_events):
+    first, _ = _failed_read_worker_meta(stream_events, [1, 2], {1, 2, 3})
+    second, _ = _failed_read_worker_meta(stream_events, [2, 3], {1, 2, 3})
+
+    assert first is not None and second is not None
+    merged = first.aggregate(second)
+    assert isinstance(merged, moriio_common.MoRIIOConnectorWorkerMetadata)
+    assert merged.blocks_to_zero == {1, 2, 3}
 
 
 def test_requested_cudagraph_mode_is_never_overridden():

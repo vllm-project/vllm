@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
@@ -39,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
+    MoRIIOConnectorWorkerMetadata,
     MoRIIOConstants,
     MoRIIOError,
     MoRIIOMode,
@@ -458,6 +460,11 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             return set()
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.build_connector_worker_meta()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.CONSUMER:
@@ -620,12 +627,14 @@ class MoRIIOConnectorScheduler:
             if self.mode == MoRIIOMode.WRITE:
                 _validate_hybrid_speculation(vllm_config)
         self._num_ssm_scratch_blocks = 0
+        self._mamba_align_block_size: int | None = None
         if mamba_spec is not None:
-            mamba_config = kv_cache_config.transfer_groups[
-                self._mamba_group_ids[0]
-            ].manager_config
+            mamba_group = kv_cache_config.transfer_groups[self._mamba_group_ids[0]]
+            mamba_config = mamba_group.manager_config
             assert isinstance(mamba_config.params, MambaManager.Params)
             self._num_ssm_scratch_blocks = mamba_config.params.num_speculative_blocks
+            if mamba_config.params.mamba_cache_mode == "align":
+                self._mamba_align_block_size = mamba_group.block_size
         self.block_size = vllm_config.cache_config.block_size
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
@@ -771,6 +780,7 @@ class MoRIIOConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._failed_read_block_ids_to_zero: set[int] = set()
         # Snapshot of kv_transfer_params for chunked prefill recovery.
         self._req_kv_params: dict[ReqId, dict] = {}
 
@@ -1468,13 +1478,33 @@ class MoRIIOConnectorScheduler:
             return False
         if not scheduler_output.has_sync_kv_loads:
             return False
-        if self._has_mamba:
-            return True
         stream_written_block_ids = {
             *(scheduler_output.new_block_ids_to_zero or ()),
             *(c.dst_block_id for c in scheduler_output.kv_cache_block_copies or ()),
         }
-        return not read_dst_block_ids.isdisjoint(stream_written_block_ids)
+        if not read_dst_block_ids.isdisjoint(stream_written_block_ids):
+            return True
+        return any(
+            self._mamba_state_precopy_crosses_block(req, scheduler_output)
+            for req, _ in self._reqs_need_recv.values()
+        )
+
+    def _mamba_state_precopy_crosses_block(
+        self, req: "Request", scheduler_output: SchedulerOutput
+    ) -> bool:
+        # In align mode, MambaHybridModelState.preprocess_state copies the
+        # running Mamba state into the block of the step's last token whenever
+        # the step crosses a block boundary. For a READ that block is the state
+        # destination.
+        block_size = self._mamba_align_block_size
+        if block_size is None:
+            return False
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req.request_id, 0)
+        num_computed = req.num_computed_tokens
+        if num_scheduled == 0 or num_computed == 0:
+            return False
+        last_token = num_computed + num_scheduled - 1
+        return (num_computed - 1) // block_size != last_token // block_size
 
     def build_connector_meta(
         self,
@@ -1530,28 +1560,36 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+        if self.mode == MoRIIOMode.READ:
+            new_block_ids_to_zero = scheduler_output.new_block_ids_to_zero
+            if self._failed_read_block_ids_to_zero:
+                # Failed reads left these destinations unzeroed, and the
+                # scheduler may recompute into them.
+                new_block_ids_to_zero = [
+                    *(new_block_ids_to_zero or ()),
+                    *sorted(self._failed_read_block_ids_to_zero),
+                ]
+                self._failed_read_block_ids_to_zero.clear()
+            if new_block_ids_to_zero:
+                # A READ writes every byte of its destination pages, so zeroing
+                # them first adds nothing and races the host-posted reads.
+                # Hybrid READ metadata puts the aligned attention groups first.
+                read_dst_block_ids = {
+                    b
+                    for _, block_ids in self._reqs_need_recv.values()
+                    for group in block_ids[: len(self._attn_group_ids)]
+                    for b in group
+                }
+                meta.unzeroed_read_block_ids = read_dst_block_ids.intersection(
+                    new_block_ids_to_zero
+                )
+                new_block_ids_to_zero = [
+                    b for b in new_block_ids_to_zero if b not in read_dst_block_ids
+                ]
+            scheduler_output.new_block_ids_to_zero = new_block_ids_to_zero
         meta.order_reads_after_compute_stream = (
             self._compute_stream_writes_read_destinations(scheduler_output)
         )
-        if (
-            self.mode == MoRIIOMode.READ
-            and self._has_mamba
-            and scheduler_output.new_block_ids_to_zero
-        ):
-            # Hybrid models zero recycled attention pages that held Mamba state.
-            # Host-submitted READs overwrite these pages and can race zeroing.
-            # Hybrid READ metadata puts the aligned attention groups first.
-            read_dst_block_ids = {
-                b
-                for _, block_ids in self._reqs_need_recv.values()
-                for group in block_ids[: len(self._attn_group_ids)]
-                for b in group
-            }
-            scheduler_output.new_block_ids_to_zero = [
-                b
-                for b in scheduler_output.new_block_ids_to_zero
-                if b not in read_dst_block_ids
-            ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
@@ -1802,10 +1840,15 @@ class MoRIIOConnectorScheduler:
           send was already reaped) and is dropped.
 
         Consumers never populate finished_sending (they report
-        finished_recving), and they unmap in request_finished, so this is a
-        no-op for them.
+        finished_recving), and they unmap in request_finished. For them this
+        only queues the destinations of failed READs that skipped zeroing, so
+        that the next step zeroes them.
         """
         if not self.is_producer:
+            worker_meta = connector_output.kv_connector_worker_meta
+            if worker_meta is not None:
+                assert isinstance(worker_meta, MoRIIOConnectorWorkerMetadata)
+                self._failed_read_block_ids_to_zero |= worker_meta.blocks_to_zero
             return
 
         incoming = set(connector_output.finished_sending or ())
@@ -2089,6 +2132,8 @@ class MoRIIOConnectorWorker:
         self._recving_local_blocks: dict[ReqId, list[int]] = {}
         # Drained by get_block_ids_with_load_errors.
         self._invalid_block_ids: set[int] = set()
+        self._unzeroed_read_block_ids: set[int] = set()
+        self._failed_read_block_ids_to_zero: set[int] = set()
         # This step's posted reads, awaited in start_load_kv before the forward.
         self._reads_issued_this_step: list = []
 
@@ -3219,15 +3264,30 @@ class MoRIIOConnectorWorker:
         KV cache group. Reporting IDs for a hybrid request would crash it while
         unpacking the request's groups, so match NIXL and keep HMA failures out
         of this API until scheduler recovery carries group identity.
+
+        Destinations that skipped zeroing are also returned through
+        `build_connector_worker_meta`, for the scheduler to zero them before
+        they are reused.
         """
         if self._has_mamba:
             return
-        self._invalid_block_ids.update(self._recving_local_blocks.get(req_id, ()))
+        dst_block_ids = self._recving_local_blocks.get(req_id, ())
+        self._invalid_block_ids.update(dst_block_ids)
+        self._failed_read_block_ids_to_zero.update(
+            self._unzeroed_read_block_ids.intersection(dst_block_ids)
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose read failed, for the scheduler to recompute."""
         invalid, self._invalid_block_ids = self._invalid_block_ids, set()
         return invalid
+
+    def build_connector_worker_meta(self) -> MoRIIOConnectorWorkerMetadata | None:
+        if not self._failed_read_block_ids_to_zero:
+            return None
+        blocks_to_zero = self._failed_read_block_ids_to_zero
+        self._failed_read_block_ids_to_zero = set()
+        return MoRIIOConnectorWorkerMetadata(blocks_to_zero)
 
     def save_kv_layer(
         self,
@@ -3474,6 +3534,7 @@ class MoRIIOConnectorWorker:
             return
         if self.mode == MoRIIOMode.WRITE:
             return
+        self._unzeroed_read_block_ids = metadata.unzeroed_read_block_ids
 
         # Handshake every referenced remote prefill rank up front, before any
         # read enters the forward pass. A lazy per-rank handshake on the read

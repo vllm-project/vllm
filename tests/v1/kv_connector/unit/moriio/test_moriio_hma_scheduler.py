@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 moriio_connector = importlib.import_module(
@@ -87,6 +88,8 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
+        self._mamba_align_block_size = None
+        self._failed_read_block_ids_to_zero: set[int] = set()
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
@@ -343,11 +346,13 @@ def test_scheduler_rejects_hybrid_without_attention_group():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
+def _glm5_next_mtp_kv_cache_config(mamba_cache_mode: str = "align") -> KVCacheConfig:
     """GLM-5.3-Flash-shaped groups from the real grouping, with an MTP layer."""
     kpool, num_spec = 4, 1
     mamba = MambaManager.layer_config(
-        _mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=num_spec
+        _mamba_spec(),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_spec,
     )
     layers: dict[str, KVCacheLayerConfig] = {}
     for i in range(7):
@@ -409,15 +414,18 @@ def _group_kv_cache_layers(layers: dict[str, KVCacheLayerConfig]) -> KVCacheConf
     return KVCacheConfig(num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
-def _glm5_next_mtp_scheduler(kv_role: str = "kv_consumer"):
+def _glm5_next_mtp_scheduler(
+    kv_role: str = "kv_consumer", mamba_cache_mode: str = "align"
+):
     vllm_config = _gate_vllm_config(
         speculative_config=_spec_config("mtp"),
         block_size=1024,
         num_lookahead_tokens=1,
         num_speculative_tokens=1,
+        mamba_cache_mode=mamba_cache_mode,
     )
     vllm_config.kv_transfer_config.kv_role = kv_role
-    config = _glm5_next_mtp_kv_cache_config()
+    config = _glm5_next_mtp_kv_cache_config(mamba_cache_mode)
     return moriio_connector.MoRIIOConnectorScheduler(vllm_config, "engine", config)
 
 
@@ -1133,7 +1141,7 @@ def _make_read_request(remote_block_ids):
 def test_update_state_drops_decode_recompute_tail_block(
     external_tokens, has_mamba, zero_ids
 ):
-    """Only full hybrid READ destinations skip zeroing; local tails still zero."""
+    """Paired READ destinations skip zeroing but the recomputed local tail does not."""
     sched = _make_read_scheduler()
     sched._has_mamba = has_mamba
     remote_blocks = [[10, 11], [91]] if has_mamba else [[10, 11]]
@@ -1157,8 +1165,10 @@ def test_update_state_drops_decode_recompute_tail_block(
     before = asdict(output)
     meta = sched.build_connector_meta(output)
     assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
-    if zero_ids and has_mamba and external_tokens:
-        before["new_block_ids_to_zero"] = zero_ids[1:]
+    if external_tokens and zero_ids:
+        before["new_block_ids_to_zero"] = [
+            b for b in zero_ids if b not in expected_blocks[0]
+        ]
     assert asdict(output) == before
 
     # A later local allocation of the same pages must still be zeroed.
@@ -1172,11 +1182,10 @@ def test_update_state_drops_decode_recompute_tail_block(
 @pytest.mark.parametrize(
     ("hybrid", "num_external_tokens", "zero_ids", "copies", "expected"),
     [
-        pytest.param(False, 127, [100, 101, 102], None, True, id="zeroed-dst"),
+        pytest.param(False, 127, [100, 101, 102], None, False, id="zeroing-skipped"),
         pytest.param(
             False, 127, None, [KVCacheBlockCopy(7, 101)], True, id="copied-dst"
         ),
-        pytest.param(True, 1500, None, None, True, id="hybrid-state"),
         pytest.param(True, 0, None, None, False, id="hybrid-load-after-forward"),
         pytest.param(False, 127, [102], None, False, id="zeroed-elsewhere"),
         pytest.param(False, 127, None, None, False, id="no-stream-work"),
@@ -1211,6 +1220,112 @@ def test_read_meta_orders_reads_after_stream_work(
     meta = scheduler.build_connector_meta(output)
 
     assert meta.order_reads_after_compute_stream is expected
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("mamba_cache_mode", "num_computed_tokens", "num_scheduled_tokens", "expected"),
+    [
+        pytest.param("align", 1504, 1, True, id="align-crosses-block"),
+        pytest.param("align", 1500, 1, False, id="align-within-block"),
+        pytest.param("align", 1503, 1, False, id="align-fills-block"),
+        pytest.param("align", 1500, 5, True, id="align-chunk-crosses-block"),
+        pytest.param("align", 1500, 4, False, id="align-chunk-fills-block"),
+        pytest.param("none", 1504, 1, False, id="no-prefix-caching"),
+    ],
+)
+def test_hybrid_read_waits_only_when_state_is_copied_into_its_destination(
+    mamba_cache_mode, num_computed_tokens, num_scheduled_tokens, expected
+):
+    assert _mamba_spec().block_size == 16
+    scheduler = _glm5_next_mtp_scheduler(mamba_cache_mode=mamba_cache_mode)
+    request = _make_read_request([[10, 11], [50], [90]])
+    request.num_computed_tokens = num_computed_tokens
+    scheduler.update_state_after_alloc(
+        request,
+        _FakeBlocks(([200, 201], [100, 101, 102], [300])),
+        num_external_tokens=num_computed_tokens,
+    )
+    output = SchedulerOutput.make_empty()
+    output.has_sync_kv_loads = True
+    output.num_scheduled_tokens = {"req": num_scheduled_tokens}
+    output.new_block_ids_to_zero = [100, 101, 102]
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.order_reads_after_compute_stream is expected
+
+
+def _mixed_precision_read_step(scheduler, local_block_ids):
+    scheduler.update_state_after_alloc(
+        _make_read_request([[10, 11]]),
+        _FakeBlocks((local_block_ids,)),
+        num_external_tokens=127,
+    )
+    step = SchedulerOutput.make_empty()
+    step.has_sync_kv_loads = True
+    step.new_block_ids_to_zero = list(local_block_ids)
+    return step, scheduler.build_connector_meta(step)
+
+
+def _report_read_result(scheduler, meta, dst_block_ids, read_failed):
+    worker = _FakeWorker(
+        _has_mamba=False,
+        _recving_local_blocks={"req": dst_block_ids},
+        _invalid_block_ids=set(),
+        _unzeroed_read_block_ids=meta.unzeroed_read_block_ids,
+        _failed_read_block_ids_to_zero=set(),
+    )
+    if read_failed:
+        worker._record_failed_recv("req")
+    connector = _FakeConnector(scheduler)
+    connector.connector_worker = worker
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            invalid_block_ids=connector.get_block_ids_with_load_errors(),
+            kv_connector_worker_meta=connector.build_connector_worker_meta(),
+        )
+    )
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("read_failed", "expected_zero_ids"),
+    [(True, [300, 100, 101]), (False, [300])],
+)
+def test_failed_read_destinations_are_zeroed_in_the_next_step(
+    read_failed, expected_zero_ids
+):
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(block_size=64),
+        "engine",
+        _mixed_precision_mla_kv_cache_config(block_size=64),
+    )
+    read_step, meta = _mixed_precision_read_step(scheduler, [100, 101, 102])
+    assert read_step.new_block_ids_to_zero == [102]
+    _report_read_result(scheduler, meta, [100, 101], read_failed)
+    next_step = SchedulerOutput.make_empty()
+    next_step.new_block_ids_to_zero = [300]
+
+    scheduler.build_connector_meta(next_step)
+
+    assert next_step.new_block_ids_to_zero == expected_zero_ids
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_failed_read_destination_reused_by_a_read_is_not_zeroed():
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(block_size=64),
+        "engine",
+        _mixed_precision_mla_kv_cache_config(block_size=64),
+    )
+    _, meta = _mixed_precision_read_step(scheduler, [100, 101, 102])
+    _report_read_result(scheduler, meta, [100, 101], read_failed=True)
+
+    next_step, next_meta = _mixed_precision_read_step(scheduler, [100, 300, 301])
+
+    assert next_step.new_block_ids_to_zero == [301, 101]
+    assert next_meta.unzeroed_read_block_ids == {100, 300}
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():

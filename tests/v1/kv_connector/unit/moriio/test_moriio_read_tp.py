@@ -193,6 +193,8 @@ def _make_reader(
     worker._reads_issued_this_step = []
     worker._mamba_reads_this_step = []
     worker._invalid_block_ids = set()
+    worker._unzeroed_read_block_ids = set()
+    worker._failed_read_block_ids_to_zero = set()
     consumer.sent = read_from
     return released
 
