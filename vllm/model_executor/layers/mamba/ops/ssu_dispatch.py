@@ -1,21 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ReplaySSM decode planner and FlashInfer ReplaySSM entry. The plain SSU
-decode kernels are in `linear_attention/mamba/decode/`."""
+"""The Triton ReplaySSM decode planner and the FlashInfer ReplaySSM entry,
+used by the ReplaySSM decode kernels in `linear_attention/mamba/decode/`."""
 
-from collections.abc import Callable
 from functools import cache
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
-from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-
-logger = init_logger(__name__)
 
 
 @triton.jit(
@@ -108,9 +101,6 @@ def plan_replayssm_decode(
     )
 
 
-_flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
-
-
 @cache
 def flashinfer_replayssm_autotune_supported() -> bool:
     """Return True when FlashInfer exposes ReplaySSM autotuning."""
@@ -121,6 +111,13 @@ def flashinfer_replayssm_autotune_supported() -> bool:
     except ImportError:
         return False
     return True
+
+
+@cache
+def _checkpointing_ssu():
+    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+    return checkpointing_ssu
 
 
 def selective_state_update_replayssm_flashinfer(
@@ -154,12 +151,6 @@ def selective_state_update_replayssm_flashinfer(
     With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
     refreshed by the caller each step; without one, a seed is drawn here.
     """
-    if _flashinfer_replayssm_kernel is None:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM has not been initialized. "
-            "Call initialize_mamba_ssu_backend() with use_replayssm=True."
-        )
-
     if x.dim() == 3:
         dim = 0 if cu_seqlens is not None else 1
         x = x.unsqueeze(dim)
@@ -182,7 +173,7 @@ def selective_state_update_replayssm_flashinfer(
         rand_seed = torch.randint(
             0, 2**32, (1,), device=state.device, dtype=torch.int64
         )
-    return _flashinfer_replayssm_kernel(
+    return _checkpointing_ssu()(
         state,
         x_cache,
         B_cache,
@@ -209,39 +200,3 @@ def selective_state_update_replayssm_flashinfer(
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
     )
-
-
-def initialize_mamba_ssu_backend(
-    mamba_config: MambaConfig,
-    kv_cache_config: KVCacheConfig,
-    *,
-    use_replayssm: bool = False,
-) -> None:
-    """Load FlashInfer's ReplaySSM kernel when ReplaySSM decodes on FlashInfer.
-
-    Layers select their SSU kernels themselves (`select_mamba_ssu_kernel`);
-    this is removed once ReplaySSM is selected the same way.
-    """
-    if not any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_type
-        in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
-        for g in kv_cache_config.kv_cache_groups
-        for spec in g.kv_cache_specs.values()
-    ):
-        return
-
-    global _flashinfer_replayssm_kernel
-    _flashinfer_replayssm_kernel = None
-    if not use_replayssm:
-        return
-    backend = mamba_config.backend or MambaBackendEnum.TRITON
-    if backend == MambaBackendEnum.FLASHINFER:
-        try:
-            from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
-        except ImportError as e:
-            raise ImportError(
-                "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
-            ) from e
-        _flashinfer_replayssm_kernel = checkpointing_ssu
-    logger.info("Using %s ReplaySSM backend.", backend.value)

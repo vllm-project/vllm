@@ -75,7 +75,8 @@ class MambaSSUKernel(LinearAttnKernel):
     @classmethod
     def is_replayssm(cls) -> bool:
         """Whether this kernel also reads and fills the layer's input rings
-        (`--use-replayssm`)."""
+        (`--use-replayssm`): plain kernels can't run on a ReplaySSM cache, and
+        ReplaySSM kernels need one."""
         return False
 
     @classmethod
@@ -109,6 +110,10 @@ class MambaSSUKernel(LinearAttnKernel):
     @classmethod
     def validate_configuration(cls, cfg: LinearAttnSelectorConfig) -> list[str]:
         reasons = super().validate_configuration(cfg)
+        if cfg.use_replayssm and not cls.is_replayssm():
+            reasons.append("--use-replayssm not supported")
+        if cls.is_replayssm() and not cfg.use_replayssm:
+            reasons.append("requires --use-replayssm")
         spec = cfg.kv_cache_spec
         if isinstance(spec, MambaSpec) and not cls.supports_mamba_type(spec.mamba_type):
             reasons.append(f"{spec.mamba_type.name.title()} layers not supported")

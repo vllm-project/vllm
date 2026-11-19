@@ -31,9 +31,12 @@ class LinearAttnSelectorConfig:
     dtype: torch.dtype | None = None
     use_stochastic_rounding: bool = False
     use_ssu_algorithm: bool = False
+    use_replayssm: bool = False
+    replayssm_buffer_len: int = 0
     num_speculative_tokens: int = 0
     use_ubatching: bool = False
     use_pipeline_parallel: bool = False
+    use_prefix_caching: bool = False
 
     @classmethod
     def from_current_platform(
@@ -49,6 +52,7 @@ class LinearAttnSelectorConfig:
             capability = None
         model_config = vllm_config.model_config
         mamba_config = vllm_config.mamba_config
+        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
         return cls(
             current_platform._enum,
@@ -57,9 +61,12 @@ class LinearAttnSelectorConfig:
             model_config.dtype if model_config is not None else None,
             use_stochastic_rounding=mamba_config.enable_stochastic_rounding,
             use_ssu_algorithm=mamba_config.ssu_algorithm is not None,
+            use_replayssm=cache_config.use_replayssm,
+            replayssm_buffer_len=cache_config.replayssm_buffer_len,
             num_speculative_tokens=vllm_config.num_speculative_tokens,
             use_ubatching=parallel_config.use_ubatching,
             use_pipeline_parallel=parallel_config.pipeline_parallel_size > 1,
+            use_prefix_caching=cache_config.enable_prefix_caching,
         )
 
 

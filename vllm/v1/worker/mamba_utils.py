@@ -6,7 +6,6 @@ from typing import Any, cast
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncs,
     MambaStateCopyFuncsByType,
@@ -28,6 +27,7 @@ from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _reinterpret_u64_as_i64,
     mamba_state_copy_boundary,
+    uses_ring_trackers,
 )
 
 logger = init_logger(__name__)
@@ -715,7 +715,7 @@ def _get_mamba_gpu_state_copy_funcs(
     copy_funcs: MambaStateCopyFuncsByType,
 ) -> MambaStateCopyFuncs:
     state_copy_funcs = copy_funcs[spec.mamba_type]
-    if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
+    if uses_ring_trackers(layer):
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
             or len(spec.shapes) != 5
@@ -951,10 +951,7 @@ class MambaSpecDecodeGPUContext:
                     mamba_spec, attention, mamba_state_copy_funcs
                 )
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                uses_replayssm_trackers = (
-                    isinstance(attention, MambaBase)
-                    and attention.use_replayssm_trackers
-                )
+                uses_replayssm_trackers = uses_ring_trackers(attention)
                 has_baseline_layer |= not uses_replayssm_trackers
                 if uses_replayssm_trackers:
                     if len(kv_caches) != len(state_copy_funcs):
