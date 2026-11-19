@@ -126,8 +126,7 @@ impl UnsupportedArgs {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
             return Err(format!(
-                "
-The following arguments are not implemented in Rust frontend yet:
+                "The following arguments are not implemented in Rust frontend yet:
 {bullets}
 
 Remove these arguments to continue."

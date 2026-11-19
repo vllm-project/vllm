@@ -1443,6 +1443,33 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     Ok(args)
 }
 
+/// Parser for `--args-json`. Unlike a function value parser, it reports an
+/// error without echoing the JSON, which holds every non-default argument from
+/// Python and would bury the error.
+#[derive(Clone)]
+struct RuntimeArgsJsonParser;
+
+impl clap::builder::TypedValueParser for RuntimeArgsJsonParser {
+    type Value = SharedRuntimeArgs;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let error = |message: String| {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("{message}\n"),
+            )
+            .with_cmd(cmd)
+        };
+        let value = value.to_str().ok_or_else(|| error("--args-json is not valid UTF-8".into()))?;
+        parse_runtime_args_json(value).map_err(error)
+    }
+}
+
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
@@ -1478,7 +1505,7 @@ pub struct FrontendArgs {
     pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
-    #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
+    #[arg(long = "args-json", value_parser = RuntimeArgsJsonParser, value_name = "JSON")]
     pub runtime: SharedRuntimeArgs,
 }
 
