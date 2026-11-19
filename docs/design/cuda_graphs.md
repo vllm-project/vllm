@@ -217,7 +217,5 @@ See the following links for examples:
 
 ## Last-layer FFN pruning
 
-Dense Qwen3, Llama, and Qwen2/Qwen2.5 prefills can optionally skip
-unused final-layer FFN rows.
-See [Last-layer FFN row pruning](last_layer_ffn_pruning.md) for activation,
-supported requests, and the additional breakable graph variants.
+Optional prefill pruning of unused final-layer FFN rows is described in
+[Last-layer FFN row pruning](last_layer_ffn_pruning.md).

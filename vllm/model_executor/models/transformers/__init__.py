@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 import vllm.envs as envs
-from vllm.model_executor.layers.utils import use_output_lora_mapping
+from vllm.model_executor.layers.last_layer_ffn import install_transformer_ffn_hooks
 from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -135,65 +135,16 @@ ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 class TransformersForCausalLM(CausalMixin):
     def __init__(self, *, vllm_config, prefix=""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self._ffn_token_indices: torch.Tensor | None = None
-        self._ffn_pruning_supported = False
-        self._ffn_lora_mapping = None
-        if (
+        self._ffn_pruning_supported = bool(
             envs.VLLM_ENABLE_LAST_LAYER_FFN_PRUNING
             and self.text_config.model_type == "qwen2"
             and self.pp_group.is_last_rank
-        ):
-            layers = self._decoder_layers
-            if layers is not None and hasattr(layers[-1], "mlp"):
-                layers[-1].mlp.register_forward_pre_hook(self._select_final_ffn_rows)
-                layers[-1].mlp.register_forward_hook(
-                    self._restore_final_ffn_rows, always_call=True
-                )
-                self._ffn_pruning_supported = True
+            and install_transformer_ffn_hooks(self)
+        )
 
     @property
     def supports_last_layer_ffn_pruning(self):
         return self._ffn_pruning_supported
-
-    def _select_final_ffn_rows(self, module, args):
-        if self._ffn_token_indices is None:
-            return None
-        (hidden_states,) = args
-        self._ffn_input_shape = hidden_states.shape
-        selected = hidden_states.index_select(-2, self._ffn_token_indices)
-        self._ffn_lora_mapping = use_output_lora_mapping(module)
-        self._ffn_lora_mapping.__enter__()
-        return (selected,)
-
-    def _restore_final_ffn_rows(self, module, args, output):
-        if self._ffn_lora_mapping is not None:
-            self._ffn_lora_mapping.__exit__(None, None, None)
-            self._ffn_lora_mapping = None
-        if output is None:
-            return None
-        if self._ffn_token_indices is None:
-            return output
-        return output.new_zeros(self._ffn_input_shape).index_copy_(
-            -2, self._ffn_token_indices, output
-        )
-
-    def forward(
-        self,
-        input_ids,
-        positions,
-        intermediate_tensors=None,
-        inputs_embeds=None,
-        last_layer_token_indices=None,
-        **kwargs,
-    ):
-        # Hooks preserve parameter names and the Transformers residual contract.
-        self._ffn_token_indices = last_layer_token_indices
-        try:
-            return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
-            )
-        finally:
-            self._ffn_token_indices = None
 
 
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin): ...

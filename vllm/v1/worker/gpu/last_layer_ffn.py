@@ -12,6 +12,7 @@ from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture
 from vllm.logger import init_logger
+from vllm.model_executor.layers.last_layer_ffn import current_last_layer_ffn_indices
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -20,13 +21,12 @@ logger = init_logger(__name__)
 
 
 def last_layer_ffn_graph_key(*args: Any, **kwargs: Any) -> int:
-    indices = kwargs.get("last_layer_token_indices")
+    del args, kwargs
+    indices = current_last_layer_ffn_indices()
     return 0 if indices is None else indices.numel()
 
 
 class LastLayerFFNGraphWrapper(BreakableCUDAGraphWrapper):
-    """Capture newly encountered row-count variants on a non-default stream."""
-
     def _capture(self, entry, args, kwargs):
         caller = torch.cuda.current_stream()
         if not hasattr(self, "ffn_capture_stream"):
@@ -34,7 +34,6 @@ class LastLayerFFNGraphWrapper(BreakableCUDAGraphWrapper):
         with graph_capture(caller.device, self.ffn_capture_stream):
             super()._capture(entry, args, kwargs)
         caller.wait_stream(self.ffn_capture_stream)
-        # Capture records kernels; the live request still needs execution.
         return self._replay(entry, args, kwargs)
 
 
