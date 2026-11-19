@@ -320,6 +320,8 @@ def test_flash_attn4_mixed_causal(
 
 @pytest.mark.parametrize("causal_dtype", [torch.bool, torch.int32])
 def test_flashinfer_mixed_causal_metadata(causal_dtype: torch.dtype):
+    pytest.importorskip("flashinfer")
+
     from vllm.v1.attention.backends.flashinfer import _fill_mixed_causal_metadata
 
     device = "cuda"
