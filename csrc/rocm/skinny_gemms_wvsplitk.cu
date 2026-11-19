@@ -4,6 +4,7 @@
 // Host-side launcher of the wvSplitK skinny GEMM; kernels in skinny_gemms.cuh.
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "skinny_gemms.cuh"
 
@@ -70,11 +71,16 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 #define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
   WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
 
+// bf16 at N=5 on wave64 spills at YTILE 3 and 4 (its dot product widens to
+// f32), so it stays at YTILE 2. fp16 and wave32 do not spill there.
 #define WVSPLIT_TILE_GENERIC(_THRDS, _WVPRGRP, _sYT, __N) \
   {                                                       \
     bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
+    else if (__N == 5 && _THRDS == 64 &&                  \
+             std::is_same_v<fptype, __hip_bfloat16>)      \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if (_sYT <= 4 * 3)                               \
