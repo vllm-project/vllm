@@ -51,6 +51,22 @@ def setup_pass_context():
 class TestCloneCleanup:
     """Test UnsafeCloneEliminationPass behavior on various graph patterns."""
 
+    def test_keep_clone_with_unbacked_layout(self, clone_cleanup_pass):
+        """Unknown symbolic strides must keep the clone without adding a guard."""
+
+        def f(x: torch.Tensor) -> torch.Tensor:
+            selected = x.masked_select(x > 0)
+            view = selected.unsqueeze(0).transpose(0, 1)
+            return view.clone(memory_format=torch.contiguous_format).relu()
+
+        inp = torch.tensor([-1.0, 1.0, 2.0, 3.0], device="cpu")
+        graph_module = make_fx(f, tracing_mode="symbolic")(inp)
+        assert count_clones(graph_module.graph) == 1
+        clone_cleanup_pass(graph_module.graph)
+        graph_module.recompile()
+        assert count_clones(graph_module.graph) == 1
+        torch.testing.assert_close(graph_module(inp), f(inp))
+
     def test_remove_clone_readonly_users(self, clone_cleanup_pass):
         """Clone with only read-only users should be removed."""
 

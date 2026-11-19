@@ -6,6 +6,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._higher_order_ops.triton_kernel_wrap import TritonKernelWrapperFunctional
 from torch._inductor.fx_utils import get_node_storage
 from torch._ops import HigherOrderOperator, OpOverload
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -32,8 +33,12 @@ def clone_preserves_layout(node: fx.Node, original_node: fx.Node) -> bool:
         return True
 
     return (
-        node_stride == original_stride
-        and node_storage_offset == original_storage_offset
+        len(node_stride) == len(original_stride)
+        and all(
+            statically_known_true(left == right)
+            for left, right in zip(node_stride, original_stride)
+        )
+        and statically_known_true(node_storage_offset == original_storage_offset)
     )
 
 
