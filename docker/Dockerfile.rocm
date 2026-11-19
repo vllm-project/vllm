@@ -139,8 +139,8 @@ RUN cd /opt/nixl && \
 # Fetch and verify pinned LMCache source.
 FROM dev AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
-ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
-ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_REF="1181bea5c65a6f477e3680acd14ffac988b13dc3"
+ARG LMCACHE_VERSION="0.5.7.post1"
 
 # Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
@@ -149,7 +149,7 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
     && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
-    && test "$(grep -Fxc 'numpy<=2.2.6' \
+    && test "$(grep -Fxc 'numpy<=2.2.6; python_version < "3.14"' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
     && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
@@ -157,7 +157,7 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
-        -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        -e 's/^numpy<=2\.2\.6;/numpy<=2.3.5;/' \
         -e '/^opentelemetry-api /s/<= 1\.40\.0$/<= 1.45.2/' \
         -e '/^opentelemetry-exporter-prometheus /s/<= 0\.61b0$/<= 0.66b2/' \
         /app/lmcache/requirements/common.txt \
@@ -169,7 +169,7 @@ COPY --from=lmcache_source \
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -r /tmp/lmcache-build-requirements.txt
 
-ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_VERSION="0.5.7.post1"
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 
 COPY --from=lmcache_source /app/lmcache /app/lmcache
@@ -192,10 +192,10 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     set -eu; \
     python3 -m zipfile -e /app/install/*.whl /tmp/lmcache-wheel; \
-    c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
-    test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
+    cuda_ops="$(find /tmp/lmcache-wheel -type f -name 'cuda_ops*.so')"; \
+    test "$(find /tmp/lmcache-wheel -type f -name 'cuda_ops*.so' | wc -l)" -eq 1; \
     expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
-    actual="$(llvm-objdump --offloading "${c_ops}" \
+    actual="$(llvm-objdump --offloading "${cuda_ops}" \
         | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
     if [ "${actual}" != "${expected}" ]; then \
         printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
@@ -324,7 +324,7 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
     --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -c /etc/rocm-constraints.txt -c /r/test.txt -r /r/rocm.txt \
         /nixl/*.whl /lmcache/*.whl quart==0.22.0 msgpack aiohttp pyzmq \
-    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+    && python3 -c "import lmcache, lmcache.cuda_ops; print('lmcache', lmcache.__version__)"
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
