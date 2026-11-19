@@ -89,6 +89,10 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
             return False, str(error)
         return True, None
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.view(torch.float8_e8m0fnu)
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}

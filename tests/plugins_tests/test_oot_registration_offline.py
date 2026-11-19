@@ -85,7 +85,6 @@ def test_oot_registration_multimodal(
             model=dummy_llava_path,
             load_format="dummy",
             max_num_seqs=1,
-            trust_remote_code=True,
             max_model_len=4096,
             enforce_eager=True,
             limit_mm_per_prompt={"image": 1},
