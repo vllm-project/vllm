@@ -262,3 +262,22 @@ def test_harmony_tokenize_and_count_tokens_max_limit():
     count_resp = client.post("/v1/messages/count_tokens", json=payload)
     assert count_resp.status_code == 400
     assert "maximum context length is 3 tokens" in count_resp.text
+
+
+@pytest.mark.parametrize("blank_env", ["", "   "])
+def test_blank_env_var_startup_and_cli_precedence(
+    monkeypatch: pytest.MonkeyPatch, blank_env: str
+):
+    # Blank or whitespace-only env vars should fall back to None without crashing
+    monkeypatch.setenv("VLLM_MAX_TOKENIZE_TOKENS", blank_env)
+    envs.enable_envs_cache()
+    try:
+        assert envs.VLLM_MAX_TOKENIZE_TOKENS is None
+
+        # CLI flag should take precedence over the environment variable
+        parser = FlexibleArgumentParser()
+        BaseFrontendArgs.add_cli_args(parser)
+        args = parser.parse_args(["--max-tokenize-tokens", "7"])
+        assert args.max_tokenize_tokens == 7
+    finally:
+        envs.disable_envs_cache()

@@ -1222,11 +1222,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of tokens allowed for /tokenize, /detokenize, and
     # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
     # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
-    # Currently supported in the Python frontend on standard template rendering
-    # paths (GPT-OSS Harmony rendering is not yet covered).
     "VLLM_MAX_TOKENIZE_TOKENS": lambda: (
         int(val)
-        if (val := os.environ.get("VLLM_MAX_TOKENIZE_TOKENS")) is not None
+        if (val := os.environ.get("VLLM_MAX_TOKENIZE_TOKENS", "").strip())
         else None
     ),
     # Maximum number of bad-word token sequences generated per request.
