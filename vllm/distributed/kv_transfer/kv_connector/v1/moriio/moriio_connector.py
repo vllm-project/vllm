@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import logging
 import math
 import queue
@@ -81,6 +82,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_head_layout,
     get_layer_transfer_geometry,
     get_mamba_state_layout,
+    get_nvfp4_page_split,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
@@ -102,6 +104,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -116,6 +119,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
@@ -1037,8 +1041,11 @@ class MoRIIOConnectorScheduler:
         if dp_local > 0 and pod_idx < len(hosts):
             remote_host = hosts[pod_idx]
         local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
+        peer_tp_size = get_moriio_peer_tp_size(params, self.tp_size)
+        for tp_index in range(peer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                local_dp_rank, tp_index, peer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1355,9 +1362,10 @@ class MoRIIOConnectorScheduler:
                             _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                    peer_tp_size = get_moriio_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(peer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, peer_tp_size
                         )
 
                         self.send_notify_block(
@@ -3588,14 +3596,70 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
-    def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
+    def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
+        """KV heads of a layer across all TP ranks.
+
+        Layers may differ from the model-wide count, which is their maximum:
+        Gemma4's sliding and full attention layers, or a draft model's layers.
+        Without a layer: the model-wide count.
+        """
+        if layer_name is None:
+            return self.model_config.get_total_num_kv_heads()
+        spec = cast(AttentionSpec, self.layer_to_spec[layer_name])
+        if spec.num_kv_heads > 1 or self.world_size == 1:
+            return spec.num_kv_heads * self.world_size
+        # With one head per rank, up to world_size ranks share each head, so the
+        # spec cannot tell the count: take it from the config of the model the
+        # layer belongs to.
+        model_config = self.model_config
+        is_draft = self._is_draft_layer(layer_name)
+        if is_draft:
+            spec_config = self.vllm_config.speculative_config
+            assert spec_config is not None and spec_config.draft_model_config
+            model_config = spec_config.draft_model_config
+        arch = model_config.model_arch_config
+        total = model_config.get_total_num_kv_heads()
+        if arch.per_layer_overrides is not None:
+            layer_idx = extract_layer_index(layer_name)
+            if is_draft:
+                # Drafters may number their layers after the target's (EAGLE).
+                assert self._draft_layer_start is not None
+                layer_idx -= self._draft_layer_start
+            total = arch[layer_idx].total_num_kv_heads
+        return min(total, self.world_size)
+
+    def _is_draft_layer(self, layer_name: str) -> bool:
+        layer = self.vllm_config.compilation_config.static_forward_context.get(
+            layer_name
+        )
+        return bool(getattr(layer, "is_draft_layer", False))
+
+    @functools.cached_property
+    def _draft_layer_start(self) -> int | None:
+        """Index of the first draft model layer with its own KV cache."""
+        indices = [
+            extract_layer_index(name)
+            for name in self.layer_to_spec
+            if self._is_draft_layer(name)
+        ]
+        return min(indices, default=None)
+
+    def _write_tp_mapping(
+        self, remote_tp_size: int | None, layer_name: str | None = None
+    ) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
+        # An MLA-style cache in a non-MLA model (e.g. MiniMax-M3's indexer
+        # keys) has no KV heads: it is identical on every TP rank, so it is
+        # copied whole like an MLA latent rather than sliced by head.
+        is_mla = self.use_mla or (
+            layer_name is not None and self._is_mla_cache_layer(layer_name)
+        )
         return compute_write_tp_mapping(
             self.tp_rank,
             self.world_size,
             remote_tp_size or self.world_size,
-            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
-            self.use_mla,
+            1 if is_mla else self._layer_total_num_kv_heads(layer_name),
+            is_mla,
             self._has_mamba,
         )
 
@@ -3733,7 +3797,7 @@ class MoRIIOConnectorWorker:
                 if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=self._layer_total_num_kv_heads(layer_name),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
         local, remote, sizes = compute_block_transfer_offsets(
@@ -3886,6 +3950,8 @@ class MoRIIOConnectorWorker:
             merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
                 local, remote, sizes, assume_sorted=False
             ),
+            # A packed NVFP4 page's head slots are not per-head rows.
+            nvfp4_split=get_nvfp4_page_split(self.layer_to_spec.get(layer_name)),
         )
         return self._apply_layer_mr_offsets(
             layer_name, offsets, remote_moriio_meta, remote_engine_id

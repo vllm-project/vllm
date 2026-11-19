@@ -52,7 +52,6 @@ def test_tensor_parallel(image_assets: ImageTestAssets):
     llm = LLM(
         model=MOONDREAM3_MODEL_ID,
         tokenizer=MOONDREAM3_TOKENIZER,
-        trust_remote_code=True,
         dtype="bfloat16",
         tensor_parallel_size=2,
         max_model_len=1024,
@@ -89,7 +88,6 @@ def llm():
         return LLM(
             model=MOONDREAM3_MODEL_ID,
             tokenizer=MOONDREAM3_TOKENIZER,
-            trust_remote_code=True,
             dtype="bfloat16",
             max_model_len=2048,
             enforce_eager=True,

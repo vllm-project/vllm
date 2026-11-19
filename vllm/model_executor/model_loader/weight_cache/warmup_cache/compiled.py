@@ -24,7 +24,7 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
 
 logger = init_logger(__name__)
 
