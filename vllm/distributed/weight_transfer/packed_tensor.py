@@ -69,6 +69,13 @@ class Chunk(NamedTuple):
         return self.nbytes > 0
 
 
+def _bytes_end(pieces: list[Piece]) -> int:
+    """Where the bytes of `pieces` end in their chunk; 0 if they have none."""
+    return max(
+        (p.offset + p.end - p.start for p in pieces if p.end > p.start), default=0
+    )
+
+
 def grow_buffer(
     buf: torch.Tensor | None,
     nbytes: int,
@@ -100,10 +107,8 @@ def chunks(
 ) -> Iterator[Chunk]:
     """Lazily cut the `ALIGN`-aligned byte stream of `specs` into chunks of
     `chunk_capacity(buffer_size)` bytes, splitting tensors that cross a cut.
-
-    A full chunk is yielded before the next spec is pulled. `before_pull` gets
-    each piece once, before the next pull and before its chunk is yielded. A
-    chunk's `nbytes` ends at its last byte, without trailing padding."""
+    A full chunk is yielded before the next spec is pulled, and `before_pull`
+    gets each piece once, before the next pull and before its chunk is yielded."""
     limit = chunk_capacity(buffer_size)
     pieces: list[Piece] = []
     seen = 0  # pieces passed to `before_pull`
@@ -268,10 +273,7 @@ def packed_nccl_broadcast_producer(
 
     def pack(pieces: list[Piece]) -> None:
         nonlocal filled
-        end = max(
-            (p.offset + p.end - p.start for p in pieces if p.end > p.start),
-            default=0,
-        )
+        end = _bytes_end(pieces)
         if end == 0:
             _pack_copies(None, pieces, tensors)
             return
@@ -451,12 +453,9 @@ def packed_ipc_producer(
 
     def pack(pieces: list[Piece]) -> None:
         nonlocal buf, filled
-        end = max(
-            (p.offset + p.end - p.start for p in pieces if p.end > p.start),
-            default=0,
-        )
+        end = _bytes_end(pieces)
         with torch.cuda.stream(caller_stream):
-            if end:  # grows only in the first chunk, before it is exported
+            if end:
                 device = tensors[pieces[0].position].device
                 buf = grow_buffer(buf, end, capacity, device, filled)
                 filled = end
@@ -466,8 +465,7 @@ def packed_ipc_producer(
             for t in srcs:  # not reused before the copy ends
                 t.record_stream(caller_stream)
 
-    exported = first_sent = False
-    for chunk in chunks(specs(), buffer_size_bytes, before_pull=pack):
+    for k, chunk in enumerate(chunks(specs(), buffer_size_bytes, before_pull=pack)):
         caller_stream.synchronize()  # before the consumer reads
         # the last chunk ends a tensor, and no item follows
         last = chunk.pieces[-1].position not in tensors
@@ -475,17 +473,17 @@ def packed_ipc_producer(
             ahead.append(next(items, None))
             last = ahead[0] is None
         handle = None
-        if buf is not None and not exported:
-            handle, exported = {gpu_uuid: reduce_tensor(buf)[1]}, True
+        if k == 0 and buf is not None:  # only the first chunk grows `buf`
+            handle = {gpu_uuid: reduce_tensor(buf)[1]}
         yield PackedIpcChunk(
             names=[name for name, _, _ in started],
             shapes=[shape for _, shape, _ in started],
             dtype_names=[dtype for _, _, dtype in started],
             ipc_handle=handle,
-            chunk_capacity=None if first_sent else capacity,
+            chunk_capacity=None if k else capacity,
             last=last,
         )
-        first_sent, filled = True, 0
+        filled = 0
         started.clear()
 
 
