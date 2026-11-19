@@ -295,9 +295,9 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
             cu_token_num_per_group_buffer[curr_expert_id];
         scalar_t* __restrict__ curr_w13_gemm_output_buffer =
             w13_gemm_output_buffer +
-            cu_token_num_per_group_buffer[curr_expert_id] *
+            static_cast<int64_t>(cu_token_num_per_group_buffer[curr_expert_id]) *
                 (output_size_13 / 2) +
-            curr_output_group_id * w13_n_tile_size / 2;
+            static_cast<int64_t>(curr_output_group_id) * w13_n_tile_size / 2;
 
         w_t* __restrict__ w13_weight_ptr_0 = nullptr;
         w_t* __restrict__ w13_weight_ptr_1 = nullptr;
@@ -474,11 +474,13 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                      output_size_2 - curr_output_group_id * w2_n_tile_size);
         scalar_t* __restrict__ curr_w13_gemm_output_buffer =
             w13_gemm_output_buffer +
-            cu_token_num_per_group_buffer[curr_expert_id] * input_size_2;
+            static_cast<int64_t>(cu_token_num_per_group_buffer[curr_expert_id]) *
+                input_size_2;
         float* __restrict__ curr_w2_gemm_output_buffer =
             w2_gemm_output_buffer +
-            cu_token_num_per_group_buffer[curr_expert_id] * output_size_2 +
-            curr_output_group_id * w2_n_tile_size;
+            static_cast<int64_t>(cu_token_num_per_group_buffer[curr_expert_id]) *
+                output_size_2 +
+            static_cast<int64_t>(curr_output_group_id) * w2_n_tile_size;
         scalar_t* __restrict__ w2_weight_ptr =
             w2 + curr_expert_id * output_size_2 * input_size_2 +
             curr_output_group_id * w2_n_tile_size * input_size_2;
@@ -577,7 +579,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
           {
             int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
             float* __restrict__ w2_output_iter =
-                w2_gemm_output_buffer + w2_output_idx * output_size_2;
+                w2_gemm_output_buffer +
+                static_cast<int64_t>(w2_output_idx) * output_size_2;
             float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
             vec_op::FP32Vec16 weight_vec(curr_weight[0]);
             for (int32_t i = 0; i < output_size_2; i += 16) {
@@ -595,7 +598,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
             for (int32_t idx = 1; idx < topk_num - 1; ++idx) {
               int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
               float* __restrict__ w2_output_iter =
-                  w2_gemm_output_buffer + w2_output_idx * output_size_2;
+                  w2_gemm_output_buffer +
+                  static_cast<int64_t>(w2_output_idx) * output_size_2;
               float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
               vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
               for (int32_t i = 0; i < output_size_2; i += 16) {
@@ -615,7 +619,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
             int32_t idx = topk_num - 1;
             int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
             float* __restrict__ w2_output_iter =
-                w2_gemm_output_buffer + w2_output_idx * output_size_2;
+                w2_gemm_output_buffer +
+                static_cast<int64_t>(w2_output_idx) * output_size_2;
             float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
             scalar_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
             vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
@@ -635,7 +640,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
         } else {
           int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
           float* __restrict__ w2_output_iter =
-              w2_gemm_output_buffer + w2_output_idx * output_size_2;
+              w2_gemm_output_buffer +
+              static_cast<int64_t>(w2_output_idx) * output_size_2;
           scalar_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
           vec_op::FP32Vec16 weight_vec(curr_weight[0]);
           for (int32_t i = 0; i < output_size_2; i += 16) {
