@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -11,6 +11,17 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     circular_buffer_layer,
     make_kv_cache_group,
     mamba_layer,
+)
+from tests.v1.kv_connector.unit.test_mooncake_store_worker import (
+    _make_store_sending_thread,
+    _run_store_req,
+)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
@@ -28,15 +39,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler impor
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.output import KVConnectorBlockState
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.sched.output import (
+    KVConnectorBlockState,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
 )
-from vllm.v1.request import RequestStatus
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request, RequestStatus
 
 
 def _make_bare_scheduler(
@@ -1973,3 +1990,90 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+def _scheduled_save_case() -> tuple[
+    MooncakeStoreScheduler,
+    BlockPool,
+    list[KVCacheBlock],
+    MooncakeStoreConnectorMetadata,
+]:
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+        ),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["layer"],
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(config, kv_config)
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=16)
+    scheduler.bind_gpu_block_pool(pool)
+    tokens = list(range(32))
+    request = Request(
+        "admission",
+        tokens,
+        SamplingParams(max_tokens=1),
+        None,
+        block_hashes=[BlockHash(b"a0"), BlockHash(b"a1")],
+    )
+    blocks = pool.get_new_blocks(2)
+    ids = ([b.block_id for b in blocks],)
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [NewRequestData.from_request(request, ids, tokens)]
+    output.num_scheduled_tokens = {request.request_id: 32}
+    output.total_num_scheduled_tokens = 32
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids={request.request_id},
+        resolve_block_ids=lambda _: ids,
+        boundary_state_offloads={},
+    )
+    return scheduler, pool, blocks, scheduler.build_connector_meta(output)
+
+
+def test_failed_save_releases_hbm_only_after_every_worker_finishes():
+    scheduler, pool, blocks, meta = _scheduled_save_case()
+    request = meta.requests[0]
+    pool.free_blocks(blocks)
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    for rank in range(2):
+        store = MagicMock()
+        store.batch_is_exist.return_value = [0, 0]
+        store.batch_put_from_multi_buffers.return_value = [-900, -900]
+        sender = _make_store_sending_thread(
+            store,
+            coord=scheduler._store_coord,
+            tp_rank=rank,
+        )
+        _run_store_req(sender, request)
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                    completed_saves=sender.take_completed_saves(),
+                ),
+            )
+        )
+        assert sender.request_queue.unfinished_tasks == 0
+        assert [block.ref_cnt for block in blocks] == [1 - rank, 1 - rank]
+        assert store.batch_put_from_multi_buffers.call_count == 1
+        assert sender._saved_offset.get(request.req_id, 0) == 0
+    assert not scheduler.has_pending_push_work()
