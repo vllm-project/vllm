@@ -272,9 +272,10 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
-        # A pause whose completion condition (scheduler.quiesced) is not met
-        # yet; re-checked after every step and whenever the engine is idle.
-        self._pending_pause: tuple[Future[Any], PauseMode, bool, bool] | None = None
+        # Pauses whose completion condition (scheduler.quiesced) is not met
+        # yet, in arrival order; re-checked after every step and whenever the
+        # engine is idle. Each completes on its own row of the pause table.
+        self._pending_pauses: list[tuple[Future[Any], PauseMode, bool, bool]] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -2466,6 +2467,13 @@ class EngineCoreProc(EngineCore):
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        if mode == "keep" and any(p[1] == "wait" for p in self._pending_pauses):
+            # Keep stops scheduling, so the pending wait could never drain.
+            # Rejected before anything changes; abort can still escalate.
+            raise RuntimeError(
+                "Cannot pause with mode='keep' while a mode='wait' pause is "
+                "still draining; resume first or pause with mode='abort'."
+            )
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
@@ -2488,8 +2496,9 @@ class EngineCoreProc(EngineCore):
             self._finish_pause(clear_cache, reset_connector)
             return None
 
+        # Earlier pending pauses stay pending: each caller gets a result.
         future = Future[Any]()
-        self._pending_pause = (future, mode, clear_cache, reset_connector)
+        self._pending_pauses.append((future, mode, clear_cache, reset_connector))
         return future
 
     def pause_generation(
@@ -2506,13 +2515,11 @@ class EngineCoreProc(EngineCore):
         # After the checkpoint guard, so a refused resume keeps rejecting.
         super().resume_scheduler()
         self.reject_new_requests = False
-        if (pending := self._pending_pause) is not None:
+        pending, self._pending_pauses = self._pending_pauses, []
+        for future, *_ in pending:
             # The operation waiting inside the pause ends with it; its caller
             # must not see a success that never happened.
-            self._pending_pause = None
-            pending[0].set_exception(
-                RuntimeError("Resumed before the pause completed.")
-            )
+            future.set_exception(RuntimeError("Resumed before the pause completed."))
 
     def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
         """Drain with `mode`, then release the KV cache and what a process
@@ -2580,23 +2587,26 @@ class EngineCoreProc(EngineCore):
         )
 
     def _maybe_finish_pause(self) -> None:
-        """Complete a pending pause once its table row is satisfied."""
-        if self._pending_pause is None:
+        """Complete each pending pause whose table row is satisfied."""
+        if not self._pending_pauses:
             return
-        future, mode, clear_cache, reset_connector = self._pending_pause
-        if mode == "keep" and clear_cache:
+        if any(mode == "keep" and clear for _, mode, clear, _ in self._pending_pauses):
             # Prefills in flight at the pause have finished since, and
             # requests may have been added: retract their transfers too.
             self.scheduler.retract_kv_transfers()
-        if not self._pause_ready(mode, clear_cache):
-            return
-        self._pending_pause = None
-        try:
-            self._finish_pause(clear_cache, reset_connector)
-        except Exception as e:
-            future.set_exception(e)
-        else:
-            future.set_result(None)
+        still_pending = []
+        for pending in self._pending_pauses:
+            future, mode, clear_cache, reset_connector = pending
+            if not self._pause_ready(mode, clear_cache):
+                still_pending.append(pending)
+                continue
+            try:
+                self._finish_pause(clear_cache, reset_connector)
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
+        self._pending_pauses = still_pending
 
     def _send_finish_outputs_to_client(
         self,

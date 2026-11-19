@@ -821,11 +821,10 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
-    core._pending_pause = None
+    core._pending_pauses = []
     # The scheduler's pause table: by default a pause may complete.
     core.scheduler.quiesced.return_value = True
     core.scheduler.ledger.needs_driving.return_value = False
-    core.scheduler.ledger.is_empty.return_value = True
     return core
 
 
@@ -1082,7 +1081,7 @@ def test_keep_pause_without_clear_ignores_retained_exports():
 
     assert EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False) is None
     assert order == ["synchronize_device"]
-    assert core._pending_pause is None
+    assert core._pending_pauses == []
 
 
 @pytest.mark.parametrize(
@@ -1096,13 +1095,13 @@ def test_other_pauses_wait_for_the_ledger(mode, clear_cache):
     core._set_kv_cache_reclaimable = MagicMock()
     result = EngineCoreProc.pause_scheduler(core, mode=mode, clear_cache=clear_cache)
     assert isinstance(result, Future) and not result.done()
-    assert core._pending_pause is not None
+    assert len(core._pending_pauses) == 1
     # The reads complete: the scheduler reports the row satisfied.
     core.scheduler.quiesced.side_effect = None
     core.scheduler.quiesced.return_value = True
     core._maybe_finish_pause()
     assert result.result(timeout=0) is None
-    assert core._pending_pause is None
+    assert core._pending_pauses == []
     # A clearing keep pause retracts again what appeared while it was pending.
     expected_retracts = 2 if mode == "keep" else 0
     assert core.scheduler.retract_kv_transfers.call_count == expected_retracts
@@ -1133,4 +1132,76 @@ def test_resume_fails_pending_pause():
     EngineCoreProc.resume_scheduler(core)
     with pytest.raises(RuntimeError, match="Resumed before"):
         result.result(timeout=0)
-    assert core._pending_pause is None
+    assert core._pending_pauses == []
+
+
+def _draining_core() -> EngineCoreProc:
+    """An engine still draining requests: no pause row holds yet."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.finished_req_ids = set()
+    core.scheduler.finish_requests.return_value = []
+    core._send_abort_outputs = MagicMock()
+    core._reset_caches = MagicMock()
+    core._set_kv_cache_reclaimable = MagicMock()
+    core.scheduler.quiesced.return_value = False
+    return core
+
+
+@pytest.mark.parametrize("second", ["wait", "abort"])
+def test_overlapping_pauses_each_get_a_result(second):
+    core = _draining_core()
+    first = EngineCoreProc.pause_scheduler(core, mode="wait", clear_cache=True)
+    other = EngineCoreProc.pause_scheduler(core, mode=second, clear_cache=False)
+    assert isinstance(first, Future) and isinstance(other, Future)
+    assert first is not other
+    assert len(core._pending_pauses) == 2
+    # The engine drains: both rows hold and both callers are answered.
+    core.scheduler.quiesced.return_value = True
+    core._notify_idle_state_callbacks()
+    assert first.result(timeout=0) is None
+    assert other.result(timeout=0) is None
+    assert core._pending_pauses == []
+
+
+def test_overlapping_pauses_complete_on_their_own_rows():
+    core = _draining_core()
+    cleared = EngineCoreProc.pause_scheduler(core, mode="wait", clear_cache=True)
+    kept = EngineCoreProc.pause_scheduler(core, mode="abort", clear_cache=False)
+    # The engine drains, but a block is still pinned: only the row that does
+    # not clear the cache holds.
+    core.scheduler.quiesced.side_effect = lambda mode, clear: not clear
+    core._maybe_finish_pause()
+    assert kept.result(timeout=0) is None
+    assert not cleared.done()
+    assert len(core._pending_pauses) == 1
+    core.scheduler.quiesced.side_effect = None
+    core.scheduler.quiesced.return_value = True
+    core._maybe_finish_pause()
+    assert cleared.result(timeout=0) is None
+
+
+def test_keep_pause_rejected_while_wait_pause_drains():
+    core = _draining_core()
+    pending = EngineCoreProc.pause_scheduler(core, mode="wait", clear_cache=False)
+    core.scheduler.set_pause_state.reset_mock()
+    with pytest.raises(RuntimeError, match="still draining"):
+        EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    # Rejected before anything changed; the wait pause is still pending.
+    core.scheduler.set_pause_state.assert_not_called()
+    assert not pending.done()
+    assert len(core._pending_pauses) == 1
+
+
+def test_resume_fails_every_pending_pause():
+    core = _draining_core()
+    core._checkpoint_state = MagicMock(is_restored=True)
+    core.reject_new_requests = True
+    futures = [
+        EngineCoreProc.pause_scheduler(core, mode="wait", clear_cache=False),
+        EngineCoreProc.pause_scheduler(core, mode="abort", clear_cache=True),
+    ]
+    EngineCoreProc.resume_scheduler(core)
+    for future in futures:
+        with pytest.raises(RuntimeError, match="Resumed before"):
+            future.result(timeout=0)
+    assert core._pending_pauses == []
