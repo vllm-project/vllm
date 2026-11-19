@@ -3,9 +3,9 @@
 """Per-attempt transfer evidence for the MooncakeStore worker.
 
 The production-side evidence producer of the hole-repair policy
-(``kv_load_failure_policy="repair"``). One `AttemptEvidence` instance is
+(`kv_load_failure_policy="repair"`). One `AttemptEvidence` instance is
 created by a receive thread at the START of every load attempt, carries
-the scheduler-assigned ``transfer_generation`` captured once from the
+the scheduler-assigned `transfer_generation` captured once from the
 load spec, and accumulates the ACTUAL outcomes of every store GET the
 attempt issued.
 
@@ -14,16 +14,16 @@ Accounting unit
 A Mooncake store object is one (group, shard, logical-block) chunk whose
 payload packs EVERY KV-cache layer of its group for that block. The
 scheduler evidence contract reconciles reports and attestations in
-``(block, layer)`` cells: ``failed_objects == len(failed_block_ids) *
-len(observed_failed_layers)``. This module therefore counts in the same
+`(block, layer)` cells: `failed_objects == len(failed_block_ids) *
+len(observed_failed_layers)`. This module therefore counts in the same
 cell unit:
 
-* ``expected_cells`` -- blocks this rank expected to load, times the
+* `expected_cells` -- blocks this rank expected to load, times the
   layer count. A shard of a block is NOT a separate cell: any failed
   shard makes the whole block unusable, because the repair writes whole
   blocks and a partially-headed block is corrupt for attention.
-* ``failed_cells`` -- failed blocks times the layer count.
-* ``certified_cells`` -- blocks fully loaded under the claimed
+* `failed_cells` -- failed blocks times the layer count.
+* `certified_cells` -- blocks fully loaded under the claimed
   certification mode, times the layer count.
 
 Truthfulness rules
@@ -33,15 +33,15 @@ Truthfulness rules
   emission time, so a delayed old attempt can never inherit a newer
   attempt's identity.
 * Certification is only ever one of the modes actually applied:
-  ``"content"`` -- the store keys embed the block's chained token hash
+  `"content"` -- the store keys embed the block's chained token hash
   (an identity key, NOT a digest of the KV payload bytes), so GET
   success means the bytes stored under that identity key were returned:
   correct content iff the store's key-to-data binding is trustworthy
-  (the documented store-trust assumption); ``"none"`` -- no verification
-  beyond GET success. Digest verification (``"sha256"``) is never
+  (the documented store-trust assumption); `"none"` -- no verification
+  beyond GET success. Digest verification (`"sha256"`) is never
   claimed: the Mooncake GET path performs no independent digest check.
   Deployments that do not trust the store key-to-data binding should
-  configure ``evidence_certification="none"``; the scheduler then fails
+  configure `evidence_certification="none"`; the scheduler then fails
   publication closed, exactly as designed.
 * An attempt that did not complete (interrupted, exception before
   terminality) never reports success: it stays non-terminal and its
@@ -61,10 +61,10 @@ from vllm.v1.outputs import KVLoadAttestation, KVLoadFailureReport
 def validate_evidence_certification(mode: str) -> str:
     """Validate the configured evidence certification mode.
 
-    Only ``content`` (content-addressed store keys under the documented
-    store-trust assumption) and ``none`` (no verification beyond GET
+    Only `content` (content-addressed store keys under the documented
+    store-trust assumption) and `none` (no verification beyond GET
     success) are producible by this worker: the GET path performs no
-    independent digest check, so ``sha256`` is rejected -- never claim a
+    independent digest check, so `sha256` is rejected -- never claim a
     verification that did not happen.
 
     Args:
@@ -74,7 +74,7 @@ def validate_evidence_certification(mode: str) -> str:
         The validated mode.
 
     Raises:
-        ValueError: For any mode other than ``"content"``/``"none"``.
+        ValueError: For any mode other than `"content"`/`"none"`.
 
     """
     if mode not in ("content", "none"):
@@ -98,7 +98,7 @@ def evidence_enabled(
     Activation gates:
 
     * the repair policy must be explicitly configured -- under any other
-      policy (including the default ``fail``) the connector's evidence
+      policy (including the default `fail`) the connector's evidence
       output would raise in the scheduler's evidence handler and the
       flat-channel suppression would destroy the only working failure
       channel, so the evidence channels stay fully off;
@@ -134,6 +134,7 @@ class AttemptEvidence:
     block_size: int
     restored_extent: int
     certification_mode: str
+    vllm_cached_tokens: int = 0
     # Logical (group-local) block indices this rank expected to load.
     expected_blocks: set[int] = field(default_factory=set)
     # Blocks with at least one failed store GET (or an exception mid-batch).
@@ -149,7 +150,7 @@ class AttemptEvidence:
         self.expected_blocks.add(logical_block)
 
     def note_block_outcome(self, logical_block: int, ok: bool) -> None:
-        """Record the outcome of one store object covering ``logical_block``.
+        """Record the outcome of one store object covering `logical_block`.
 
         A block is loaded only when EVERY shard-object of that block
         succeeded (a partially-headed block is corrupt); it is failed as
@@ -205,7 +206,7 @@ class AttemptEvidence:
         """Whether the loaded set is fully certified under the mode
         (mirrors KVLoadAttestation.certifies_content: a real mode, every
         loaded object certified; the failed objects are the report's
-        region and are excluded by construction). Only ``content`` can
+        region and are excluded by construction). Only `content` can
         certify here -- see certified_cells."""
         if self.certification_mode != "content":
             return False
@@ -227,7 +228,7 @@ class AttemptEvidence:
     def to_failure_report(self) -> KVLoadFailureReport | None:
         """Build the v1 single-region failure report for this attempt.
 
-        Returns ``None`` when the failure geometry cannot be represented by
+        Returns `None` when the failure geometry cannot be represented by
         the single-region contract (more than one failed block, or a failed
         block without a captured physical id): the caller then emits no
         report and the scheduler's reconciliation fails the delivery closed
@@ -236,7 +237,8 @@ class AttemptEvidence:
         The rollback boundary is the largest block-aligned prefix of
         CONTIGUOUSLY loaded blocks before the failed one: blocks the
         attempt never loaded are not healthy, so any hole before the
-        failure forces the full-recompute floor (rollback 0).
+        failure forces the full-recompute floor (rollback 0). The locally
+        cached prefix is already valid and does not require a store GET.
         """
         if len(self.failed_blocks) != 1:
             return None
@@ -247,7 +249,7 @@ class AttemptEvidence:
         span_start = logical * self.block_size
         span_end = span_start + self.block_size
         rollback = span_start
-        for idx in range(logical):
+        for idx in range(self.vllm_cached_tokens // self.block_size, logical):
             if idx not in self.loaded_blocks or idx in self.failed_blocks:
                 rollback = 0
                 break
@@ -265,8 +267,8 @@ class AttemptEvidence:
 
 class EvidenceBuffer:
     """Thread-safe hand-off of completed attempt evidence from the receive
-    threads to the worker ``get_load_*`` drain (called once per step in
-    ``post_forward``)."""
+    threads to the worker `get_load_*` drain (called once per step in
+    `post_forward`)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()

@@ -324,6 +324,21 @@ def test_report_rollback_zero_when_prefix_hole():
     assert report.rollback_boundary == 0
 
 
+def test_report_preserves_local_prefix_before_external_failure():
+    """Locally cached blocks do not need a store GET to support rollback."""
+    buf = EvidenceBuffer()
+    thread, _ = make_thread(FakeStore([0, RC_OBJECT_NOT_FOUND, 0, 0, 0, 0]), buf)
+    meta = make_req_meta(vllm_cached_tokens=2 * BLOCK, gen=7)
+    thread.request_queue.put(meta)
+    thread._handle_request(meta)
+    (attempt,) = buf.drain_terminal()
+    report = attempt.to_failure_report()
+    assert report is not None
+    assert report.token_span == (3 * BLOCK, 4 * BLOCK)
+    assert report.rollback_boundary == 3 * BLOCK
+    assert attempt.to_attestation().expected_objects == 6 * LAYERS
+
+
 def test_failed_block_without_physical_id_no_report():
     ev = make_ev()
     ev.note_expected_block(0)
@@ -1370,7 +1385,7 @@ def test_connector_worker_role_forwards_evidence_getters():
 
 
 def test_producer_evidence_admits_repair_in_real_scheduler():
-    """[1][2] End-to-end: evidence produced by the REAL receive thread
+    """End-to-end: evidence produced by the REAL receive thread
     from REAL per-key GET outcomes (one OBJECT_NOT_FOUND) passes the
     REAL repair-policy scheduler's identity partition, geometry
     battery, reconciliation arithmetic, and completeness gate, and
