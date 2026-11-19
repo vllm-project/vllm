@@ -80,6 +80,7 @@ pub struct ChatRequestProcessor {
     /// Effective model dtype that media tensors are encoded in; multimodal
     /// requests are rejected without one.
     model_dtype: Option<ModelDtype>,
+    allow_missing_mm_embeddings: bool,
     /// Effective runtime context length. Absent for render-only frontends
     /// without a configured `--max-model-len`.
     max_model_len: Option<usize>,
@@ -111,6 +112,7 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype,
+            allow_missing_mm_embeddings: false,
             max_model_len: max_model_len.map(|len| len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -180,6 +182,7 @@ impl ChatRequestProcessor {
                     self.backend.multimodal_model_info(),
                     model_dtype,
                     self.max_model_len,
+                    self.allow_missing_mm_embeddings,
                 )
                 .await
             }
@@ -202,6 +205,11 @@ impl ChatRequestProcessor {
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
         let multimodal::MultimodalInput { preprocessed, raw } = media;
+        if raw.iter().any(|part| matches!(part, MediaContentPart::ImageEmbeds { .. })) {
+            return Err(Error::UnsupportedMultimodalContent(
+                "metadata-only image_embeds in content_parts; use chat completions",
+            ));
+        }
         let mut features = info.prepare_preprocessed(preprocessed, token_ids.len())?;
         if !raw.is_empty() {
             let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
@@ -365,8 +373,9 @@ impl ChatLlm {
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         let info = text.llm().info();
-        let processor =
+        let mut processor =
             ChatRequestProcessor::new(backend, info.model_dtype, Some(info.max_model_len));
+        processor.allow_missing_mm_embeddings = info.allow_missing_mm_embeddings;
 
         Self { text, processor }
     }

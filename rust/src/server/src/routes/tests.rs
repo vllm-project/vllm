@@ -617,6 +617,7 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
                     ChatContentPart::Text { text }
                     | ChatContentPart::ToolReference { name: text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::ImageEmbeds { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }
                     | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
@@ -5411,6 +5412,150 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 }
 
 const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+/// Proxy image references preserve the raw render and cache identity without pixels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_metadata_only_matches_raw_images_for_ec_and_kv_consumers() {
+    use base64::Engine as _;
+
+    let rendered = render_two_image_chat().await;
+    let encoded = rendered["features"]["kwargs_data"]["image"][0].as_str().unwrap();
+    let kwargs = crate::mm_wire::decode_kwargs(
+        &base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(),
+    )
+    .unwrap();
+    let Some(MmKwargValue::Tensor(grid)) = &kwargs["image_grid_thw"].data else {
+        panic!("image grid is a tensor");
+    };
+    let grid: Vec<i64> = grid
+        .data
+        .as_raw_view()
+        .unwrap()
+        .chunks_exact(8)
+        .map(|bytes| i64::from_ne_bytes(bytes.try_into().unwrap()))
+        .collect();
+
+    for (params_key, params) in [
+        ("ec_transfer_params", json!({"producer": "test-encoder"})),
+        ("kv_transfer_params", json!({"do_remote_prefill": true})),
+    ] {
+        let expected = rendered.clone();
+        let kwargs = kwargs.clone();
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = true;
+        let (mut app, engine) = test_app_with_ready_and_engine_request_check(
+            ready,
+            |llm| {
+                ChatLlm::from_shared_backend(
+                    llm,
+                    Arc::new(FakeChatBackend::with_multimodal_model_info(
+                        qwen_multimodal_model_info(),
+                    )),
+                )
+            },
+            move |request| {
+                assert_eq!(
+                    json!(decode_prompt_token_ids(request).unwrap()),
+                    expected["token_ids"]
+                );
+                let features = request.mm_features.as_ref().unwrap();
+                assert_eq!(features.len(), 2);
+                for (index, feature) in features.iter().enumerate() {
+                    assert_eq!(
+                        json!(feature.identifier),
+                        expected["features"]["mm_hashes"]["image"][index]
+                    );
+                    let position = &expected["features"]["mm_placeholders"]["image"][index];
+                    assert_eq!(json!(feature.mm_position.offset), position["offset"]);
+                    assert_eq!(json!(feature.mm_position.length), position["length"]);
+                    let data = feature.data.as_ref().unwrap();
+                    assert_eq!(
+                        data.keys().map(String::as_str).collect::<Vec<_>>(),
+                        ["image_grid_thw"]
+                    );
+                    assert_eq!(data["image_grid_thw"], kwargs["image_grid_thw"]);
+                }
+            },
+        )
+        .await;
+        let mut body = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "image_embeds", "image_embeds": {"image_grid_thw": grid}, "uuid": "image-1"},
+                {"type": "text", "text": "then "},
+                {"type": "image_embeds", "image_embeds": {"image_grid_thw": grid}, "uuid": "image-2"}
+            ]}],
+            "max_completion_tokens": 8
+        });
+        body[params_key] = params;
+        let (status, response) = post_json(&mut app, "/v1/chat/completions", body).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["choices"][0]["message"]["content"], "hi");
+        engine.finish().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_metadata_only_rejects_unsupported_role_and_invalid_metadata() {
+    for allow in [false, true] {
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = allow;
+        let (state, _engine) = test_admin_state_with_backend_and_engine_script(
+            ready,
+            Arc::new(FakeChatBackend::with_multimodal_model_info(
+                qwen_multimodal_model_info(),
+            )),
+            |state| state,
+            |_dealer, _push| boxed_test_future(std::future::pending()),
+        )
+        .await;
+        let mut app = build_router(state);
+        let reference = json!({"type": "image_embeds", "image_embeds": {"image_grid_thw": [1, 4, 4]}, "uuid": "image-1"});
+        let params = if allow {
+            json!(null)
+        } else {
+            json!({"producer": "e"})
+        };
+        let mut cases = vec![(reference.clone(), params)];
+        if allow {
+            for metadata in [
+                json!({"image_grid_thw": [1, 4]}),
+                json!({"llm_grid": [4, 4]}),
+                json!({"image_grid_thw": [1, 4, 4], "llm_grid": [4, 4]}),
+                json!({"image_grid_thw": [1, 0, 4]}),
+                json!({"image_grid_thw": [2, 4, 4]}),
+                json!({"image_grid_thw": [1, 3, 4]}),
+                json!({"image_grid_thw": [1, i64::MAX, i64::MAX]}),
+                json!({"image_grid_thw": [1, 4, 4], "pixel_values": [1]}),
+                json!({"image_grid_thw": [1, 4.5, 4]}),
+            ] {
+                let mut part = reference.clone();
+                part["image_embeds"] = metadata;
+                cases.push((part, json!({"producer": "e"})));
+            }
+            let mut empty_uuid = reference.clone();
+            empty_uuid["uuid"] = json!("");
+            cases.push((empty_uuid, json!({"producer": "e"})));
+        }
+        for (part, params) in cases {
+            let (status, response) = tokio::time::timeout(
+                Duration::from_secs(10),
+                post_json(
+                    &mut app,
+                    "/v1/chat/completions",
+                    json!({
+                        "messages": [{"role": "user", "content": [part]}],
+                        "ec_transfer_params": params
+                    }),
+                ),
+            )
+            .await
+            .expect("invalid metadata must be rejected before engine execution");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        }
+    }
+}
 
 fn multimodal_render_app() -> axum::Router {
     let backend = Arc::new(FakeChatBackend::with_multimodal_model_info(

@@ -62,6 +62,36 @@ and compares the disaggregated outputs against it. Set `MODEL` to use another mo
 or `MOONCAKE_EC_PROTOCOL=rdma` to use RDMA on supported hardware. See the script for
 additional configuration options.
 
+### Rust HTTP metadata-only images
+
+The Rust frontend accepts the Python EPD proxy's JSON `image_embeds` references
+on `/v1/chat/completions` for Qwen2/2.5-VL, Qwen3-VL/Qwen3.5,
+DeepSeek V4.1, and Kimi K3/K3.1. Start the consumer with
+`VLLM_USE_RUST_FRONTEND=1` and its usual EC configuration; EC consumers
+automatically enable embedding inputs. Multimodal KV consumers can also accept
+these references for separate E/P/D deployments.
+
+For example, an image already encoded by E is forwarded as:
+
+```json
+{
+  "type": "image_embeds",
+  "image_embeds": {"image_grid_thw": [1, 32, 32]},
+  "uuid": "the-same-image-uuid-sent-to-E"
+}
+```
+
+The metadata field is `image_grid_thw` for Qwen, `llm_grid` for DeepSeek V4.1,
+or `image_sizes` (`[width, height]`) for Kimi K3/K3.1. Each content part describes
+one image and requires a nonempty UUID. The request must include
+`ec_transfer_params`, or `kv_transfer_params` with `do_remote_prefill=true`.
+Embeddings still arrive through the connectors; the frontend rebuilds the prompt
+without fetching or preprocessing the images. Raw and metadata-only images
+cannot be mixed in one request. Serialized embedding tensors and audio/video
+metadata-only content parts are not supported by this Rust HTTP path yet.
+This path requires multimodal rendering; `--language-model-only` on the Rust
+frontend is not supported.
+
 ### Audio inputs
 
 The Python EPD proxy also rewrites audio in `/v1/chat/completions` into

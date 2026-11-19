@@ -33,7 +33,9 @@ use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, M
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use crate::error::{
+    Error, Result, bail_invalid_preprocessed_multimodal, bail_multimodal, multimodal,
+};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
@@ -42,6 +44,7 @@ mod expand;
 mod image;
 mod input;
 mod item;
+mod metadata;
 mod models;
 mod preprocessed;
 mod tensor;
@@ -50,6 +53,8 @@ mod video;
 
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
+pub use self::metadata::ImageMetadata;
+use self::metadata::ImageReference;
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
 
@@ -174,6 +179,7 @@ struct ResolvedMultimodalSpec {
     /// differs from the per-modality default (e.g. `"patches"` for
     /// DeepSeek-V4.1 images).
     encoder_input_key: Option<String>,
+    image_metadata: Option<&'static str>,
 }
 
 impl ResolvedMultimodalSpec {
@@ -184,6 +190,7 @@ impl ResolvedMultimodalSpec {
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
             encoder_input_key: raw.encoder_input_key_for(modality),
+            image_metadata: ImageMetadata::field_for_model(raw.name()),
         }
     }
 
@@ -637,9 +644,31 @@ pub(crate) async fn finalize_rendered_prompt(
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
     max_model_len: Option<usize>,
+    allow_missing_mm_embeddings: bool,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
-    let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
-    if media_parts.is_empty() {
+    let (media_parts, references) = extract_media_parts(request, rendered.media_order.as_deref())?;
+    if !references.is_empty() {
+        if !allow_missing_mm_embeddings {
+            bail_invalid_preprocessed_multimodal!(
+                "metadata-only image_embeds requires an EC or multimodal KV consumer"
+            );
+        }
+        let xargs = request.sampling_params.vllm_xargs.as_ref();
+        let has_ec = xargs
+            .and_then(|args| args.get("ec_transfer_params"))
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|params| !params.is_empty());
+        let has_remote_kv =
+            xargs.and_then(|args| args.get("kv_transfer_params")).is_some_and(|params| {
+                params.get("do_remote_prefill").and_then(serde_json::Value::as_bool) == Some(true)
+            });
+        if !has_ec && !has_remote_kv {
+            bail_invalid_preprocessed_multimodal!(
+                "metadata-only image_embeds requires ec_transfer_params or remote-prefill kv_transfer_params"
+            );
+        }
+    }
+    if media_parts.is_empty() && references.is_empty() {
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
@@ -652,8 +681,9 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
-        .prepare_multimodal(
+        .prepare_multimodal_timed(
             media_parts,
+            references,
             &mut prompt_token_ids,
             model_dtype,
             max_model_len,
@@ -668,7 +698,7 @@ pub(crate) async fn finalize_rendered_prompt(
 fn extract_media_parts(
     request: &ChatRequest,
     media_order: Option<&[MediaPartSource]>,
-) -> Result<Vec<MediaContentPart>> {
+) -> Result<(Vec<MediaContentPart>, Vec<ImageReference>)> {
     let parts = match media_order {
         // Resolve exactly the sources selected by the renderer, in placeholder order.
         Some(media_order) => Either::Left(media_order.iter().map(|source| -> Result<_> {
@@ -719,8 +749,10 @@ fn extract_media_parts(
             .map(Ok)
         })),
     };
-    parts
-        .map(|part| match part? {
+    let mut raw = Vec::new();
+    let mut references = Vec::new();
+    for part in parts {
+        raw.push(match part? {
             ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => {
                 bail_multimodal!("renderer reported a non-media part as multimodal content")
             }
@@ -728,28 +760,36 @@ fn extract_media_parts(
                 image_url,
                 detail,
                 uuid,
-            } => Ok(MediaContentPart::ImageUrl {
+            } => MediaContentPart::ImageUrl {
                 url: image_url.clone(),
                 detail: *detail,
                 uuid: uuid.clone(),
                 max_long_side_pixel: None,
-            }),
-            ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
+            },
+            ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
+                references.push(ImageReference {
+                    metadata: *image_embeds,
+                    uuid: uuid.clone(),
+                });
+                continue;
+            }
+            ChatContentPart::VideoUrl { video_url, uuid } => MediaContentPart::VideoUrl {
                 url: video_url.clone(),
                 uuid: uuid.clone(),
                 fps: None,
                 max_long_side_pixel: None,
-            }),
-            ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
+            },
+            ChatContentPart::InputAudio { data, format, uuid } => MediaContentPart::AudioUrl {
                 url: input_audio_data_url(data, format.as_deref())?,
                 uuid: uuid.clone(),
-            }),
-            ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
+            },
+            ChatContentPart::AudioUrl { audio_url, uuid } => MediaContentPart::AudioUrl {
                 url: audio_url.clone(),
                 uuid: uuid.clone(),
-            }),
-        })
-        .collect()
+            },
+        });
+    }
+    Ok((raw, references))
 }
 
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.
@@ -929,8 +969,14 @@ impl MultimodalModelInfo {
         if media_parts.is_empty() {
             return Ok(Vec::new());
         }
-        self.prepare_multimodal_timed(media_parts, prompt_token_ids, model_dtype, max_model_len)
-            .await
+        self.prepare_multimodal_timed(
+            media_parts,
+            Vec::new(),
+            prompt_token_ids,
+            model_dtype,
+            max_model_len,
+        )
+        .await
     }
 
     /// Timed body of [`Self::prepare_multimodal`]; each stage is a `tracing`
@@ -944,16 +990,33 @@ impl MultimodalModelInfo {
     async fn prepare_multimodal_timed(
         &self,
         media_parts: Vec<MediaContentPart>,
+        references: Vec<ImageReference>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
         max_model_len: Option<usize>,
     ) -> Result<MmFeatures> {
-        let media_parts_len = media_parts.len();
+        let media_parts_len = media_parts.len() + references.len();
         self.validate_mm_limits(&media_parts)?;
+        if !references.is_empty()
+            && media_parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MediaContentPart::ImageUrl { .. } | MediaContentPart::ImageData { .. }
+                )
+            })
+        {
+            bail_invalid_preprocessed_multimodal!(
+                "Mixing raw image and embedding inputs is not allowed"
+            );
+        }
+        self.validate_modality_limits(std::iter::repeat_n(MmModality::Image, references.len()))?;
         let vision_context = self.vision_preprocessing_context(prompt_token_ids, max_model_len);
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
+        if !references.is_empty() {
+            prepared.push(self.prepare_image_references(references, max_model_len)?);
+        }
         if !fetched.images.is_empty() {
             prepared.push(
                 self.prepare_images(
@@ -2011,6 +2074,80 @@ mod tests {
         test_info("deepseek_v41", config, tokenizer)
     }
 
+    /// Rebuilding from metadata must keep the encoder's token layout and
+    /// UUID-derived cache key, without running the image processor again.
+    #[tokio::test]
+    async fn image_metadata_preserves_raw_prompt_layout_and_cache_identity() {
+        use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
+
+        let kimi = test_info(
+            "kimi_k31",
+            serde_json::json!({"model_type": "kimi_k31", "media_placeholder_token_id": 163605}),
+            TestTokenizer::new()
+                .with_regular_token("<|media_pad|>", 163605)
+                .with_regular_token("<|media_begin|>", 163600)
+                .with_regular_token("<|media_content|>", 163601)
+                .with_regular_token("<|media_end|>", 163602),
+        );
+        for (info, key) in [
+            (qwen3_vl_info(), "image_grid_thw"),
+            (deepseek_v41_info(), "llm_grid"),
+            (kimi, "image_sizes"),
+        ] {
+            let marker = &info.image.as_ref().unwrap().placeholder.marker_token_ids;
+            let mut tokens = [vec![10], marker.clone(), vec![20]].concat();
+            let mut raw_tokens = tokens.clone();
+            let mut raw = png_640x480();
+            let MediaContentPart::ImageUrl { uuid, .. } = &mut raw else {
+                unreachable!()
+            };
+            *uuid = Some("image-a".to_owned());
+            let raw_features = info
+                .prepare_multimodal(vec![raw], &mut raw_tokens, ModelDtype::BFloat16, Some(8192))
+                .await
+                .unwrap();
+            let values = if key == "image_sizes" {
+                vec![640, 480]
+            } else {
+                let Some(MmKwargValue::Tensor(tensor)) =
+                    &raw_features[0].data.as_ref().unwrap()[key].data
+                else {
+                    panic!("metadata is a tensor");
+                };
+                tensor
+                    .data
+                    .as_raw_view()
+                    .unwrap()
+                    .chunks_exact(8)
+                    .map(|bytes| i64::from_ne_bytes(bytes.try_into().unwrap()))
+                    .collect()
+            };
+            let metadata = ImageReference {
+                metadata: serde_json::from_value(serde_json::json!({key: values})).unwrap(),
+                uuid: "image-a".to_owned(),
+            };
+            let features = info
+                .prepare_multimodal_timed(
+                    Vec::new(),
+                    vec![metadata],
+                    &mut tokens,
+                    ModelDtype::BFloat16,
+                    Some(8192),
+                )
+                .await
+                .unwrap();
+            assert_eq!(tokens, raw_tokens, "{key}");
+            assert_eq!(
+                features[0].mm_position, raw_features[0].mm_position,
+                "{key}"
+            );
+            assert_eq!(features[0].identifier, raw_features[0].identifier, "{key}");
+            assert_eq!(features[0].mm_hash, raw_features[0].mm_hash, "{key}");
+            assert!(!features[0].data.as_ref().unwrap().contains_key("pixel_values"));
+            assert!(!features[0].data.as_ref().unwrap().contains_key("patches"));
+        }
+    }
+
     #[test]
     fn kimi_k31_resolves_kimi_k3_image_support_by_model_type() {
         const KIMI_MEDIA_PAD_ID: u32 = 163605;
@@ -2107,6 +2244,7 @@ mod tests {
         let uuids = selections.map(|order| {
             extract_media_parts(&request, order)
                 .unwrap()
+                .0
                 .into_iter()
                 .map(|part| match part {
                     MediaContentPart::ImageUrl { uuid, .. } => uuid,

@@ -229,6 +229,12 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    /// vLLM EPD reference; embedding values arrive through the EC connector.
+    #[serde(rename = "image_embeds")]
+    ImageEmbeds {
+        image_embeds: vllm_chat::multimodal::ImageMetadata,
+        uuid: String,
+    },
     #[serde(rename = "video_url")]
     VideoUrl {
         video_url: VideoUrl,
@@ -257,7 +263,7 @@ impl ContentPart {
     /// The media modality this part carries, if any.
     pub fn modality(&self) -> Option<MmModality> {
         match self {
-            Self::ImageUrl { .. } => Some(MmModality::Image),
+            Self::ImageUrl { .. } | Self::ImageEmbeds { .. } => Some(MmModality::Image),
             Self::VideoUrl { .. } => Some(MmModality::Video),
             Self::AudioUrl { .. } | Self::InputAudio { .. } => Some(MmModality::Audio),
             Self::Text { .. } | Self::Refusal { .. } | Self::ToolReference { .. } => None,

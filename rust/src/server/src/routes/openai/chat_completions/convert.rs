@@ -350,6 +350,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 ContentPart::Refusal { .. } => bail_invalid_request!(
                     "Only assistant messages can have a 'refusal' content type."
                 ),
+                ContentPart::ImageEmbeds { image_embeds, uuid } => {
+                    Ok(ChatContentPart::ImageEmbeds { image_embeds, uuid })
+                }
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
                     detail: image_url.detail,

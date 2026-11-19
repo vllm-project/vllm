@@ -565,7 +565,7 @@ fn to_template_openai_content(
                     Ok(TemplateContentPart::Text { text: text.clone() })
                 }
                 // All multimodal contents are normalized to `{ "type": <modality> }`.
-                ChatContentPart::ImageUrl { .. } => {
+                ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
                     multimodal
                         .and_then(|multimodal| multimodal.image_token.as_ref())
                         .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
@@ -607,9 +607,11 @@ fn to_template_string_content(
                 .filter(|part| !part.is_empty_text())
                 .map(|part| match part {
                     ChatContentPart::Text { text } => Ok(text.as_str()),
-                    ChatContentPart::ImageUrl { .. } => multimodal
-                        .and_then(|multimodal| multimodal.image_token.as_deref())
-                        .ok_or(Error::UnsupportedMultimodalContent("image_url")),
+                    ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
+                        multimodal
+                            .and_then(|multimodal| multimodal.image_token.as_deref())
+                            .ok_or(Error::UnsupportedMultimodalContent("image_url"))
+                    }
                     ChatContentPart::VideoUrl { .. } => multimodal
                         .and_then(|multimodal| multimodal.video_token.as_deref())
                         .ok_or(Error::UnsupportedMultimodalContent("video_url")),
