@@ -24,8 +24,12 @@ def _make_kv_cache(
 ):
     """Create a minimal KV cache tensor in the expected layout."""
     return torch.zeros(
-        num_blocks, num_kv_heads, block_size, 2 * head_size,
-        dtype=dtype, device="cpu",
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * head_size,
+        dtype=dtype,
+        device="cpu",
     )
 
 
@@ -111,9 +115,7 @@ def test_fp8_retype_cached():
     assert value_cache.data_ptr() == ref_value_fp8.data_ptr()
 
     # Second call reuses cache
-    k2, v2 = impl._get_kv_views(
-        kv_cache, impl.head_size, fp8_retype=True
-    )
+    k2, v2 = impl._get_kv_views(kv_cache, impl.head_size, fp8_retype=True)
     assert k2 is key_cache
     assert v2 is value_cache
 
@@ -132,3 +134,42 @@ def test_different_fp8_retype_cache_miss():
     k2, v2 = impl._get_kv_views(kv_cache_fp8, impl.head_size, fp8_retype=True)
     assert k2.dtype == impl.fp8_dtype
     assert k1 is not k2
+
+
+def test_two_impls_do_not_share_views():
+    """The view cache must be per-instance, never shared via the class.
+
+    `_kv_view_cache` is declared as a class attribute with an immutable
+    `None` default and is only ever assigned through `self`, so two impls
+    alternating `_get_kv_views` must each rebuild and keep their own
+    views. One impl here is created without an instance attribute to pin
+    the read-through-class-default path.
+    """
+    kv_a = _make_kv_cache()
+    kv_b = _make_kv_cache()
+
+    impl_a = object.__new__(TritonAttentionImpl)
+    impl_a.head_size = 128
+    impl_a.fp8_dtype = torch.float8_e4m3fn
+    impl_b = object.__new__(TritonAttentionImpl)
+    impl_b.head_size = 128
+    impl_b.fp8_dtype = torch.float8_e4m3fn
+
+    # Class-level default is None before either instance assigns.
+    assert TritonAttentionImpl._kv_view_cache is None
+
+    ka, va = impl_a._get_kv_views(kv_a, impl_a.head_size)
+    kb, vb = impl_b._get_kv_views(kv_b, impl_b.head_size)
+
+    assert ka.data_ptr() != kb.data_ptr()
+    assert va.data_ptr() != vb.data_ptr()
+    assert impl_a._kv_view_cache[0] is kv_a
+    assert impl_b._kv_view_cache[0] is kv_b
+    # Per-instance assignment must never mutate the class attribute.
+    assert TritonAttentionImpl._kv_view_cache is None
+
+    # Alternating back and forth never serves the other impl's views.
+    ka2, va2 = impl_a._get_kv_views(kv_a, impl_a.head_size)
+    assert ka2 is ka and va2 is va
+    kb2, vb2 = impl_b._get_kv_views(kv_b, impl_b.head_size)
+    assert kb2 is kb and vb2 is vb
