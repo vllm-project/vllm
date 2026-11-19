@@ -1882,8 +1882,8 @@ class Engram(nn.Module):
     ) -> None:
         """Look up, or prefetch from host memory, rows before the decoder layers
         consume them; DP-sharded tables take the group's gathered hash IDs.
-        In ``per_token`` mode the rows come from the per-token table instead and
-        ``comp_ids``, the compressed id of each position's current token, is
+        In `per_token` mode the rows come from the per-token table instead and
+        `comp_ids`, the compressed id of each position's current token, is
         required."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"

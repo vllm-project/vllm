@@ -2274,7 +2274,7 @@ def initialize_model_parallel(
             )
         )
         and not enable_elastic_ep
-        # The replacement modes keep per-rank GPU tables and exchange no ids.
+        # per_token keeps per-rank GPU tables and exchanges no ids.
         and engram_config.mode == "ngram"
     ):
         if (

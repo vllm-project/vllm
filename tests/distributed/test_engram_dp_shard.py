@@ -130,6 +130,8 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
             [0, 1, 2, 3],
         ),
+        # per_token keeps per-rank GPU tables, so there is no Engram DP group.
+        ("DeepseekV41ForCausalLM", {"mode": "per_token"}, 2, None, [0, 1]),
         ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
         # The offloaded Qwen4Exp PLE table is only shared over the group, so it
         # exists with dp_shared_memory unless the table is spread over DP.

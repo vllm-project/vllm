@@ -43,7 +43,7 @@ class EngramConfig:
 
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup. Ignored in
-    ``per_token`` mode, where the table stays on the GPU."""
+    `per_token` mode, where the table stays on the GPU."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
@@ -65,10 +65,10 @@ class EngramConfig:
     DP replicas are not co-located on one node or the host cannot hold them."""
 
     mode: Literal["ngram", "per_token"] = "ngram"
-    """Engram table lookup mode. ``ngram`` (default) uses the checkpoint's
-    hashed n-gram table. ``per_token`` (DeepSeek V4.1, ROCm only) reads one row
+    """Engram table lookup mode. `ngram` (default) uses the checkpoint's
+    hashed n-gram table. `per_token` (DeepSeek V4.1, ROCm only) reads one row
     per token from the bf16 checkpoint tensor
-    ``layers.<i>.engram.per_token_table.weight``, sliced over hash columns by
+    `layers.<i>.engram.per_token_table.weight`, sliced over hash columns by
     tensor parallelism; the n-gram table is not needed. Requires
     embedding_across_dp, dp_shared_memory, use_thp and peer_group_size to be
     off."""

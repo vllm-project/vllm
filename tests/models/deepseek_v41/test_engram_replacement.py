@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the Engram ``per_token`` lookup mode (DeepSeek V4.1)."""
+"""CPU tests for the Engram `per_token` lookup mode (DeepSeek V4.1)."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,14 +11,22 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import nn
 
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.engram import EngramConfig
+from vllm.config.utils import hash_config
+from vllm.model_executor.model_loader.weight_utils import (
+    finalize_model_weights,
+    initialize_single_dummy_weight,
+)
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.utils import weights_already_processed
 from vllm.models.deepseek_v41.common.engram_replacement import (
     PerTokenTable,
     ReplacementShard,
-    is_ngram_table_weight,
     per_token_comp_ids,
+    skip_engram_weight,
 )
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 N_COLS, HEAD_DIM, VOCAB = 24, 256, 50  # n_hash_cols, head_dim, compressed vocab
 LAYERS = [1, 14]
@@ -56,11 +64,9 @@ def test_per_token_parses_from_a_json_style_dict() -> None:
     assert EngramConfig(**{"mode": "per_token"}).mode == "per_token"
 
 
-# "zero" was a debug-only mode that has been removed.
-@pytest.mark.parametrize("mode", ["bogus", "zero"])
-def test_unknown_mode_is_rejected(mode: str) -> None:
+def test_unknown_mode_is_rejected() -> None:
     with pytest.raises(pydantic.ValidationError):
-        EngramConfig(mode=mode)  # type: ignore[arg-type]
+        EngramConfig(mode="bogus")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -83,9 +89,7 @@ def test_ngram_mode_still_accepts_dp_sharing() -> None:
 
 
 def test_mode_enters_the_config_hash() -> None:
-    assert (
-        EngramConfig().compute_hash() != EngramConfig(mode="per_token").compute_hash()
-    )
+    assert hash_config(EngramConfig()) != hash_config(EngramConfig(mode="per_token"))
 
 
 def test_per_token_does_not_share_host_tables_across_dp() -> None:
@@ -149,9 +153,9 @@ def test_shards_reassemble_the_full_table(tp: int) -> None:
     assert not gathered[:, N_COLS:].any()
 
 
-def test_loader_overwrites_uninitialized_padding() -> None:
+def test_loader_overwrites_stale_padding() -> None:
     """The last TP shard overruns n_hash_cols; its padding must be zeroed even
-    though the parameter is allocated uninitialized."""
+    if the parameter held other values."""
     table = _per_token_table(tp=5, rank=4)  # part = 5, head_start = 20, used = 4
     table.weight.data.fill_(7.0)
     table.weight.weight_loader(table.weight, _table())
@@ -160,7 +164,7 @@ def test_loader_overwrites_uninitialized_padding() -> None:
 
 
 def test_table_loads_through_auto_weights_loader_like_any_weight(tmp_path) -> None:
-    """Checkpoint style: a bf16 safetensors tensor named ``per_token_table.weight``
+    """Checkpoint style: a bf16 safetensors tensor named `per_token_table.weight`
     below the Engram module, loaded by the generic weights loader."""
 
     class _Engram(nn.Module):
@@ -258,53 +262,171 @@ def test_per_token_fill_rejects_mismatched_row_shape() -> None:
 # --- compressed token ids ---------------------------------------------------------
 
 
-def test_comp_ids_follow_the_token_map_and_dead_positions_map_to_zero() -> None:
+def test_comp_ids_follow_the_token_map_and_dropped_positions_map_to_id_zero() -> None:
     token_map = torch.arange(100, 0, -1, dtype=torch.int32)  # token t -> 100 - t
     ids = torch.tensor([3, 0, 7, 5])
-    dead = torch.tensor([False, False, True, False])  # position 2: image span
-    out = per_token_comp_ids(token_map, ids, dead)
+    keep = torch.tensor([True, True, False, True])  # position 2: image span
+    out = per_token_comp_ids(token_map, ids, keep)
     assert out.dtype == torch.int64
     assert out.tolist() == [97, 100, 100, 95]
 
 
-def test_comp_ids_on_a_profile_run_are_all_dead() -> None:
-    """Profile runs use dummy hashes (nothing is kept), yet per_token still needs
-    valid ids for every row."""
+def test_comp_ids_on_a_profile_run_use_id_zero_everywhere() -> None:
+    """Profile runs keep nothing, yet per_token still needs valid ids."""
     token_map = torch.arange(100, 0, -1, dtype=torch.int32)
     ids = torch.tensor([2**30, 5, -1], dtype=torch.int32)  # arbitrary dummy ids
-    dead = torch.ones(3, dtype=torch.bool)
-    assert per_token_comp_ids(token_map, ids, dead).tolist() == [100, 100, 100]
+    keep = torch.zeros(3, dtype=torch.bool)
+    assert per_token_comp_ids(token_map, ids, keep).tolist() == [100, 100, 100]
 
 
 def test_comp_ids_clamp_ids_beyond_the_token_map() -> None:
     token_map = torch.arange(10)
     ids = torch.tensor([9, 10, 1000])
-    dead = torch.zeros(3, dtype=torch.bool)
-    assert per_token_comp_ids(token_map, ids, dead).tolist() == [9, 9, 9]
+    keep = torch.ones(3, dtype=torch.bool)
+    assert per_token_comp_ids(token_map, ids, keep).tolist() == [9, 9, 9]
 
 
-def test_replaced_checkpoint_tables_are_recognised() -> None:
-    assert is_ngram_table_weight("model.layers.1.engram.embed_tokens.weight")
-    assert not is_ngram_table_weight("model.layers.1.engram.wkv.weight")
-    assert not is_ngram_table_weight("model.layers.1.self_attn.qkv_proj.weight")
+# --- per-name load decision ---------------------------------------------------------
 
 
-def test_engram_prepare_embeddings_fills_rows_from_the_per_token_table() -> None:
-    """Engram.prepare_embeddings fills the staged rows from the table without
-    touching any n-gram table (no table exists in this mode)."""
-    from vllm.models.deepseek_v41.common.engram import Engram
+@pytest.mark.parametrize(
+    ("name", "skipped_in_per_token", "skipped_in_ngram"),
+    [
+        ("model.layers.1.engram.embed_tokens.weight", True, False),
+        ("model.layers.1.engram.embed_tokens.scale", True, False),
+        ("model.layers.1.engram.embed_tokens.weight_scale", True, False),
+        ("model.layers.1.engram.per_token_table.weight", False, True),
+        ("model.layers.1.engram.wkv.weight", False, False),
+        ("model.layers.1.self_attn.qkv_proj.weight", False, False),
+    ],
+)
+def test_each_mode_skips_only_the_table_it_does_not_use(
+    name: str, skipped_in_per_token: bool, skipped_in_ngram: bool
+) -> None:
+    """A checkpoint carrying both tables can be served in either mode."""
+    assert skip_engram_weight(name, per_token=True) is skipped_in_per_token
+    assert skip_engram_weight(name, per_token=False) is skipped_in_ngram
+
+
+# --- never-loaded check (runs from process_weights_after_loading) ------------------
+
+
+def _fill_with_weight_loader(table: PerTokenTable) -> None:
+    table.weight.weight_loader(table.weight, _table())
+
+
+def _fill_with_copy(table: PerTokenTable) -> None:
+    """`--load-format sharded_state` copies the local shard straight in."""
+    local = torch.zeros_like(table.weight)
+    local[:, :4] = _table()[:, 20:24]
+    table.weight.data.copy_(local)
+
+
+@pytest.mark.parametrize("fill", [_fill_with_weight_loader, _fill_with_copy])
+def test_hook_rejects_an_unloaded_table_until_the_shard_is_loaded(fill) -> None:
+    table = _per_token_table(tp=5, rank=4)  # part = 5, head_start = 20, used = 4
+    with pytest.raises(ValueError, match="never loaded"):
+        table.process_weights_after_loading()
+    fill(table)
+    table.process_weights_after_loading()
+    assert torch.equal(table.weight.data[:, :4], _table()[:, 20:24])
+    assert not table.weight.data[:, 4:].any()  # padding of the last shard
+
+
+def test_hook_rejects_an_unloaded_table_until_dummy_init() -> None:
+    table = _per_token_table()
+    with pytest.raises(ValueError, match="never loaded"):
+        table.process_weights_after_loading()
+    initialize_single_dummy_weight(table.weight)
+    table.process_weights_after_loading()
+    assert torch.isfinite(table.weight).all()
+
+
+def test_hook_is_skipped_for_already_processed_weights() -> None:
+    table = _per_token_table()
+    with pytest.raises(ValueError, match="never loaded"):
+        table.process_weights_after_loading()
+    with weights_already_processed():
+        table.process_weights_after_loading()
+
+
+def test_hook_is_skipped_on_the_meta_device() -> None:
+    table = _per_token_table()
+    with pytest.raises(ValueError, match="never loaded"):
+        table.process_weights_after_loading()
+    table.to_empty(device="meta")
+    table.process_weights_after_loading()
+
+
+def test_nan_in_a_loaded_table_is_rejected() -> None:
+    table = _per_token_table()
+    bad = _table()
+    bad[3, 2, 1] = float("nan")
+    table.weight.weight_loader(table.weight, bad)
+    with pytest.raises(ValueError, match="contains NaN"):
+        table.process_weights_after_loading()
+
+
+def test_finalize_model_weights_runs_the_hook() -> None:
+    class _Engram(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.per_token_table = _per_token_table()
+
+    engram = _Engram()
+    with pytest.raises(ValueError, match="never loaded"):
+        finalize_model_weights(engram)
+    engram.per_token_table.weight.weight_loader(engram.per_token_table.weight, _table())
+    finalize_model_weights(engram)
+
+
+# --- Engram module in per_token mode, built through its real __init__ ---------------
+
+
+def test_engram_per_token_mode_builds_and_looks_up_rows(dist_init) -> None:
+    from vllm.models.deepseek_v41.common.engram import Engram, EngramLayout
+
+    config = DeepseekV41Config(
+        text_config=dict(
+            hidden_size=64,
+            hc_mult=2,
+            rms_norm_eps=1e-6,
+            engram_layer_ids=[1],
+            engram_num_embeddings=[1000],
+            engram_vocab_size=1000,
+            engram_max_ngram_size=4,
+            engram_n_heads=N_COLS // 3,  # n_hash_cols = 3 * 8 = 24
+            engram_head_dim=HEAD_DIM,
+            engram_compressed_vocab_size=VOCAB,
+            engram_pad_token_id=0,
+        )
+    )
+    layout = EngramLayout(config)
+    vllm_config = VllmConfig()
+    # VllmConfig rejects an engram config without a model.
+    vllm_config.engram_config = EngramConfig(mode="per_token")
+    with set_current_vllm_config(vllm_config):
+        engram = Engram(
+            config,
+            None,
+            layout,
+            layer_hash_index=0,
+            use_sequence_parallel=False,
+            prefix="model.layers.1.engram",
+        )
+
+    assert isinstance(engram.embed_tokens, ReplacementShard)
+    assert not list(engram.embed_tokens.parameters())
+    assert engram.per_token_table is not None
+    assert tuple(engram.per_token_table.weight.shape) == (VOCAB, N_COLS, HEAD_DIM)
+    keys = engram.state_dict().keys()
+    assert not [k for k in keys if k.startswith("embed_tokens.")]
+    assert "per_token_table.weight" in keys
 
     full = _table()
-    shard = ReplacementShard(N_COLS, HEAD_DIM, 1, 0)
-    engram = object.__new__(Engram)
-    torch.nn.Module.__init__(engram)
-    engram.embed_tokens = shard
-    engram.staged_rows = torch.full((8, N_COLS, HEAD_DIM), 5.0, dtype=torch.bfloat16)
-    engram.per_token_table = PerTokenTable(shard, VOCAB)
-    engram.per_token_table.weight.weight_loader(engram.per_token_table.weight, full)
+    weight = engram.per_token_table.weight
+    weight.weight_loader(weight, full)
     hashes = torch.zeros(4, N_COLS, dtype=torch.int32)
-    ids = torch.tensor([5, 5, 2, 0])
-
-    engram.prepare_embeddings(hashes, ids)
-    assert torch.equal(engram.staged_rows[:4], full[ids])
-    assert (engram.staged_rows[4:] == 5).all()  # rows past the batch untouched
+    comp_ids = torch.tensor([5, 5, 2, 0])
+    engram.prepare_embeddings(hashes, comp_ids)
+    assert torch.equal(engram.embed(hashes), full[comp_ids])

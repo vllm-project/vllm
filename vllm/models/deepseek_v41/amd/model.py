@@ -99,7 +99,7 @@ from ..common.engram import (
     can_share_engram_tables,
     gather_engram_hashes,
 )
-from ..common.engram_replacement import is_ngram_table_weight, per_token_comp_ids
+from ..common.engram_replacement import per_token_comp_ids, skip_engram_weight
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -878,7 +878,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         "engram needs `lookback_token_ids` from the model runner"
                     )
                 # TODO: skip the n-gram hash when no Engram layer uses it; the
-                # replacement modes only need the mask and the token map.
+                # per_token mode only needs the mask and the token map.
                 engram_hashes = self.engram_hash(
                     input_ids,
                     positions,
@@ -897,7 +897,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # dead positions (image spans, profile runs) map to id 0.
                 engram_comp_ids = (
                     per_token_comp_ids(
-                        self.engram_hash.token_map, input_ids, ~engram_mask
+                        self.engram_hash.token_map, input_ids, engram_mask
                     )
                     if self.engram_per_token
                     else None
@@ -1212,9 +1212,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
                 continue
-            if self.engram_per_token and is_ngram_table_weight(name):
-                # The n-gram table is replaced, so a checkpoint that still
-                # carries it is not an error.
+            if skip_engram_weight(name, self.engram_per_token):
                 continue
             if pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = self._pad_shared_expert_weight(
@@ -1298,21 +1296,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                     continue
-
-        if self.engram_per_token:
-            # The generic "all weights loaded" check is skipped for quantized
-            # checkpoints, and the table is allocated uninitialized.
-            missing = sorted(
-                n
-                for n in params_dict
-                if n.endswith(".engram.per_token_table.weight")
-                and n not in loaded_params
-            )
-            if missing:
-                raise ValueError(
-                    "engram mode 'per_token' but the checkpoint has no tensor "
-                    f"for: {missing}"
-                )
 
         return loaded_params
 

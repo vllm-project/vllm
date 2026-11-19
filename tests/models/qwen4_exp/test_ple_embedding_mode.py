@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the Qwen4Exp ``ple_embedding_mode`` (ngram / per_token)."""
+"""Tests for the Qwen4Exp `ple_embedding_mode` (ngram / per_token)."""
 
 from types import SimpleNamespace
 
@@ -9,7 +9,19 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
+import vllm.model_executor.parameter as parameter_module
+from vllm.model_executor.model_loader.reload import (
+    finish_reload,
+    record_metadata_for_reloading,
+    start_reload,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+    finalize_model_weights,
+    initialize_single_dummy_weight,
+)
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.utils import weights_already_processed
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPerTokenEmbedding
 from vllm.models.qwen4_exp.common.ple_mode import (
@@ -18,7 +30,7 @@ from vllm.models.qwen4_exp.common.ple_mode import (
     validate_ple_embedding_config,
 )
 
-from .test_ple import _build_amd_ngram_embedding
+from .test_ple import _build_amd_ngram_embedding, _mock_etp_group
 
 VOCAB = 64
 DIM = 6  # ngram_size=3, heads_per_ngram=1 -> 2 heads of dim 3
@@ -184,12 +196,11 @@ def test_per_token_loader_dtype_policy() -> None:
         module.load_weights([("per_token_table.weight", _table().float())])
     with pytest.raises(ValueError, match="dtype mismatch"):
         module.load_weights([("per_token_table.weight", _table().int())])
-    assert not module.table_loaded
     # bf16 checkpoint into an fp16 model is the one allowed cast
     half = _per_token(dtype=torch.float16)
     half.load_weights([("per_token_table.weight", _table())])
     assert half.per_token_table.weight.dtype == torch.float16
-    assert half.table_loaded
+    assert torch.equal(half.per_token_table.weight, _table().half())
 
 
 def test_per_token_loader_reports_missing_table() -> None:
@@ -206,7 +217,7 @@ def test_per_token_loader_rejects_wrong_shape_and_unknown_names() -> None:
 
 
 def test_loader_through_auto_weights_loader_with_checkpoint_names() -> None:
-    """Names as in the checkpoint, below the PLE layer (``ple_embedding.*``)."""
+    """Names as in the checkpoint, below the PLE layer (`ple_embedding.*`)."""
 
     class _PleOwner(nn.Module):
         def __init__(self) -> None:
@@ -242,12 +253,16 @@ def test_ngram_embedding_still_loads_original_checkpoint_layout(monkeypatch) -> 
     assert module.dequantize(rows, torch.bfloat16) is rows
 
 
-def test_ngram_mode_rejects_per_token_checkpoint_tensor(monkeypatch) -> None:
-    module, _ = _build_amd_ngram_embedding(
+def test_ngram_mode_skips_per_token_checkpoint_tensor(monkeypatch) -> None:
+    """A checkpoint carrying both tables can be served in either mode."""
+    module, loaded = _build_amd_ngram_embedding(
         monkeypatch, device="cpu", cpu_offload=False, fp8_checkpoint=False
     )
+    assert module.load_weights([("per_token_table.weight", _table())]) == set()
+    embedding = module.ngram_embedding
+    assert torch.equal(embedding.weight[: embedding.org_vocab_size], loaded)
     with pytest.raises(ValueError):
-        module.load_weights([("per_token_table.weight", _table())])
+        module.load_weights([("unknown_table.weight", _table())])
 
 
 def test_verify_and_update_config_rejects_invalid_mode() -> None:
@@ -359,60 +374,133 @@ def test_flat_text_config_mode_and_overrides() -> None:
     assert get_ple_embedding_mode(flat.get_text_config()) == "per_token"
 
 
-def test_per_token_mode_ignores_engram_cpu_offload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The table is a plain parameter, so engram_config (cpu_offload) is never read."""
+def _fill_load_weights(module: Qwen4ExpPerTokenEmbedding) -> None:
+    module.load_weights([("per_token_table.weight", _table())])
 
-    def _fail():
-        raise AssertionError("engram_config must not be read in this mode")
 
-    monkeypatch.setattr(amd_ple_layer, "get_current_vllm_config", _fail)
+def _fill_direct_copy(module: Qwen4ExpPerTokenEmbedding) -> None:
+    """What sharded_state does: copy into state_dict() without load_weights."""
+    module.state_dict()["per_token_table.weight"].copy_(_table())
+
+
+def _fill_dummy(module: Qwen4ExpPerTokenEmbedding) -> None:
+    for name, param in module.named_parameters():
+        initialize_single_dummy_weight(param.data, name=name)
+
+
+@pytest.mark.parametrize(
+    "fill",
+    [_fill_load_weights, _fill_direct_copy, _fill_dummy],
+    ids=["load_weights", "direct_copy", "dummy"],
+)
+def test_per_token_post_load_check_follows_the_table_contents(fill) -> None:
     module = _per_token()
-    assert module(torch.tensor([1, 2])).shape == (2, DIM)
+    with pytest.raises(ValueError, match="never loaded"):
+        finalize_model_weights(module)
+    fill(module)
+    finalize_model_weights(module)
+    weight = module.per_token_table.weight
+    if fill is _fill_dummy:
+        assert torch.isfinite(weight).all()
+    else:
+        assert torch.equal(weight, _table())
 
 
-def _model_config():
-    from unittest.mock import MagicMock
-
-    return MagicMock(
-        dtype=torch.bfloat16,
-        quantization=None,
-        word_embeddings_untied_by_checkpoint=False,
-    )
-
-
-def test_per_token_missing_table_fails_loudly_after_load() -> None:
-    """A per-token model on a checkpoint without the table must fail at load."""
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
-
+def test_per_token_never_loaded_fails_loudly() -> None:
     module = _per_token()
     module.load_weights(_NGRAM_CHECKPOINT_TENSORS)  # table absent
-    assert not module.table_loaded
-    model_config = _model_config()
     with pytest.raises(ValueError, match="per_token_table.weight"):
-        process_weights_after_loading(module, model_config, torch.device("cpu"))
-    with pytest.raises(ValueError, match="per_token_table.weight"):
-        module.quant_method.process_weights_after_loading(module)
+        finalize_model_weights(module)
 
 
-def test_per_token_present_table_passes_post_load_check() -> None:
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
-
+def test_per_token_nan_in_loaded_table_fails() -> None:
     module = _per_token()
+    table = _table()
+    table[3, 2] = float("nan")
+    module.load_weights([("per_token_table.weight", table)])
+    with pytest.raises(ValueError, match="NaN"):
+        finalize_model_weights(module)
+
+
+def test_per_token_pre_processed_weights_skip_the_check() -> None:
+    """IPC weight-cache loader runs the post-load pass under this context."""
+    module = _per_token()
+    with pytest.raises(ValueError, match="never loaded"):
+        finalize_model_weights(module)
+    with weights_already_processed():
+        finalize_model_weights(module)
+
+
+def test_per_token_meta_device_skips_the_check() -> None:
+    with pytest.raises(ValueError, match="never loaded"):
+        finalize_model_weights(_per_token())
+    with torch.device("meta"):
+        module = _per_token()
+    finalize_model_weights(module)
+
+
+@pytest.mark.parametrize("update_has_table", [True, False])
+def test_per_token_table_through_a_layerwise_weight_update(
+    monkeypatch: pytest.MonkeyPatch, update_has_table: bool
+) -> None:
+    """Weight updates reload layer by layer (the default `VLLM_RELOAD_MODE`)."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    module = _per_token()
+    record_metadata_for_reloading(module)
     module.load_weights([("per_token_table.weight", _table())])
-    assert module.table_loaded
-    process_weights_after_loading(
-        module,
-        _model_config(),
-        torch.device("cpu"),
+    finalize_model_weights(module)
+
+    start_reload(module)
+    update = [("per_token_table.weight", 2 * _table())] if update_has_table else []
+    module.load_weights(update + _NGRAM_CHECKPOINT_TENSORS)
+    finish_reload(module, model_config=None, device=torch.device("cpu"))
+
+    expected = 2 * _table() if update_has_table else _table()
+    assert torch.equal(module.per_token_table.weight, expected)
+
+
+# ---------------------------------------------------------------- factory
+
+
+def _build(mode: str, *, use_sequence_parallel: bool = False) -> nn.Module:
+    return amd_ple_layer._build_ple_embedding(
+        mode,
+        _config(ple_embedding_mode=mode),
+        1,
+        4,
+        "model.layers.1",
+        use_sequence_parallel,
+        quant_config=None,
+        params_dtype=torch.bfloat16,
+        data_parallel_rank=0,
     )
 
 
-def test_per_token_dummy_weights_skip_the_loaded_check() -> None:
-    from vllm.config import LoadConfig, VllmConfig, set_current_vllm_config
+@pytest.mark.parametrize(
+    ("mode", "cls"),
+    [
+        ("per_token", Qwen4ExpPerTokenEmbedding),
+        ("ngram", amd_ple_layer.Qwen4ExpNGramEmbedding),
+    ],
+)
+def test_factory_builds_embedding_for_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    mode: str,
+    cls: type[nn.Module],
+) -> None:
+    # Same single-rank setup as _build_amd_ngram_embedding (needed by ngram only).
+    _mock_etp_group(monkeypatch)
+    for module in (embedding_module, parameter_module):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: 0)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    module = _build(mode)
+    assert type(module) is cls
+    if mode == "per_token":
+        assert module.per_token_table.weight.dtype == torch.bfloat16
+        assert module.per_token_table.weight.shape == (VOCAB, DIM)
 
-    with set_current_vllm_config(VllmConfig(load_config=LoadConfig("dummy"))):
-        module = _per_token()
-    assert not module.table_loaded
-    module.check_table_loaded()  # dummy weights: nothing to load, no error
+
+def test_factory_per_token_rejects_sequence_parallel() -> None:
+    with pytest.raises(NotImplementedError, match="sequence parallelism"):
+        _build("per_token", use_sequence_parallel=True)

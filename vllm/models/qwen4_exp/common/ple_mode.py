@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selection and validation of the Qwen4Exp PLE embedding mode.
 
-``ple_embedding_mode`` is an optional field of the text ``config.json``:
+`ple_embedding_mode` is an optional field of the text `config.json`:
 
-* ``"ngram"`` (default, also used when the field is absent): hashed n-gram
+* `"ngram"` (default, also used when the field is absent): hashed n-gram
   embedding table, the original behaviour.
-* ``"per_token"``: a replicated ``[vocab_size, ple_embed_dim]`` table indexed by
+* `"per_token"`: a replicated `[vocab_size, ple_embed_dim]` table indexed by
   the current token id (no hashing, no context from earlier tokens).
 """
 
