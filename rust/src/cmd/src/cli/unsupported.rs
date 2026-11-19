@@ -117,6 +117,14 @@ impl UnsupportedArgs {
             }
         }
 
+        // `vllm serve` passes frontend args via `--args-json` without populating
+        // env-backed defaults into the JSON payload, so `clap`'s `env` attribute
+        // alone would not catch `VLLM_MAX_TOKENIZE_TOKENS` when launched through
+        // the Python entrypoint. Check the process environment explicitly here.
+        if std::env::var("VLLM_MAX_TOKENIZE_TOKENS").is_ok_and(|v| !v.trim().is_empty()) {
+            unsupported.push("VLLM_MAX_TOKENIZE_TOKENS");
+        }
+
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
