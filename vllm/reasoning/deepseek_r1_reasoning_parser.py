@@ -36,12 +36,16 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
         )
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        if not self._prompt_opens_reasoning or self.start_token_id in token_ids:
-            return super().count_reasoning_tokens(token_ids)
-        try:
-            return token_ids.index(self.end_token_id)
-        except ValueError:
-            return len(token_ids)
+        if self._prompt_opens_reasoning:
+            try:
+                first_end = token_ids.index(self.end_token_id)
+            except ValueError:
+                first_end = len(token_ids)
+            if self.start_token_id not in token_ids[:first_end]:
+                return first_end + super().count_reasoning_tokens(
+                    token_ids[first_end + 1 :]
+                )
+        return super().count_reasoning_tokens(token_ids)
 
     def extract_reasoning_streaming(
         self,

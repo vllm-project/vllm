@@ -292,7 +292,17 @@ def test_reasoning(
     "prompt, output, expected",
     [
         pytest.param([start_token], ["K", "K"], 2, id="truncated"),
+        pytest.param([start_token], ["K", "K", end_token], 2, id="closed-in-output"),
         pytest.param([start_token], ["K", "K", end_token, "K"], 2, id="complete"),
+        pytest.param(
+            [start_token], ["K", "K", end_token, start_token], 2, id="reopened"
+        ),
+        pytest.param(
+            [start_token],
+            ["K", "K", end_token, start_token, "K"],
+            3,
+            id="reopened-with-token",
+        ),
         pytest.param([start_token, end_token], ["K"], 0, id="closed-in-prompt"),
     ],
 )
