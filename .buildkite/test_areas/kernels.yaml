@@ -136,9 +136,24 @@ steps:
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/model_executor/models/config.py
+  - vllm/config/attention.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/kernels/attention/dsa/sparse_mqa_logits.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+  - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/test_top_k_per_row.py
+    - >-
+      pytest -v -s
+      model_executor/layers/test_mla_short_prefill_indexer.py
+      models/deepseek_v41/nvidia/test_candidate_indexer.py
+      -k "candidate_logits or candidate_indexer"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
@@ -599,7 +614,9 @@ steps:
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/kernels/linear/
   - tests/kernels/quantization
+  - tests/models/quantization/test_mxfp8.py
   commands:
     # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
     # pytest: test_fp8_quant.py ran 2.4x slower after test_cutlass_scaled_mm.py
@@ -607,12 +624,13 @@ steps:
     - pytest -v -s kernels/quantization --ignore=kernels/quantization/test_cutlass_scaled_mm.py --ignore=kernels/quantization/test_fp8_quant.py
     - pytest -v -s kernels/quantization/test_cutlass_scaled_mm.py
     - pytest -v -s kernels/quantization/test_fp8_quant.py
+    - pytest -v -s models/quantization/test_mxfp8.py::test_quark_mxfp8_weight_only_checkpoint
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300 DPX) Quantization Kernels"
+      label: ":amd: (MI300) Quantization Kernels"
       dind: false
-      device: mi300_dpx
+      device: mi300_1
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -645,6 +663,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -666,6 +685,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/single_rank_group.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
@@ -693,6 +713,8 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/triton_utils/allocation.py
+  - vllm/triton_utils/tensor_descriptor.py
   - vllm/v1/attention/backends/gdn_attn.py
   commands:
     - pytest -v -s kernels/mamba
@@ -816,14 +838,16 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - vllm/models/minimax_m3/common/indexer.py
   - vllm/models/minimax_m3/common/ops/sparse_attn.py
   - vllm/models/minimax_m3/common/sparse_attention.py
+  - vllm/models/minimax_m3/nvidia/indexer_flashinfer.py
   - vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py
   - tests/v1/attention/utils.py
   - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
   commands:
-    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k "prefill_sparse_attention_correctness or flashinfer_indexer_impl_matches_triton"
     - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
 
 - label: ":nvidia: (B200) Kernels"
@@ -1199,6 +1223,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+    - pytest -v -s kernels/moe/test_deepep_v2_async_finalize.py
   mirror:
     amd:
       automatic_shard: true
