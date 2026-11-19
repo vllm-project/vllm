@@ -11,6 +11,7 @@ import pytest
 from tests.quantization.utils import is_quant_method_supported
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.flashinfer import has_flashinfer
 from ..utils import check_logprobs_close
 
@@ -146,6 +147,36 @@ def test_flashinfer_bf16_query_with_checkpoint_q_scale(
         outputs_1_lst=outputs[1],
         name_0="triton",
         name_1="flashinfer",
+    )
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="FP8 MFMA needs gfx942 or gfx950")
+@pytest.mark.parametrize("max_tokens", [4])
+def test_rocm_fp8_mfma_paged_attention(
+    vllm_runner, example_prompts, max_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a GQA 5-16 model, the FP8 MFMA paged attention must match the f16 one."""
+    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
+    # Spawn the engine core so that it reads VLLM_ROCM_FP8_MFMA_PAGE_ATTN.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    outputs = []
+    for fp8_mfma in ("0", "1"):
+        monkeypatch.setenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", fp8_mfma)
+        with vllm_runner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+            kv_cache_dtype="fp8",
+            attention_config={"backend": "ROCM_ATTN"},
+        ) as vllm_model:
+            outputs.append(
+                vllm_model.generate_greedy_logprobs(example_prompts, max_tokens, 8)
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="f16_mfma",
+        name_1="fp8_mfma",
     )
 
 

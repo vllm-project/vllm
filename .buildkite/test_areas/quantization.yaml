@@ -189,6 +189,9 @@ steps:
       source_file_dependencies:
       - vllm/model_executor/layers/quantization
       - tests/models/quantization
+      - csrc/rocm/attention_dispatch.cu
+      - csrc/rocm/attention_kernels.cuh
+      - csrc/rocm/generate_paged_attn.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
