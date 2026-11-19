@@ -37,6 +37,12 @@ class IrOpPriorityConfig:
     gelu_and_mul_sparse: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
 
+    rotary_embedding: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rotary_embedding"""
+
+    rotary_embedding_query_only: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rotary_embedding_query_only"""
+
     def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -341,10 +347,10 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
-      mega-kernel with NVFP4 weights on Blackwell (SM100/SM103, where MXFP4
-      checkpoints are requantized at load, or SM107 for NVFP4 checkpoints
-      only), or with block-FP8 (128x128) weights on Hopper; requires expert
-      parallelism and NVSHMEM
+      mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
+      where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,
+      where MXFP4 runs with MXFP8 activations), or with block-FP8 (128x128)
+      weights on Hopper; requires expert parallelism and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
