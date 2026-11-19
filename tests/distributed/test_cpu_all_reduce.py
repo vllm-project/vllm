@@ -75,14 +75,14 @@ def _worker(rank: int, world_size: int, port: int, stateless_port: int):
     torch.testing.assert_close(t, expected, rtol=0, atol=0)
 
     # The DP state sync all-gathers one float row per rank in the same reduce.
-    gather = torch.zeros(world_size, 2, dtype=torch.float64)
-    gather[rank] = torch.tensor([rank + 0.1, -rank / 3], dtype=torch.float64)
-    has_unfinished, pause_consensus = ParallelConfig().sync_dp_state(
-        stateless_pg, has_unfinished=rank == 0, pending_pause=True, gather=gather
+    has_unfinished, pause_consensus, rows = ParallelConfig().sync_dp_state(
+        stateless_pg,
+        has_unfinished=rank == 0,
+        pending_pause=True,
+        row=[rank + 0.1, -rank / 3],
     )
     assert has_unfinished and pause_consensus
-    rows = [[r + 0.1, -r / 3] for r in range(world_size)]
-    assert gather.tolist() == rows
+    assert rows == [[r + 0.1, -r / 3] for r in range(world_size)]
 
     dist.destroy_process_group()
 

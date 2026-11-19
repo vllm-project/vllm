@@ -968,8 +968,8 @@ class ParallelConfig:
         dp_group: ProcessGroup,
         has_unfinished: bool,
         pending_pause: bool,
-        gather: torch.Tensor | None = None,
-    ) -> tuple[bool, bool]:
+        row: list[float] | None = None,
+    ) -> tuple[bool, bool, list[list[float]] | None]:
         """Combined all-reduce for DP state synchronization.
 
         Uses a single SUM all-reduce on a 2-element tensor:
@@ -981,28 +981,30 @@ class ParallelConfig:
         has_unfinished_global is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
-        `gather`, if given, is a `[dp_size, n]` CPU tensor holding this rank's
-        row and zeros elsewhere; the same all-reduce fills in the other ranks'
-        rows in place.
+        `row`, if given, is all-gathered in the same all-reduce: each rank
+        writes it into its own slot of a zeroed `[dp_size, len(row)]` block
+        appended to the tensor. Every rank must pass a row of the same length.
 
         Returns:
-            (has_unfinished_global, pause_consensus)
+            (has_unfinished_global, pause_consensus, rows), where `rows` holds
+            every rank's `row` in rank order, or is None without `row`.
 
         """
-        tensor = torch.tensor(
-            [int(has_unfinished), int(pending_pause)],
-            dtype=torch.int32 if gather is None else gather.dtype,
-            device="cpu",
-        )
-        if gather is not None:
-            tensor = torch.cat((tensor, gather.view(-1)))
-        cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
-        if gather is not None:
-            gather.view(-1).copy_(tensor[2:])
         dp_size = dp_group.size()
+        flags = [int(has_unfinished), int(pending_pause)]
+        if row is None:
+            tensor = torch.tensor(flags, dtype=torch.int32, device="cpu")
+        else:
+            n = len(row)
+            start = 2 + dp_group.rank() * n
+            tensor = torch.zeros(2 + dp_size * n, dtype=torch.float64)
+            tensor[:2] = torch.tensor(flags, dtype=torch.float64)
+            tensor[start : start + n] = torch.tensor(row, dtype=torch.float64)
+        cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
+        rows = None if row is None else tensor[2:].view(dp_size, n).tolist()
         pause_count = int(tensor[1].item())
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
-        return has_unfinished_global, pause_count == dp_size
+        return has_unfinished_global, pause_count == dp_size, rows
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:

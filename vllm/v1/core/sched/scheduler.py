@@ -82,12 +82,15 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, PrefillQueueState
-    from vllm.v1.engine.dp_state_sync import DPStateSync
 
 logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Cross-DP prefill hold; replaces `throttle_prefills` when set. A class
+    # default, so schedulers built without `__init__` (as tests do) have it.
+    prefill_hold: "PrefillHold | None" = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -395,8 +398,6 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
-        # Cross-DP prefill hold; replaces `throttle_prefills` when set.
-        self.prefill_hold: PrefillHold | None = None
         if self.scheduler_config.prefill_hold_ttft_target is not None:
             from vllm.v1.core.sched import dp_prefill_hold
 
@@ -406,6 +407,7 @@ class Scheduler(SchedulerInterface):
                 self.scheduler_config.prefill_hold_alpha,
                 self.scheduler_config.max_num_batched_tokens,
                 lag_steps=self.vllm_config.max_concurrent_batches - 1,
+                log_stats=self.parallel_config.data_parallel_rank == 0,
             )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
@@ -3083,9 +3085,19 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.get_num_cached_tokens,
         )
 
-    def attach_dp_sync(self, sync: "DPStateSync") -> None:
-        if self.prefill_hold is not None:
-            self.prefill_hold.attach_dp(sync)
+    @property
+    def shares_dp_row(self) -> bool:
+        return self.prefill_hold is not None
+
+    def dp_row(self) -> list[float]:
+        assert self.prefill_hold is not None
+        return self.prefill_hold.local_row()
+
+    def update_from_dp_rows(self, rows: list[list[float]], idle: bool) -> None:
+        assert self.prefill_hold is not None
+        self.prefill_hold.update(rows)
+        if idle:
+            self.prefill_hold.reset()
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

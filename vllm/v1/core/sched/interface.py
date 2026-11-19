@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
-    from vllm.v1.engine.dp_state_sync import DPStateSync
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -267,10 +266,21 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
-    def attach_dp_sync(self, sync: "DPStateSync") -> None:
-        """Called by the DP engine core (DP attention + EP) with its cross-rank
-        state sync, for scheduling that coordinates across ranks."""
-        return
+    @property
+    def shares_dp_row(self) -> bool:
+        """Whether the DP engine core (DP attention + EP) must all-gather
+        `dp_row()` every step, for scheduling that coordinates across ranks.
+        Fixed for the scheduler's life and the same on every rank."""
+        return False
+
+    def dp_row(self) -> list[float]:
+        """This rank's row for the next DP state sync, if `shares_dp_row`."""
+        raise NotImplementedError
+
+    def update_from_dp_rows(self, rows: list[list[float]], idle: bool) -> None:
+        """Takes every rank's `dp_row()` in rank order after a DP state sync,
+        and whether that sync found every rank idle."""
+        raise NotImplementedError
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None

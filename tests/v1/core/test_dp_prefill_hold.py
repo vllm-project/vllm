@@ -6,10 +6,8 @@ from unittest.mock import Mock
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
-from vllm.config import ParallelConfig
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
-from vllm.v1.engine.dp_state_sync import DPStateSync
 from vllm.v1.outputs import ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -240,12 +238,17 @@ def test_hold_overrides_per_rank_capacity_escape():
     assert set(output.num_scheduled_tokens) > {"d"}
 
 
-def test_attaches_to_dp_state_sync():
-    """Under DP the scheduler hands the hold the DP state sync, on which it
-    shares a row every step; rank 0 logs."""
+def test_scheduler_relays_dp_rows_to_the_hold():
+    """The scheduler shares the hold's row in the DP state sync and hands the
+    gathered rows back to it; a sync that finds every rank idle releases the
+    hold. DP rank 0 logs."""
+    assert not create_scheduler().shares_dp_row
     scheduler, hold = _hold_scheduler()
-    group = Mock(**{"rank.return_value": 0})
-    sync = DPStateSync(ParallelConfig(), group=lambda: group)
-    assert not sync.every_step
-    scheduler.attach_dp_sync(sync)
-    assert sync.every_step and hold.log_stats
+    assert scheduler.shares_dp_row and hold.log_stats
+    assert len(scheduler.dp_row()) == dph.ROW_SIZE
+
+    _warm(hold, random.Random(0))
+    scheduler.update_from_dp_rows(_one_rank_queued(), idle=False)
+    assert hold.hold
+    scheduler.update_from_dp_rows(_one_rank_queued(), idle=True)
+    assert not hold.hold

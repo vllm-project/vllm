@@ -92,7 +92,6 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
-from vllm.v1.engine.dp_state_sync import DPStateSync
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -2625,10 +2624,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
             if not isinstance(self.scheduler, Scheduler):
                 raise ValueError("prefill_hold_ttft_target needs the v1 Scheduler.")
-        self.dp_state_sync = DPStateSync(
-            vllm_config.parallel_config, group=lambda: self.dp_group
-        )
-        self.scheduler.attach_dp_sync(self.dp_state_sync)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2858,16 +2853,23 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
+        shares_row = self.scheduler.shares_dp_row
         if (
-            not self.dp_state_sync.every_step
+            not shares_row
             and self.step_counter != 1
             and self.step_counter % self.dp_sync_interval != 0
         ):
             return True
 
-        has_unfinished, pause_consensus = self.dp_state_sync.sync(
-            has_unfinished=local_unfinished, pending_pause=self.pending_pause
+        parallel_config = self.vllm_config.parallel_config
+        has_unfinished, pause_consensus, rows = parallel_config.sync_dp_state(
+            self.dp_group,
+            has_unfinished=local_unfinished,
+            pending_pause=self.pending_pause,
+            row=self.scheduler.dp_row() if shares_row else None,
         )
+        if rows is not None:
+            self.scheduler.update_from_dp_rows(rows, idle=not has_unfinished)
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

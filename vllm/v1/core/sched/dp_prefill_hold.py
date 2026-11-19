@@ -31,7 +31,6 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.core.sched.request_queue import RequestQueue
-    from vllm.v1.engine.dp_state_sync import DPStateSync
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -178,8 +177,9 @@ class PrefillQueueState(NamedTuple):
 
 class PrefillHold:
     """Decides, once per step and identically on every DP rank, whether all
-    ranks hold their prefills on the next step. It needs the DP state sync
-    (`attach_dp`); without it, it never holds.
+    ranks hold their prefills on the next step. The DP engine core feeds every
+    rank's `local_row` to `update` each step, through the scheduler; without
+    that, it never holds.
 
     Args:
         queue_state: Returns a read-only view of the scheduler's queues.
@@ -190,6 +190,7 @@ class PrefillHold:
         lag_steps: Steps between a decision and the step it takes effect on
             the GPU beyond the next one (`max_concurrent_batches - 1`, so 1
             with async scheduling and no pipeline parallelism).
+        log_stats: Whether this rank logs a periodic summary; DP rank 0 does.
 
     """
 
@@ -200,14 +201,14 @@ class PrefillHold:
         alpha: float,
         token_budget: int,
         lag_steps: int = 0,
+        log_stats: bool = False,
     ) -> None:
         self._queue_state = queue_state
         self.ttft_target = ttft_target_s
         self.alpha = alpha
         self.budget = token_budget
         self.lag_steps = lag_steps
-        # Whether this rank logs a periodic summary; rank 0 does.
-        self.log_stats = False
+        self.log_stats = log_stats
         # Whether to hold prefills on the next step.
         self.hold = False
 
@@ -241,11 +242,6 @@ class PrefillHold:
         self._skip_sample = True
         self._pending.clear()
         self._done = None
-
-    def attach_dp(self, sync: "DPStateSync") -> None:
-        """Shares this rank's row with the other DP ranks every step."""
-        self.log_stats = sync.rank == 0
-        sync.share(ROW_SIZE, self.local_row, self.update, on_idle=self.reset)
 
     def on_arrival(
         self, request: "Request", num_cached_tokens: Callable[["Request"], int]
