@@ -102,6 +102,8 @@ pub struct LoadModelBackendsOptions {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities default to 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
 }
 
 /// Shared backends loaded from a model id.

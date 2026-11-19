@@ -22,9 +22,11 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 
+from .ops import use_sm100_kernels
 from .ops.activation import swiglu_quantize
 from .ops.block_scales import shuffle_rows, swizzle_block_scales
 from .ops.moe import NUM_COUNTERS, combine, combine_push, route
+from .ops.moe_sm90 import bmm as bmm_sm90
 from .ops.seq_parallel import SeqParallel
 from .ops.trtllm_bmm import bmm, expert_plan, load_kernels
 
@@ -139,11 +141,14 @@ class Inkling2Experts(nn.Module):
         self.register_buffer(
             "ones", torch.ones(self.num_experts, dtype=torch.float32), persistent=False
         )
-        load_kernels(
-            (self.w13_weight, self.w2_weight),
-            (self.w13_weight_scale, self.w2_weight_scale),
-            self.topk,
-        )
+        # Hopper runs Triton GEMMs on row-major weights and block scales.
+        self.sm100 = use_sm100_kernels()
+        if self.sm100:
+            load_kernels(
+                (self.w13_weight, self.w2_weight),
+                (self.w13_weight_scale, self.w2_weight_scale),
+                self.topk,
+            )
 
     def _register(
         self,
@@ -167,11 +172,13 @@ class Inkling2Experts(nn.Module):
 
     def _load_weight(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
         self._load_expert_shard(param, loaded)
-        param.data.copy_(shuffle_rows(param.data))
+        if self.sm100:
+            param.data.copy_(shuffle_rows(param.data))
 
     def _load_block_scales(self, param: nn.Parameter, loaded: torch.Tensor) -> None:
         self._load_expert_shard(param, loaded)
-        param.data.copy_(swizzle_block_scales(shuffle_rows(param.data)))
+        if self.sm100:
+            param.data.copy_(swizzle_block_scales(shuffle_rows(param.data)))
 
     @staticmethod
     def _load_full(param: nn.Parameter, loaded: torch.Tensor) -> None:
@@ -194,7 +201,7 @@ class Inkling2Experts(nn.Module):
 
     def _gemm(self, quantized, name: str, tiles, plan, projection: int):
         act, act_scale, row_scale = quantized
-        return bmm(
+        return (bmm if self.sm100 else bmm_sm90)(
             act,
             act_scale,
             row_scale,
