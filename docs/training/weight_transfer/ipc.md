@@ -93,6 +93,10 @@ GPU memory:
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
 - After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
 
+Packed IPC supports mixed dtypes, including odd-sized byte tensors followed by
+wider types. Received tensors have independent storage, so later chunks can
+reuse the shared buffer without overwriting weights retained by the loader.
+
 ```python
 engine = WeightTransferTrainerFactory.trainer_init(
     init_info=IPCTrainerInitInfo(
