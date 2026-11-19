@@ -8,6 +8,7 @@ import pytest
 import torch
 from transformers import DeepseekV3Config
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     VllmConfig,
@@ -154,7 +155,8 @@ def test_pluggable_router_output_parity(oot_registry_scope, scheme):
     torch.testing.assert_close(weights, expected_weights, rtol=0, atol=0)
 
 
-def test_pluggable_router_preserves_model_bias_loading(dist_init):
+@override_parallel_groups(SingleRankGroup())
+def test_pluggable_router_preserves_model_bias_loading():
     """The model's gate retains the checkpoint path when its router is a module."""
     hf_config = DeepseekV3Config(
         hidden_size=128,
