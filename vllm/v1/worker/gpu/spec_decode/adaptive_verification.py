@@ -214,7 +214,7 @@ def build_cost_tables_from_curves(
 class AdmittedDraftCounts:
     """Per-request admitted draft counts, in flight to the host."""
 
-    def __init__(self, cpu: torch.Tensor, event: torch.cuda.Event):
+    def __init__(self, cpu: torch.Tensor, event: torch.Event):
         self._cpu = cpu
         self._event = event
 
@@ -271,7 +271,7 @@ class AdaptiveVerificationManager:
             self._admitted_drafts_cpu = torch.empty(
                 max_num_reqs, dtype=torch.int32, pin_memory=True
             )
-            self._admitted_drafts_event = torch.cuda.Event(blocking=True)
+            self._admitted_drafts_event = torch.Event(blocking=True, device=device)
 
         # Two D2H slots preserve stale inputs for budget selection.
         self._stale_confidences = [
@@ -283,7 +283,9 @@ class AdaptiveVerificationManager:
             )
             for _ in range(2)
         ]
-        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
+        self._copy_events = [
+            torch.Event(blocking=True, device=device) for _ in range(2)
+        ]
         self._pending_resets: list[int] = []
         self._stale_idx = 0
         for slot in self._stale_confidences:
@@ -390,7 +392,7 @@ class AdaptiveVerificationManager:
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
-        current_stream = torch.cuda.current_stream(self.req_states.device)
+        current_stream = torch.accelerator.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
@@ -570,7 +572,7 @@ class AdaptiveVerificationManager:
             0 < draft_budget < int(scheduled_drafts.sum())
         ):
             admitted_cpu = self._admitted_drafts_cpu[:num_reqs]
-            current_stream = torch.cuda.current_stream(self.req_states.device)
+            current_stream = torch.accelerator.current_stream(self.req_states.device)
             self._copy_stream.wait_stream(current_stream)
             with stream(self._copy_stream, current_stream):
                 admitted_cpu.copy_(capacities, non_blocking=True)

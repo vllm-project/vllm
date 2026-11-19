@@ -33,7 +33,7 @@ def _row_width(num_logprobs: int, num_slots: int) -> int:
     return num_slots if num_logprobs == -1 else num_logprobs + 1
 
 
-@dataclass
+@dataclass(slots=True)
 class LogprobsProcessor:
     # Tokenizer for this request,
     # None if detokenization is disabled.

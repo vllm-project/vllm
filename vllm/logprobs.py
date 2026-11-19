@@ -12,7 +12,7 @@ import numpy as np
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
 # TODO(sang): Fix it.
-@dataclass
+@dataclass(slots=True)
 class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.
 

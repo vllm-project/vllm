@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
 from collections.abc import Callable
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
@@ -16,6 +17,9 @@ from tests.v1.kv_connector.unit.offloading_connector.test_config import (
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     MockOffloadingSpec,
     generate_store_output,
+    make_kv_cache_group,
+    mamba_layer,
+    sliding_window_layer,
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import (
@@ -68,6 +72,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
@@ -80,23 +85,20 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager,
+    ChunkedLocalAttentionManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+    KVCacheGroup,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -216,16 +218,16 @@ def test_swa_offload_window_covers_unaligned_hit(
             block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
         )
         kv_spec = (
-            FullAttentionSpec(**kwargs)
+            AttentionSpec(**kwargs)
             if group_window is None
-            else SlidingWindowSpec(
+            else sliding_window_layer(
                 **kwargs,
                 sliding_window=group_window,
                 extra_retained_tokens=extra_retained if i == 1 else 0,
             )
         )
         groups.append(
-            KVCacheGroupSpec([f"layer{i}"], kv_spec, is_eagle_group=eagle and i == 1)
+            make_kv_cache_group([f"layer{i}"], kv_spec, is_eagle_group=eagle and i == 1)
         )
     manager = CPUOffloadingManager(num_chunks=100)
     spec = SimpleNamespace(
@@ -233,9 +235,9 @@ def test_swa_offload_window_covers_unaligned_hit(
             groups=tuple(
                 SimpleNamespace(
                     group_id=i,
-                    tokens_per_block=group.kv_cache_spec.block_size,
+                    tokens_per_block=group.block_size,
                     sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
-                        group.kv_cache_spec, group.kv_cache_spec.block_size * 4
+                        group, group.block_size * 4
                     ),
                 )
                 for i, group in enumerate(groups)
@@ -245,6 +247,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         tokens_per_hash=8,
         blocks_per_chunk=4,
         offload_prompt_only=True,
+        async_init=False,
         extra_config={},
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
@@ -309,9 +312,8 @@ def test_swa_offload_window_covers_unaligned_hit(
     pool = BlockPool(256, enable_caching=True, hash_block_size=8)
     managers = []
     for i, group in enumerate(groups):
-        cls = FullAttentionManager if i == 0 else SlidingWindowManager
-        m = cls(
-            kv_cache_spec=group.kv_cache_spec,
+        m = group.manager_cls(
+            group,
             block_pool=pool,
             enable_caching=True,
             kv_cache_group_id=i,
@@ -389,18 +391,203 @@ def _make_partial_tail_request(
 
 
 def _make_real_partial_tail_request(
-    scheduler: OffloadingConnectorScheduler, request_id: str
+    scheduler: OffloadingConnectorScheduler, request_id: str, num_tokens: int = 30
 ) -> Request:
     init_none_hash(sha256)
     request = Request(
         request_id=request_id,
-        prompt_token_ids=list(range(30)),
+        prompt_token_ids=list(range(num_tokens)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_block_hasher(4, sha256),
     )
     scheduler.on_new_request(request)
     return request
+
+
+FINAL_SWA_TAIL_FULL_BLOCK = 36
+FINAL_SWA_TAIL_SWA_BLOCK = 4
+FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE = 1001
+FINAL_SWA_TAIL_WINDOW = 16
+
+
+def _make_final_swa_tail_scheduler(
+    blocks_per_chunk: int = 1, **parallel_kwargs: int
+) -> OffloadingConnectorScheduler:
+    """Full attention with 36-token blocks next to a 4-token SWA group with a
+    16-token window: the final SWA tail is aligned to 9-block segments."""
+    vllm_config = _make_vllm_config(
+        extra_config={
+            "blocks_per_chunk": blocks_per_chunk,
+            "offload_prompt_only": False,
+        },
+        **parallel_kwargs,
+    )
+    vllm_config.speculative_config = None
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=FINAL_SWA_TAIL_FULL_BLOCK,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            make_kv_cache_group(
+                ["swa"],
+                sliding_window_layer(
+                    block_size=FINAL_SWA_TAIL_SWA_BLOCK,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=FINAL_SWA_TAIL_WINDOW,
+                ),
+            ),
+        ],
+    )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+    return scheduler
+
+
+def _schedule_new_request(
+    output: SchedulerOutput,
+    request: Request,
+    block_ids: tuple[list[int], ...],
+    num_tokens: int,
+) -> None:
+    output.scheduled_new_reqs.append(
+        NewRequestData(
+            req_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            mm_features=[],
+            sampling_params=request.sampling_params,
+            pooling_params=None,
+            block_ids=block_ids,
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=request.prompt_token_ids,
+        )
+    )
+    output.num_scheduled_tokens[request.request_id] = num_tokens
+    output.total_num_scheduled_tokens += num_tokens
+
+
+def _final_swa_tail_store_block_ids(
+    blocks_per_chunk: int,
+    parallel_kwargs: dict[str, int],
+    finish_status: RequestStatus,
+    num_computed_tokens: int,
+    reuse_while_running: bool,
+    reuse: bool,
+) -> tuple[list[int], list[int]]:
+    """Run a 1200-token request until it computed num_computed_tokens, and
+    finish it.
+
+    The reuse step is the finish step, where the core frees every SWA block of
+    the request. With reuse_while_running, it is the last decode step, where
+    the core frees only the SWA blocks outside the window.
+
+    Returns:
+        The SWA block ids that the core can give away in the reuse step (with
+        reuse, a new request gets them), and the SWA block ids that the request
+        stores from the reuse step on.
+
+    """
+    prompt_tokens = 1200
+    scheduler = _make_final_swa_tail_scheduler(blocks_per_chunk, **parallel_kwargs)
+    full_config, swa_config = scheduler.config.kv_group_configs
+    request = _make_real_partial_tail_request(scheduler, "req", prompt_tokens)
+    num_tokens = max(prompt_tokens, num_computed_tokens + 1)
+    full_block_ids = list(range(1, cdiv(num_tokens, full_config.tokens_per_block) + 1))
+    swa_block_ids = list(
+        range(
+            FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE,
+            FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE
+            + cdiv(num_tokens, swa_config.tokens_per_block),
+        )
+    )
+
+    def give_away(output: SchedulerOutput, block_ids: list[int]) -> None:
+        if not reuse:
+            return
+        other = _make_real_partial_tail_request(
+            scheduler, "other", swa_config.tokens_per_block * len(block_ids)
+        )
+        _schedule_new_request(
+            output, other, ([900], block_ids), other.num_prompt_tokens
+        )
+
+    def stored_swa_block_ids(output: SchedulerOutput) -> list[int]:
+        meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        return [
+            block_id
+            for job_id, job in meta.store_jobs.items()
+            if scheduler._job_statuses[job_id].req_id == request.request_id
+            and isinstance(job.src_spec, GPULoadStoreSpec)
+            for block_id in job.src_spec.block_ids.tolist()
+            if block_id >= FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE
+        ]
+
+    prefill = SchedulerOutput.make_empty()
+    num_prefill_tokens = min(prompt_tokens, num_computed_tokens)
+    _schedule_new_request(
+        prefill, request, (full_block_ids, swa_block_ids), num_prefill_tokens
+    )
+    scheduler.build_connector_meta(prefill)
+    request.num_computed_tokens = num_prefill_tokens
+    if num_prefill_tokens == prompt_tokens:
+        request.append_output_token_ids(0)
+
+    reusable: list[int] = []
+    stores: list[int] = []
+    while request.num_computed_tokens < num_computed_tokens:
+        decode = SchedulerOutput.make_empty()
+        decode.scheduled_cached_reqs = CachedRequestData(
+            req_ids=[request.request_id],
+            new_token_ids=[[]],
+            new_block_ids=[None],
+            num_computed_tokens=[request.num_computed_tokens],
+            num_output_tokens=[request.num_output_tokens],
+        )
+        decode.num_scheduled_tokens = {request.request_id: 1}
+        decode.total_num_scheduled_tokens = 1
+        if reuse_while_running and request.num_computed_tokens == (
+            num_computed_tokens - 1
+        ):
+            window_start = request.num_computed_tokens - FINAL_SWA_TAIL_WINDOW
+            reusable = [
+                block_id
+                for block_idx, block_id in enumerate(swa_block_ids)
+                if (block_idx + 1) * swa_config.tokens_per_block <= window_start
+            ]
+            give_away(decode, reusable)
+            stores += stored_swa_block_ids(decode)
+        else:
+            scheduler.build_connector_meta(decode)
+        request.num_computed_tokens += 1
+        request.append_output_token_ids(0)
+
+    request.status = finish_status
+    scheduler.request_finished(request)
+    finish = SchedulerOutput.make_empty()
+    finish.finished_req_ids = {request.request_id}
+    if not reuse_while_running:
+        reusable = swa_block_ids
+        give_away(finish, reusable)
+    stores += stored_swa_block_ids(finish)
+    return reusable, stores
 
 
 def test_create_req_context_preserves_kv_hints():
@@ -655,14 +842,15 @@ def _make_dcp_shaped_hybrid_scheduler(
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     kv_cache_config.cache_hit_alignment_tokens = prefix_match_unit
     if recurrent_block_size is not None:
-        kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
-            ["mamba_layer"],
-            MambaSpec(
-                block_size=recurrent_block_size,
-                shapes=((1, 1),),
-                dtypes=(torch.float32,),
-                mamba_cache_mode="align",
-            ),
+        group = kv_cache_config.kv_cache_groups[1]
+        kv_cache_config.kv_cache_groups[1] = replace(
+            group,
+            kv_cache_specs={
+                "mamba_layer": replace(
+                    group.distinct_specs[0], block_size=recurrent_block_size
+                )
+            },
+            block_size=recurrent_block_size,
         )
     if eagle:
         kv_cache_config.kv_cache_groups[0].is_eagle_group = True
@@ -715,6 +903,112 @@ def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     assert not _make_dcp_shaped_hybrid_scheduler(
         recurrent_block_size=24
     ).config.supports_partial_tail
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_handoff_partial_tail_excludes_sliding_window_groups(with_swa_group: bool):
+    """The hand-off handler reports no live chunk: its partial tail reads the
+    request's block ids only for groups that are not CoW sources, and the
+    scheduler zeroes only sliding-window groups. A sliding-window group that is
+    not a CoW source must therefore turn the partial tail off.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.speculative_config = None
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    kv_cache_config.cache_hit_alignment_tokens = 4
+    if with_swa_group:
+        kv_cache_config.kv_cache_groups.append(
+            make_kv_cache_group(
+                ["swa_layer"],
+                sliding_window_layer(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=8,
+                    dtype=torch.float16,
+                    sliding_window=32,
+                ),
+            )
+        )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+    assert scheduler.config.supports_handoff
+    assert scheduler.config.supports_partial_tail == (not with_swa_group)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    (
+        "blocks_per_chunk",
+        "parallel_kwargs",
+        "finish_status",
+        "num_computed_tokens",
+        "reuse_while_running",
+    ),
+    [
+        # 250 of 300 prompt chunks: the final segment is 243-249.
+        pytest.param(
+            1, {}, RequestStatus.FINISHED_ABORTED, 1000, False, id="aborted-prefill"
+        ),
+        # DCP doubles the SWA block to 8 tokens: 125 of 150 prompt chunks, the
+        # final segment is 117-124.
+        pytest.param(
+            1,
+            {"tensor_parallel_size": 2, "decode_context_parallel_size": 2},
+            RequestStatus.FINISHED_ABORTED,
+            1000,
+            False,
+            id="aborted-prefill-dcp2",
+        ),
+        # 105 chunks of 12 tokens, past the 100-chunk prompt: the final
+        # segment is 99-104.
+        pytest.param(
+            3,
+            {},
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            1260,
+            False,
+            id="stopped-decode-bpc3",
+        ),
+        # A 12-token chunk of the final tail holds a 4-token block that left
+        # the 16-token window one step before the finish.
+        pytest.param(
+            3,
+            {},
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            1260,
+            True,
+            id="stopped-decode-bpc3-reuse-while-running",
+        ),
+    ],
+)
+def test_final_swa_tail_store_skips_reused_blocks(
+    blocks_per_chunk: int,
+    parallel_kwargs: dict[str, int],
+    finish_status: RequestStatus,
+    num_computed_tokens: int,
+    reuse_while_running: bool,
+):
+    """At finish, the final SWA tail of a short segment is stored again from
+    the segment start, below the stored progress. The core can give the blocks
+    of that tail to another request, at the finish or when a block leaves the
+    window. The tail store must not copy that request's KV.
+    """
+    args = (
+        blocks_per_chunk,
+        parallel_kwargs,
+        finish_status,
+        num_computed_tokens,
+        reuse_while_running,
+    )
+    reusable, clean_stores = _final_swa_tail_store_block_ids(*args, reuse=False)
+    # The tail reads blocks that the core can give away.
+    assert set(reusable) & set(clean_stores)
+
+    reused, stores = _final_swa_tail_store_block_ids(*args, reuse=True)
+    assert not set(reused) & set(stores)
 
 
 @pytest.mark.cpu_test
@@ -1177,12 +1471,12 @@ def test_pending_attention_outside_hit_keeps_shared_prefix_junction():
         num_blocks=20,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], FullAttentionSpec(**attention)),
-            KVCacheGroupSpec(
-                ["window_a"], SlidingWindowSpec(**attention, sliding_window=16)
+            make_kv_cache_group(["full"], AttentionSpec(**attention)),
+            make_kv_cache_group(
+                ["window_a"], sliding_window_layer(**attention, sliding_window=16)
             ),
-            KVCacheGroupSpec(
-                ["window_b"], SlidingWindowSpec(**attention, sliding_window=16)
+            make_kv_cache_group(
+                ["window_b"], sliding_window_layer(**attention, sliding_window=16)
             ),
         ],
     )
@@ -1223,8 +1517,8 @@ def test_unconfirmed_attention_does_not_register_junction():
     )
     config.cache_config.prefix_cache_retention_interval = 0
     kv_config = _make_mamba_hybrid_kv_cache_config()
-    full = kv_config.kv_cache_groups[0].kv_cache_spec
-    kv_config.kv_cache_groups.insert(1, KVCacheGroupSpec(["other_full"], full))
+    full = kv_config.kv_cache_groups[0].kv_cache_specs["full_layer"]
+    kv_config.kv_cache_groups.insert(1, make_kv_cache_group(["other_full"], full))
     spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
     scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
     request = create_request(num_tokens=49, block_size=16)
@@ -1291,13 +1585,10 @@ def test_max_load_tokens_preserves_aligned_sliding_window_chunk(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     kv_cache_groups = [
-        KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)),
-        KVCacheGroupSpec(
+        make_kv_cache_group(["full"], AttentionSpec(**spec_kwargs)),
+        make_kv_cache_group(
             ["sliding"],
-            SlidingWindowSpec(
-                **spec_kwargs,
-                sliding_window=2 * tokens_per_chunk,
-            ),
+            sliding_window_layer(**spec_kwargs, sliding_window=2 * tokens_per_chunk),
         ),
     ]
     runner = request_runner(
@@ -1458,9 +1749,9 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     """Groups with different chunk sizes overlap; the outermost tier wins."""
     block_size = 4
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             [f"layer{group_idx}"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size * (group_idx + 1),
                 num_kv_heads=1,
                 head_size=1,
@@ -1592,15 +1883,15 @@ def test_external_cache_hit_sources_use_loaded_attention_ranges(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     sparse_spec = (
-        SlidingWindowSpec(**spec_kwargs, sliding_window=2 * chunk_size)
+        sliding_window_layer(**spec_kwargs, sliding_window=2 * chunk_size)
         if sparse_kind == "sliding"
-        else ChunkedLocalAttentionSpec(
-            **spec_kwargs, attention_chunk_size=2 * chunk_size
+        else ChunkedLocalAttentionManager.layer_config(
+            AttentionSpec(**spec_kwargs), attention_chunk_size=2 * chunk_size
         )
     )
-    groups = [KVCacheGroupSpec(["sparse"], sparse_spec)]
+    groups = [make_kv_cache_group(["sparse"], sparse_spec)]
     if full_attention:
-        groups.insert(0, KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)))
+        groups.insert(0, make_kv_cache_group(["full"], AttentionSpec(**spec_kwargs)))
     vllm_config = _make_vllm_config(extra_config={"block_size": chunk_size})
     vllm_config.cache_config.block_size = block_size
     vllm_config.speculative_config = None
@@ -2704,6 +2995,53 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
     assert on_compute.first_live_chunk_idx(req_status, 0) == 2
 
 
+def test_async_init_offloads_only_after_workers_are_ready(request_runner):
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        extra_config_overrides={"async_init": True},
+    )
+    ready = False
+    runner.offloading_spec.handler.is_ready = lambda: ready
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=[0] * block_size * 2)
+    runner.run(decoded_tokens=[0, 0])
+    assert not runner.connector_scheduler._offloading_enabled
+    runner.manager.lookup.assert_not_called()
+    runner.manager.prepare_store.assert_not_called()
+
+    # Readiness reported in one step enables stores in the next, which complete
+    # a step later. Chunks skipped while not ready are still stored.
+    ready = True
+    runner.run(decoded_tokens=[0, 0, 0], expected_stored=(0, 1))
+    assert runner.connector_scheduler._offloading_enabled
+
+
+def test_async_init_waits_for_every_worker(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        worker_count=2,
+        extra_config_overrides={"async_init": True},
+    )
+    scheduler = runner.connector_scheduler
+    # Each worker reports once, in separate steps; a repeated rank is not
+    # counted twice.
+    for rank, enabled in ((0, False), (0, False), (1, True)):
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=OffloadingWorkerMetadata(ready_ranks={rank})
+            )
+        )
+        assert scheduler._offloading_enabled == enabled
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,
@@ -3690,18 +4028,18 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
     sliding_window = 8
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -3779,10 +4117,10 @@ def test_sliding_window_chunk_with_null_block_is_not_stored(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     kv_cache_groups = [
-        KVCacheGroupSpec(["layer0"], FullAttentionSpec(**spec_kwargs)),
-        KVCacheGroupSpec(
+        make_kv_cache_group(["layer0"], AttentionSpec(**spec_kwargs)),
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(**spec_kwargs, sliding_window=2 * block_size),
+            sliding_window_layer(**spec_kwargs, sliding_window=2 * block_size),
         ),
     ]
     runner = request_runner(
@@ -3830,9 +4168,9 @@ def test_swa_retry_keeps_internal_null_block_in_store_spec(request_runner):
         blocks_per_chunk=3,
         async_scheduling=False,
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["swa"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -3875,18 +4213,18 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Group 0: block_size=12 (tokens_per_chunk=12)
     # Group 1: block_size=16 (tokens_per_chunk=16)
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=tokens_per_hash * 3,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=tokens_per_hash * 4,
                 num_kv_heads=1,
                 head_size=1,
@@ -4339,15 +4677,15 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
 ):
     """A CPU store beyond a missing SWA chunk must not block a ready prefix."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["full"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["swa"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=4,
                 num_kv_heads=1,
                 head_size=1,
@@ -4654,6 +4992,155 @@ def test_fence_at_build_store_jobs(request_runner):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("shared_prefix", [True, False])
+def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
+    """A prefix hit preserves the store; a reallocation still flushes it."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    scheduler = create_scheduler(config, num_blocks=3 if shared_prefix else 2)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    offloading = connector.scheduler
+    manager = offloading.manager
+    assert isinstance(manager, CPUOffloadingManager)
+
+    request_a = create_request(
+        request_id=1, num_tokens=4, common_prefix_len=4, block_size=4
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    state = offloading._req_status[request_a.request_id]
+    key = state.group_states[0].offload_keys[0]
+    block = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks[0][0]
+    block_id, block_hash = block.block_id, block.block_hash
+    assert block_hash is not None
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert manager.lookup(key, state.req_context) is LookupResult.HIT_PENDING
+
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert block.ref_cnt == 0
+    request_b = create_request(
+        request_id=2,
+        num_tokens=8 if shared_prefix else 4,
+        common_prefix_len=4 if shared_prefix else 0,
+        block_size=4,
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    assert output.scheduled_new_reqs[0].num_computed_tokens == (
+        4 if shared_prefix else 0
+    )
+    b_block = scheduler.kv_cache_manager.get_blocks(request_b.request_id).blocks[0][0]
+    assert b_block.block_id == block_id
+    if shared_prefix:
+        assert b_block.block_hash == block_hash and b_block.ref_cnt == 1
+        assert not (metadata.jobs_to_flush or set()) & jobs
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output(
+                scheduler.running,
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs=dict.fromkeys(jobs, 1)
+                ),
+            ),
+        )
+        assert manager.lookup(key, state.req_context) is LookupResult.HIT
+    else:
+        assert b_block.block_hash != block_hash
+        assert jobs <= (metadata.jobs_to_flush or set())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("prefix_tokens", [8, 20])
+def test_full_attention_pending_store_with_bounded_replay(prefix_tokens):
+    """Retained replay hits do not flush; discarded hits still fence reuse."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 8 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = False
+    spec = AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    groups = [
+        make_kv_cache_group(["full"], spec),
+        make_kv_cache_group(
+            ["swa"],
+            SlidingWindowManager.layer_config(
+                spec, sliding_window=8, bounded_replay=True
+            ),
+        ),
+    ]
+    cache = KVCacheConfig(
+        num_blocks=7 if prefix_tokens == 8 else 32,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    scheduler = create_scheduler(config, kv_cache_config=cache, hash_block_size=4)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    request_a = create_request(
+        request_id=1,
+        num_tokens=prefix_tokens,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    a_ids = scheduler.kv_cache_manager.get_block_ids(request_a.request_id)[0]
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+
+    request_b = create_request(
+        request_id=2,
+        num_tokens=prefix_tokens + 4,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    state = connector.scheduler._req_status[request_b.request_id]
+    assert state.num_locally_computed_tokens == prefix_tokens
+    b_ids = scheduler.kv_cache_manager.get_block_ids(request_b.request_id)
+    if prefix_tokens > 8:
+        assert b_ids[0][: len(a_ids)] == a_ids
+        assert output.scheduled_new_reqs[0].replay_start == prefix_tokens - 8
+        assert not (metadata.jobs_to_flush or set()) & jobs
+    else:
+        assert output.scheduled_new_reqs[0].num_computed_tokens == 0
+        assert set(a_ids) & set().union(*b_ids)
+        assert jobs <= (metadata.jobs_to_flush or set())
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     """complete_store fires per-job, not deferred to request finish.
@@ -4877,18 +5364,18 @@ def test_failed_load_ends_or_reruns_its_request(
         # The sliding-window group loads only the blocks inside its window.
         expected_loaded = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2))
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5370,18 +5857,18 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool, extra_retain
     num_gpu_blocks = 200
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=full_attn_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=swa_block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -5461,21 +5948,21 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool, extra_retain
 
 def _full_and_swa_groups(
     full_attn_block_size: int, swa_block_size: int, sliding_window: int
-) -> list[KVCacheGroupSpec]:
+) -> list[KVCacheGroup]:
     """Group 0 full attention (MLA-like), group 1 sliding window."""
     return [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=full_attn_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=swa_block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -5623,9 +6110,9 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     num_gpu_blocks = 4
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -5830,9 +6317,9 @@ class TestEagle:
         """Full-attn eagle group with 3 blocks all hit → pop to 2 blocks."""
         block_size = 4
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5892,9 +6379,9 @@ class TestEagle:
             num_blocks=100,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["mtp"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -5928,9 +6415,9 @@ class TestEagle:
         """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""
         block_size = 4
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5961,9 +6448,9 @@ class TestEagle:
         """Full-attn eagle group with 0 hits returns 0 before pop."""
         block_size = 4
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6000,9 +6487,9 @@ class TestEagle:
         block_size = 4
         sw_blocks = 2
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6057,9 +6544,9 @@ class TestEagle:
         block_size = 4
         sw_blocks = 2
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6092,9 +6579,9 @@ class TestEagle:
         block_size = 4
         sw_blocks = 2
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6134,9 +6621,9 @@ class TestEagle:
         """
         block_size = 4
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6144,9 +6631,9 @@ class TestEagle:
                 ),
                 is_eagle_group=False,
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=2,
                     head_size=1,
@@ -6190,9 +6677,9 @@ class TestEagle:
         """
         block_size = 4
         groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6200,9 +6687,9 @@ class TestEagle:
                 ),
                 is_eagle_group=False,
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=2,
                     head_size=1,
@@ -6261,18 +6748,18 @@ class TestEagle:
         num_gpu_blocks = 100
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=2,
                     head_size=1,
@@ -6334,9 +6821,9 @@ class TestEagle:
         num_gpu_blocks = 100
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6387,9 +6874,9 @@ class TestEagle:
         num_gpu_blocks = 100
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6476,9 +6963,9 @@ class TestEagle:
         num_gpu_blocks = 1000
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6541,18 +7028,18 @@ class TestEagle:
         num_tokens = 1200
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=full_attn_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=swa_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6609,18 +7096,18 @@ class TestEagle:
         swa_block_size = 4
         prompt_tokens = 1200
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=full_attn_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=swa_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6654,44 +7141,8 @@ class TestEagle:
 
     def test_dcp_abort_reconsiders_final_swa_tail(self):
         """DCP-expanded SWA blocks are not scaled twice during abort."""
-        vllm_config = _make_vllm_config(
-            extra_config={"offload_prompt_only": False},
-            tensor_parallel_size=2,
-            decode_context_parallel_size=2,
-        )
-        vllm_config.speculative_config = None
-        vllm_config.kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True, publisher="null"
-        )
-        kv_cache_config = KVCacheConfig(
-            num_blocks=0,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["full"],
-                    FullAttentionSpec(
-                        block_size=36,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                    ),
-                ),
-                KVCacheGroupSpec(
-                    ["swa"],
-                    SlidingWindowSpec(
-                        block_size=4,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                        sliding_window=16,
-                    ),
-                ),
-            ],
-        )
-        spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
-        scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
-        _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, req_context, trigger: generate_store_output(keys)
+        scheduler = _make_final_swa_tail_scheduler(
+            tensor_parallel_size=2, decode_context_parallel_size=2
         )
 
         request = MagicMock()
@@ -6758,18 +7209,18 @@ class TestEagle:
         num_gpu_blocks = 100
 
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=2,
                     head_size=1,
@@ -6974,18 +7425,18 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     sliding_window = 8  # 2 blocks
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -7069,18 +7520,23 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
 def test_chunked_local_attention_reports_its_chunk_window():
     """Llama 4 uses chunked local attention, which used to trip the
-    FullAttentionSpec assert and kill the engine at startup."""
-    spec = ChunkedLocalAttentionSpec(
-        block_size=16,
-        num_kv_heads=2,
-        head_size=64,
-        dtype=torch.bfloat16,
-        attention_chunk_size=8192,
+    full-attention assert and kill the engine at startup."""
+    group = make_kv_cache_group(
+        ["layer"],
+        ChunkedLocalAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.bfloat16,
+            ),
+            attention_chunk_size=8192,
+        ),
     )
 
-    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
+    assert get_sliding_window_size_in_chunks(group, tokens_per_chunk=1024) == 8
     # Partial chunks round up, so the reachable tail is never understated.
-    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
+    assert get_sliding_window_size_in_chunks(group, tokens_per_chunk=3000) == 3
 
 
 @pytest.mark.parametrize("blocks_per_chunk", [1, 2, 3])
@@ -7099,25 +7555,15 @@ def test_reachable_block_mask_chunk_to_block_index_conversion(
     sliding_window = 8
     alignment_tokens = 16 * blocks_per_chunk
 
-    swa_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-        sliding_window=sliding_window,
-    )
-
     num_chunks = 8
     start_chunk_idx = 0
 
-    manager_cls = KVCacheSpecRegistry.get_manager_class(swa_spec)
-    assert manager_cls is not None
-
-    block_mask = manager_cls.reachable_block_mask(
+    block_mask = SlidingWindowManager.reachable_block_mask(
         start_block=start_chunk_idx * blocks_per_chunk,
         end_block=num_chunks * blocks_per_chunk,
         alignment_tokens=alignment_tokens,
-        kv_cache_spec=swa_spec,
+        block_size=block_size,
+        manager_config=SlidingWindowManager.config(sliding_window=sliding_window),
         use_eagle=False,
     )
 
@@ -7166,18 +7612,18 @@ def test_retention_interval_sparsifies_swa_stores(
     num_gpu_blocks = 200
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=full_attn_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=swa_block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -7246,18 +7692,18 @@ def test_retention_interval_zero_stores_only_replay_boundary(
     num_gpu_blocks = 200
 
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=full_attn_block_size,
                 num_kv_heads=1,
                 head_size=1,
                 dtype=torch.float32,
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer1"],
-            SlidingWindowSpec(
+            sliding_window_layer(
                 block_size=swa_block_size,
                 num_kv_heads=1,
                 head_size=1,
@@ -7331,18 +7777,18 @@ class TestSharedGroupMTPOffload:
         non-speculative behavior of test_two_groups_full_and_sliding_window."""
         block_size = 4
         kv_cache_groups = [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                SlidingWindowSpec(
+                sliding_window_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -7408,9 +7854,9 @@ class TestMambaHybridOffloadServing:
             num_blocks=64,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["full_layer"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=self.BLOCK,
                         num_kv_heads=1,
                         head_size=1,
@@ -7418,9 +7864,9 @@ class TestMambaHybridOffloadServing:
                     ),
                     is_eagle_group=mamba_eagle,
                 ),
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["mamba_layer"],
-                    MambaSpec(
+                    mamba_layer(
                         block_size=self.MAMBA_BLOCK,
                         shapes=((1, 1),),
                         dtypes=(torch.float32,),
@@ -7611,8 +8057,6 @@ def test_dcp_partial_tail_store_is_independent_of_handoff_batching(split_handoff
 
 
 def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
-    from dataclasses import replace
-
     from tests.v1.kv_connector.unit.utils import make_kv_cache_config
 
     config = create_vllm_config(
@@ -7639,8 +8083,8 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     caches.prefix_cache_retention_interval = 16
     caches.kv_cache_groups[0].is_eagle_group = eagle
     group = caches.kv_cache_groups[1]
-    group.kv_cache_spec = replace(
-        group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
+    group.manager_config = group.manager_config.replace_params(
+        num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
     )
     init_none_hash(sha256)
     return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
@@ -7723,24 +8167,25 @@ def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
         _reachable_store_block_mask,
     )
 
-    swa_spec = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=4,
-        head_size=16,
-        dtype=torch.float16,
-        sliding_window=32,
+    swa_group = make_kv_cache_group(
+        ["layer"],
+        sliding_window_layer(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=16,
+            dtype=torch.float16,
+            sliding_window=32,
+        ),
     )
     group = GroupOffloadConfig(
         group_idx=0,
         tokens_per_block=16,
         tokens_per_chunk=16,
         hashes_per_chunk=1,
-        kv_event_group_spec=get_offloading_event_group_spec(
-            KVCacheGroupSpec(["layer"], swa_spec)
-        ),
+        kv_event_group_spec=get_offloading_event_group_spec(swa_group),
         sliding_window_size_in_chunks=2,
-        kv_cache_spec=swa_spec,
-        manager_cls=SlidingWindowManager,
+        block_size=swa_group.block_size,
+        manager_config=swa_group.manager_config,
         is_eagle_group=True,
     )
     plain_group = group._replace(is_eagle_group=False)
