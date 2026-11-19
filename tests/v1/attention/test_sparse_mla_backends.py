@@ -136,7 +136,7 @@ if current_platform.is_rocm():
 
     SPARSE_BACKENDS: list[type[AttentionBackend]] = [ROCMAiterMLASparseBackend]
     SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
-    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla"]
     SPARSE_BLOCK_SIZES = [64]
 else:
     SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
