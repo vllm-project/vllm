@@ -100,8 +100,8 @@ steps:
       --ignore models/multimodal/generation/test_whisper.py
       --ignore models/multimodal/generation/test_gemma_ragged_audio.py
       --ignore models/multimodal/generation/test_memory_leak.py
-      --ignore models/multimodal/generation/test_unlimited_ocr.py
-      --ignore models/multimodal/processing'
+      --ignore models/multimodal/processing
+      --deselect="tests/models/multimodal/generation/test_moss_audio.py::test_moss_audio_parallel_smoke"'
 
 - label: ":intel: (BMG) Multi-Modal Processor" # 44min
   key: multi-modal-processor

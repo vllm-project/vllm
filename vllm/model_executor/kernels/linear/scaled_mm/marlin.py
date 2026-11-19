@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8Static128BlockSym,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -43,6 +44,12 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if envs.VLLM_BATCH_INVARIANT:
             return False, "FP8 Marlin not supported for batch invariant execution."
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:

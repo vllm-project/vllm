@@ -414,19 +414,30 @@ def test_rdna_valid_for_any_batch():
     """Valid whatever max_num_seqs, on Triton's packed HND cache."""
     from vllm.v1.attention.backends import rocm_rdna_attn as rdna
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
     backend = rdna.RocmRdnaAttentionBackend
     reason = backend.supports_combination(
         HEAD_DIM, torch.float16, "auto", 16, False, False, False, False, None
     )
     assert reason is None
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=HKV, head_size=HEAD_DIM, dtype=torch.float16
     )
     assert backend.customize_spec(spec) == TritonAttentionBackend.customize_spec(spec)
     assert backend.supported_kv_cache_layouts() == (KVCacheLayout.LBHNC,)
     assert 512 in backend.get_supported_head_sizes()
+
+
+@requires_gfx1151
+def test_rdna_prefers_built_page_size():
+    """Runs without --block-size get the pages the kernels are built for."""
+    from vllm.config.cache import CacheConfig
+    from vllm.v1.attention.backends import rocm_rdna_attn as rdna
+
+    backend = rdna.RocmRdnaAttentionBackend
+    assert backend.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE) == 16
+    assert any(v.page_size == 16 for v in hip.variants())
 
 
 # ---------------------------------------------------------------- prefill
