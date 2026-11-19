@@ -10,7 +10,6 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    triton_scalar_specialization_rep,
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8
 from vllm.platforms import current_platform
@@ -71,12 +70,13 @@ def _is_sm90() -> bool:
     return current_platform.get_device_capability() == (9, 0)
 
 
-@triton.jit(do_not_specialize=["num_rows", "num_requests"])
+@triton.jit(do_not_specialize=["num_rows", "num_requests", "num_cache_blocks"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
     k_cache_ptr,
     v_cache_ptr,
     indices_ptr,
+    valid_counts_ptr,
     block_table_ptr,
     token_to_req_ptr,
     partial_output_ptr,
@@ -94,6 +94,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     stride_v_token,
     stride_v_head,
     stride_indices_row,
+    stride_valid_counts,
     stride_table_req,
     stride_output_row,
     stride_output_head,
@@ -112,6 +113,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    PHYSICAL_BLOCK_STRIDE: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -119,11 +121,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
 
-    # The packed selection buffer carries one TRAILING COUNT COLUMN per row
-    # (column TOPK of a TOPK+1-wide buffer): the row's valid-entry count,
-    # written by the expand kernel. It is never a token index — the tile loop
-    # and the index load below only ever cover columns [0, TOPK).
-    valid_count = tl.load(indices_ptr + row * stride_indices_row + TOPK)
+    valid_count = tl.load(valid_counts_ptr + row * stride_valid_counts)
 
     head_offsets = tl.arange(0, BLOCK_M)
     dim_offsets = tl.arange(0, HEAD_DIM)
@@ -150,27 +148,29 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
 
     for tile in range(split_id, tile_end, NUM_SPLITS):
         columns = tile * BLOCK_N + column_offsets
-        logical_token = tl.load(
+        selected_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
             mask=columns < TOPK,
             other=-1,
         )
-        safe_token = tl.maximum(logical_token, 0)
-        logical_page = safe_token // PAGE_SIZE
-        page_offset = safe_token % PAGE_SIZE
-        valid = (
-            (request >= 0)
-            & (request < num_requests)
-            & (logical_token >= 0)
-            & (logical_page < PAGE_TABLE_WIDTH)
-        )
-        physical_page = tl.load(
-            block_table_ptr
-            + safe_request * stride_table_req
-            + tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1),
-            mask=valid,
-            other=-1,
-        )
+        safe_token = tl.maximum(selected_token, 0)
+        valid = (request >= 0) & (request < num_requests) & (selected_token >= 0)
+        if PHYSICAL_BLOCK_STRIDE:
+            # HiSparse encodes rows using the backing block stride, including padding.
+            physical_page = safe_token // PHYSICAL_BLOCK_STRIDE
+            page_offset = safe_token % PHYSICAL_BLOCK_STRIDE
+            valid &= page_offset < PAGE_SIZE
+        else:
+            selected_page = safe_token // PAGE_SIZE
+            page_offset = safe_token % PAGE_SIZE
+            valid &= selected_page < PAGE_TABLE_WIDTH
+            physical_page = tl.load(
+                block_table_ptr
+                + safe_request * stride_table_req
+                + tl.minimum(selected_page, PAGE_TABLE_WIDTH - 1),
+                mask=valid,
+                other=-1,
+            )
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
@@ -639,7 +639,7 @@ def qsa_sparse_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    logical_indices: torch.Tensor,
+    indices: torch.Tensor,
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     use_prefill_config: bool,
@@ -648,6 +648,7 @@ def qsa_sparse_paged_attention(
     v_scale: float | None = None,
     *,
     output_gate: torch.Tensor,
+    valid_counts: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -658,25 +659,30 @@ def qsa_sparse_paged_attention(
     pre-multiplied into the softmax scale and v_scale becomes the kernel's
     output scale, so the kernel needs no device scale buffers.
 
-    logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
-    with the trailing column holding each row's valid-entry count (written by
-    the expand kernel; never a token index). The kernel reads it as the
-    tile-loop bound. use_prefill_config steers the top of the config table (see
-    _select_config). Large fp8 batches, prefill or decode, take the Blackwell
-    kernel in qsa_fp8 (see qsa_fp8.use_fp8_decode_kernel).
+    By default, `indices` is the PACKED logical selection buffer:
+    `[rows, selection_width + 1]` with the trailing column holding each row's
+    valid-entry count (written by the expand kernel; never a token index). The
+    kernel reads it as the tile-loop bound. use_prefill_config steers the top
+    of the config table (see _select_config). Large Blackwell FP8 batches use
+    the kernel in qsa_fp8. With `valid_counts`, `indices` instead holds
+    `[rows, selection_width]` resolved physical rows of the supplied cache
+    view, which split-K reads without the block table.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
-    if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
+    if indices.ndim != 2 or indices.shape[0] != q.shape[0]:
         raise ValueError("QSA indices must have one row per query")
     if token_to_req.shape != (q.shape[0],) or block_table.ndim != 2:
         raise ValueError("QSA sparse attention metadata has invalid shapes")
     if not all(k_cache.shape[:3]) or not all(block_table.shape):
         raise ValueError("QSA sparse attention cache and block table must be nonempty")
-    if logical_indices.shape[1] < 2:
-        raise ValueError(
-            "QSA packed indices need selection columns plus the count column"
-        )
+    if valid_counts is None:
+        if indices.shape[1] < 2:
+            raise ValueError(
+                "QSA packed indices need selection columns plus the count column"
+            )
+    elif valid_counts.shape != (q.shape[0],) or valid_counts.dtype != torch.int32:
+        raise ValueError("QSA valid counts must be one int32 count per query")
     if q.shape[2] != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
@@ -700,13 +706,13 @@ def qsa_sparse_paged_attention(
     else:
         softmax_scale = head_dim**-0.5
         output_scale = 1.0
-    assert logical_indices.dtype == block_table.dtype == torch.int32
+    assert indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
-    assert q.device == logical_indices.device == block_table.device
+    assert q.device == indices.device == block_table.device
     assert q.device == token_to_req.device
     assert q.stride(2) == k_cache.stride(3) == v_cache.stride(3) == 1
-    assert logical_indices.stride(1) == block_table.stride(1) == 1
+    assert indices.stride(1) == block_table.stride(1) == 1
     assert token_to_req.stride(0) == 1
 
     if out is None:
@@ -720,12 +726,14 @@ def qsa_sparse_paged_attention(
     if not q.shape[0]:
         return out
 
-    if qsa_fp8.use_fp8_decode_kernel(q.shape[0] * k_cache.shape[2], k_cache.dtype):
+    if valid_counts is None and qsa_fp8.use_fp8_decode_kernel(
+        q.shape[0] * k_cache.shape[2], k_cache.dtype
+    ):
         return qsa_fp8.qsa_sparse_paged_decode(
             q,
             k_cache,
             v_cache,
-            logical_indices,
+            indices,
             block_table,
             token_to_req,
             out,
@@ -737,7 +745,7 @@ def qsa_sparse_paged_attention(
         q,
         k_cache,
         v_cache,
-        logical_indices,
+        indices,
         block_table,
         token_to_req,
         use_prefill_config,
@@ -745,6 +753,7 @@ def qsa_sparse_paged_attention(
         output_gate_view,
         softmax_scale,
         output_scale,
+        valid_counts=valid_counts,
     )
 
 
@@ -752,7 +761,7 @@ def _qsa_sparse_paged_splitk(
     q: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
-    logical_indices: torch.Tensor,
+    indices: torch.Tensor,
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     use_prefill_config: bool,
@@ -760,12 +769,19 @@ def _qsa_sparse_paged_splitk(
     output_gate_view: torch.Tensor,
     softmax_scale: float,
     output_scale: float,
+    *,
+    valid_counts: torch.Tensor | None,
 ) -> torch.Tensor:
     """The split-K kernel (and merge) at _select_config's config."""
     is_fp8 = k_cache.dtype != torch.bfloat16
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
-    selection_width = logical_indices.shape[1] - 1  # trailing column is the count
+    physical_indices = valid_counts is not None
+    if valid_counts is None:
+        valid_counts = indices[:, -1]
+        selection_width = indices.shape[1] - 1
+    else:
+        selection_width = indices.shape[1]
     block_n, partial_warps, num_tiles, num_splits = _select_config(
         q.shape[0], k_cache.shape[2], use_prefill_config, selection_width, is_fp8
     )
@@ -791,7 +807,8 @@ def _qsa_sparse_paged_splitk(
         q,
         k_cache,
         v_cache,
-        logical_indices,
+        indices,
+        valid_counts,
         block_table,
         token_to_req,
         partial_output,
@@ -808,7 +825,8 @@ def _qsa_sparse_paged_splitk(
         v_cache.stride(0),
         v_cache.stride(1),
         v_cache.stride(2),
-        logical_indices.stride(0),
+        indices.stride(0),
+        valid_counts.stride(0),
         block_table.stride(0),
         out.stride(0),
         out.stride(1),
@@ -827,6 +845,9 @@ def _qsa_sparse_paged_splitk(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        PHYSICAL_BLOCK_STRIDE=k_cache.stride(0) // k_cache.stride(1)
+        if physical_indices
+        else 0,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -859,9 +880,9 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
+    physical_indices: bool = False,
 ) -> tuple[tuple[int | str, ...], ...]:
-    """Compile every production-reachable split-K/merge and decode
-    specialization."""
+    """Warm split-K/merge and, for logical indices, the Blackwell FP8 kernel."""
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
@@ -886,9 +907,8 @@ def warmup_qsa_sparse_paged_attention(
         for use_prefill_config in (False, True)
     }
 
-    # Scalars constant per deployment get their real values (their divisibility
-    # specialization is wanted); the batch-varying ones are do_not_specialize'd
-    # on the kernels, so any value here compiles the only variant.
+    # Preserve stride specialization. Batch and cache-pool sizes are runtime
+    # bounds, so do_not_specialize lets warmup cover their different values.
     num_rows = 16
     num_requests = 16
     q_ptr = TritonWarmupTensor(
@@ -904,8 +924,17 @@ def warmup_qsa_sparse_paged_attention(
         shape=tuple(value_cache.shape),
         strides=tuple(value_cache.stride()),
     )
-    # +1: the packed buffer's trailing count column.
-    indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
+    # Counts are always the packed logical buffer's trailing column; physical
+    # rows come from a separate buffer without it.
+    packed_width = selection_width + 1
+    indices_width = selection_width if physical_indices else packed_width
+    indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, indices_width))
+    valid_counts_ptr = TritonWarmupTensor(
+        torch.int32,
+        aligned=selection_width * torch.int32.itemsize % 16 == 0,
+        shape=(num_rows,),
+        strides=(packed_width,),
+    )
     block_table_ptr = TritonWarmupTensor(
         block_table.dtype,
         shape=tuple(block_table.shape),
@@ -921,7 +950,7 @@ def warmup_qsa_sparse_paged_attention(
     )
     head_stride = head_dim
     row_stride = num_query_heads * head_dim
-    num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
+    num_cache_blocks = kv_cache.shape[0]
 
     warmed: list[tuple[int | str, ...]] = []
     for block_n, warps, num_tiles, num_splits in sorted(profiles):
@@ -941,6 +970,7 @@ def warmup_qsa_sparse_paged_attention(
             k_cache_ptr,
             v_cache_ptr,
             indices_ptr,
+            valid_counts_ptr,
             block_table_ptr,
             token_to_req_ptr,
             partial_output_ptr,
@@ -957,7 +987,8 @@ def warmup_qsa_sparse_paged_attention(
             value_cache.stride(0),
             value_cache.stride(1),
             value_cache.stride(2),
-            selection_width + 1,
+            indices_width,
+            packed_width,
             block_table.stride(0),
             row_stride,
             head_stride,
@@ -976,6 +1007,9 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
+            PHYSICAL_BLOCK_STRIDE=key_cache.stride(0) // key_cache.stride(1)
+            if physical_indices
+            else 0,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
@@ -1001,12 +1035,13 @@ def warmup_qsa_sparse_paged_attention(
             )
         warmed.append((block_n, num_splits, warps))
 
-    warmed += qsa_fp8.warmup_qsa_fp8_decode(
-        kv_cache,
-        block_table,
-        num_query_heads=num_query_heads,
-        selection_width=selection_width,
-    )
+    if not physical_indices:
+        warmed += qsa_fp8.warmup_qsa_fp8_decode(
+            kv_cache,
+            block_table,
+            num_query_heads=num_query_heads,
+            selection_width=selection_width,
+        )
     return tuple(warmed)
 
 
