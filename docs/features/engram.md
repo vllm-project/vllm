@@ -273,11 +273,12 @@ vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "per_t
 
 In `ngram` mode, `per_token_table.weight` is skipped, so a checkpoint that
 carries both tables can be served in either mode. `per_token` supports a
-single PLE layer. Its table is replicated on every rank's GPU, so
-`cpu_offload` has no effect. Token ids outside the table are clamped to the
-first or last row instead of failing. The selected mode and table size are
-logged once per PLE layer. `per_token` is experimental and not supported on
-other platforms or with sequence parallelism.
+single PLE layer. Its table is replicated on every rank's GPU (about 1.3 GB,
+against 102.4 GB for the n-gram table), so `cpu_offload` has no effect. Token
+ids outside the table are clamped to the first or last row instead of failing.
+The selected mode and table size are logged once per PLE layer. `per_token` is
+experimental and not supported on other platforms or with sequence
+parallelism.
 
 ## Limitations
 

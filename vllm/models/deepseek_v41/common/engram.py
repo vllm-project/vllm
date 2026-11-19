@@ -1820,7 +1820,7 @@ class Engram(nn.Module):
         self._init_staging(max_tokens, layout.head_dim)
         self.per_token_table: PerTokenTable | None = None
         if mode == MODE_PER_TOKEN:
-            # Checkpoint tensor ``engram.per_token_table.weight``.
+            # Checkpoint tensor `engram.per_token_table.weight`.
             self.per_token_table = PerTokenTable(
                 self.embed_tokens, layout.compressed_vocab_size
             )
