@@ -2858,7 +2858,15 @@ guide: |
 
   On MI325X (gfx942), one 8-GPU node runs TP8 with DCP8 from
   `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`, with the routed experts requantized online
-  to groupwise INT4 and the KV cache in `fp8_ds_mla`. See [MI325X (gfx942)](#mi325x-gfx942).
+  to groupwise INT4 and the KV cache in `fp8_ds_mla`. INT6 quick all-reduce matched BF16
+  all-reduce on GSM8K (0.977 either way, 5-shot, all 1,319 questions) and on passkeys (14/14
+  at 32k and 120k). INT4 quick all-reduce was faster but lowered answer confidence at 120k,
+  so the recipe does not use it. With the INT4 expert requant, GSM8K was 0.9735 ± 0.0044
+  (20-shot) and RULER NIAH was 1.0 through 128k. Against BF16 all-reduce, INT6 cut time to
+  first token 4.6% at 32k and 128k input (concurrency 1) and raised output throughput 2.8%
+  at 32k input and 1k output, concurrency 16. Decode at concurrency 1 was unchanged. DCP8
+  grows the KV cache from 1.49M to 8.29M tokens and costs a few percent of decode speed
+  (242 vs 264 output tok/s at 2k input, concurrency 8).
 
   On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
@@ -2971,36 +2979,6 @@ guide: |
   validating on the client. The feature is not offered for prefill/decode disaggregation:
   Dynamo workers do not accept the flag and constrain tool calls through their own
   `--dyn-enable-structural-tag`, which the AgentX PD presets set.
-
-  ## MI325X (gfx942)
-
-  Use `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. Its entrypoint is `vllm`, so the
-  rendered command is `vllm serve`. Main and the generic `kimi-k31` ROCm image do not run
-  this configuration.
-
-  One 8x MI325X node, single-node TP8 with DCP8 (`a2a`). The routed experts are requantized
-  to groupwise INT4 at load, which is lossy. Attention, the shared experts and the vision
-  tower stay BF16, and the KV cache is `fp8_ds_mla`. Context is capped at 135,168 tokens.
-  Prefix caching is off. `--max-num-seqs` is 64: the default of 1024 exceeds the KDA state
-  slots (899 with prefix caching off) and startup aborts.
-
-  The AMD profile sets AITER, fast safetensors, breakable CUDA graphs, the ready timeout and
-  SiTUv2=1 (a4w4). This configuration adds INT6 quick all-reduce for tensor-parallel
-  all-reduces of 4 MiB and more. Decode all-reduces stay BF16. Set
-  `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE` for BF16 all-reduce throughout.
-
-  - **Accuracy.** INT6 matched BF16 all-reduce on GSM8K (0.977 either way, 5-shot, all 1,319
-    questions) and on passkeys (14/14 at 32k and 120k). INT4 quick all-reduce was faster but
-    lowered answer confidence at 120k, so the recipe does not use it. With the INT4 expert
-    requant, GSM8K was 0.9735 ± 0.0044 (20-shot) and RULER NIAH was 1.0 through 128k.
-  - **Performance.** Against BF16 all-reduce, INT6 cut time to first token 4.6% at 32k and
-    128k input (concurrency 1) and raised output throughput 2.8% at 32k input and 1k output,
-    concurrency 16. Decode at concurrency 1 was unchanged. DCP8 grows the KV cache from 1.49M
-    to 8.29M tokens and costs a few percent of decode speed (242 vs 264 output tok/s at 2k
-    input, concurrency 8).
-
-  Expert parallelism, multi-node TP and prefill/decode disaggregation have not been tested.
-  Speculative decoding is off (vllm-project/vllm#64261).
 
   ## Client usage
 
