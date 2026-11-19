@@ -13,6 +13,7 @@ steps:
     - "!vllm/distributed/kv_transfer/"
     - vllm/inputs/
     - vllm/model_executor/
+    - vllm/models/hy_v4/nvidia/dfly_inputs.py
     - vllm/models/qwen4_exp/
     - vllm/platforms/
     - vllm/sampling_params.py

@@ -33,7 +33,6 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.transformers_utils.configs.lfm3_omni import Lfm3OmniConfig
 from vllm.transformers_utils.processors.lfm3_omni import Lfm3OmniProcessor
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .interfaces import MultiModalEmbeddings
 from .lfm3_audio import (
@@ -50,6 +49,7 @@ from .lfm3_vl import (
     Lfm3VlProcessingInfo,
 )
 from .qwen2_5_omni_thinker import (
+    get_omni_modality_masks,
     may_interleave_audio_video,
     merge_interleaved_embeddings,
 )
@@ -441,12 +441,17 @@ class Lfm3OmniForConditionalGeneration(Lfm3VlForConditionalGeneration):
             and is_multimodal is not None
             and may_interleave_audio_video(multimodal_embeddings)
         ):
-            with gpu_sync_allowed():
-                input_ids_cpu = input_ids.cpu()
-                is_video = is_multimodal & (input_ids_cpu == self.config.video_token_id)
-                is_audio = is_multimodal & (input_ids_cpu == self.config.audio_token_id)
-                video_and_audio = bool(is_video.any() and is_audio.any())
-            if video_and_audio:
+            masks = get_omni_modality_masks(
+                input_ids,
+                multimodal_embeddings,
+                is_multimodal,
+                {
+                    "video": self.config.video_token_id,
+                    "audio": self.config.audio_token_id,
+                },
+            )
+            is_video, is_audio = masks["video"], masks["audio"]
+            if is_video.any() and is_audio.any():
                 # A soundtrack's tokens sit inside its video's span, so the
                 # embeddings are not in position order: scatter each modality
                 # over its own tokens.

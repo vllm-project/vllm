@@ -375,6 +375,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -597,6 +598,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -640,6 +645,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
