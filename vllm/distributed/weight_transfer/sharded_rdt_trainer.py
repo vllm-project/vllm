@@ -39,8 +39,8 @@ from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
-    dtype_name,
 )
+from vllm.distributed.weight_transfer.packed_tensor import dtype_name
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     DEFAULT_BUFFER_BYTES,
     DEFAULT_NUM_BUFFERS,

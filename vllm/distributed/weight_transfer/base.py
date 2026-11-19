@@ -41,11 +41,6 @@ def _stack_key(name: str) -> tuple[str, int] | None:
     return None
 
 
-def dtype_name(dtype: torch.dtype) -> str:
-    """The wire name of `dtype` (`torch.bfloat16` -> `"bfloat16"`)."""
-    return str(dtype).removeprefix("torch.")
-
-
 def layerwise_groups(names: list[str]) -> list[list[str]]:
     """Deprecated: no weight transfer backend groups by layer any more.
 
