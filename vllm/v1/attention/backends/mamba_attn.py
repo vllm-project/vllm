@@ -8,6 +8,7 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
@@ -121,11 +122,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and kv_cache_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
         )
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
+        # GDN ReplaySSM has its own builder, so Mamba2 follows --mamba-backend.
         self.use_flashinfer_replayssm = (
-            self.use_replayssm and vllm_config.use_flashinfer_replayssm
+            self.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
-        self.use_replayssm_trackers = (
-            self.use_replayssm and vllm_config.use_replayssm_trackers
+        self.use_replayssm_trackers = self.use_replayssm and (
+            self.use_flashinfer_replayssm or self.use_spec_decode
         )
 
         scheduler_config = vllm_config.scheduler_config
