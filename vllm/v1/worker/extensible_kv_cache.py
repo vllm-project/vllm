@@ -558,11 +558,21 @@ def extend_kv_cache(
             + getattr(runner.speculator, "attn_groups", [])
             for group in groups
         ]
-        # Host-resident layers, absent from `committed`, keep their views, so
-        # layers sharing their KV still resolve as at allocation.
+        # Host-resident layers do not move: they stay bound as at allocation,
+        # and their views resolve the layers sharing their KV.
+        host_resident = {
+            name
+            for tensor in runner.kv_cache_config.kv_cache_tensors
+            if tensor.host_resident
+            for name in tensor.layers
+        }
         runner.kv_caches_by_layer = bind_kv_caches(
             runner.kv_caches_by_layer | committed,
-            forward_context,
+            {
+                name: layer
+                for name, layer in forward_context.items()
+                if name not in host_resident
+            },
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,

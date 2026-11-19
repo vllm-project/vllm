@@ -859,9 +859,9 @@ def test_extensible_extend_keeps_layers_sharing_host_resident_kv_bound(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The views rebuilt at the final extend omit host-resident layers (HiSparse),
-    whose storage does not move. A layer sharing one's KV (a DSpark draft) stays
-    bound to it, while one sharing a device layer's KV follows the new view
-    (#68561)."""
+    whose storage does not move, so they are left as bound. A layer sharing one's
+    KV (a DSpark draft) stays bound to it, while one sharing a device layer's KV
+    follows the new view (#68561)."""
     from vllm.v1.worker import extensible_kv_cache
     from vllm.v1.worker.gpu import attn_utils
 
@@ -896,7 +896,13 @@ def test_extensible_extend_keeps_layers_sharing_host_resident_kv_bound(
             commit=lambda num_blocks, defragment, shrink: None,
             committed_views=lambda config, layout, sizes: {"device": new_device},
         ),
-        kv_cache_config=SimpleNamespace(num_blocks=4),
+        kv_cache_config=SimpleNamespace(
+            num_blocks=4,
+            kv_cache_tensors=[
+                SimpleNamespace(host_resident=True, layers=["host"]),
+                SimpleNamespace(host_resident=False, layers=["device"]),
+            ],
+        ),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         vllm_config=SimpleNamespace(
             kv_transfer_config=None,
@@ -928,7 +934,8 @@ def test_extensible_extend_keeps_layers_sharing_host_resident_kv_bound(
         "device": new_device,
         "device_reader": new_device,
     }
-    assert {name: bound[name] for name in names} == expected
+    # The host-resident layer itself is not rebound.
+    assert bound == {name: expected[name] for name in names if name != "host"}
     assert runner.kv_caches_by_layer == expected
 
 
