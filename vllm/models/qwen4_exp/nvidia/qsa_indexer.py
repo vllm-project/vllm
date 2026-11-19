@@ -14,6 +14,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 
 from ..common.qsa_indexer import (
     QSACompressedKeyCache,
@@ -53,7 +54,10 @@ def apply_qsa_rope(
         )
         return tensor.reshape(shape)
 
-    rotated = rotary_emb.apply_rotary_emb.forward_cuda(
+    apply_rotary_emb = rotary_emb.apply_rotary_emb
+    if current_platform.is_cuda():
+        apply_rotary_emb = apply_rotary_emb.forward_cuda
+    rotated = apply_rotary_emb(
         tensor[..., :rotary_dim],
         cos,
         sin,
