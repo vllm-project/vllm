@@ -22,10 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.utils import (
-    prompt_embeds_budget_bytes,
-    prompt_embeds_row_bytes,
-)
+from vllm.v1.core.sched.utils import prompt_embeds_row_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -1542,7 +1539,9 @@ def get_kv_cache_configs(
     if override is None and vllm_config.cache_config.kv_cache_memory_bytes is None:
         prompt_embeds_bytes_per_token = prompt_embeds_row_bytes(vllm_config)
         available_memory = set_aside(
-            available_memory, prompt_embeds_budget_bytes(vllm_config, 0)
+            available_memory,
+            prompt_embeds_bytes_per_token
+            * vllm_config.scheduler_config.max_num_batched_tokens,
         )
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and

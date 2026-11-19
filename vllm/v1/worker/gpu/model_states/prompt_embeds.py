@@ -62,10 +62,12 @@ class PromptEmbedsState:
         # them, this holds only while steps run in order and each removes
         # requests before adding new ones.
         num_rows = prompt_embeds.shape[0]
-        assert self.num_rows + num_rows <= self.max_num_rows, (
-            f"prompt_embeds rows exceed the max_model_len budget "
-            f"({self.num_rows} held + {num_rows} > {self.max_num_rows})"
-        )
+        if self.num_rows + num_rows > self.max_num_rows:
+            raise RuntimeError(
+                f"prompt_embeds rows of request {new_req_data.req_id} exceed the "
+                f"prompt_embeds budget ({self.num_rows} held + {num_rows} > "
+                f"{self.max_num_rows})"
+            )
         self.num_rows += num_rows
         embeds = async_tensor_h2d(prompt_embeds, device=self.device, dtype=self.dtype)
         embeds = embeds.contiguous()
