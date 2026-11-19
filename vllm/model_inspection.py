@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model inspection utilities for vLLM."""
 
+from collections import defaultdict
+from dataclasses import dataclass
+
 import torch.nn as nn
 
 
@@ -134,3 +137,158 @@ def _format_module_tree(
 def format_model_inspection(model: nn.Module) -> str:
     """Format a model into a transformers-style hierarchical string."""
     return "\n".join(_format_module_tree(model))
+
+
+@dataclass(frozen=True)
+class LayerBackend:
+    """The backend one or more layers of a model run on."""
+
+    kind: str
+    """What the layers are: `attention`, `linear` or `moe`."""
+    backend: str
+    """The attention backend or kernel class, or `unquantized`."""
+    details: tuple[tuple[str, str], ...]
+    """What the backend runs, e.g. `(("w", "mxfp4"), ("a", "mxfp8"))`."""
+    modules: tuple[str, ...]
+    """Names of the layers, as in `model.named_modules()`."""
+
+
+_Described = tuple[str, str, tuple[tuple[str, str], ...]]
+
+
+def _dtype_name(dtype: object) -> str:
+    return str(dtype).removeprefix("torch.") if dtype is not None else "none"
+
+
+def _describe_kernel(method: object) -> tuple[str, dict[str, str]] | None:
+    """The kernel a quant method (or compressed-tensors scheme) selected,
+    whatever attribute it keeps it in, with the precision it runs if known."""
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+
+    for value in vars(method).values():
+        if isinstance(value, FusedMoEKernel):
+            experts = value.fused_experts
+            quant = experts.quant_config
+            if quant.weight_quant_dtype is None and quant.quant_dtype is None:
+                return type(experts).__name__, {}
+            return type(experts).__name__, {
+                "w": _dtype_name(quant.weight_quant_dtype),
+                "a": _dtype_name(quant.quant_dtype),
+            }
+        if type(value).__module__.startswith("vllm.model_executor.kernels.linear"):
+            return type(value).__name__, {}
+    # The MoE kernel is built after the weights load; before that, name the
+    # experts class the method selected.
+    experts_cls = getattr(method, "experts_cls", None)
+    return (experts_cls.__name__, {}) if experts_cls is not None else None
+
+
+def _describe_layer(module: nn.Module) -> _Described | None:
+    """`(kind, backend, details)` for a layer that selects a backend."""
+    from vllm.model_executor.layers.attention import MMEncoderAttention
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+        FusedMoEMethodBase,
+    )
+
+    details: dict[str, str] = {}
+    if isinstance(module, AttentionLayerBase):
+        kind, backend = "attention", module.get_attn_backend().get_name()
+        if (kv_cache_dtype := getattr(module, "kv_cache_dtype", "auto")) != "auto":
+            details["kv_cache"] = kv_cache_dtype
+    elif isinstance(module, MMEncoderAttention):
+        kind, backend = "attention", module.attn_backend.name
+    elif (quant_method := getattr(module, "quant_method", None)) is not None:
+        kind = "moe" if isinstance(quant_method, FusedMoEMethodBase) else "linear"
+        # Compressed-tensors keeps the per-layer scheme, and its kernel, on
+        # the layer.
+        method = getattr(module, "scheme", None) or quant_method
+        if (kernel := _describe_kernel(method)) is not None:
+            backend, details = kernel
+        elif "Unquantized" in type(method).__name__:
+            backend = "unquantized"
+            if (weight := getattr(module, "weight", None)) is not None:
+                details["w"] = _dtype_name(weight.dtype)
+        else:
+            # A method that runs its own op rather than a kernel object.
+            backend = type(method).__name__
+    else:
+        return None
+    return kind, backend, tuple(details.items())
+
+
+def collect_layer_backends(model: nn.Module) -> list[LayerBackend]:
+    """The backends the layers of `model` selected, one entry per distinct
+    (kind, backend, details), ordered by kind."""
+    modules: dict[_Described, list[str]] = defaultdict(list)
+    for name, module in model.named_modules():
+        if (described := _describe_layer(module)) is not None:
+            modules[described].append(name)
+
+    kinds = ("attention", "linear", "moe")
+    return [
+        LayerBackend(*described, modules=tuple(names))
+        for described, names in sorted(
+            modules.items(), key=lambda item: kinds.index(item[0][0])
+        )
+    ]
+
+
+def _format_layer_indices(indices: set[int], max_ranges: int = 3) -> str:
+    ranges = _format_index_ranges(list(indices))
+    if ranges.count(",") < max_ranges:
+        return f"[{ranges}]"
+    return f"[{min(indices)}-{max(indices)} ({len(indices)})]"
+
+
+def _format_layer_names(names: list[str]) -> str:
+    """Collapse layer names: `layers.[0-47].attn.{q_proj,k_proj}`."""
+    # Layers that differ only in their numeric indices share a pattern.
+    indices: dict[tuple[str, ...], list[set[int]]] = {}
+    for name in names:
+        parts = name.split(".")
+        pattern = tuple("#" if part.isdigit() else part for part in parts)
+        numbers = [int(part) for part in parts if part.isdigit()]
+        seen = indices.setdefault(pattern, [set() for _ in numbers])
+        for position, number in enumerate(numbers):
+            seen[position].add(number)
+
+    # Patterns that differ only in the leaf name share a prefix.
+    leaves: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for pattern, seen in indices.items():
+        ranges = iter(_format_layer_indices(numbers) for numbers in seen)
+        parts = [next(ranges) if part == "#" else part for part in pattern]
+        leaves[tuple(parts[:-1])].append(parts[-1])
+
+    formatted = []
+    for prefix, leaf_names in leaves.items():
+        leaf = leaf_names[0]
+        if len(leaf_names) > 1:
+            leaf = "{" + ",".join(leaf_names) + "}"
+        formatted.append(".".join((*prefix, leaf)))
+    return ", ".join(formatted)
+
+
+def format_layer_backends(backends: list[LayerBackend]) -> str:
+    """A table with one row per entry: its kind, how many layers run it, the
+    backend with its details, and the layer names collapsed."""
+    rows = [("layer", "count", "backend", "modules")]
+    for entry in backends:
+        backend = entry.backend
+        if entry.details:
+            details = ", ".join(f"{key}={value}" for key, value in entry.details)
+            backend += f" [{details}]"
+        rows.append(
+            (
+                entry.kind,
+                str(len(entry.modules)),
+                backend,
+                _format_layer_names(list(entry.modules)),
+            )
+        )
+    widths = [max(len(row[col]) for row in rows) for col in range(3)]
+    return "\n".join(
+        f"  {kind:<{widths[0]}} | {count:>{widths[1]}} | "
+        f"{backend:<{widths[2]}} | {names}"
+        for kind, count, backend, names in rows
+    )
