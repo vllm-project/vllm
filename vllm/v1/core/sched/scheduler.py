@@ -618,8 +618,10 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         junction = request.shared_prefix_boundary
-        # Block-floored: a sub-block junction's state is not separately cacheable.
-        block_floored = start + (junction - start) // block_size * block_size
+        # Floored to the block grid: a sub-block junction's state is not
+        # separately cacheable, and a chunk starting mid-block must still stop
+        # at the block boundary.
+        block_floored = junction // block_size * block_size
         # Past the prompt the manager writes nothing, so fall back to the
         # block-floored stop rather than dropping it: a resumed request replaying
         # output tokens can still observe a junction there.

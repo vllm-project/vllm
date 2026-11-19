@@ -1592,7 +1592,7 @@ def get_global_kv_cache_groups(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every sliding window with how many extra tokens to retain in the window.
-    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
+    extra_retained_tokens = vllm_config.num_reprefillable_tokens
     for layer_name, layer_config in merged_layer_configs.items():
         config = layer_config.manager_config
         if isinstance(config.params, SlidingWindowManager.Params):

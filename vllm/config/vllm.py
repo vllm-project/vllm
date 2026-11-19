@@ -725,38 +725,33 @@ class VllmConfig:
         Mid-prefill the drafter consumes tokens the target model has not been
         scheduled for yet, so every component that has to keep them available
         must apply this margin: the scheduler, which never ends a chunk within
-        it and shifts encoder scheduling by it, and the HiSparse write-back and
-        sliding-window retention, which keep the trailing `this - 1` tokens
-        re-prefillable. Consumers must read this property rather than
-        re-deriving their own per-method lookahead, so those components cannot
-        drift apart.
+        it and shifts encoder scheduling by it, and the components that read
+        `num_reprefillable_tokens`. Consumers must read this property rather
+        than re-deriving their own per-method lookahead, so those components
+        cannot drift apart.
         """
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
+    @property
+    def num_reprefillable_tokens(self) -> int:
+        """Trailing computed tokens whose drafter KV is not final yet: of the
+        `num_prefill_lookahead_tokens` read past the prompt end, only the first
+        is sampled, so the rest are rewritten later."""
+        return max(0, self.num_prefill_lookahead_tokens - 1)
+
     def _resolve_num_hash_lookahead_tokens(self) -> int:
         """Resolve the hash lookahead after the relevant configs are finalized."""
         if self.speculative_config is None:
             return 0
-        lookahead = self.speculative_config.speculator_config.num_hash_lookahead_tokens
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is None:
-            return lookahead if self.cache_config.enable_prefix_caching else 0
-        if lookahead:
-            from vllm.distributed.kv_transfer.kv_connector.factory import (
-                KVConnectorFactory,
-            )
-
-            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
-                logger.warning_once(
-                    "%s does not support hash lookahead; spec decode acceptance "
-                    "may drop.",
-                    kv_transfer_config.kv_connector,
-                )
-        return lookahead
+        if (
+            self.kv_transfer_config is None
+            and not self.cache_config.enable_prefix_caching
+        ):
+            return 0
+        return self.speculative_config.speculator_config.num_hash_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:

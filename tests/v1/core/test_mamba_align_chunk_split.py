@@ -409,3 +409,21 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail stop ({tail_stop})"
         )
+
+
+@pytest.mark.parametrize("resume_at", [400, 1200, 1216])
+def test_junction_stop_is_floored_to_the_block_grid(resume_at: int) -> None:
+    """A mid-block resume whose chunk an internal checkpoint lets cross the
+    boundary must still stop at the block holding the junction's state."""
+    prompt_len = 3602
+    junction = MAMBA_BLOCK_SIZE + 1200
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+    request.shared_prefix_boundary = junction
+    num_new = _split(
+        request,
+        prompt_len - resume_at,
+        num_hash_lookahead_tokens=1,
+        num_prefill_checkpoint_blocks=1,
+    )
+    assert resume_at + num_new == junction // MAMBA_BLOCK_SIZE * MAMBA_BLOCK_SIZE

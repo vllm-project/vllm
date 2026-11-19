@@ -1153,8 +1153,10 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     prefix_caching: bool,
     nested: bool,
     role: str,
+    caplog_vllm,
 ):
-    """An unsupported child only warns; every connector keeps the lookahead."""
+    """An unsupported child only warns, once on the scheduler side; every
+    connector keeps the lookahead."""
     children = [_lookahead_connector_config(supported) for supported in child_support]
     if nested:
         children = [
@@ -1185,6 +1187,8 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
     )
 
+    warned = "does not support hash lookahead" in caplog_vllm.text
+    assert warned == (role == "SCHEDULER" and not all(child_support))
     assert isinstance(connector, MultiConnector)
     assert connector._vllm_config.num_hash_lookahead_tokens == expected
     for child in connector.sub_connectors:

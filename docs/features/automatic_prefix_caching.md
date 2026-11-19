@@ -20,7 +20,6 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- lookahead block hashes (EAGLE/EAGLE3/MTP speculative decoding)
 - `--prefix-match-unit` smaller than the Mamba block size
 
 ```bash

@@ -626,6 +626,7 @@ def make_nixl_scheduler(
     sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
+        num_reprefillable_tokens=0,
         num_hash_lookahead_tokens=0,
         cache_config=CacheConfig(block_size=16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -707,6 +708,7 @@ def make_nixl_push_scheduler(
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_reprefillable_tokens = 0
     vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 

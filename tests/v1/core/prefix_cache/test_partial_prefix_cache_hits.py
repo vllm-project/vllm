@@ -945,7 +945,8 @@ def test_mid_block_resume_running_past_block_end_does_not_cache_it(case):
         num_prefill_checkpoint_blocks=1,
     )
     # "local_junction": default sparse retention, where block 1 is retained
-    # because 128 is the shared-prefix junction left by a sibling.
+    # because 128 is the shared-prefix junction left by a sibling; the junction
+    # stop ends the chunk there, so block 1 does get state@128.
     manager.coordinator.retention_interval = 0 if case == "local_junction" else None
     scheduler = SimpleNamespace(
         block_size=mamba_block_size,
@@ -1005,17 +1006,23 @@ def test_mid_block_resume_running_past_block_end_does_not_cache_it(case):
         "resume", tokens[:230], num_external=96 if case == "external" else 0
     )
     assert num_hit == (0 if case == "external" else 96)
-    assert chunks == [(96, 134)]
+    if case == "local_junction":
+        assert chunks == [(96, 32), (128, 102)]
+    else:
+        assert chunks == [(96, 134)]
     resumed_block = manager.get_blocks("resume").blocks[mamba_group][1]
     offloads = drain_boundary_state_offloads(manager).get("resume", [])
     manager.free(resume)
     manager.new_step_starts()
 
-    assert resumed_block.block_hash_num_tokens != 128
-    assert (mamba_group, resumed_block.block_id, 128) not in offloads
+    cached_at_block_end = case == "local_junction"
+    assert (resumed_block.block_hash_num_tokens == 128) == cached_at_block_end
+    assert (
+        (mamba_group, resumed_block.block_id, 128) in offloads
+    ) == cached_at_block_end
     probe = make_request("probe", tokens[:128] + [9] * 16, hash_block_size, sha256)
     _, num_hit, _ = manager.get_computed_blocks(probe)
-    assert num_hit == (0 if case == "external" else 96)
+    assert num_hit == {"local": 96, "local_junction": 128, "external": 0}[case]
 
 
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():

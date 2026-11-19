@@ -46,6 +46,7 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
     """Composite binding must reach HiSparse and existing pool-only connectors."""
     hisparse = object.__new__(HiSparseConnector)
     hisparse._role = KVConnectorRole.SCHEDULER
+    hisparse._vllm_config = SimpleNamespace(num_reprefillable_tokens=0)
     hisparse.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
     legacy = object.__new__(ExampleConnector)
     legacy.bind_gpu_block_pool = MagicMock()

@@ -882,6 +882,11 @@ class SimpleCPUOffloadScheduler:
         )
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
+        # Mimic the GPU KV cache manager's cacheable prefix.
+        cacheable_tokens = min(
+            self.cpu_coordinator.get_num_cacheable_tokens(confirmed_tokens),
+            len(request.block_hashes) * self.hash_block_size,
+        )
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
@@ -896,13 +901,6 @@ class SimpleCPUOffloadScheduler:
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
             group_size = self.group_block_sizes[g]
-            # Mimic the GPU KV cache manager's cacheable prefix.
-            cacheable_tokens = self.cpu_coordinator.get_num_cacheable_tokens(
-                confirmed_tokens, g
-            )
-            cacheable_tokens = min(
-                cacheable_tokens, len(request.block_hashes) * self.hash_block_size
-            )
             ready = min(len(group_gpu_ids), cacheable_tokens // group_size)
             resolved_hashes = resolve_block_hashes(
                 request.block_hashes, self.hash_block_size, group_size

@@ -489,9 +489,8 @@ class HiSparseCoordinator:
         """Run the per-step residency work for each scheduled request.
 
         `requests` pairs a request id with the number of tokens computed
-        once the step completes. As in `KVCacheCoordinator.cache_blocks`, the
-        last `num_reprefillable_tokens` are not final yet and are not written
-        back.
+        once the step completes. Multi-module MTP may still rewrite the last
+        `num_reprefillable_tokens`, so they are not written back yet.
         """
         if not self.resident_managers:
             return

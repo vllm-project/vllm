@@ -67,7 +67,9 @@ def replay_boundaries(
 
     - Resend of the same prompt: `get_reusable_prefix_length`, which leaves
       the last token for logits and the lookahead tokens for the hash.
-    - Request extending the prompt (e.g. the next turn): the full prompt.
+    - Request extending the prompt (e.g. the next turn): the full prompt. With
+      Mamba and L >= 2 this adds nothing: the state is freed before its
+      lookahead hash exists.
 
     `reachable_block_mask` floors both to the hit alignment, so they keep
     different tails only when a boundary falls in the prompt's last
@@ -310,10 +312,8 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def get_num_cacheable_tokens(
-        self, num_computed_tokens: int, kv_cache_group_id: int
-    ) -> int:
-        """Return the prefix eligible for hashing in this group."""
+    def get_num_cacheable_tokens(self, num_computed_tokens: int) -> int:
+        """Return the prefix eligible for hashing."""
         return num_computed_tokens
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
@@ -330,12 +330,13 @@ class KVCacheCoordinator(ABC):
             request.num_prompt_tokens,
             num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
         )
-        for group_id, manager in enumerate(self.single_type_managers):
+        num_cacheable_tokens = self.get_num_cacheable_tokens(num_computed_tokens)
+        for manager in self.single_type_managers:
             if not manager.enable_caching:
                 continue
             manager.cache_blocks(
                 request,
-                self.get_num_cacheable_tokens(num_computed_tokens, group_id),
+                num_cacheable_tokens,
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
@@ -692,9 +693,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             else None
         )
 
-    def get_num_cacheable_tokens(
-        self, num_computed_tokens: int, kv_cache_group_id: int
-    ) -> int:
+    def get_num_cacheable_tokens(self, num_computed_tokens: int) -> int:
         """Largest finalized prefix a future cache hit could match."""
         # Hits are scheduler-block aligned, except partial hits: their sub-block
         # Mamba tails publish only at the exact chunk end, so keep it unrounded.

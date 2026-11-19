@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mamba "align" check-points at the position a sibling resumes from.
 
-Lookahead hashes identify the shared prefix. Mamba must materialize state at
+Block hashes identify the shared prefix. Mamba must materialize state at
 that same position, including hash boundaries inside a physical Mamba block.
 
 Gated by `CacheConfig.enable_mamba_shared_prefix_checkpoint`. Every test here
@@ -339,7 +339,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
 
 @pytest.mark.parametrize("lookahead", [0, 1])
 def test_enabling_never_reduces_reuse(lookahead):
-    """Eligible junctions improve reuse; other configurations are unchanged."""
+    """The junction checkpoint improves reuse with and without lookahead."""
     block_size, hash_block_size = 512, 32
 
     def sibling_hit(shared_prefix_checkpoint):
@@ -349,9 +349,7 @@ def test_enabling_never_reduces_reuse(lookahead):
             shared_prefix_checkpoint=shared_prefix_checkpoint,
             num_hash_lookahead_tokens=lookahead,
         )
-        assert manager.mamba_shared_prefix_checkpoint == (
-            shared_prefix_checkpoint and lookahead > 0
-        )
+        assert manager.mamba_shared_prefix_checkpoint == shared_prefix_checkpoint
         stub = _stub(manager, block_size, hash_block_size)
         _orphaned_full_attention_tail(manager, stub, 2020)
         consumer = make_request(
@@ -365,10 +363,7 @@ def test_enabling_never_reduces_reuse(lookahead):
         return _sibling_hit(manager, 2017, [-2] * 583, hash_block_size)
 
     on, off = sibling_hit(True), sibling_hit(False)
-    if lookahead > 0:
-        assert on > off
-    else:
-        assert on == off
+    assert on > off
 
 
 def test_disabled_by_default():

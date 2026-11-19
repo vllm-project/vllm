@@ -179,7 +179,6 @@ class KVCacheManager:
         # junction costs a forward pass and displaces the block-boundary stop.
         self.mamba_shared_prefix_checkpoint = (
             enable_mamba_shared_prefix_checkpoint
-            and self.coordinator.block_pool.num_hash_lookahead_tokens > 0
             and self.coordinator.enable_partial_hash_hits
         )
         if self.mamba_shared_prefix_checkpoint:

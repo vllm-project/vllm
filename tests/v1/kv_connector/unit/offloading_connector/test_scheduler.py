@@ -6746,7 +6746,7 @@ def test_retention_interval_zero_stores_only_replay_boundaries(
         ),
     ]
 
-    spec = _shared_kv_mtp_config() if num_lookahead else None
+    spec = _mtp_config() if num_lookahead else None
     if spec is not None:
         spec.num_speculative_tokens = num_lookahead
         spec.use_multi_module_mtp.return_value = True
@@ -6793,11 +6793,9 @@ def test_retention_interval_zero_stores_only_replay_boundaries(
     )
 
 
-def _shared_kv_mtp_config():
-    """Speculative config for a shared-group MTP model: eagle-family method
-    whose drafter layer merges into a target KV-cache group, so no group
-    self-identifies as a drafter group (issue #52735)."""
-    spec = MagicMock(name="shared_kv_mtp_spec")
+def _mtp_config():
+    """Speculative config for single-module MTP (L = 1)."""
+    spec = MagicMock(name="mtp_spec")
     spec.use_eagle.return_value = True
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
@@ -6806,15 +6804,12 @@ def _shared_kv_mtp_config():
     return attach_speculator_config(spec, MTPSpeculatorConfig)
 
 
-class TestSharedGroupMTPOffload:
-    """Regression tests for issue #52735: OffloadingConnector must keep
-    serving when speculative decoding is enabled but no KV-cache group is
-    annotated as a drafter group (shared-group MTP models)."""
+class TestMTPOffload:
+    """OffloadingConnector with MTP speculative decoding (issue #52735)."""
 
-    def test_no_annotation_marks_no_groups(self, request_runner):
-        """Spec decode on + zero annotated groups must NOT mark every group
-        as a drafter group; the full store->load roundtrip must match the
-        non-speculative behavior of test_two_groups_full_and_sliding_window."""
+    def test_store_then_load_with_lookahead_hashes(self, request_runner):
+        """A full-attention + sliding-window store->load roundtrip with lookahead
+        block hashes (L = 1)."""
         block_size = 4
         kv_cache_groups = [
             make_kv_cache_group(
@@ -6842,7 +6837,7 @@ class TestSharedGroupMTPOffload:
             num_gpu_blocks=100,
             async_scheduling=True,
             kv_cache_groups=kv_cache_groups,
-            speculative_config=_shared_kv_mtp_config(),
+            speculative_config=_mtp_config(),
         )
 
         runner.new_request(token_ids=[0] * block_size * 3)

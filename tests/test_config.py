@@ -67,6 +67,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroup
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.config import (
@@ -4933,6 +4934,7 @@ def test_draft_sample_method_probabilistic_is_accepted():
         (DSpineSpeculatorConfig, 0),
         (XPressSpeculatorConfig, 0),
         (LiLiCorrSpeculatorConfig, 0),
+        (DFlySpeculatorConfig, 0),
         (NgramSpeculatorConfig, 0),
     ],
 )

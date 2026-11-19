@@ -2379,7 +2379,7 @@ def test_prefill_hybrid_model():
     )
 
 
-def test_prefill_hybrid_model_eagle():
+def test_prefill_hybrid_model_hash_lookahead():
     """All groups reuse only boundaries whose finalized lookahead matches."""
     block_size = 16
     manager = make_kv_cache_manager(
@@ -2407,9 +2407,8 @@ def test_prefill_hybrid_model_eagle():
         assert hit == expected
         assert all(len(group) == expected // block_size for group in blocks.blocks)
     # Losing a full-attention block still limits every group's shared hit.
-    manager.block_pool.cached_block_hash_to_block._cache.pop(
-        make_block_hash_with_group_id(prime.block_hashes[4], 0)
-    )
+    (evicted,) = manager.block_pool.get_cached_block(prime.block_hashes[4], [0])
+    manager.block_pool.evict_blocks({evicted.block_id})
     _, hit, _ = manager.get_computed_blocks(prime)
     assert hit == 64
 
@@ -4368,7 +4367,7 @@ def test_emit_cached_block_events_zero_cached():
         (3, 33, 1),
     ],
 )
-def test_eagle_identical_prompt_hit(
+def test_hash_lookahead_identical_prompt_hit(
     lookahead: int, num_prompt_tokens: int, expected_blocks: int
 ):
     block_size = 16
@@ -4387,10 +4386,10 @@ def test_eagle_identical_prompt_hit(
     assert manager.allocate_slots(req, len(token_ids)) is not None
     manager.free(req)
 
-    req_eagle = make_request(
-        "eagle", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    resend = make_request(
+        "resend", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
     )
-    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
+    computed_blocks, num_tokens, _ = manager.get_computed_blocks(resend)
     assert len(computed_blocks.blocks[0]) == expected_blocks
     assert num_tokens == expected_blocks * block_size
 
@@ -4540,7 +4539,7 @@ def test_lookahead_checkpoint_has_available_hash(
     assert hit_tokens == expected_boundary
 
 
-def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
+def test_hash_lookahead_hybrid_mamba_hits_partial_prompt_boundary():
     hash_block_size = 16
     mamba_block_size = 544
     token_ids = list(range(1249))
@@ -4640,7 +4639,7 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
     assert num_computed == (boundary if diverge_offset >= lookahead else 0)
 
 
-def test_eagle_grouped_swa_siblings_use_same_cache_mask():
+def test_hash_lookahead_grouped_swa_siblings_use_same_cache_mask():
     """Equal-spec SWA groups retain the same hash-ready segment tails."""
     block_size = 8
     swa_spec = _swa_layer(

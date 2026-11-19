@@ -45,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # The drafter's own KV at a position depends on the tokens it reads ahead.
+    draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
     # For performance, prefers requests' full token history on the GPU instead of
@@ -139,10 +141,12 @@ class SpeculatorConfig:
         return 1 if self.uses_target_hidden_states else 0
 
     @property
+    @final
     def num_hash_lookahead_tokens(self) -> int:
         """Next tokens the drafter's own KV at a position depends on, which
-        prefix-cache block hashes must cover. 0 when the drafter writes no KV
-        that reads past its position."""
+        prefix-cache block hashes must cover."""
+        if self.draft_kv_depends_on_lookahead:
+            return self.num_prefill_lookahead_tokens
         return 0
 
     @property
