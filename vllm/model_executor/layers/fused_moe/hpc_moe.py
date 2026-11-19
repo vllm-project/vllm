@@ -102,10 +102,6 @@ class HPCExperts(mk.FusedMoEExpertsModular):
     def supports_expert_map(self) -> bool:
         return False
 
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
