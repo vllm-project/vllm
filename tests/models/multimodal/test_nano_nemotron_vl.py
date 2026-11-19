@@ -502,22 +502,27 @@ def test_nemotron_processor_keeps_videos_of_different_sizes_apart():
 
 
 def test_nemotron_video_frame_size_falls_back_to_the_image_processor_config():
-    fallback = {"video_target_num_patches": 64, "video_maintain_aspect_ratio": False}
-
     # The vision config's frame size wins.
-    processor = _make_processor(**fallback)
+    processor = _make_processor(
+        video_target_num_patches=64, video_maintain_aspect_ratio=False
+    )
     assert processor.video_target_num_patches == 16
     assert processor.video_maintain_aspect_ratio is True
 
     # A checkpoint in the native Transformers layout (Nemotron 3.5 Super VL)
     # keeps it in the image processor config only.
-    processor = _make_processor(video_in_vision_config=False, **fallback)
+    processor = _make_processor(
+        video_in_vision_config=False,
+        video_target_num_patches=64,
+        video_maintain_aspect_ratio=True,
+    )
     assert processor.video_target_num_patches == 64
-    assert processor.video_maintain_aspect_ratio is False
+    assert processor.video_maintain_aspect_ratio is True
 
     # Neither sets one: frames are `force_image_size` squares.
     processor = _make_processor(video_in_vision_config=False)
     assert processor.video_target_num_patches is None
+    assert processor.video_maintain_aspect_ratio is False
 
 
 @pytest.mark.parametrize(
