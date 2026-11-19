@@ -2742,15 +2742,12 @@ strategy_overrides:
           - "--max-model-len"
           - "135168"
           # K3.1 keeps per-sequence KDA state. The default of 1024 is more
-          # than the state slots this node has (899 with prefix caching off),
+          # than the state slots this node has (604 with prefix caching on),
           # and startup aborts before serving. 64 was verified to start.
           - "--max-num-seqs"
           - "64"
           - "--gpu-memory-utilization"
           - "0.9"
-          - "--no-enable-prefix-caching"
-          - "--kv-cache-dtype"
-          - "fp8_ds_mla"
           - "--quantization-config"
           - '{"moe":{"weight":"int4_per_group_32"}}'
           - "--compilation-config"
@@ -2858,15 +2855,14 @@ guide: |
 
   On MI325X (gfx942), one 8-GPU node runs TP8 with DCP8 from
   `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`, with the routed experts requantized online
-  to groupwise INT4 and the KV cache in `fp8_ds_mla`. INT6 quick all-reduce matched BF16
-  all-reduce on GSM8K (0.977 either way, 5-shot, all 1,319 questions) and on passkeys (14/14
-  at 32k and 120k). INT4 quick all-reduce was faster but lowered answer confidence at 120k,
-  so the recipe does not use it. With the INT4 expert requant, GSM8K was 0.9735 ± 0.0044
-  (20-shot) and RULER NIAH was 1.0 through 128k. Against BF16 all-reduce, INT6 cut time to
-  first token 4.6% at 32k and 128k input (concurrency 1) and raised output throughput 2.8%
-  at 32k input and 1k output, concurrency 16. Decode at concurrency 1 was unchanged. DCP8
-  grows the KV cache from 1.49M to 8.29M tokens and costs a few percent of decode speed
-  (242 vs 264 output tok/s at 2k input, concurrency 8).
+  to groupwise INT4 and the KV cache in `fp8_ds_mla`.
+
+  - **Accuracy.** INT6 quick all-reduce is lossy and may lower accuracy slightly. In our runs
+    it matched BF16 all-reduce on GSM8K (0.977) and on passkey retrieval up to 120k. Set
+    `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE` for BF16 all-reduce.
+  - **Performance.** About 240 output tok/s at 2k input and concurrency 8. INT6 cuts time to
+    first token by about 5% on long prompts, and DCP8 grows the KV cache from 1.5M to 8.3M
+    tokens for a few percent of decode speed.
 
   On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
   two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
