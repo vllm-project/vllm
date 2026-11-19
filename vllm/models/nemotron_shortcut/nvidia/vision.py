@@ -15,6 +15,7 @@ from functools import cached_property
 from typing import Any, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PreTrainedConfig, ProcessorMixin
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
@@ -40,6 +41,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.pixtral import (
     TRANSFORMERS_WITH_AXIAL_ROPE,
     PixtralHFVisionModel,
+    pack_image_patches,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -106,7 +108,7 @@ def get_video_temporal_patch_size(config: object) -> int:
     The checks are the same as Megatron-Bridge
     `check_video_temporal_compression`: T must be 1 or 2, and T > 1 needs
     `separate_video_embedder` (default True), because images keep
-    `vision_tower.patch_conv` and tubelets use `video_patch_conv`.
+    `vision_tower.patch_conv` and tubelets use `vision_tower.video_patch_conv`.
     """
     value = getattr(config, "video_temporal_patch_size", None)
     if value is None:
@@ -833,7 +835,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        def replacement(item_idx: int):
+        def image_replacement(item_idx: int):
             pixels = out_mm_kwargs["image"][item_idx]["pixel_values"].data
             assert isinstance(pixels, torch.Tensor)
             height, width = pixels.shape[-2:]
@@ -843,14 +845,6 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             )
             tokens = processor.tokenizer.encode(image_tokens, add_special_tokens=False)
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
-
-        image_updates = [
-            PromptReplacement(
-                modality="image",
-                target=[processor.image_token_id],
-                replacement=replacement,
-            )
-        ]
 
         temporal_patch_size = cast(
             NemotronShortcutProcessingInfo, self.info
@@ -906,7 +900,12 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                 )
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
 
-        return image_updates + [
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[processor.image_token_id],
+                replacement=image_replacement,
+            ),
             PromptReplacement(
                 modality="video",
                 target=processor.tokenizer.encode(
@@ -914,15 +913,71 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     add_special_tokens=False,
                 ),
                 replacement=video_replacement,
-            )
+            ),
         ]
+
+
+class NemotronShortcutVisionModel(PixtralHFVisionModel):
+    """vLLM's Pixtral encoder, plus `video_patch_conv` for video tubelets.
+
+    A tubelet stacks T frames frame-major on the channel axis.
+    `video_patch_conv` embeds it as one patch grid, and the rest of the encoder
+    runs as for one frame of the same size, with the same RoPE positions."""
+
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        video_temporal_patch_size: int,
+        quant_config=None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        self.video_patch_conv: Conv2dLayer | None = None
+        if video_temporal_patch_size > 1:
+            self.video_patch_conv = Conv2dLayer(
+                in_channels=config.num_channels * video_temporal_patch_size,
+                out_channels=config.hidden_size,
+                kernel_size=config.patch_size,
+                stride=config.patch_size,
+                bias=False,
+            )
+
+    def encode_tubelets(self, tubelets: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+        """Encode the tubelets of a video; `forward` encodes images."""
+        assert self.video_patch_conv is not None
+        tubelets = [tubelet.to(device=self.device) for tubelet in tubelets]
+        patches, grid_sizes = pack_image_patches(
+            tubelets, (self.patch_size, self.patch_size)
+        )
+        weight = self.video_patch_conv.weight
+        patch_embeds = F.linear(
+            patches.to(weight.dtype), weight.reshape(weight.shape[0], -1)
+        )
+        patch_embeds = self.ln_pre(patch_embeds.unsqueeze(0))
+        positions = torch.cat(
+            [
+                torch.cartesian_prod(torch.arange(rows), torch.arange(cols))
+                for rows, cols in grid_sizes
+            ]
+        ).to(self.device)
+        if not TRANSFORMERS_WITH_AXIAL_ROPE:
+            max_width = self.config.image_size // self.config.patch_size
+            positions = positions[:, 0] * max_width + positions[:, 1]
+        embed_sizes = [rows * cols for rows, cols in grid_sizes]
+        out = self.transformer(
+            patch_embeds,
+            self.patch_positional_embedding(patch_embeds, positions),
+            **self.packed_attention_metadata(embed_sizes, self.device),
+            return_all_hidden_states=False,
+        )
+        return torch.split(out.squeeze(0), embed_sizes)
 
 
 class NemotronShortcutMultiModalProjector(Mistral3MultiModalProjector):
     def __init__(self, config: PreTrainedConfig, quant_config=None, prefix: str = ""):
         if config.vision_feature_layer != -1:
             raise ValueError(
-                "Nemotron Shortcut currently supports vision_feature_layer=-1"
+                "Nemotron Shortcut currently only supports vision_feature_layer=-1"
             )
         assert isinstance(config.vision_config, PixtralVisionConfig)
         vision_size = config.vision_config.hidden_size
@@ -958,7 +1013,7 @@ class NemotronShortcutForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
-            "model.video_patch_conv.": "video_patch_conv.",
+            "model.video_patch_conv.": "vision_tower.video_patch_conv.",
             "lm_head.": "language_model.lm_head.",
         }
     )
@@ -987,23 +1042,12 @@ class NemotronShortcutForConditionalGeneration(
                 # Before 5.17, Pixtral's default RoPE computes the same 2D angles.
                 vision_config = copy.deepcopy(vision_config)
                 vision_config.rope_parameters = {**rope, "rope_type": "default"}
-            self.vision_tower = PixtralHFVisionModel(
+            self.vision_tower = NemotronShortcutVisionModel(
                 vision_config,
+                self.video_temporal_patch_size,
                 quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if self.video_temporal_patch_size > 1:
-                # Embeds a tubelet of T frames, stacked frame-major on the
-                # channel axis. Images keep vision_tower.patch_conv.
-                vision_config = config.vision_config
-                self.video_patch_conv = Conv2dLayer(
-                    in_channels=vision_config.num_channels
-                    * self.video_temporal_patch_size,
-                    out_channels=vision_config.hidden_size,
-                    kernel_size=vision_config.patch_size,
-                    stride=vision_config.patch_size,
-                    bias=False,
-                )
             self.multi_modal_projector = NemotronShortcutMultiModalProjector(
                 config,
                 vllm_config.quant_config,
@@ -1033,45 +1077,24 @@ class NemotronShortcutForConditionalGeneration(
                         list(frames), self.video_temporal_patch_size
                     )
                     embeddings.append(
-                        torch.cat(
-                            self._embed_images(
-                                tubelets, patch_conv=self.video_patch_conv
-                            )
-                        )
+                        torch.cat(self._embed_images(tubelets, video=True))
                     )
         return embeddings
 
     def _embed_images(
-        self, pixels: object, patch_conv: nn.Module | None = None
+        self, pixels: object, video: bool = False
     ) -> tuple[torch.Tensor, ...]:
         assert isinstance(pixels, (torch.Tensor, list, tuple))
         images = list(pixels)
         sizes = torch.tensor([image.shape[-2:] for image in images])
-        if patch_conv is None:
-            features = self.vision_tower(images)
+        if video:
+            features = self.vision_tower.encode_tubelets(images)
         else:
-            features = self._vision_tower_with_patch_conv(images, patch_conv)
+            features = self.vision_tower(images)
         embeds = self.multi_modal_projector(torch.cat(features), sizes)
         multiple = self.config.vision_config.patch_size * self.config.spatial_merge_size
         lengths = (sizes // multiple).prod(-1).tolist()
         return embeds.split(lengths)
-
-    def _vision_tower_with_patch_conv(
-        self, images: list[torch.Tensor], patch_conv: nn.Module
-    ) -> tuple[torch.Tensor, ...]:
-        """Run the vision tower with `patch_conv` in place of its own.
-
-        `PixtralHFVisionModel.forward` reads only `self.patch_conv` for the
-        embedding; RoPE positions come from the conv output grid, so a tubelet
-        gets the same positions as one frame of the same size.
-        """
-        tower = self.vision_tower
-        image_patch_conv = tower.patch_conv
-        tower.patch_conv = patch_conv
-        try:
-            return tower(images)
-        finally:
-            tower.patch_conv = image_patch_conv
 
     def forward(
         self,
@@ -1105,11 +1128,7 @@ class NemotronShortcutForConditionalGeneration(
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
-            tower_model=(
-                "vision_tower"
-                if self.video_temporal_patch_size == 1
-                else ["vision_tower", "video_patch_conv"]
-            ),
+            tower_model="vision_tower",
         )
 
     get_mamba_state_dtype_from_config = (
