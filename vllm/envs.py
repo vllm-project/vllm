@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
     VLLM_MAX_STOP_STRINGS: int = 4
+    VLLM_MAX_TOKENIZE_TOKENS: int | None = None
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
@@ -349,6 +350,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_XPU_SUPPORT_FP8_QUERY: bool | None = None
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1230,6 +1232,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Maximum number of stop strings allowed in a single request.
     "VLLM_MAX_STOP_STRINGS": lambda: int(os.environ.get("VLLM_MAX_STOP_STRINGS", "4")),
+    # Maximum number of tokens allowed for /tokenize, /detokenize, and
+    # /v1/messages/count_tokens requests. Defaults to max(max_model_len * 2, 131072);
+    # set <= 0 to disable. The --max-tokenize-tokens CLI flag takes precedence.
+    "VLLM_MAX_TOKENIZE_TOKENS": lambda: (
+        int(val)
+        if (val := os.environ.get("VLLM_MAX_TOKENIZE_TOKENS", "").strip())
+        else None
+    ),
     # Maximum number of bad-word token sequences generated per request.
     "VLLM_MAX_NUM_BAD_WORDS": lambda: int(
         os.environ.get("VLLM_MAX_NUM_BAD_WORDS", "128")
@@ -2423,6 +2433,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
     # whether use xpu specific sample kernel
+    # Whether XPU attention takes an FP8 query. If unset, enabled on Xe3p
+    # (native FP8) and disabled otherwise.
+    "VLLM_XPU_SUPPORT_FP8_QUERY": lambda: (
+        bool(int(os.environ["VLLM_XPU_SUPPORT_FP8_QUERY"]))
+        if "VLLM_XPU_SUPPORT_FP8_QUERY" in os.environ
+        else None
+    ),
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
     ),
@@ -2607,6 +2624,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        "VLLM_MAX_TOKENIZE_TOKENS",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
