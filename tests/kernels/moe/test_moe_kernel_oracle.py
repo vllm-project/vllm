@@ -922,3 +922,20 @@ def test_aiter_activation_matching_uses_the_layer_layout(
                     mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend(config)
     finally:
         rocm_aiter_ops.refresh_env_variables()
+
+
+def test_hpc_clamp_rejected_during_backend_selection():
+    """Exclude HPC before selection so automatic mode can use another kernel."""
+    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+    config.swiglu_limit = 10.0
+    supported, reason = HPCExperts.is_supported_config(
+        HPCExperts,
+        config,
+        kFp8Static128BlockSym,
+        kFp8Dynamic128Sym,
+        HPCExperts.activation_format(),
+    )
+    assert not supported
+    assert reason is not None and "SwiGLU clamp" in reason
