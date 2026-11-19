@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 
-@dataclass
+@dataclass(slots=True)
 class ShardQMetadata:
     """This step's ShardQ: which TP rank attends which of the tokens after
     `num_decode_tokens` head-sharded decode tokens (ids relative to the first

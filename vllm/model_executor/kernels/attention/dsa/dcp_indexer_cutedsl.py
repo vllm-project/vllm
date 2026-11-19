@@ -124,7 +124,7 @@ def pack_dcp_topk_candidates_cutedsl(
 class PackDCPTopkCandidatesKernel(
     VllmTritonJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dcp_rank: int
         dcp_world_size: int
@@ -202,7 +202,7 @@ class PackDCPTopkCandidatesKernel(
         tl.store(packed_base, score, mask=mask)
         tl.store(packed_base + packed_stride2, global_id.to(tl.float32), mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         has_row_starts: bool,
@@ -307,7 +307,7 @@ class StableTopKFromGatheredCandidatesKernel(
     hist_chunks = (hist_bins + tb_size - 1) // tb_size
     warps_per_block = tb_size // cute.arch.WARP_SIZE
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         topk: int
         num_candidates: int
@@ -604,7 +604,7 @@ class StableTopKFromGatheredCandidatesKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:

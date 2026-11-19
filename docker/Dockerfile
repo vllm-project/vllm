@@ -23,7 +23,7 @@
 # =============================================================================
 
 ARG CUDA_VERSION=13.2.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
@@ -230,6 +230,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         # Cython 3.3 rejects tilelang's hardcoded Py_LIMITED_API=3.8.
         printf 'cython<3.3\n' > /tmp/build-constraints.txt \
         && export UV_BUILD_CONSTRAINT=/tmp/build-constraints.txt; \
+        # PyNvVideoCodec's cp314 aarch64 wheels are manylinux_2_34 only, and
+        # it has no sdist. The build does not need it; the wheel still
+        # requires it (the build stage re-copies cuda.txt), and the Ubuntu
+        # runtime image installs it.
+        sed -i '/^PyNvVideoCodec==/d' requirements/cuda.txt; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
@@ -771,7 +776,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
 
-# Python version string for paths (e.g., "312" for 3.12)
+# Python version string for paths (e.g., "314" for 3.14)
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
@@ -1163,6 +1168,23 @@ RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-
     if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
         uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
         && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
+    fi
+
+# torchao and conch for the Quantization steps, which put /opt/quantization-deps on
+# PYTHONPATH. Kept out of site-packages so other jobs never see them (see
+# requirements/test/quantization_deps.in): importing torchao initializes CUDA, which
+# breaks tests that fork, and an installed conch changes vLLM's kernel choice.
+COPY requirements/test/quantization_deps_cuda.txt requirements/test/quantization_deps_cuda.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        env -u UV_OVERRIDE uv pip install --python python3 --require-hashes --no-deps \
+            --target /opt/quantization-deps -r requirements/test/quantization_deps_cuda.txt \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu132; \
+    fi \
+    && if ! python3 -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) for m in ('torchao', 'conch')))"; then \
+        echo "torchao or conch is importable from the default path; keep them in /opt/quantization-deps only" >&2; \
+        exit 1; \
     fi
 
 # image to run unit testing suite
