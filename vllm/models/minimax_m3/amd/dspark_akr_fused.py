@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The rest of the amd_kernels `draft` route's DSpark forward at TP4 on the library
-block `amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4`: the input fc split by N
-(eager), the layer stack around the draft attention and the context K/V chain."""
+"""The rest of the amd_kernels `draft` route's DSpark forward on the library block of
+the TP size (`amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4` at TP4,
+`dense_mxfp8_h6144_i6144_ranks2` at TP2): the input fc split by N (eager), the layer
+stack around the draft attention and the context K/V chain."""
 
 import time
 
@@ -12,43 +13,53 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.rocm_akr import is_akr_layer
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.models.minimax_m3.amd import akr_config
 
 logger = init_logger(__name__)
 
 
 _H = 6144  # hidden size of the kernels
 _SWIGLU_FORM = "bf16_chain"  # the uncompiled SiluAndMulWithClamp's aten chain
+# TP size -> (decoder package, its block class)
+_BLOCKS = {
+    4: ("dense_mxfp8_h6144_i3072_ranks4", "DenseDecoderRanks4"),
+    2: ("dense_mxfp8_h6144_i6144_ranks2", "DenseDecoderRanks2"),
+}
+
+
+def _lib(world: int):
+    """The decoder package of `world` ranks; another TP size gets the four-rank one,
+    whose `stack_blocker` names it."""
+    four = f"decoder.{_BLOCKS[4][0]}"
+    return akr_config.package(f"decoder.{_BLOCKS.get(world, _BLOCKS[4])[0]}", four)
 
 
 class DraftFused:
-    """The library block of the draft's layers, built collectively on the 4 TP ranks
+    """The library block of the draft's layers, built collectively on every TP rank
     once the draft shares the target's embedding."""
 
-    def __init__(self, model: torch.nn.Module, dense: list) -> None:
-        from amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4 import (
-            MAX_ROWS,
-            DenseDecoderRanks4,
-        )
-
+    def __init__(self, model: torch.nn.Module, dense: list, lib) -> None:
         from vllm.distributed.parallel_state import get_tp_group
 
         inner = model.model
         tp = get_tp_group()
+        self.lib = lib
+        block = getattr(lib, _BLOCKS.get(tp.world_size, _BLOCKS[4])[1])
         self.layers = list(inner.layers)
         self.dense = dense
         self.eps = inner.norm.variance_epsilon
         act = self.layers[0].mlp.act_fn
         self.swiglu = (act.alpha, act.beta, act.swiglu_limit)
-        # the block keeps this rank's 1536 fc rows; the replicated weight is released
+        # the block keeps this rank's FC_N fc rows; the replicated weight is released
         fc = inner.fc
         w = fc.weight.data
-        self.blk = DenseDecoderRanks4(
+        self.blk = block(
             tp.rank_in_group,
             tp.cpu_group,
             tp.device,
             fc_weight=w,
             embedding=inner.embed_tokens.weight,
-            max_rows=MAX_ROWS,
+            max_rows=self.lib.MAX_ROWS,
         )
         fc.weight.data = torch.empty(0, dtype=w.dtype, device=w.device)
         del w
@@ -99,10 +110,7 @@ class DraftFused:
     ) -> bool:
         """`precompute_and_store_context_kv` on the library's norm + GEMM + insert
         chain; False where the stock path runs."""
-        from amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4 import (
-            context_kv_blocker,
-        )
-
+        context_kv_blocker = self.lib.context_kv_blocker
         layers = inner._attn_layers
         caches = [a.kv_cache for a in layers]
         k_scales = [a._k_scale for a in layers]
@@ -159,13 +167,10 @@ class DraftFused:
 def setup(model: torch.nn.Module, max_query_rows: int) -> DraftFused | None:
     """The fused forward of a loaded draft (every TP rank, before graph capture), or
     None where it stays off."""
-    from amd_kernels.decoder.dense_mxfp8_h6144_i3072_ranks4 import (
-        DenseLayer,
-        stack_blocker,
-    )
-
     from vllm.distributed import get_tensor_model_parallel_world_size
 
+    world = get_tensor_model_parallel_world_size()
+    lib = _lib(world)
     inner = model.model
     dense: list = []
     why: str | None
@@ -179,7 +184,7 @@ def setup(model: torch.nn.Module, max_query_rows: int) -> DraftFused | None:
             on_library += [is_akr_layer(lin) for lin in linears]
         if all(on_library):  # the weights are in the library's layout
             dense = [
-                DenseLayer(
+                lib.DenseLayer(
                     x.input_layernorm.weight,
                     tuple(x.self_attn.qkv_proj.weight.shape),
                     x.post_attention_layernorm.weight,
@@ -190,8 +195,8 @@ def setup(model: torch.nn.Module, max_query_rows: int) -> DraftFused | None:
                 )
                 for x in inner.layers
             ]
-        why = stack_blocker(
-            get_tensor_model_parallel_world_size(),
+        why = lib.stack_blocker(
+            world,
             max_query_rows,
             on_library,
             inner.fc.weight,
@@ -202,7 +207,7 @@ def setup(model: torch.nn.Module, max_query_rows: int) -> DraftFused | None:
         logger.warning("amd_kernels draft: the fused draft stays off (%s)", why)
         return None
     t0 = time.perf_counter()
-    fused = DraftFused(model, dense)
+    fused = DraftFused(model, dense, lib)
     logger.info(
         "amd_kernels draft: the input fc, embedding + norm, all-reduce + norm tails, "
         "MLP blocks and context K/V run amd_kernels (set-up and warm-up %.1f s)",

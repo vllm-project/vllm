@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels `sampling` route (gfx950, TP4, with
+"""The amd_kernels `sampling` route (gfx950, TP4 or TP2, with
 `--enable-batch-sharded-sampling`): the target's logits exchange, the sampler-output
 gather and the DSpark draft's Markov steps on
-`amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4`. The
+`amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4` (`_ranks2` at
+TP2: above `LOCAL_MIN_ROWS` owned logits from both lm_head shards, no exchange). The
 draft-logits cache keeps one row per request slot (`SlotDraftLogitsCache`): upstream's
 compact sharded cache hands a skipped request's row to another request. Sampling is
 upstream's (same draws: seed, position, vocab id; bf16 bits exchanged)."""
@@ -22,13 +23,16 @@ logger = init_logger(__name__)
 _STATE: dict[str, Any] = {}
 
 
+def _lib(tp_size: int):
+    """The batch-sharded sampling package of this TP size (two or four ranks)."""
+    pkg = "sampling.batch_sharded_markov_v200064_h6144_r256_ranks"
+    return akr_config.package(f"{pkg}{2 if tp_size == 2 else 4}", f"{pkg}4")
+
+
 # ---- configuration (the target's __init__)
 def _blocker(vllm_config) -> str | None:
-    from amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4 import (
-        sampling_blocker,
-    )
-
     pc, sc = vllm_config.parallel_config, vllm_config.scheduler_config
+    sampling_blocker = _lib(pc.tensor_parallel_size).sampling_blocker
     spec = vllm_config.speculative_config
     if not pc.enable_batch_sharded_sampling:
         return "--enable-batch-sharded-sampling is off"
@@ -76,19 +80,22 @@ def _sampler(device: torch.device):
     first use: the draft's set-up or the target's first batch-sharded step."""
     s = _STATE.get("sampler")
     if s is None:
-        from amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4 import (  # noqa: E501
-            BatchShardedSampling,
-        )
-
         from vllm.distributed.parallel_state import get_tp_group
 
         g = get_tp_group()
-        s = _STATE["sampler"] = BatchShardedSampling(
+        kw = {}
+        lm = _STATE["lm"]
+        if g.world_size == 2 and getattr(lm.lm_head, "_akr_shuffled", False):
+            # two ranks: a copy of the peer's shard serves the owned rows locally above
+            # LOCAL_MIN_ROWS (no logits exchange); +1.23 GB per GPU
+            kw["lm_weight"] = lm.lm_head.weight
+        s = _STATE["sampler"] = _lib(g.world_size).BatchShardedSampling(
             g.rank_in_group,
             g.cpu_group,
             device,
             max_reqs=int(_STATE["max_num_reqs"]),
             target_rows=int(_STATE["target_rows"]),
+            **kw,
         )
     return s
 
@@ -158,7 +165,7 @@ def _slot_cache(compact, dtype: torch.dtype, fill: float):
     class SlotDraftLogitsCache(DraftLogitsCache):
         """Batch-sharded, with the replicated cache's rows: row = request slot (identity
         `row_mapping`), written by the rank that drafts and then verifies the request
-        (batch position % 4); a request the scheduler skips keeps its row."""
+        (batch position % TP); a request the scheduler skips keeps its row."""
 
         def __init__(self) -> None:  # noqa: D107
             # not DraftLogitsCache.__init__: the owner tables carry over
@@ -179,7 +186,7 @@ def _slot_cache(compact, dtype: torch.dtype, fill: float):
             )
 
         def assign(self, idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray) -> None:
-            """Batch position i drafts on rank i % 4, which verifies it next."""
+            """Batch position i drafts on rank i % TP, which verifies it next."""
             n = idx_mapping_np.shape[0]
             if n == 0:
                 return
@@ -194,11 +201,10 @@ def setup(spec, model: torch.nn.Module, target_model: torch.nn.Module) -> None:
     """From the draft's set-up (every TP rank, before any capture): the target's owned
     logits on the shuffled lm_head, the slot-row draft cache and, where the draft fits,
     the library's Markov chain (collective; it warms up on its first call)."""
-    from amd_kernels.sampling.batch_sharded_markov_v200064_h6144_r256_ranks4 import (
-        markov_blocker,
-    )
-
+    from vllm.distributed.parallel_state import get_tp_group
     from vllm.models.minimax_m3.amd.dspark_akr import plain_processor
+
+    markov_blocker = _lib(get_tp_group().world_size).markov_blocker
 
     lm = _STATE.get("lm")
     if lm is None:

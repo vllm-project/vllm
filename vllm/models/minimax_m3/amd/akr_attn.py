@@ -64,9 +64,11 @@ def qkv_norm_rope_nvfp4_insert(
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
     index_slot_mapping: torch.Tensor,
+    projected: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The layer's QKV + norms + RoPE + NVFP4 inserts -> (q, index-q): the library's
-    one call from amd_kernels' codes, else the layer's linear, then the insert."""
+    one call from amd_kernels' codes, else the layer's linear (none where `x` is
+    `projected` already), then the insert."""
     proj = attn.qkv_proj
     ins = (
         attn.q_norm.weight,
@@ -102,7 +104,7 @@ def qkv_norm_rope_nvfp4_insert(
             # one counter set per stream and capture: not in breakable graphs
             one_launch=oproj_mxfp8_mode_ok(),
         )
-    out, _ = proj(x)
+    out = x if projected else proj(x)[0]
     return kernels().qkv_norm_rope_nvfp4_insert(out, *ins, **kw)
 
 
@@ -285,7 +287,7 @@ def init_and_warm_up(
     )
     logger.info(
         "amd_kernels qkv / attention / indexer = %d%d%d (decode rows per request %d, "
-        "four-GPU decode indexer: %s); warm-up %.1f s",
+        "multi-GPU decode indexer: %s); warm-up %.1f s",
         akr_config.on("qkv"),
         akr_config.on("attention"),
         akr_config.on("indexer"),

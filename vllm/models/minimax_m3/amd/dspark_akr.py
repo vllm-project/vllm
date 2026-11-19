@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels `draft` route (gfx950, TP4, the draft not torch.compiled): the
-MiniMax-M3.1 DSpark draft's attention, context K/V, MXFP8 linears and shared lm_head;
-`dspark_akr_fused` runs the rest of its forward, `sample_akr` its sampling."""
+"""The amd_kernels `draft` route (gfx950, TP4 or TP2, the draft not torch.compiled):
+the MiniMax-M3.1 DSpark draft's attention, context K/V, MXFP8 linears and shared
+lm_head; `dspark_akr_fused` runs the rest of its forward, `sample_akr` its
+sampling."""
 
 import time
 from typing import Any
@@ -171,16 +172,28 @@ def plain_processor(lp) -> bool:
     )
 
 
+def _lm_head_lib(w: torch.Tensor):
+    """The lm_head GEMM package of this shard's rows (TP4 50016, TP2 100032) and its
+    GEMM."""
+    n = 100032 if w.shape[0] == 100032 else 50016
+    lib = akr_config.package(f"gemm.bf16_n{n}_k6144", "gemm.bf16_n50016_k6144")
+    # the four-rank package where the installed amd_kernels has no n100032
+    gemm = getattr(lib, f"bf16_gemm_n{n}_k6144", None) or lib.bf16_gemm_n50016_k6144
+    return lib, gemm
+
+
 class AkrShuffledLmHeadMethod(UnquantizedEmbeddingMethod):
-    """The lm_head's GEMM on amd_kernels' `bf16_gemm_n50016_k6144` over the shard in
-    `shuffle_weight`'s layout (any row count)."""
+    """The lm_head's GEMM on amd_kernels' `bf16_gemm_n50016_k6144` (TP4) or
+    `bf16_gemm_n100032_k6144` (TP2) over the shard in `shuffle_weight`'s layout."""
+
+    def __init__(self, gemm) -> None:
+        super().__init__()
+        self.gemm = gemm
 
     def apply(self, layer, x, bias=None):
-        from amd_kernels.gemm.bf16_n50016_k6144 import bf16_gemm_n50016_k6144
-
         assert bias is None
         x2 = x.reshape(-1, x.shape[-1]).contiguous()
-        out = bf16_gemm_n50016_k6144(x2, layer.weight, shuffled=True)
+        out = self.gemm(x2, layer.weight, shuffled=True)
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
 
@@ -188,13 +201,11 @@ def switch_shared_lm_head(lm_head, logits_processor, models: list) -> None:
     """Shuffle the lm_head's shard in place (a permutation of its storage) and give it
     the method above: the target's and the draft's logits run the library GEMM.
     Refused when another parameter holds the same tensor (a tied embedding)."""
-    from amd_kernels.gemm.bf16_n50016_k6144 import shuffle_weight_, supports
-
     w = getattr(lm_head, "weight", None)
     if not (
         type(getattr(lm_head, "quant_method", None)) is UnquantizedEmbeddingMethod
         and isinstance(w, torch.Tensor)
-        and supports(w, getattr(lm_head, "bias", None))
+        and _lm_head_lib(w)[0].supports(w, getattr(lm_head, "bias", None))
         and plain_processor(logits_processor)
     ):
         logger.warning("amd_kernels draft: the lm_head stays stock (shape or method)")
@@ -207,8 +218,9 @@ def switch_shared_lm_head(lm_head, logits_processor, models: list) -> None:
                 )
                 return
     t0 = time.perf_counter()
-    shuffle_weight_(w.data)
-    lm_head.quant_method = AkrShuffledLmHeadMethod()
+    lib, gemm = _lm_head_lib(w)
+    lib.shuffle_weight_(w.data)
+    lm_head.quant_method = AkrShuffledLmHeadMethod(gemm)
     lm_head._akr_shuffled = True
     torch.accelerator.empty_cache()
     logger.info(

@@ -17,7 +17,7 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -313,6 +313,7 @@ class MiniMaxM3MLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -321,6 +322,7 @@ class MiniMaxM3MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=disable_tp,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -329,6 +331,7 @@ class MiniMaxM3MLP(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
+            disable_tp=disable_tp,
         )
         # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
         # Kept as our fp32 Triton kernel (not the #22 SWIGLUOAI_UNINTERLEAVE op
@@ -536,14 +539,19 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.shared_experts: MiniMaxM3MLP | None = None
+        # a full shared expert on every rank, only for the amd_kernels moe route
+        self.akr_shared_full = False
+        make_shared = partial(
+            MiniMaxM3MLP,
+            config=config,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            reduce_results=False,
+            prefix=f"{prefix}.shared_experts",
+        )
         if not self.is_fused_shared_expert_enabled:
-            self.shared_experts = MiniMaxM3MLP(
-                config=config,
-                intermediate_size=config.intermediate_size,
-                quant_config=quant_config,
-                reduce_results=False,
-                prefix=f"{prefix}.shared_experts",
-            )
+            self.akr_shared_full = akr_moe.replicate_shared(config)
+            self.shared_experts = make_shared(disable_tp=self.akr_shared_full)
 
         # The aiter MoE fused path goes through aiter's biased grouped top-k
         # (GroupedTopKRouter, as in DeepSeek-V4): M3 is not group-routed, so a
@@ -585,6 +593,18 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.use_akr_moe = akr_moe.setup(self, config, prefix)
+        if self.akr_shared_full and not self.use_akr_moe:
+            # The stock path would add the full shared expert on every rank: the TP
+            # shard replaces it in the block and the runner (no weight loaded yet).
+            logger.warning_once(
+                "amd_kernels moe off: the shared expert stays TP-sharded"
+            )
+            self.akr_shared_full = False
+            self.shared_experts = make_shared()
+            runner_shared = self.experts.shared_experts
+            assert runner_shared is not None
+            runner_shared._layer = self.shared_experts
+            self.use_akr_moe = akr_moe.setup(self, config, prefix)
         self._akr_weights = None
 
     def process_weights_after_loading(self) -> None:
@@ -1873,6 +1893,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        # amd_kernels VocabGather at TP2, set after loading
+        self._akr_embed: Callable[[torch.Tensor], torch.Tensor] | None = None
 
         # Reserved top-k indices buffer shared by all sparse-attention indexer
         # layers (mirrors DeepseekV4); the indexer writes its per-head decode/
@@ -2040,8 +2062,55 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # after every layer's own processing (children first)
         if self.akr_arnorm:
             akr_arnorm.init(self)
+        self._init_akr_embed()
+
+    def _init_akr_embed(self) -> None:
+        """At TP2 the embedding reads each token's row from the shard that owns it
+        (`amd_kernels.embedding.vocab_gather_h6144`) in place of the masked lookup +
+        all-reduce: bit for bit on the checkpoint's rows (no subnormal, signed zero or
+        non-finite value), no all-reduce. A collective on both ranks."""
+        from vllm.distributed.parallel_state import get_tp_group
+
+        emb = self.embed_tokens
+        tp = get_tp_group()
+        # the two-rank VocabGather ships with the two-rank norm package
+        if not self.akr_arnorm or tp.world_size != 2:
+            return
+        if (
+            not isinstance(emb, VocabParallelEmbedding)
+            or get_pp_group().world_size != 1
+        ):
+            return
+        w = emb.weight
+        si = emb.shard_indices
+        shard = self.vocab_size // 2
+        if (
+            self.vocab_size % 2
+            or tuple(w.shape) != (shard, 6144)
+            or w.dtype != torch.bfloat16
+            or not w.is_contiguous()
+            or si.org_vocab_start_index != tp.rank_in_group * shard
+            or si.org_vocab_end_index != (tp.rank_in_group + 1) * shard
+            or si.num_added_elements != 0
+        ):
+            logger.warning(
+                "amd_kernels embedding stays stock: shard %s", tuple(w.shape)
+            )
+            return
+        from amd_kernels.embedding.vocab_gather_h6144 import VocabGather
+
+        gather = VocabGather(w, tp.rank_in_group, tp.cpu_group)
+        gather.warm_up()
+        self._akr_embed = gather
+        logger.info("amd_kernels embedding: owner reads of the two vocabulary shards")
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if (
+            self._akr_embed is not None
+            and input_ids.dim() == 1
+            and input_ids.is_contiguous()
+        ):
+            return self._akr_embed(input_ids)
         return self.embed_tokens(input_ids)
 
     def build_specialized_decode(self) -> None:

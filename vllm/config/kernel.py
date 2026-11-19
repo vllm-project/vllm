@@ -33,7 +33,7 @@ AmdKernelsRoute = Literal[
 
 @config
 class AmdKernelsConfig:
-    """MiniMax-M3.1 layers on `amd_kernels` (ROCm gfx950, TP4)."""
+    """MiniMax-M3.1 layers on `amd_kernels` (ROCm gfx950, TP4 or TP2)."""
 
     enabled: bool = True
     """Use `amd_kernels` where it is installed and the shapes fit."""

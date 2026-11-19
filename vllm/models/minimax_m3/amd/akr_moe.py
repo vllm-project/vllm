@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels `moe` route: the whole MiniMax-M3.1 MoE block on
-`amd_kernels.moe.mxfp4_h6144_i768_e128_top4`, then the stock TP all-reduce."""
+"""The amd_kernels `moe` route: the whole MiniMax-M3.1 MoE block on the package of
+its per-rank intermediate size (`amd_kernels.moe.mxfp4_h6144_i768_e128_top4` at TP4,
+`mxfp4_h6144_i1536_e128_top4` at TP2), then the stock TP all-reduce.
+
+At TP2 every rank holds the whole shared expert (`replicate_shared`): the
+sequence-parallel prefill runs it on the rank's own rows only, and the TP path
+(decode) computes this rank's TP shard of it from a view of the full copy."""
+
+import os
 
 import torch
 
@@ -12,10 +19,50 @@ from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 logger = init_logger(__name__)
 
 
-def _pkg():
-    from amd_kernels.moe import mxfp4_h6144_i768_e128_top4
+# per-rank intermediate size -> package
+_PKGS = {768: "mxfp4_h6144_i768_e128_top4", 1536: "mxfp4_h6144_i1536_e128_top4"}
 
-    return mxfp4_h6144_i768_e128_top4
+
+def _package(i: int):
+    """The package of per-rank I `i`; another I (or an amd_kernels without it) gets
+    the TP4 package, whose `unsupported_reason` names the shape."""
+    return akr_config.package(f"moe.{_PKGS.get(i, _PKGS[768])}", f"moe.{_PKGS[768]}")
+
+
+def package(moe: torch.nn.Module):
+    """The package of `moe`'s per-rank I (routed w2 [E, H, I / 2]), kept on the
+    block."""
+    p = getattr(moe, "_akr_pkg", None)
+    if p is None:
+        i = moe.experts.routed_experts.w2_weight.shape[-1] * 2
+        p = moe._akr_pkg = _package(i)
+    return p
+
+
+def replicate_shared(config) -> bool:
+    """Whether the MoE blocks load the full shared expert on every rank: the moe route
+    at TP2 with plain TP and a package that takes it; `AKR_SHARED_FULL=0` keeps the
+    TP-sharded one."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    if os.environ.get("AKR_SHARED_FULL", "1") == "0" or mono_envs.MONO_ENABLE:
+        return False
+    tp = get_tensor_model_parallel_world_size()
+    if tp != 2 or not akr_config.on("moe"):
+        return False
+    cfg = get_current_vllm_config_or_none()
+    if cfg is not None:
+        pc = cfg.parallel_config
+        if (
+            pc.enable_expert_parallel
+            or pc.data_parallel_size > 1
+            or pc.prefill_context_parallel_size > 1
+            or cfg.kernel_config.monokernel
+        ):
+            return False
+    P = _package(config.intermediate_size // tp)
+    return bool(getattr(P, "SHARED_FULL", False))
 
 
 def setup(moe: torch.nn.Module, config, prefix: str) -> bool:
@@ -31,6 +78,20 @@ def setup(moe: torch.nn.Module, config, prefix: str) -> bool:
     for layer in (moe.experts.routed_experts, se.gate_up_proj, se.down_proj):
         layer.quant_method.process_weights_after_loading = lambda layer: None
     logger.info_once("amd_kernels moe: MoE blocks run on amd_kernels mxfp4_moe")
+    if moe.akr_shared_full:
+        nbytes = sum(
+            p.numel() * p.element_size()
+            for p in (
+                se.gate_up_proj.weight,
+                se.gate_up_proj.weight_scale,
+                se.down_proj.weight,
+                se.down_proj.weight_scale,
+            )
+        )
+        logger.info_once(
+            "amd_kernels moe: the full shared expert on every rank (%.1f MB per layer)",
+            nbytes / 1e6,
+        )
     return True
 
 
@@ -58,7 +119,7 @@ def unsupported_reason(moe: torch.nn.Module, config) -> str | None:
     if type(rx.quant_method).__name__ != "QuarkOCP_MX_MoEMethod":
         return f"needs Quark MXFP4 routed experts: {type(rx.quant_method).__name__}"
     se = moe.shared_experts
-    return _pkg().unsupported_reason(
+    return package(moe).unsupported_reason(
         rx.w13_weight,
         rx.w13_weight_scale,
         rx.w2_weight,
@@ -73,7 +134,7 @@ def unsupported_reason(moe: torch.nn.Module, config) -> str | None:
 
 def build_weights(moe: torch.nn.Module):
     """The package's `MoeWeights`; the checkpoint-layout parameters are released."""
-    P = _pkg()
+    P = package(moe)
     # Inside DBO microbatches the shared expert stays on the caller's stream.
     from vllm.v1.worker.ubatching import dbo_enabled
 
@@ -83,12 +144,20 @@ def build_weights(moe: torch.nn.Module):
     def u8(p):
         return p.data.view(torch.uint8)
 
-    shared = P.SharedWeights.from_row_major(
+    shared_args = (
         u8(se.gate_up_proj.weight),
         u8(se.gate_up_proj.weight_scale),
         u8(se.down_proj.weight),
         u8(se.down_proj.weight_scale),
     )
+    if moe.akr_shared_full:
+        from vllm.distributed import get_tp_group
+
+        shared = P.SharedWeights.from_row_major(
+            *shared_args, tp_rank=get_tp_group().rank_in_group
+        )
+    else:
+        shared = P.SharedWeights.from_row_major(*shared_args)
     w = P.MoeWeights.from_row_major(
         moe.gate.weight.data,
         moe.e_score_correction_bias.data,
@@ -120,7 +189,7 @@ def forward(moe: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
 
     if x.shape[0] == 0:
         return torch.empty_like(x)
-    out = _pkg().mxfp4_moe(x.contiguous(), moe._akr_weights)
+    out = package(moe).mxfp4_moe(x.contiguous(), moe._akr_weights)
     mc = moe.experts.routed_experts.moe_config
     if mc.tp_size > 1 and not mc.skip_final_all_reduce:
         out = tensor_model_parallel_all_reduce(out)

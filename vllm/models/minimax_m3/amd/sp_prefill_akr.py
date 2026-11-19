@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The amd_kernels `sp_prefill` route (TP4): the sequence-parallel prefill from
-4096 tokens. Each rank keeps a shard of the residual stream; per layer the two
-all-reduces become the hand-offs of
-`amd_kernels.collectives.seq_parallel_handoffs_h6144_q2048_ranks4` (pull
-collectives for a single batch, SDMA pushes per DBO microbatch) around the layer's
-own `attend` and the FFN of every token, with the whole o_proj on every rank."""
+"""The amd_kernels `sp_prefill` route (TP4 or TP2): the sequence-parallel prefill
+from the package's `MIN_TOKENS`. Each rank keeps a shard of the residual stream; per
+layer the two all-reduces become the hand-offs of
+`amd_kernels.collectives.seq_parallel_handoffs_h6144_q2048_ranks4` (TP4) or
+`seq_parallel_handoffs_h6144_q4096_ranks2` (TP2) (pull collectives for a single
+batch, SDMA pushes per DBO microbatch) around the layer's own `attend` and the FFN of
+every token, with the whole o_proj on every rank. With the full shared expert on
+every rank (TP2, `akr_moe.replicate_shared`) the MoE input gather carries only the
+routed FP4 payload and each rank adds its own rows' shared expert in the
+reduce-scatter."""
 
 import functools
 
@@ -15,17 +19,25 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8 import rocm_akr
-from vllm.models.minimax_m3.amd import akr_config
+from vllm.models.minimax_m3.amd import akr_attn, akr_config, akr_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled, dbo_yield
 
 logger = init_logger(__name__)
 
 
+# TP size -> hand-offs package
+_LIBS = {
+    4: "seq_parallel_handoffs_h6144_q2048_ranks4",
+    2: "seq_parallel_handoffs_h6144_q4096_ranks2",
+}
+
+
 @functools.cache
 def _lib():
-    from amd_kernels.collectives import seq_parallel_handoffs_h6144_q2048_ranks4
-
-    return seq_parallel_handoffs_h6144_q2048_ranks4
+    """The hand-offs package of this TP size; another TP size gets the four-rank one,
+    whose `WORLD` turns the route off."""
+    name = _LIBS.get(get_tensor_model_parallel_world_size(), _LIBS[4])
+    return akr_config.package(f"collectives.{name}", f"collectives.{_LIBS[4]}")
 
 
 # from the serving config (make_o_proj_full): batch-token limit, microbatches per step
@@ -38,7 +50,7 @@ _SDMA: list = []
 
 def make_o_proj_full(layer, quant_config, prefix: str):
     """At decoder-layer init: the whole o_proj on amd_kernels' MXFP8 GEMMs (+3.1 GB
-    per rank at TP4), or None where the sequence-parallel prefill cannot run."""
+    per rank), or None where the sequence-parallel prefill cannot run."""
     from vllm.config import get_current_vllm_config
     from vllm.distributed import get_pp_group
     from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -108,8 +120,11 @@ def _unsupported(layer) -> str | None:
         moe = layer.block_sparse_moe
         if not getattr(moe, "use_akr_moe", False) or moe._akr_weights is None:
             return "MoE block not on amd_kernels"
-        if moe._akr_weights.shared_weights is None:
+        shared = moe._akr_weights.shared_weights
+        if shared is None:
             return "MoE block without the shared expert"
+        if getattr(shared, "full", False) and not getattr(lib, "OWNER_SHARED", False):
+            return "the full shared expert needs the hand-offs' owner form"
     else:
         mlp = layer.mlp
         if not (
@@ -179,11 +194,15 @@ def _init(device: torch.device, layers) -> None:
     # microbatch takes the remainder, up to n - 1 tokens more
     n = _CFG["ubatches"]
     ub_tokens = ph.max_tokens // max(n, 1) + max(n - 1, 0)
+    # a shard copy of the shared expert gathers the larger compact MoE payload
+    kw = {}
+    if getattr(lib, "OWNER_SHARED", False):
+        kw["compact"] = not getattr(moe._akr_weights.shared_weights, "full", False)
     if n > 1 and ub_tokens >= lib.MIN_TOKENS:
         for _ in range(n):
             _SDMA.append(
                 lib.SdmaSeqParallelHandoffs(
-                    tp.rank_in_group, tp.cpu_group, device, ub_tokens
+                    tp.rank_in_group, tp.cpu_group, device, ub_tokens, **kw
                 )
             )
     logger.info(
@@ -225,6 +244,28 @@ def _dense_mlp(mlp, codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     return mlp.down_proj.quant_method.apply(mlp.down_proj, x)
 
 
+def _attend(attn, positions: torch.Tensor, qkv: torch.Tensor):
+    """The layer's attention of every token: at TP2 with the layer's `qkv` route on,
+    the norms, RoPE and NVFP4 inserts on amd_kernels, else the layer's own `attend`."""
+    slots = get_forward_context().slot_mapping
+    if not (
+        attn.akr_qkv_insert
+        and get_tensor_model_parallel_world_size() == 2
+        and isinstance(slots, dict)
+        and attn.layer_name in slots
+    ):
+        return attn.attend(positions, qkv)
+    q, index_q = akr_attn.qkv_norm_rope_nvfp4_insert(
+        attn,
+        qkv,
+        positions,
+        slots[attn.layer_name],
+        slots[attn.indexer.index_cache.prefix],
+        projected=True,
+    )
+    return attn._attend_nvfp4(q, index_q)
+
+
 def forward(
     model,
     positions: torch.Tensor,
@@ -232,8 +273,6 @@ def forward(
     aux_hidden_states: list[torch.Tensor],
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
     """The SP forward of `model` from the embeddings to the final norm."""
-    from amd_kernels.moe.mxfp4_h6144_i768_e128_top4 import mxfp4_moe
-
     if dbo_enabled():
         # this microbatch's SDMA hand-offs, DBO's yield between a phase's pushes
         # and waits
@@ -250,16 +289,26 @@ def forward(
         # the GEMM covers the padding rows too (their codes are zero): row-major
         # codes and AITER scales of whole 32-row groups
         qkv = _gemm(attn.qkv_proj, codes, scales)[:t]
-        attn_output = attn.attend(positions, qkv)
+        attn_output = _attend(attn, positions, qkv)
         o_w = (attn.o_proj_full.weight, attn.o_proj_full.weight_scale)
         norm = (post.weight, post.variance_epsilon)
         if layer.is_moe_layer:
             w = layer.block_sparse_moe._akr_weights
-            ffn_in, residual = ph.attention_moe(
+            mxfp4_moe = akr_moe.package(layer.block_sparse_moe).mxfp4_moe
+            ffn_in, residual, *shared = ph.attention_moe(
                 attn_output, *o_w, residual, *norm, w, **kw
             )
             del attn_output
-            ffn_out = mxfp4_moe(ffn_in, w, return_partials=True)
+            if shared and shared[0] is not None:
+                # the full shared expert of this rank's rows (a SharedPending on the
+                # hand-offs' side stream; ffn_norm_gather / ffn_reduce_scatter join it)
+                slots, _ = mxfp4_moe(ffn_in, w, return_partials=True)
+                ffn_out = (slots, shared[0])
+                del slots
+            else:
+                # a shard copy: the compact payload and the [2 rows, H] shared partial
+                ffn_out = mxfp4_moe(ffn_in, w, return_partials=True)
+            del shared
         else:
             *ffn_in, residual = ph.attention_dense(
                 attn_output, *o_w, residual, *norm, **kw

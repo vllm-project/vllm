@@ -3,6 +3,8 @@
 """Which MiniMax-M3.1 routes run amd_kernels (`kernel_config.amd_kernels`): all by
 default on ROCm gfx950 with the package installed."""
 
+import importlib
+from types import ModuleType
 from typing import get_args
 
 from vllm.config.kernel import AmdKernelsRoute
@@ -65,3 +67,17 @@ def _available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def package(name: str, four_rank: str) -> ModuleType:
+    """`amd_kernels.<name>`; where an older amd_kernels lacks it, the four-rank
+    `amd_kernels.<four_rank>`, whose checks turn the route off at other TP sizes."""
+    try:
+        return importlib.import_module(f"amd_kernels.{name}")
+    except ImportError as e:
+        if name == four_rank:
+            raise
+        logger.warning_once(
+            "amd_kernels: no %s (%s), using %s", name, str(e), four_rank
+        )
+    return importlib.import_module(f"amd_kernels.{four_rank}")

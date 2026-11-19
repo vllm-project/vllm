@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The MiniMax-M3.1 decoder-layer norms on amd_kernels: the qkv input norm (`gemm`
-route) and the TP4 all-reduce + add + Gemma RMSNorm at both sites (`norm` route)."""
+route) and the TP all-reduce + add + Gemma RMSNorm at both sites (`norm` route): the
+four-rank package at TP4, its two-rank copy at TP2."""
 
 import contextlib
 import dataclasses
@@ -13,6 +14,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8 import rocm_akr
+from vllm.models.minimax_m3.amd import akr_config
 from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 
 logger = init_logger(__name__)
@@ -30,10 +32,11 @@ class DeferredFfn:
     taps: list | None = None
 
 
-def _lib():
-    from amd_kernels.norm.gemma_add_rmsnorm_h6144 import allreduce_add_rmsnorm
-
-    return allreduce_add_rmsnorm
+def _lib(world_size: int):
+    """The all-reduce + norm package of `world_size` ranks (2: the two-rank copy; any
+    other count gets the four-rank one, whose `unsupported_reason` names it)."""
+    pkg = "norm.gemma_add_rmsnorm_h6144.allreduce_add_rmsnorm"
+    return akr_config.package(f"{pkg}_ranks2" if world_size == 2 else pkg, pkg)
 
 
 def unsupported_reason(vllm_config) -> str | None:
@@ -44,7 +47,7 @@ def unsupported_reason(vllm_config) -> str | None:
         return "needs PP 1 and DP 1"
     if mono_envs.MONO_ENABLE:
         return "the mono decode path (VLLM_ROCM_MINIMAX_M3_MONO) owns the layers"
-    return _lib().unsupported_reason(
+    return _lib(pc.tensor_parallel_size).unsupported_reason(
         pc.tensor_parallel_size, vllm_config.model_config.hf_text_config.hidden_size
     )
 
@@ -53,7 +56,10 @@ def init(model: torch.nn.Module) -> None:
     """Build and warm up the communicators (a TP collective) once the weights are
     processed, and enter their `capture()` around every TP graph capture."""
     global _comms
-    L = _lib()
+    from vllm.distributed.parallel_state import get_tp_group
+
+    tp = get_tp_group()
+    L = _lib(tp.world_size)
     layers = model.layers[model.start_layer : model.end_layer]
     for layer in layers:
         # every input norm but the first writes the qkv GEMM's codes
@@ -76,10 +82,7 @@ def init(model: torch.nn.Module) -> None:
             )
     if _comms is not None:
         return
-    from vllm.distributed.parallel_state import get_tp_group
-
     moe = next((x.akr_ffn for x in layers if x.is_moe_layer), None)
-    tp = get_tp_group()
     norm = layers[0].post_attention_layernorm
     dev = torch.device("cuda", torch.accelerator.current_device_index())
     t0 = time.time()
@@ -98,8 +101,9 @@ def init(model: torch.nn.Module) -> None:
     tp.graph_capture = bound  # type: ignore[method-assign]
     _comms = comms
     logger.info(
-        "amd_kernels norm: TP4 all-reduce + add + Gemma RMSNorm on "
+        "amd_kernels norm: %d-rank all-reduce + add + Gemma RMSNorm on "
         "amd_kernels at both decoder-layer sites (start-up %.1f s)",
+        tp.world_size,
         time.time() - t0,
     )
 
