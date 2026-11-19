@@ -854,8 +854,7 @@ guide: |
     two trays with NVFP4 and FP8), 8x B300 (NVFP4 and FP8), 8x B200 (NVFP4) and
     2x 8 H200 (FP8, TP16 or PP2 x TP8). FP8 needs ~128 GiB of weights per GPU on
     8 GPUs, NVFP4 ~76 GiB. AMD Instinct MI350X (8 GPUs, TP8 or two TP4 replicas)
-    and 8× MI325X (TP8, block-FP8) with the ROCm image. MI300X is the same
-    gfx942 path and has not been smoke-tested.
+    with the ROCm image, and 8× MI325X (TP8, block-FP8).
 
   ## Choosing a configuration
 
@@ -914,23 +913,9 @@ guide: |
 
   MXFP4 vs FP8 experts at TP8: +22–71% output tok/s at 1–64 concurrent requests.
 
-  On MI300 Series (gfx942) the FP8 checkpoint stays block-FP8. The MI325X run
-  did not re-quantize the experts, and TP8 is required (~128 GiB resident per
-  GPU with the drafter; TP4 does not fit a 256 GB GPU). One 8-GPU node, greedy
-  DSpark (depth 3, the drafter shipped in the checkpoint). Validated on 8× MI325X. Probabilistic drafting, the Quark MXFP4
-  checkpoint and the gfx950 specialized decode are not part of this path.
-  MI300X uses the same command and has not been smoke-tested.
-
-  On that MI325X node, GSM8K (1,319 questions, 5-shot) scored 96.7% flexible /
-  96.4% strict with DSpark and 96.7% / 96.8% without it; the runs agree on
-  1,300 questions. Draft acceptance was 80–86%, about 3.4 of 4 tokens per
-  step. One greedy request decoded at 136–187 tok/s with DSpark and 60–71
-  tok/s without, and the 32-way GSM8K run finished in about 540 s versus
-  about 980 s. The server was started at 64k context and profiled 1,947,840
-  KV tokens with DSpark, which holds 7 sequences of this recipe's 262144
-  context, so that length stays. Long prompts at 262144 were not scored.
-  Shared-expert fusion, tuned AITER GEMM tables and a gfx942 specialized
-  decode kernel were not used.
+  On MI300 Series (gfx942) the FP8 checkpoint stays block-FP8 and needs TP8 on
+  one 8-GPU node (TP4 does not fit a 256 GB GPU), with greedy DSpark. Validated
+  on 8× MI325X; see the MI300 Series note for results.
 
   ## Accuracy
 
@@ -977,9 +962,7 @@ guide: |
   - AMD: NVFP4 checkpoints, DCP / PCP, NIXL P/D and HiSparse aren't supported on
     ROCm yet. TP8 with DSpark is not validated on MI350 Series. On gfx942,
     probabilistic DSpark, the Quark MXFP4 checkpoint and the gfx950 specialized
-    decode are not offered. MI300X has not been smoke-tested. GSM8K was run
-    with the server started at 64k context; the profiled KV pool holds this
-    recipe's 262144 context. Long prompts at 262144 were not scored.
+    decode are not offered, and MI300X has not been smoke-tested.
 
   ## References
 
