@@ -73,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
@@ -460,6 +461,44 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
     assert output.num_scheduled_tokens[second.request_id] == 80 - expected_hit
 
 
+@pytest.mark.parametrize(
+    "loaded_tokens,prompt_start,external_tokens,expected_tokens",
+    [(80, 0, 0, 80), (79, 0, 0, 80), (80, 79, 15, 1)],
+    ids=["returns-prompt", "returns-prompt-mid-block", "returns-from-prompt-end"],
+)
+def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
+    loaded_tokens, prompt_start, external_tokens, expected_tokens
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=loaded_tokens, is_async=True),
+    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    first, second = create_requests(num_requests=2, num_tokens=80, same_prompt=True)
+    second.sampling_params = second.sampling_params.clone()
+    first.sampling_params.routed_experts_prompt_start = 80
+    second.sampling_params.routed_experts_prompt_start = prompt_start
+    scheduler.add_request(first)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[],
+            kv_connector_output=KVConnectorOutput(finished_recving={first.request_id}),
+        ),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == {first.request_id: 1}
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        return_value=(external_tokens, False)
+    )
+    scheduler.add_request(second)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {second.request_id: expected_tokens}
+    assert output.aux_output_connector_metadata.retained_block_hashes is None
+
+
 def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=5)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
@@ -634,18 +673,23 @@ def test_scheduler_stats_route_to_existing_output_client():
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    iteration_record = SchedulerIterationDetails(0, 1, 10, 0, 0, elapsed_ms=1.5)
     model_output = ModelRunnerOutput(
         req_ids=[request.request_id],
         sampled_token_ids=[[1000]],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
+        iteration_records=[iteration_record],
     )
 
     engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
+    assert engine_core_outputs[1].scheduler_stats.iteration_records == [
+        iteration_record
+    ]
     assert len(engine_core_outputs[1].outputs) == 1
 
 
@@ -2530,6 +2574,58 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_of_aborted_request_is_counted():
+    """A request preempted and then aborted is still counted once."""
+    # 10 usable blocks: two 80-token requests fill them, so the second request
+    # is preempted when the first one needs a new block.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, block_size=16)
+    scheduler.add_request(first)
+    first_output = scheduler.schedule()
+    scheduler.add_request(second)
+    scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    preempting_output = scheduler.schedule()
+    assert second.status == RequestStatus.PREEMPTED
+    scheduler.finish_requests(
+        [first.request_id, second.request_id], RequestStatus.FINISHED_ABORTED
+    )
+    # A step with no request outputs still carries the stats.
+    engine_core_outputs = scheduler.update_from_output(
+        preempting_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    eco = next(iter(engine_core_outputs.values()))
+    assert not eco.outputs
+
+    assert eco.scheduler_stats is not None
+    assert eco.scheduler_stats.num_preempted_reqs == 1
+
+    next_stats = scheduler.make_stats()
+    assert next_stats is not None
+    assert next_stats.num_preempted_reqs == 0
+
+
 def test_preemption_processes_stale_aux_output():
     scheduler = create_scheduler(enable_prefix_caching=True)
     request = create_requests(num_requests=1)[0]
@@ -4405,12 +4501,7 @@ def create_scheduler_with_priority(
       {class}`Scheduler` instance with priority scheduling
 
     """
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="float16", seed=42)
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -5108,9 +5199,8 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     scheduler = create_scheduler()
     manager = scheduler.structured_output_manager
-    manager.backend = Mock()
-    manager.backend_name = "xgrammar"
-    manager.backend.compile_grammar.side_effect = RuntimeError(
+    manager.backends["xgrammar"] = Mock()
+    manager.backends["xgrammar"].compile_grammar.side_effect = RuntimeError(
         "forced FSM compilation error"
     )
     manager._use_async_grammar_compilation = async_grammar
@@ -5196,6 +5286,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -6888,12 +6979,7 @@ def _create_encoder_decoder_scheduler(
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
 
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m", dtype="float16", seed=42)
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -8262,11 +8348,7 @@ def _create_hybrid_mamba_connector_scheduler(
 ) -> Scheduler:
     """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=True,
+        model="facebook/opt-125m", dtype="float16", seed=42, skip_tokenizer_init=True
     )
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -8841,6 +8923,17 @@ def test_drafts_unused_with_async_placeholders():
     (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
     request.num_output_placeholders = 2
     assert not scheduler._drafts_unused(request, 17, 3)
+
+    # Depth > 2: 1 verified + 2 in-flight steps + this step = max_tokens.
+    (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=4)
+    request.append_output_token_ids(100)
+    request.num_output_placeholders = 4
+    request.num_output_placeholder_steps = 2
+    assert scheduler._drafts_unused(request, 21, 3)
+    # With one of them in flight, it may not.
+    request.num_output_placeholders = 2
+    request.num_output_placeholder_steps = 1
+    assert not scheduler._drafts_unused(request, 19, 3)
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])

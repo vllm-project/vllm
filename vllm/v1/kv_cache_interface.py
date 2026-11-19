@@ -478,6 +478,11 @@ class AttentionSpec(KVCacheSpec):
     """Tokens covered by one stored state. Ints > 1 compress multiple tokens
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
     token (Whisper block pooling: `Fraction(1, block_pool_size)`)."""
+    cache_role: SparseCacheRole | None = None
+    """Role in a sparse-attention index group; None for dense attention."""
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
+    is_index_group_leader: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -520,13 +525,9 @@ class AttentionSpec(KVCacheSpec):
 class MLAAttentionSpec(AttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
-    topk_buffer_width: int | None = None
-    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
-    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
-    is_index_group_leader: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -619,11 +620,11 @@ def is_mamba_prefill_checkpoint_valid(
         return False
     assert checkpoint_alignment > 0
 
-    initial_state_col = (query_start - 1) // mamba_block_size
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        # A mid-block query may export into its first column (private copy).
+        and checkpoint_col >= query_start // mamba_block_size
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0
