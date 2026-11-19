@@ -553,6 +553,49 @@ def test_masked_route_needs_layer_masked_mha(
     assert metadata.prefill.route is expected
 
 
+@pytest.mark.parametrize(
+    ("pcp", "spec_decode", "expected"),
+    [(2, False, True), (1, False, False), (2, True, False)],
+)
+def test_shardq_eligibility_with_pcp_and_32_heads(
+    default_vllm_config, dist_init, workspace_init, pcp, spec_decode, expected
+):
+    """A 32-head TP layout can shard only when PCP is on and spec decoding is off."""
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V3.2",
+        max_model_len=4096,
+        num_gpu_blocks=128,
+        block_size=64,
+        dtype="bfloat16",
+    )
+    vllm_config.parallel_config.tensor_parallel_size = 2
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    if spec_decode:
+        vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=1)
+    with set_current_vllm_config(vllm_config), torch.device(DEVICE_TYPE):
+        impl = FlashMLASparseImpl(
+            num_heads=32,
+            head_size=576,
+            scale=256**-0.5,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=256,
+            qk_rope_head_dim=64,
+            qk_head_dim=320,
+            v_head_dim=256,
+            kv_b_proj=ColumnParallelLinear(512, 2 * 512, bias=False),
+        )
+    assert impl.use_shardq is expected
+
+
 def test_hisparse_skips_sliding_window_sparse_layers(
     default_vllm_config, dist_init, workspace_init
 ):
