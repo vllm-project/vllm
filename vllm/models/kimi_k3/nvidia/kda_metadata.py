@@ -580,7 +580,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         state_indices: torch.Tensor,
     ) -> KimiK3KDAMetadata:
         """Add this group's state indices, FULL graph staging, RecoverSSM commit
-        and checkpoint to the batch-level ``metadata`` that groups with the same
+        and checkpoint to the batch-level `metadata` that groups with the same
         spec and builder share. Group-specific fields go here."""
         spec_sequence_masks_cpu = metadata.spec_sequence_masks_cpu
         active_non_spec_mask_cpu = metadata.active_non_spec_mask_cpu

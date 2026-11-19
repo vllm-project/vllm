@@ -643,6 +643,7 @@ def test_update_block_table_recoverssm_checkpoint(monkeypatch: pytest.MonkeyPatc
             common.seq_lens,
             builder.kv_cache_spec,
             "align",
+            builder.num_speculative_blocks,
         )
     first_meta = first.build(0, first_common, **kwargs)
     meta = second.update_block_table(

@@ -100,9 +100,12 @@ def test_update_block_table_matches_build(
         seq_lens=[40, 30, 20],
         query_lens=[1 + num_spec, 1 + num_spec, 4 if num_prefills else 1 + num_spec],
     )
+    # Each request's blocks, then its draft-token state blocks.
+    block_table = torch.arange(3 * (3 + num_spec), dtype=torch.int32).view(3, -1)
     first_common = create_common_attn_metadata(
         batch, 16, torch.device("cpu"), arange_block_indices=True
     ).replace(
+        block_table_tensor=block_table,
         is_prefilling=torch.tensor([False, False, bool(num_prefills)]),
     )
     second_common = first_common.replace(
@@ -114,7 +117,11 @@ def test_update_block_table_matches_build(
     for builder, common in ((first, first_common), (second, second_common)):
         if mamba_cache_mode == "align":
             builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
-                common.block_table_tensor, common.seq_lens, spec, "align"
+                common.block_table_tensor,
+                common.seq_lens,
+                spec,
+                "align",
+                builder.num_speculative_blocks,
             )
     first_meta = first.build(0, first_common, **kwargs)
     meta = second.update_block_table(
