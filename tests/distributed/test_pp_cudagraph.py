@@ -15,6 +15,9 @@ from vllm.distributed.pp_transport.schema import (
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    reserve_aux_intermediate_tensor_slots,
+)
 
 from ..models.utils import check_logprobs_close
 from ..utils import (
@@ -45,6 +48,9 @@ class Qwen3PPTransportForCausalLM(Qwen3ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.pp_transport_schema.make_empty_intermediate_tensors
         )
+        # Take an upstream tap so the last stage receives aux without a drafter.
+        self.set_aux_hidden_state_layers((1,))
+        reserve_aux_intermediate_tensor_slots(self)
 
     def forward(
         self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None
@@ -156,6 +162,7 @@ def test_pp_transport_preserves_sp_padding(vllm_runner, monkeypatch):
                 for shape in senders:
                     assert shape[8]["hidden_states"][0] == 4
                     assert shape[8]["residual"][0] == 8
+                    assert shape[8]["aux_hidden_states_0"][0] == 8
     assert results[True, False] == results[False, False]
     assert results[True, True] == results[False, False]
 

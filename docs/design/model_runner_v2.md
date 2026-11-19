@@ -248,6 +248,13 @@ configurations from that backend. SP bindings with ubatching/DBO are unsupported
 Models without a schema retain full-tensor behavior, including arbitrary legacy
 intermediate keys and dtype-converting receive copies.
 
+EAGLE aux hidden states are registered during auxiliary-layer setup, before
+receive buffers or graphs are allocated. Each stage receives earlier stages'
+aux fields; non-last stages send both received and locally collected fields.
+These fields use full layouts even when hidden states use SP. Models without
+a schema receive an aux-only schema and retain their existing buffer factory.
+Layer selection and final aux assembly remain in the EAGLE model and PP handler.
+
 Downstream workers that override PP communication must forward the schema's
 `send_all_gather_tensors` and `recv_all_gather_tensors` to the corresponding
 `GroupCoordinator` tensor-dict calls along with the TP group. Those calls use
