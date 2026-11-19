@@ -25,7 +25,7 @@ from vllm.config import (
     set_current_vllm_config,
     update_config,
 )
-from vllm.config.compilation import CompilationMode
+from vllm.config.compilation import CompilationMode, validate_mamba_cudagraph_capacity
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
@@ -1296,6 +1296,16 @@ class Worker(WorkerBase):
                     init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
                 )
+            )
+
+            # Final capacity is capped by the reservation made before warmup.
+            runner = self.model_runner
+            validate_mamba_cudagraph_capacity(
+                runner.cudagraph_manager.cudagraph_mode,
+                runner.kv_cache_config,
+                runner.max_num_reqs,
+                min(num_kv_blocks, runner.kv_cache_config.num_blocks),
+                vllm_config=self.vllm_config,
             )
 
         return CompilationTimes(
