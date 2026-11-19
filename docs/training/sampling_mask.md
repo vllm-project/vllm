@@ -55,13 +55,16 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 With `stream=true`, each chunk carries the masks of the tokens it emits.
 
-On a CUDA or ROCm server without speculative decoding, set
-`sampling_params.return_sampling_mask` to `false` in a non-streaming
-`/inference/v1/generate` tokens request to skip mask capture for that request.
-This allows greedy or untruncated sampling on a mask-enabled server. The
-request can still return sampled-token logprobs or routed experts. Omitting the
-field inherits the engine setting. Explicitly requesting `true` requires
+On a server with `--return-sampling-mask` enabled and speculative decoding
+disabled, set `sampling_params.return_sampling_mask` to `false` in a
+non-streaming `/inference/v1/generate` tokens request to omit the mask from the
+response. This allows greedy or untruncated sampling. The request can still
+return sampled-token logprobs or routed experts. Omitting the field inherits
+the engine setting. Explicitly requesting `true` requires
 `--return-sampling-mask`.
+
+GPU Model Runner V2 also skips mask capture for opted-out requests. The CPU
+sampler still computes masks when `--return-sampling-mask` is enabled.
 
 ## Requirements
 
