@@ -6,12 +6,12 @@ import contextlib
 import ctypes
 import mmap
 import os
-import re
 import uuid
 import weakref
 from types import SimpleNamespace
 
 import numpy as np
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -47,8 +47,8 @@ def _fault_on_node(owner: np.ndarray, node: int | None) -> None:
     MPOL_PREFERRED takes another node's free memory before reclaiming page
     cache on `node` (with the default zone_reclaim_mode=0), so each chunk is
     bound to `node` while it clearly has room, and only preferred after."""
-    libnuma = None if node is None else get_libnuma()
-    if libnuma is None:
+    libnuma = get_libnuma()
+    if node is None or libnuma is None:
         logger.warning_once("Engram pool host shards may land off the GPU's NUMA node")
         owner[:: mmap.PAGESIZE] = 0
         return
@@ -56,8 +56,10 @@ def _fault_on_node(owner: np.ndarray, node: int | None) -> None:
     bind = True
     for start in range(0, owner.size, 1 << 30):
         chunk = owner[start : start + (1 << 30)]
-        with contextlib.suppress(OSError, KeyError, ValueError):
+        try:
             bind = bind and _claimable_bytes(node) > chunk.size + _BIND_HEADROOM
+        except (OSError, KeyError, ValueError):
+            bind = False  # Room unknown: never risk the OOM killer.
         if libnuma.mbind(
             ctypes.c_void_p(chunk.ctypes.data),
             ctypes.c_ulong(chunk.size),
@@ -71,26 +73,33 @@ def _fault_on_node(owner: np.ndarray, node: int | None) -> None:
 
 
 def _check_pages(address: int, num_bytes: int, node: int | None, huge: bool) -> None:
-    """Warn if a mapping's pages are mostly off `node`, or (`huge`) mostly not
-    huge pages, as when memory was short or fragmented."""
-    start = f"{address:x}"
+    """Warn if the pages of `[address, address + num_bytes)` are mostly off
+    `node`, or (`huge`) mostly not huge pages, as when memory was short or
+    fragmented. Chunked mbind may have split the range into several VMAs."""
+    end = address + num_bytes
+
+    def ours(line: str) -> bool:
+        start = int(line.split(maxsplit=1)[0].split("-")[0], 16)
+        return address <= start < end
+
+    pages: dict[str, int] = {}
     with open("/proc/self/numa_maps") as f:
-        line = next((x for x in f if x.startswith(start + " ")), "")
-    pages = {n: int(c) for n, c in re.findall(r" N(\d+)=(\d+)", line)}
-    on_node = pages.get(str(node), 0) / max(sum(pages.values()), 1)
-    huge_bytes = 0
+        for line in filter(ours, f):
+            for n, count in re.findall(r" N(\d+)=(\d+)", line):
+                pages[n] = pages.get(n, 0) + int(count)
+    huge_bytes, mine = 0, False
     with open("/proc/self/smaps") as f:
-        mine = False
-        for x in f:
-            if "-" in x.split()[0]:
-                mine = x.startswith(start + "-")
-            elif mine and x.startswith("ShmemPmdMapped:"):
-                huge_bytes = int(x.split()[1]) << 10
-    if node is not None and on_node < 0.9:
+        for line in f:
+            if "-" in line.split(maxsplit=1)[0]:  # A VMA's header.
+                mine = ours(line)
+            elif mine and line.startswith("ShmemPmdMapped:"):
+                huge_bytes += int(line.split()[1]) << 10
+    total = sum(pages.values())
+    if node is not None and total and pages.get(str(node), 0) < 0.9 * total:
         logger.warning(
             "Engram pool: only %.0f%% of %.1f GiB of host memory is on the GPU's "
             "NUMA node %d",
-            100 * on_node,
+            100 * pages.get(str(node), 0) / total,
             num_bytes / (1 << 30),
             node,
         )
