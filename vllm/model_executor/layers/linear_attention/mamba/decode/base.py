@@ -3,7 +3,7 @@
 """The Mamba selective state update (decode) kernel interface, shared by Mamba1
 and Mamba2 layers."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -17,6 +17,12 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
+
+
+class SSULayer(Protocol):
+    """What an SSU kernel reads from its layer."""
+
+    mamba_config: MambaConfig
 
 
 class MambaSSUKernel(LinearAttnKernel):
@@ -50,7 +56,7 @@ class MambaSSUKernel(LinearAttnKernel):
     @classmethod
     def forward(
         cls,
-        mamba_config: MambaConfig,
+        layer: SSULayer,
         metadata: "BaseMambaAttentionMetadata",
         state: torch.Tensor,
         x: torch.Tensor,

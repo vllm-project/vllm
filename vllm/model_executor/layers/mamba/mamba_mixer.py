@@ -398,7 +398,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_outputs_d = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
             self.ssu_kernel.forward(
-                self.mamba_config,
+                self,
                 attn_metadata,
                 ssm_state,
                 conv_out_d.transpose(0, 1),
