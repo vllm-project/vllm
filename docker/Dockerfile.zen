@@ -20,7 +20,7 @@
 #                    --target vllm-zen-test -t <out>:<tag> .
 
 ARG BASE_IMAGE
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG ZENTORCH_VERSION
 
 ######################### ZEN OPENAI IMAGE #########################

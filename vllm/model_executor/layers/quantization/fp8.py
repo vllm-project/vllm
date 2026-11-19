@@ -158,7 +158,9 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
-        store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
+        store_dtype = cls.get_from_keys_or(
+            config, ["store_dtype", "expert_dtype"], None
+        )
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
