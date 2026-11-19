@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
@@ -23,11 +24,7 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackend,
     CPUAttentionBackendImpl,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.worker.utils import AttentionGroup
 
 NUM_HEADS = 4
@@ -67,7 +64,7 @@ def cpu_attention(dtype, sliding_window):
     config.model_config = SimpleNamespace(
         dtype=dtype, is_mm_prefix_lm=False, max_model_len=256
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -86,7 +83,7 @@ def cpu_attention(dtype, sliding_window):
         impl = cast(CPUAttentionBackendImpl, layer.impl)
         group = AttentionGroup(CPUAttentionBackend, ["attn"], spec, 0)
         group.create_metadata_builders(config, torch.device("cpu"))
-    cache_config = KVCacheConfig(8, [], [KVCacheGroupSpec(["attn"], spec)])
+    cache_config = KVCacheConfig(8, [], [new_kv_cache_group(["attn"], spec)])
     state = DiffusionGemmaModelState.__new__(DiffusionGemmaModelState)
     state.model_config = config.model_config
     state.single_pass_reads = True
