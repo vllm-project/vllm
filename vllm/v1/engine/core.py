@@ -1806,6 +1806,18 @@ class EngineCoreProc(EngineCore):
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
+        if (
+            self.model_executor.is_sleeping
+            and not self.engines_running
+            and not self.batch_queue
+        ):
+            # The KV cache is released, so KV transfers are not driven: they
+            # wait for wake_up, and a sleeping D renews no leases (P frees the
+            # blocks when they end, D's later reads fail by the lease check).
+            return (
+                self.scheduler.has_unfinished_requests()
+                or self.scheduler.has_finished_requests()
+            )
         return (
             self.engines_running
             or self.scheduler.has_requests()

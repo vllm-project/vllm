@@ -275,3 +275,25 @@ def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
     assert done == {"Y"}
     assert list(w._reqs_to_send) == ["X"]
     assert w._reqs_to_process == {"X"}
+
+
+def test_cancelled_loads_stop_renewing_and_exports_are_kept():
+    """D stops renewing the leases of loads it cancels (retracted or aborted),
+    so P frees them when the lease ends. P keeps cancelled exports: NIXL
+    cannot revoke a read D has already posted."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import ExportRelease
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+        NixlConnector,
+    )
+
+    s = _sched()
+    cancelled, kept = _req(1), _req(2)
+    s.on_new_request(cancelled)
+    s.on_new_request(kept)
+    connector = object.__new__(NixlConnector)
+    connector.connector_scheduler = s
+
+    export = create_request(request_id=3, do_remote_decode=True)
+    assert connector.cancel_kv_transfers([export], [cancelled]) == ExportRelease.KEPT
+    assert s._heartbeat_by_engine[_ENGINE_A].req_ids == {"prefill-2"}
+    assert "id-1" not in s._heartbeat_req_engine

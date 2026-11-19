@@ -1205,3 +1205,16 @@ def test_resume_fails_every_pending_pause():
         with pytest.raises(RuntimeError, match="Resumed before"):
             future.result(timeout=0)
     assert core._pending_pauses == []
+
+
+def test_sleeping_engine_does_not_drive_kv_transfers():
+    """While the KV cache is released, transfers wait for wake_up: a sleeping
+    D must not keep renewing leases that pin P's blocks."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.has_requests.return_value = True  # a pending import
+    core.scheduler.has_unfinished_requests.return_value = False
+    core.scheduler.has_finished_requests.return_value = False
+    core.model_executor.is_sleeping = True
+    assert not EngineCoreProc.has_work(core)
+    core.model_executor.is_sleeping = False
+    assert EngineCoreProc.has_work(core)

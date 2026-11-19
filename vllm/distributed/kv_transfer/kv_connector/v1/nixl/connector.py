@@ -409,8 +409,12 @@ class NixlPullConnector(NixlBaseConnector):
     def cancel_kv_transfers(
         self, exports: list["Request"], imports: list["Request"]
     ) -> ExportRelease:
-        # NIXL cannot revoke a read D has posted, and D reads up to the lease
-        # deadline its own heartbeats extend. Only the read's completion
+        # D: stop renewing the leases of loads it no longer wants, so that P
+        # frees them when the lease ends. A load in flight still settles.
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.stop_heartbeats(r.request_id for r in imports)
+        # P: NIXL cannot revoke a read D has posted, and D reads up to the
+        # lease deadline its own heartbeats extend. Only the read's completion
         # notification or the lease expiry shows that no read uses the blocks.
         return ExportRelease.KEPT
 

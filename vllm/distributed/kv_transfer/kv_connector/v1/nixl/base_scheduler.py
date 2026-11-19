@@ -4,6 +4,7 @@
 
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -247,6 +248,11 @@ class NixlBaseConnectorScheduler:
             remote_request_id,
         )
         self._new_heartbeat_reqs.add((remote_engine_id, remote_request_id))
+
+    def stop_heartbeats(self, req_ids: Iterable[ReqId]) -> None:
+        """Stop renewing the remote leases of these requests' loads."""
+        for req_id in req_ids:
+            self._stop_heartbeat(req_id)
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
