@@ -23,14 +23,13 @@ engine core's state sync, and every rank runs the same deterministic
 import math
 import time
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.core.sched.request_queue import RequestQueue
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -169,19 +168,31 @@ class PrefillQueueState(NamedTuple):
     """A read-only view of the scheduler's queues for the hold."""
 
     running: Sequence["Request"]
-    inflight_prefills: Collection["Request"]
-    waiting: "RequestQueue"
+    # Running requests with prefill left.
+    prefill_chunks: Collection["Request"]
+    # Waiting requests that can start now, in the order the scheduler admits
+    # them.
+    waiting: Callable[[], Iterator["Request"]]
+    # Requests in the waiting queues, whether or not they can start.
+    num_waiting: int
+    # Async KV loads finished but not yet admitted: one finishing lets a
+    # waiting request start without changing `num_waiting`.
+    num_loaded: int
     max_active_reqs: int
     num_cached_tokens: Callable[["Request"], int]
+
+    @property
+    def scan_key(self) -> tuple[int, int, int]:
+        """Changes when the queue may scan differently, other than by time."""
+        return len(self.prefill_chunks), self.num_waiting, self.num_loaded
 
 
 class _QueueScan(NamedTuple):
     """`local_row`'s fields read off the prefill queue at monotonic time `at`,
-    with `num_inflight` and `num_waiting` requests queued."""
+    when its `PrefillQueueState.scan_key` was `key`."""
 
     at: float
-    num_inflight: int
-    num_waiting: int
+    key: tuple[int, int, int]
     x: int
     x_attn: float
     queued: int
@@ -303,17 +314,17 @@ class PrefillHold:
     def prepare_row(self) -> None:
         """Scans the prefill queue ahead of the next `local_row`. The engine
         core calls this while the GPU runs a step, off the critical path."""
-        _, inflight, waiting, _, probe = self._queue_state()
+        state = self._queue_state()
         at = time.monotonic()
         self._scan = (
-            self._scan_queue(inflight, waiting, probe, at, self._held(at))
-            if inflight or waiting
+            self._scan_queue(state, at, self._held(at))
+            if state.prefill_chunks or state.num_waiting
             else None
         )
 
     def local_row(self) -> list[float]:
         """This rank's row for the next all-gather."""
-        running, inflight, waiting, max_active, probe = self._queue_state()
+        state = self._queue_state()
         now = time.monotonic()
         held = self._held(now)
         period = 0.0 if self._last_sync is None else now - self._last_sync
@@ -330,28 +341,25 @@ class PrefillHold:
         row[_ARRIVED], row[_ARRIVED_UNCACHED], row[_ARRIVED_CACHED] = self._arrived
         self._arrived = [0, 0, 0]
 
-        chunks = inflight
-        if len(self._cached_tokens) > 2 * len(waiting) + 256:
+        chunks = state.prefill_chunks
+        if len(self._cached_tokens) > 2 * state.num_waiting + 256:
             self._cached_tokens = {
                 r.request_id: self._cached_tokens[r.request_id]
-                for r in waiting
+                for r in state.waiting()
                 if r.request_id in self._cached_tokens
             }
-        row[_DECODES] = max(0, len(running) - len(chunks))
-        if not chunks and not waiting:
+        row[_DECODES] = max(0, len(state.running) - len(chunks))
+        if not chunks and next(state.waiting(), None) is None:
             return row
         row[_WORK] = 1.0
-        if not chunks and len(running) >= max_active:
+        if not chunks and len(state.running) >= state.max_active_reqs:
             row[_BLOCKED] = 1.0
             return row
 
-        # Aborts and the finished step may have changed the queue since the
-        # prepared scan.
-        if scan is None or (scan.num_inflight, scan.num_waiting) != (
-            len(inflight),
-            len(waiting),
-        ):
-            scan = self._scan_queue(inflight, waiting, probe, now, held)
+        # Aborts, the finished step and finished KV loads may have changed the
+        # queue since the prepared scan.
+        if scan is None or scan.key != state.scan_key:
+            scan = self._scan_queue(state, now, held)
         row[_X] = scan.x
         row[_X_ATTN] = scan.x_attn
         row[_QUEUED] = scan.queued
@@ -368,12 +376,7 @@ class PrefillHold:
         return self._clock - self._hold_start + since_sync
 
     def _scan_queue(
-        self,
-        inflight: Collection["Request"],
-        waiting: "RequestQueue",
-        probe: Callable[["Request"], int],
-        at: float,
-        held: float,
+        self, state: PrefillQueueState, at: float, held: float
     ) -> _QueueScan:
         wall = time.time()
         budget = self.budget
@@ -381,7 +384,7 @@ class PrefillHold:
         x = queued = queue_tokens = 0
         x_attn = 0.0
         slack = target
-        for arrival, remaining, ctx in self._prefill_queue(inflight, waiting, probe):
+        for arrival, remaining, ctx in self._prefill_queue(state):
             if x < budget:
                 n = min(remaining, budget - x)
                 x += n
@@ -394,23 +397,23 @@ class PrefillHold:
             if slack <= 0:
                 # Releases whatever the rest of the queue is.
                 break
-        return _QueueScan(at, len(inflight), len(waiting), x, x_attn, queued, slack)
+        return _QueueScan(at, state.scan_key, x, x_attn, queued, slack)
 
     def _prefill_queue(
-        self,
-        inflight: Iterable["Request"],
-        waiting: Iterable["Request"],
-        probe: Callable[["Request"], int],
+        self, state: PrefillQueueState
     ) -> Iterator[tuple[float, int, int]]:
         """(arrival time, uncached tokens left, cached or computed tokens) of
         each request with prefill work, in-progress prefills first."""
-        for req in sorted(inflight, key=lambda r: r.arrival_time):
+        for req in sorted(state.prefill_chunks, key=lambda r: r.arrival_time):
             remaining = req.num_tokens - req.num_computed_tokens
             if remaining > 0:
                 yield req.arrival_time, remaining, req.num_computed_tokens
         cached_tokens = self._cached_tokens
-        for req in waiting:
-            cached = cached_tokens.get(req.request_id)
+        probe = state.num_cached_tokens
+        for req in state.waiting():
+            # A request holding KV blocks, such as a finished async KV load,
+            # resumes from them.
+            cached = req.num_computed_tokens or cached_tokens.get(req.request_id)
             if cached is None:
                 cached = cached_tokens[req.request_id] = probe(req)
             if req.num_tokens > cached:

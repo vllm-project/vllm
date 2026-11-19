@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import heapq
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -3079,10 +3080,28 @@ class Scheduler(SchedulerInterface):
 
         return PrefillQueueState(
             self.running,
-            self._inflight_prefills,
-            self.waiting,
+            # HiSparse also tracks async KV loads parked in kv_holding_waiting.
+            [r for r in self._inflight_prefills if r.status == RequestStatus.RUNNING],
+            self._startable_waiting,
+            self.get_request_counts()[1],
+            len(self.finished_recving_kv_req_ids),
             self.max_num_active_reqs,
             self.kv_cache_manager.get_num_cached_tokens,
+        )
+
+    def _startable_waiting(self) -> Iterator[Request]:
+        """Waiting requests that can start now, in the order `schedule` admits
+        them: `kv_holding_waiting` first, then `waiting` and `async_kv_waiting`
+        merged as `_next_waiting_queue` picks."""
+        merged = heapq.merge(
+            self.waiting,
+            self.async_kv_waiting,
+            key=None
+            if self.policy == SchedulingPolicy.PRIORITY
+            else lambda r: r.arrival_time,
+        )
+        return filter(
+            self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
         )
 
     @property
@@ -3670,6 +3689,17 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _can_start_waiting(self, request: Request) -> bool:
+        """Whether `_handle_blocked_waiting_request` would let `request`
+        proceed, without promoting it."""
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return request.request_id in self.finished_recving_kv_req_ids
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            struct_output_req = request.structured_output_request
+            grammar = struct_output_req.grammar if struct_output_req else None
+            return grammar is not None and not isinstance(grammar, Exception)
+        return request.status != RequestStatus.WAITING_FOR_STREAMING_REQ
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if

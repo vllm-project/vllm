@@ -7,10 +7,11 @@ from unittest.mock import Mock
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
+from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import ModelConfig
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.cpu_test
@@ -137,8 +138,9 @@ def test_idle_holds_only_where_a_lone_arrival_would_be_held():
     assert not hold.hold
 
 
-def _finish_step(scheduler, output) -> None:
-    """Completes a step, sampling a token for every request done prefilling."""
+def _finish_step(scheduler, output, finished_recving: set[str] | None = None) -> None:
+    """Completes a step, sampling a token for every request done prefilling,
+    in which the async KV loads of `finished_recving` finished."""
     req_ids = list(output.num_scheduled_tokens)
     scheduler.update_from_output(
         output,
@@ -150,6 +152,9 @@ def _finish_step(scheduler, output) -> None:
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            kv_connector_output=KVConnectorOutput(finished_recving=finished_recving)
+            if finished_recving
+            else None,
         ),
     )
 
@@ -292,6 +297,83 @@ def test_rank_without_a_free_slot_is_blocked():
     assert row[dph._DONE] == 1 and row[dph._DONE_TOKENS] == 8
     assert row[dph._DECODES] == 1
     assert row[dph._BLOCKED] == 1 and row[dph._X] == 0
+
+
+def test_finished_kv_load_is_queued_work():
+    """A request whose async KV load finished waits in `kv_holding_waiting`,
+    and the hold defers it like any other. Until it is released, it is queued
+    work whose age bounds the hold, from the sync right after the step its
+    load finished in; a load still in progress is not."""
+    scheduler, hold = _hold_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=64, is_async=True)
+    )
+    dec, req = create_requests(num_requests=2, num_tokens=200, req_ids=["d", "r"])
+    scheduler.add_request(dec)
+    _finish_step(scheduler, scheduler.schedule(), finished_recving={"d"})
+    _finish_step(scheduler, scheduler.schedule())
+
+    req.arrival_time -= 2 * T
+    scheduler.add_request(req)
+    hold.hold = True
+    output = scheduler.schedule()
+    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert hold.local_row()[dph._WORK] == 0
+    scheduler.prepare_dp_row()
+    _finish_step(scheduler, output, finished_recving={"r"})
+    # Loaded, then promoted by a step that defers it.
+    for _ in range(2):
+        row = hold.local_row()
+        assert row[dph._WORK] == 1 and row[dph._QUEUED] == 1
+        assert row[dph._X] == 200 - 64 and row[dph._SLACK] < 0
+        output = scheduler.schedule()
+        assert set(output.num_scheduled_tokens) == {"d"}
+        scheduler.prepare_dp_row()
+        _finish_step(scheduler, output)
+
+    hold.hold = False
+    assert scheduler.schedule().num_scheduled_tokens["r"] == 200 - 64
+
+
+def test_paused_streaming_session_is_not_work():
+    """A streaming session waiting for its next input sits in
+    `kv_holding_waiting` with nothing to prefill. Its arrival time is its last
+    input's, so counting it would release every step."""
+    scheduler, hold = _hold_scheduler()
+    dec, session = create_requests(
+        num_requests=2, num_tokens=8, stop_token_ids=[7], req_ids=["d", "s"]
+    )
+    session.resumable = True
+    scheduler.add_request(dec)
+    scheduler.add_request(session)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=["d", "s"], sampled_token_ids=[[0], [7]]),
+    )
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    session.arrival_time -= 2 * T
+    row = hold.local_row()
+    assert row[dph._WORK] == 0 and row[dph._DECODES] == 1
+
+
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+def test_scans_waiting_queues_in_admission_order(policy):
+    """Requests that may load KV asynchronously wait in `async_kv_waiting`
+    beside `waiting`; the hold scans the two in the order the scheduler admits
+    from them."""
+    scheduler, _ = _hold_scheduler(
+        use_kv_connector=MockKVConfig(), scheduling_policy=policy
+    )
+    scheduler.scheduler_config.max_num_inflight_kv_loads = 8
+    scheduler.connector.may_load_async = lambda r: int(r.request_id) % 2 == 0
+    reqs = create_requests(num_requests=6, num_tokens=8)
+    for i, (req, priority) in enumerate(zip(reqs, (2, 0, 1, 0, 2, 1))):
+        req.arrival_time, req.priority = float(i), priority
+        scheduler.add_request(req)
+    assert len(scheduler.async_kv_waiting) == len(scheduler.waiting) == 3
+
+    scanned = [r.request_id for r in scheduler._prefill_queue_state().waiting()]
+    admitted = [r.req_id for r in scheduler.schedule().scheduled_new_reqs]
+    assert scanned == admitted
 
 
 def test_hold_overrides_per_rank_capacity_escape():
