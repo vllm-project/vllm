@@ -199,7 +199,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             seqlen_k_capacity = max(max_model_len, FA4_DENSE_MAX_SEQLEN_K)
             if head_dim == 256:
                 # Two Q stages exceed TMEM at head_dim 256.
-                rows = [
+                rows: list[dict[str, Any]] = [
                     dict(q_stage=1, is_static_persistent=True),
                     dict(q_stage=1, is_static_persistent=False),
                     # Past FA4's hd256 2CTA batch admission.
