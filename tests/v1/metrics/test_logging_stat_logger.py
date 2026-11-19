@@ -11,7 +11,12 @@ from vllm.config import VllmConfig
 from vllm.config.device import DeviceConfig
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.loggers import StatLoggerManager
-from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
+    IterationStats,
+    SchedulerIterationDetails,
+    SchedulerStats,
+)
 
 LOGGER_NAME = "vllm.v1.metrics.loggers"
 
@@ -111,6 +116,26 @@ def test_scheduler_values_reflect_latest_snapshot(manager, caplog_vllm):
     line = _log_and_capture(manager, caplog_vllm).getMessage()
     assert "Running: 7 reqs" in line
     assert "Waiting: 2 reqs" in line
+
+
+def test_iteration_lines_have_an_elapsed_time_only_when_timed(manager, caplog_vllm):
+    caplog_vllm.set_level(logging.INFO, logger=LOGGER_NAME)
+    records = [
+        SchedulerIterationDetails(0, 1, 8, 2, 2, elapsed_ms=1.5),
+        SchedulerIterationDetails(1, 0, 0, 2, 2),
+        SchedulerIterationDetails(2, 0, 0, 0, 0, is_dummy=True),
+        SchedulerIterationDetails(3, 0, 0, 0, 0, elapsed_ms=0.0, is_dummy=True),
+    ]
+    manager.record(SchedulerStats(iteration_records=records), None)
+
+    lines = [record.getMessage() for record in caplog_vllm.records]
+    lines = [line for line in lines if "Iteration(" in line]
+    assert [line.split("generation tokens")[1] for line in lines] == [
+        ", iteration elapsed time: 1.50 ms, CPU KV cache usage: 0.0%",
+        ", CPU KV cache usage: 0.0%",
+        " (dummy), CPU KV cache usage: 0.0%",
+        ", iteration elapsed time: 0.00 ms (dummy), CPU KV cache usage: 0.0%",
+    ]
 
 
 def test_preemptions_and_corrupted_render(manager, caplog_vllm, monkeypatch):

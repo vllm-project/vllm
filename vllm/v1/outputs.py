@@ -23,11 +23,13 @@ if TYPE_CHECKING:
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.v1.metrics.stats import SchedulerIterationDetails
 else:
     AuxRequestOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    SchedulerIterationDetails = object
     ECConnectorWorkerMetadata = object
 
 
@@ -315,6 +317,9 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # Iterations whose GPU timing has completed; see IterationTimer.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     @staticmethod
     def with_kv_conn_output_only(
