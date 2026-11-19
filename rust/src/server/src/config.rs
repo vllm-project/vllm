@@ -352,6 +352,8 @@ pub struct Config {
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
+    /// Keys applied over the generation-config sampling defaults.
+    pub override_generation_config: serde_json::Map<String, Value>,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,
     /// the first entry is used as the primary ID in responses and all entries
     /// are accepted in requests. When empty, falls back to `model`.
@@ -389,7 +391,7 @@ pub struct Config {
     /// `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
