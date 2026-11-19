@@ -171,6 +171,7 @@ steps. Use Docker Hub organization username `vllm` with an organization access
 token granting Image Push, Image Delete, and Tag Admin on `vllm/vllm-openai`,
 `vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, `vllm/vllm-openai-xpu`, and
 `vllm/vllm-rust-frontend`. Create the frontend repository before its first publish.
+The short image aliases also require push access to `vllm/vllm`.
 Tag Admin and Image Delete are needed for nightly tag cleanup. Do not grant
 organization administration or access to unrelated repositories.
 
