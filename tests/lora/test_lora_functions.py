@@ -191,6 +191,8 @@ def test_invalid_lora_does_not_fail_engine(tmp_path):
     sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
     outputs = llm.generate(["Hello, my name is"] * 4, sampling_params)
     assert all(len(output.outputs[0].token_ids) == 16 for output in outputs)
+
+
 @pytest.mark.parametrize(
     ("specialize_active_lora", "max_loras"), [(True, 1), (True, 4), (False, 1)]
 )

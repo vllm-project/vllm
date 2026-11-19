@@ -133,17 +133,16 @@ def evil_forward_on_rank_1(self, *args, **kwargs):
     if get_tensor_model_parallel_rank() == 1:
         raise Exception("Simulated Error in startup on rank 1!")
 
-    kwargs.setdefault("intermediate_tensors", None)
-    return self.model(*args, **kwargs)
+    return super(TransformersForCausalLM, self).forward(*args, **kwargs)
 
 
 @pytest.fixture
 def evil_forward_on_rank_1_fixture(spawn_sitecustomize_factory):
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
-        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        "from vllm.model_executor.models.transformers import TransformersForCausalLM",
         inspect.getsource(evil_forward_on_rank_1),
-        f"LlamaForCausalLM.forward = {evil_forward_on_rank_1.__name__}",
+        f"TransformersForCausalLM.forward = {evil_forward_on_rank_1.__name__}",
     ]
     spawn_sitecustomize_factory(lines)
 
@@ -160,7 +159,7 @@ def test_async_llm_startup_error_with_peer_in_collective(
         pytest.skip(reason="Not enough CUDA devices")
 
     # Monkeypatch an error in the model.
-    monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward_on_rank_1)
+    monkeypatch.setattr(TransformersForCausalLM, "forward", evil_forward_on_rank_1)
 
     engine_args = AsyncEngineArgs(
         model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
