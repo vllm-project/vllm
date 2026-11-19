@@ -873,6 +873,34 @@ def _source(dtype):
     return value * factors[None, ..., None], factors
 
 
+def test_shared_int8_prefill_tiny_rows_keep_valid_scales():
+    """INT8 prefill retains normal decode scales for tiny nonzero rows."""
+    _require_cuda()
+    from vllm.model_executor.layers.mamba.ops.ssm_state_quantization import (
+        quantize_ssm_state,
+    )
+
+    floor = 2.0**-126
+    rows = torch.tensor([0.0, floor, 2 * floor, 64 * floor, 127.0], device="cuda")
+    source = rows[None, None, :, None].expand(1, 1, 5, 128).contiguous()
+    source[..., 1::2] = 0
+    state = torch.zeros(2, 1, 5, 128, dtype=torch.int8, device="cuda")
+    scales = torch.ones(2, 1, 5, device="cuda")
+    quantize_ssm_state(
+        source, state, scales, torch.tensor([1], device="cuda", dtype=torch.int32)
+    )
+    expected = torch.tensor([0, 1, 2, 64, 127], device="cuda", dtype=torch.int8)
+    expected = expected[None, :, None].expand(1, 5, 128).clone()
+    expected[..., 1::2] = 0
+    torch.testing.assert_close(state[1], expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales[1, 0],
+        torch.tensor([1.0, floor, floor, floor, 1.0], device="cuda"),
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_shared_fp8_prefill_tiny_rows_keep_valid_scales():
     """Tiny prefill rows must not overflow the encoder or produce zero scales."""
     _require_cuda()
