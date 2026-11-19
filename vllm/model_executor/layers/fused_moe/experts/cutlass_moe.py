@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS based Fused MoE kernels."""
 
+import functools
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -53,6 +55,13 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _swap_ab_threshold() -> int:
+    # Swap-AB reduces padding for small M. Must match SWAP_AB_THRESHOLD{,_SM120}
+    # in csrc/quantization/w8a8/cutlass/moe/moe_data.cu.
+    return 16384 if current_platform.is_device_capability_family(120) else 64
 
 
 def run_cutlass_moe_fp8(
@@ -210,8 +219,7 @@ def run_cutlass_moe_fp8(
             permuted_hidden_states=a1q_perm,
             scratch=permute_scratch,
         )
-        # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
-        swap_ab = a1q.size(0) <= 64
+        swap_ab = a1q.size(0) <= _swap_ab_threshold()
         ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
             expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, swap_ab
         )
