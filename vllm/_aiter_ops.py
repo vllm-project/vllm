@@ -387,9 +387,7 @@ def _rocm_aiter_fused_moe_impl(
         )
     if q_dtype_a is not None:
         # MXFP4 activation dtype override (mxfp4_w4a16_extra_kwargs in
-        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
-        # is checked at config time, so this is only reached on an AITER
-        # build new enough to accept it.
+        # rocm_aiter_moe.py); requires AITER >= v0.1.29.
         extra_kwargs["quant_dtype_a"] = q_dtype_a
 
     return fused_moe(

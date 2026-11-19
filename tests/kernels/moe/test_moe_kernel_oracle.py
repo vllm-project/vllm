@@ -7,8 +7,8 @@ Backend policy (platform gates, env vars, activation preferences) and the
 explicit-backend mapping of INT8/MXFP4/MXFP8/b12x-NVFP4/AITER-unquantized are
 covered in the per-oracle tests; only the uncovered cases are exercised here.
 No MoE kernel is launched: policy tests stub kernel probing and prepare/finalize
-construction, while the AITER activation-bound regressions exercise ROCm weight
-conversion.
+construction, while the AITER MXFP4 activation tests resolve the per-layer
+`quant_dtype_a`.
 """
 
 import os

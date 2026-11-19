@@ -2483,10 +2483,17 @@ def test_online_quantization(
         rocm_aiter_ops.refresh_env_variables()
         if not use_rocm_aiter and "activation" in str(online_quant_args):
             pytest.skip("Only AITER computes BF16 activations for MXFP4 MoE.")
+        args = online_quant_args or {}
+        moe_specs = [args.get("moe"), *args.get("targets", {}).values()]
         if (
             use_rocm_aiter
             and expected_moe_cls is Mxfp4OnlineMoEMethod
-            and ("'activation': None" in str(online_quant_args))
+            and any(
+                isinstance(spec, dict)
+                and "activation" in spec
+                and spec["activation"] is None
+                for spec in moe_specs
+            )
         ):
             # AITER's default CK 2-stage dispatch has no BF16 x MXFP4 kernel; BF16
             # activations only run for shapes in AITER's tuned fMoE configs.

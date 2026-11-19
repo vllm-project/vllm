@@ -510,8 +510,9 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         if self._q_dtype_a == torch.bfloat16:
             # AITER FHMoE shared-expert dispatch only runs MXFP8 activations here.
             raise ValueError(
-                "BF16 MoE activations are not supported with AITER fused shared "
-                "experts; set VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0."
+                "BF16 MoE activations (activation: null, or VLLM_STRICT_QUANT_SCHEME=1 "
+                "for a weight-only checkpoint) are not supported with AITER fused "
+                "shared experts; set VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0."
             )
         self._ensure_moe_quant_config_init()
         quant_config = self.quant_method.moe_quant_config
