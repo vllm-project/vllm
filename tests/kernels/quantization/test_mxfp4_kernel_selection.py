@@ -286,7 +286,13 @@ def test_batch_invariance_selects_batch_invariant_kernel(monkeypatch, linear_bac
         patch.object(
             HummingMxFp4LinearKernel, "is_supported", return_value=(True, None)
         ),
-        # The real one probes the device through the Humming library.
+        # The real ones import the Humming library, which may not be installed.
+        patch.object(
+            HummingMxFp4LinearKernel, "_supports_quant_scheme", return_value=True
+        ),
+        patch.object(
+            HummingMxFp4LinearKernel, "can_implement", return_value=(True, None)
+        ),
         patch.object(
             HummingMxFp4LinearKernel,
             "executed_activation_key",
