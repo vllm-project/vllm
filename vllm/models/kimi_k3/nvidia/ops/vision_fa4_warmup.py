@@ -21,7 +21,7 @@ _FA4_TILE_SIZE = 128
 _FA4_MAX_SPLITS = 128
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KimiK3VisionFA4WarmupConfig:
     num_heads: int
     head_dim: int
@@ -30,7 +30,7 @@ class KimiK3VisionFA4WarmupConfig:
     max_seqlen: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FA4WarmupProbe:
     batch_size: int
     max_seqlen: int

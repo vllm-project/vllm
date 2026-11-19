@@ -145,7 +145,7 @@ pub(super) fn prepare_completion_request(
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
-            routed_experts_prompt_start: None,
+            routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -248,7 +248,7 @@ mod tests {
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
@@ -478,7 +478,10 @@ mod tests {
             Some(vec!["hello".to_string()])
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
-        assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request.decode_options.skip_special_tokens,
+            Some(false)
+        );
         assert_eq!(
             prepared.text_request.sampling_params.stream_interval,
             NonZeroU32::new(4)

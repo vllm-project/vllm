@@ -3,11 +3,11 @@
 """Kimi-K3 specialization of GDN attention metadata.
 
 The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
+`GDNAttentionMetadataBuilder`. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
 metadata construction.
 
-For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
+For Kimi-K3 speculative decoding, `--use-replayssm` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
@@ -127,7 +127,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert state_indices.device.type == current_platform.device_type
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
@@ -154,14 +154,14 @@ def stage_spec_decode_metadata(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
     num_computed_tokens: torch.Tensor
     block_size: int
 
 
-@dataclass
+@dataclass(slots=True)
 class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
@@ -500,7 +500,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_accepted_tokens = self.recoverssm_num_accepted_tokens[
                     :num_spec_decodes
                 ]
-                if self.kv_cache_spec.mamba_cache_mode == "align":
+                if self.vllm_config.cache_config.mamba_cache_mode == "align":
                     num_computed_tokens = m.compute_num_computed_tokens()
 
         # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares

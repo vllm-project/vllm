@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -107,9 +108,9 @@ class InputProcessor:
     def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
         """Return whether watermarking will be applied to this request.
 
-        ``None`` and ``True`` request watermarking, while ``False`` opts out.
+        `None` and `True` request watermarking, while `False` opts out.
         If watermarking is unavailable or incompatible with the request, emit
-        a warning and return ``False``.
+        a warning and return `False`.
         """
         return self.vllm_config._check_supports_watermarking(params)
 
@@ -289,7 +290,9 @@ class InputProcessor:
     ) -> str:
         """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
-        generated based on the LoRA request to prevent incorrect cache hits.
+        generated based on the adapter name and path to prevent incorrect
+        cache hits when the same name is loaded from a different path.
+        Paths must identify immutable adapter versions for persistent cache reuse.
         """
         if (
             lora_request is None
@@ -297,7 +300,10 @@ class InputProcessor:
             or not self.lora_config.enable_tower_connector_lora
         ):
             return mm_hash
-        return f"{lora_request.lora_name}:{mm_hash}"
+        adapter_hash = hash_factors(
+            {"lora_name": lora_request.lora_name, "lora_path": lora_request.lora_path}
+        )
+        return f"{adapter_hash}:{mm_hash}"
 
     def inject_into_mm_cache(
         self,
@@ -312,7 +318,7 @@ class InputProcessor:
         accurately and avoids redundant processing on subsequent requests
         with the same images.
 
-        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        Uses `get_and_update_item()` with an empty prompt_updates list,
         since token expansion has already been handled externally.
         """
         cache = self.renderer.mm_processor_cache

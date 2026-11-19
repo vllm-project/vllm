@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -56,6 +57,18 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class WNA16WeightFormat:
+    """Symmetric group-quantized weights in the canonical N-first layout, for
+    checkpoint formats without a quantization config of their own here: each
+    value as `uint{num_bits}` offset by `2**(num_bits - 1)`, packed into int32
+    along K, with `[E, N, K // group_size]` scales, and no zero points or
+    activation reordering."""
+
+    num_bits: int
+    group_size: int
+
+
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
@@ -67,6 +80,8 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def backend_to_kernel_cls(
@@ -153,7 +168,7 @@ _ZEN_CPU_NUM_BITS = (4, 8)
 
 
 def _zen_cpu_num_bits(
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
 ) -> int | None:
     """Weight bit width for the Zen CPU path, or None for a checkpoint format
     it cannot read one from; AWQ and GPTQ call it weight_bits."""
@@ -170,7 +185,7 @@ def _zen_cpu_num_bits(
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     may_have_zp: bool,
     may_have_bias: bool,
     allow_tile_padding: bool,
@@ -240,7 +255,10 @@ def _backend_incompatibility_reason(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        if isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs)):
+        if isinstance(
+            quant_config,
+            (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs, WNA16WeightFormat),
+        ):
             # QuantizationArgs leaves group_size unset for per-channel
             # strategies; -1 is the in-tree encoding for that.
             group_size = (
@@ -286,6 +304,7 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
     """WNA16 MoE backend selection for one deployment configuration."""
 
     name = "WNA16"
+    placeholder_backend = WNA16MoEBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: WNA16MoEBackend
@@ -296,7 +315,7 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     may_have_zp: bool,
     may_have_bias: bool,
     allow_tile_padding: bool = False,
@@ -304,7 +323,7 @@ def select_wna16_moe_backend(
     """Select the WNA16 MoE backend.
 
     Args:
-        config: the shared ``FusedMoEConfig`` for this layer.
+        config: the shared `FusedMoEConfig` for this layer.
         weight_key: The QuantKey describing the weight quantization.
                     Must have int4 or int8 type.
         quant_config: Quantization structure and checkpoint format description.
@@ -314,9 +333,14 @@ def select_wna16_moe_backend(
             up to a tile boundary may be selected.
 
     Returns:
-        A tuple of (``WNA16MoEBackend``, experts class or ``None``).
+        A tuple of (`WNA16MoEBackend`, experts class or `None`).
 
     """
+    # TODO: migrate to oracle base method.
+    source = WNA16MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     # WNA16 MoE always runs BF16 activations.
     oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
@@ -353,7 +377,7 @@ def select_wna16_moe_backend(
             continue
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend))
+            logger.debug_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
 
     raise NotImplementedError(
@@ -481,7 +505,7 @@ def _process_weights_flashinfer(
 
     Steps
     -----
-    1. Transform weights/scales via ``prepare_static_weights_for_trtllm_mxint4_moe``.
+    1. Transform weights/scales via `prepare_static_weights_for_trtllm_mxint4_moe`.
     2. Return transformed tensors and biases.
     """
     from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
@@ -508,8 +532,8 @@ def _process_weights_flashinfer(
 
 
 def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.Tensor:
-    """Zero-pad each of the two gate/up shards of a ``(E, rows, 2 * unit)``
-    tensor along its last dim, from ``unit`` to ``padded_unit`` columns."""
+    """Zero-pad each of the two gate/up shards of a `(E, rows, 2 * unit)`
+    tensor along its last dim, from `unit` to `padded_unit` columns."""
     if padded_unit == unit:
         return x
     e, rows, _ = x.shape
@@ -519,14 +543,14 @@ def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.T
 
 
 def _pad_rows(x: torch.Tensor, padded_rows: int) -> torch.Tensor:
-    """Zero-pad a ``(E, rows, cols)`` tensor to ``padded_rows`` rows."""
+    """Zero-pad a `(E, rows, cols)` tensor to `padded_rows` rows."""
     if padded_rows == x.size(1):
         return x
     return torch.nn.functional.pad(x, (0, 0, 0, padded_rows - x.size(1)))
 
 
 def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n)`` bias to ``padded_n``."""
+    """Zero-pad each gate/up shard of a `(E, 2 * n)` bias to `padded_n`."""
     if padded_n == n:
         return bias
     e = bias.size(0)
@@ -561,12 +585,12 @@ def _process_weights_marlin(
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]``.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]`.
 
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
-    2. Repack weights via ``gptq_marlin_moe_repack``.
+    2. Repack weights via `gptq_marlin_moe_repack`.
     3. Permute scales.
     4. Permute bias tensors.
     """
@@ -811,8 +835,8 @@ def _process_weights_rdna3(
     """RDNA3 (gfx1100) W4A16 weight post-processing.
 
     Transposes the canonical N-first inputs to the K-first layout of
-    ``moe_gptq_gemm_rdna3`` (weights ``[E, K // 8, N]``, scales
-    ``[E, groups, N]``), interleaves the packed nibbles per expert (the exllama
+    `moe_gptq_gemm_rdna3` (weights `[E, K // 8, N]`, scales
+    `[E, groups, N]`), interleaves the packed nibbles per expert (the exllama
     shuffle the dense RDNA3 kernel also uses) and synthesizes the symmetric
     zero points the kernel dequantizes with.
     """
@@ -847,7 +871,7 @@ def _process_weights_rdna3(
 
 
 def _process_weights_cpu(
-    quant_config: QuantizationConfig | QuantizationArgs | None,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -954,8 +978,8 @@ def _process_weights_cpu(
 def _zen_decode_weight(
     packed: torch.Tensor, in_features: int, num_bits: int
 ) -> torch.Tensor:
-    """Decode a CT ``[E, N, K//pack_factor]`` weight into the layout the op
-    reads: packed s4 ``[E, N, K//8]`` for int4, plain s8 ``[E, N, K]`` for
+    """Decode a CT `[E, N, K//pack_factor]` weight into the layout the op
+    reads: packed s4 `[E, N, K//8]` for int4, plain s8 `[E, N, K]` for
     int8. The trailing dim is what makes the op pick DA8W4 over DA8W8."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
@@ -1014,7 +1038,7 @@ def _process_weights_zen_cpu(
 
 def _process_weights_xpu(
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -1032,20 +1056,27 @@ def _process_weights_xpu(
     """Repack INT4 MoE weights into the layout
     `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]`` int32.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]` int32.
     The int32 → uint8 view recovers sequential int4-packed bytes along
     the input dim.  Each packed int32 holds 8 nibbles in ascending K order;
     on a little-endian host the view exposes them as two nibbles per byte
     with the lower nibble = lower input-K index.  xpu_fused_moe(is_int4=True)
     expects this convention; big-endian hosts are unsupported.
     """
-    del layer, quant_config  # unused — kept for parity with the marlin helper
+    del layer  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
             "_process_weights_xpu requires a little-endian host: the "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        from vllm_xpu_kernels.quantization._quantize_convert import AWQUtils
+
+        w13_qweight = AWQUtils.moe_repack(w13_qweight)
+        w2_qweight = AWQUtils.moe_repack(w2_qweight)
 
     w13_xpu = w13_qweight.contiguous().view(torch.uint8)
     w2_xpu = w2_qweight.contiguous().view(torch.uint8)
@@ -1127,6 +1158,31 @@ def _convert_moe_wna16_humming_tensors(
             .contiguous()
         )
     return output
+
+
+class _WNA16FormatHummingWeightSchema:
+    """`WNA16WeightFormat`'s packed weights and scales are Humming's layout."""
+
+    def __init__(self, weight_format: WNA16WeightFormat) -> None:
+        self.weight_format = weight_format
+
+    def convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
+    ) -> tuple[Any, dict[str, torch.Tensor]]:
+        del shape_n_stacks, shape_k_stacks, num_experts
+        from vllm.utils.humming import HummingWeightSchema, dtypes
+
+        schema = HummingWeightSchema(
+            b_dtype=dtypes.DataType.from_str(f"uint{self.weight_format.num_bits}"),
+            weight_scale_group_size=self.weight_format.group_size,
+        )
+        weight_scale = tensors["weight_scale"].to(param_dtype)
+        return schema, {"weight": tensors["weight"], "weight_scale": weight_scale}
 
 
 class _MoeWNA16HummingWeightSchema:
@@ -1397,7 +1453,7 @@ def _process_weights_emulation_awq(
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig | QuantizationArgs | None,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -1422,25 +1478,25 @@ def convert_to_wna16_moe_kernel_format(
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     All non-AWQ frontends must supply weights and scales in N-first
-    canonical layout ``[E, N_out, K_packed]``.  AWQ uses a different
+    canonical layout `[E, N_out, K_packed]`.  AWQ uses a different
     packing axis and is handled by dedicated per-backend helpers.
 
-    To add a new backend, implement a ``_process_weights_<name>`` helper and
+    To add a new backend, implement a `_process_weights_<name>` helper and
     add a branch here. Backends that rewrite the layer's parameters in place
-    (e.g. Humming) return ``None``; the caller then skips the param scatter.
+    (e.g. Humming) return `None`; the caller then skips the param scatter.
 
     Args:
-        backend: the selected ``WNA16MoEBackend``.
-        layer: the ``MoERunner`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer.
+        backend: the selected `WNA16MoEBackend`.
+        layer: the `MoERunner` layer whose parameters are being prepared.
+        quant_config: the `QuantizationConfig` for this layer.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
-        w13_scale: quantization scales for ``w13``.
-        w2_scale: quantization scales for ``w2``.
-        w13_qzeros: optional zero points for ``w13``.
-        w2_qzeros: optional zero points for ``w2``.
-        w13_bias: optional bias for ``w13``.
-        w2_bias: optional bias for ``w2``.
+        w13_scale: quantization scales for `w13`.
+        w2_scale: quantization scales for `w2`.
+        w13_qzeros: optional zero points for `w13`.
+        w2_qzeros: optional zero points for `w2`.
+        w13_bias: optional bias for `w13`.
+        w2_bias: optional bias for `w2`.
 
     """
     if backend == WNA16MoEBackend.HUMMING:
@@ -1460,6 +1516,14 @@ def convert_to_wna16_moe_kernel_format(
                     has_zero_point=quant_config.has_zp,
                 ),
                 input_schema=HummingInputSchema(),
+            )
+        elif isinstance(quant_config, WNA16WeightFormat):
+            # With no input schema, Humming takes it from
+            # VLLM_HUMMING_INPUT_QUANT_CONFIG; the format has no input scheme.
+            convert_to_humming_moe_kernel_format(
+                layer,
+                quant_config={},
+                weight_schema=_WNA16FormatHummingWeightSchema(quant_config),
             )
         else:
             convert_to_humming_moe_kernel_format(
@@ -1486,7 +1550,7 @@ def convert_to_wna16_moe_kernel_format(
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
-        elif isinstance(quant_config, QuantizationArgs):
+        elif isinstance(quant_config, QuantizationArgs | WNA16WeightFormat):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
             group_size = (
@@ -1494,8 +1558,9 @@ def convert_to_wna16_moe_kernel_format(
             )
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig or "
-                f"QuantizationArgs, got {type(quant_config).__name__}."
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig, "
+                "QuantizationArgs or WNA16WeightFormat, got "
+                f"{type(quant_config).__name__}."
             )
 
         if isinstance(quant_config, AutoAWQConfig):

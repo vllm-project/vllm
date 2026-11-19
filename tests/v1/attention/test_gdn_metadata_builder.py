@@ -14,6 +14,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -31,7 +32,7 @@ BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-@dataclass
+@dataclass(slots=True)
 class GDNBuildTestCase:
     """Specification for a GDN metadata builder classification test."""
 
@@ -180,6 +181,24 @@ def _create_gdn_builder(
     )
 
 
+def _common_attn_metadata(
+    builder: GDNAttentionMetadataBuilder, batch_spec: BatchSpec
+) -> CommonAttentionMetadata:
+    """Common metadata whose block table also holds each request's draft-token
+    state blocks, as the runner's block table does."""
+    common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
+    block_table = common.block_table_tensor
+    num_reqs, num_extra = block_table.shape[0], builder.num_speculative_blocks
+    extra = (
+        block_table.max()
+        + 1
+        + torch.arange(
+            num_reqs * num_extra, dtype=block_table.dtype, device=DEVICE
+        ).view(num_reqs, num_extra)
+    )
+    return common.replace(block_table_tensor=torch.cat([block_table, extra], dim=1))
+
+
 def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
@@ -188,7 +207,7 @@ def _build(
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
     if common is None:
-        common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
+        common = _common_attn_metadata(builder, batch_spec)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
         kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
@@ -231,7 +250,7 @@ def test_update_block_table_matches_build(
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
-    source_common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    source_common = _common_attn_metadata(ref, batch)
     common = source_common.replace(
         block_table_tensor=source_common.block_table_tensor + 100
     )
@@ -245,6 +264,7 @@ def test_update_block_table_matches_build(
             common.seq_lens,
             dst.kv_cache_spec,
             "align",
+            dst.num_speculative_blocks,
         )
     draft_tokens = test_case.num_decode_draft_tokens
     source = _build(src, batch, draft_tokens, source_common)
@@ -317,7 +337,7 @@ def test_adaptive_verification_uses_device_query_boundaries(
         adaptive_verification=True,
     )
     batch = BatchSpec(seq_lens=[80, 96, 112], query_lens=[3, 3, 3])
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common = _common_attn_metadata(builder, batch)
     device_query_start_loc = torch.tensor([0, 1, 5, 9], dtype=torch.int32)
     common = common.replace(query_start_loc=device_query_start_loc)
 
@@ -353,7 +373,7 @@ def test_adaptive_cudagraph_capture_uses_spec_decode_path():
     # one four-token speculative row. Capture must therefore freeze the
     # speculative path, whose padded rows can also process one-token decodes.
     batch = BatchSpec(seq_lens=[1, 1, 1, 1], query_lens=[1, 1, 1, 1])
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common = _common_attn_metadata(builder, batch)
 
     meta = builder.build_for_cudagraph_capture(common)
 
@@ -466,11 +486,8 @@ def _create_checkpoint_builder_and_batch(
         block_size=64,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode="align",
-        num_speculative_blocks=num_spec,
-        num_prefill_checkpoint_blocks=1,
-        prefill_checkpoint_alignment=16,
     )
+    register_mamba_layers(vllm_config, ["layer.0"], 16)
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=mamba_spec,
         layer_names=["layer.0"],
@@ -534,7 +551,11 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     other_table = common.block_table_tensor + 100
     other = common.replace(block_table_tensor=other_table)
     dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
-        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+        other_table,
+        other.seq_lens,
+        dst.kv_cache_spec,
+        "align",
+        dst.num_speculative_blocks,
     )
 
     source = src.build(0, common, **kwargs)

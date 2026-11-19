@@ -3,16 +3,16 @@
 """Inkling logits processor (muP + LoRA aware).
 
 Inkling divides the final logits by a muP width multiplier
-(``logits_mup_width_multiplier``). This applies it two ways, depending on
+(`logits_mup_width_multiplier`). This applies it two ways, depending on
 whether an lm_head LoRA is attached:
 
-* No LoRA: fold ``1/mup`` into the lm_head GEMM alpha (fp32 epilogue) -- no
+* No LoRA: fold `1/mup` into the lm_head GEMM alpha (fp32 epilogue) -- no
   separate elementwise kernel, no extra rounding, no weight mutation.
 * LoRA attached: the LoRA manager wraps this layer in
-  ``LogitsProcessorWithLoRA``, whose ``forward`` calls
-  ``type(base_layer).forward(self=wrapper)`` -- so this ``forward`` runs with
-  ``self`` bound to the wrapper. We detect that via ``base_layer`` and take the
-  LoRA path: run the wrapper's ``_get_logits`` (base logits + the lm_head LoRA
+  `LogitsProcessorWithLoRA`, whose `forward` calls
+  `type(base_layer).forward(self=wrapper)` -- so this `forward` runs with
+  `self` bound to the wrapper. We detect that via `base_layer` and take the
+  LoRA path: run the wrapper's `_get_logits` (base logits + the lm_head LoRA
   delta), then divide the full logits by the multiplier so the delta is scaled
   too. muP thus composes with the LoRA delta, with the dispatch as the only
   model-side branching.
@@ -27,16 +27,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 
 class InklingLogitsProcessor(LogitsProcessor):
-    """``LogitsProcessor`` that applies Inkling's muP logits width multiplier.
+    """`LogitsProcessor` that applies Inkling's muP logits width multiplier.
 
     Args:
         vocab_size: Padded vocabulary size.
-        org_vocab_size: Unpadded vocabulary size (defaults to ``vocab_size``).
-        scale: Base logits scale (kept ``1.0`` for the served checkpoint).
+        org_vocab_size: Unpadded vocabulary size (defaults to `vocab_size`).
+        scale: Base logits scale (kept `1.0` for the served checkpoint).
         logits_as_input: Whether the input is already logits.
-        soft_cap: Optional logit soft cap (``None`` for the served checkpoint).
+        soft_cap: Optional logit soft cap (`None` for the served checkpoint).
         logits_mup_width_multiplier: muP width divisor for the final logits;
-            ``None`` or ``0`` disables it.
+            `None` or `0` disables it.
 
     """
 

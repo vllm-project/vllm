@@ -61,7 +61,7 @@ def _create_on_all_tp_ranks(name: str, create: Callable[[], Any]) -> Any | None:
 def maybe_create_all_gather_dual_norm(
     hidden_size: int, max_tokens: int, *, enable_pdl: bool
 ) -> Any | None:
-    """FlashInfer ``MNNVLCuteDSLAllGatherDualNormWorkspace`` for the TP group."""
+    """FlashInfer `MNNVLCuteDSLAllGatherDualNormWorkspace` for the TP group."""
 
     def create() -> Any:
         from flashinfer.comm.mnnvl_cutedsl_ag import (
@@ -103,7 +103,7 @@ def maybe_create_all_reduce_dual_norm(hidden_size: int, max_tokens: int) -> Any 
 
 
 def maybe_create_all_gather_norm_quant(hidden_size: int, max_tokens: int) -> Any | None:
-    """FlashInfer ``MNNVLCuteDSLAllGatherNormQuantWorkspace`` for the TP group."""
+    """FlashInfer `MNNVLCuteDSLAllGatherNormQuantWorkspace` for the TP group."""
 
     def create() -> Any:
         from flashinfer.comm.mnnvl_cutedsl_ag import (
@@ -125,7 +125,7 @@ def maybe_create_all_gather_norm_quant(hidden_size: int, max_tokens: int) -> Any
 def maybe_create_moe_finalize_all_reduce(
     hidden_size: int, top_k: int, max_tokens: int, *, enable_pdl: bool
 ) -> Any | None:
-    """FlashInfer ``MNNVLCuteDSLMoEFinalizeAllReduceWorkspace`` for the TP group."""
+    """FlashInfer `MNNVLCuteDSLMoEFinalizeAllReduceWorkspace` for the TP group."""
 
     def create() -> Any:
         from flashinfer.comm.mnnvl_cutedsl_moe_finalize import (

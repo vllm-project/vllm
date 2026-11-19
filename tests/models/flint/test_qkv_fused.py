@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The two-kernel fused decode qkv (residual-add RMSNorm, then qkv GEMV with
 per-head q/k norm, RoPE and KV-cache write) must reproduce the kernels it
-replaces, Flint's ``fused_add_rms_norm`` / ``rms_norm`` -> Flint GEMV ->
-``qk_norm_rope_cache``, up to reduction order (rare 1-ulp differences)."""
+replaces, Flint's `fused_add_rms_norm` / `rms_norm` -> Flint GEMV ->
+`qk_norm_rope_cache`, up to reduction order (rare 1-ulp differences)."""
 
 import pytest
 import torch

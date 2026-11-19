@@ -514,7 +514,7 @@ class FlexibleArgumentParser(ArgumentParser):
         return value
 
     def _pull_args_from_config(self, args: list[str]) -> list[str]:
-        """Method to pull arguments specified in the config file
+        r"""Method to pull arguments specified in the config file
         into the command-line args variable.
 
         The arguments in config file will be inserted between
