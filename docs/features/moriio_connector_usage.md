@@ -144,12 +144,14 @@ For DSpark, configure the same draft model on both instances through `--speculat
 
 Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
 
-For hybrid READ with independent sliding-window draft groups, both peers select
+For hybrid READ/WRITE with independent sliding-window draft groups, both peers select
 the window ending at the producer-computed prompt prefix (N-1 tokens on decode).
 This includes the cache manager's extra retained tokens, but excludes allocated
 speculative lookahead pages. Both peers must use this prompt-relative selection;
-mixing it with older tail-relative window clipping is not supported. The existing
-WRITE restrictions on sliding-window groups are unchanged.
+mixing it with older tail-relative window clipping is not supported. WRITE support
+for these windows requires a hybrid model with Mamba state; the existing restriction
+to DSpark speculation on hybrid WRITE remains. Non-Mamba sliding-window WRITE is
+still unsupported.
 
 ### Kimi-K3 specialized decode
 

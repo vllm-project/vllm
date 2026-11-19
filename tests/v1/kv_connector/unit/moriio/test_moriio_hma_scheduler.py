@@ -251,8 +251,9 @@ def _gate_vllm_config(
 @pytest.mark.usefixtures("restore_moriio_role")
 @pytest.mark.parametrize("prompt", [8, 9, 11, 13, 16, 17])
 @pytest.mark.parametrize("extra_retained_tokens", [0, 3])
-def test_hybrid_read_draft_window_ignores_allocated_lookahead(
-    prompt, extra_retained_tokens
+@pytest.mark.parametrize("read_mode", [True, False])
+def test_hybrid_transfer_draft_window_ignores_allocated_lookahead(
+    prompt, extra_retained_tokens, read_mode
 ):
     """P and D must transfer the same logical SWA pages despite unequal tails."""
     draft = KVCacheGroup.from_layers(
@@ -284,7 +285,7 @@ def test_hybrid_read_draft_window_ignores_allocated_lookahead(
                 kv_connector="MoRIIOConnector",
                 kv_role="kv_producer" if producer else "kv_consumer",
                 kv_connector_extra_config={
-                    "read_mode": True,
+                    "read_mode": read_mode,
                     "host_ip": "127.0.0.1",
                     "handshake_port": 6001,
                     "notify_port": 6002,
@@ -320,6 +321,13 @@ def test_hybrid_read_draft_window_ignores_allocated_lookahead(
                 )
                 assert delay_free and remote_params is not None
                 results.append(remote_params["remote_block_ids"])
+            elif not read_mode:
+                assert connector.connector_scheduler is not None
+                results.append(
+                    connector.connector_scheduler._clamp_to_prompt_blocks(
+                        request, block_ids
+                    )
+                )
             else:
                 connector.update_state_after_alloc(
                     request,
@@ -335,7 +343,13 @@ def test_hybrid_read_draft_window_ignores_allocated_lookahead(
     start = max(0, computed - (7 + extra_retained_tokens)) // 4
     end = (computed + 3) // 4
     expected = [[*range(10 + start, 10 + end)], [90, 91], [50]]
-    assert results == [expected, expected]
+    if not read_mode:
+        assert results == [
+            [[50], expected[0], [90]],
+            [[50], expected[0], [90, 91] if prompt > 16 else [90]],
+        ]
+    else:
+        assert results == [expected, expected]
     assert config.transfer_group_ids == (0, 1, 2)
 
 
