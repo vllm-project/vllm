@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shard and staging memory: NUMA-local pinned host pages and cuMem HBM."""
 
+import contextlib
 import ctypes
 import mmap
 import os
+import uuid
 import weakref
 from types import SimpleNamespace
 
@@ -46,13 +48,40 @@ def _unregister(mapping: mmap.mmap, pointer: int) -> None:
         logger.warning("Engram pool cudaHostUnregister failed: %s", result)
 
 
-class SharedHost:
-    """Pinned, GPU-mapped host bytes near the current GPU, in a memfd that RDMA
-    proxy processes map too."""
+# Not in Python's mmap module yet (Linux 6.1+).
+MADV_COLLAPSE = 25
 
-    def __init__(self, num_bytes: int, name: str) -> None:
-        self.nbytes = round_up(max(num_bytes, 1), mmap.PAGESIZE)
-        self.fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
+
+def _huge_page_bytes() -> int:
+    """The size of a transparent huge page: 2 MB, or 512 MB on 64 KB pages."""
+    try:
+        with open("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size") as f:
+            return int(f.read())
+    except OSError:
+        return mmap.PAGESIZE
+
+
+class SharedHost:
+    """Pinned, GPU-mapped host bytes near the current GPU, in a file that RDMA
+    proxy processes map too: a memfd, or, with `thp_dir`, an unlinked file on
+    that tmpfs.
+
+    `thp_dir` must be on a tmpfs mounted with `huge=always`, so the shard gets
+    transparent huge pages. A NIC translates every address it reads, and
+    gathers rows at random: over a large shard on base pages it misses its
+    translation cache on nearly every row."""
+
+    def __init__(self, num_bytes: int, name: str, thp_dir: str | None = None) -> None:
+        page = _huge_page_bytes() if thp_dir else mmap.PAGESIZE
+        self.nbytes = round_up(max(num_bytes, 1), page)
+        if thp_dir:
+            path = os.path.join(thp_dir, f"vllm_engram_{name}_{uuid.uuid4().hex}")
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+            self.fd = os.open(path, flags, 0o600)
+            # Peers open it through /proc/<pid>/fd, as they would a memfd.
+            os.unlink(path)
+        else:
+            self.fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
         os.ftruncate(self.fd, self.nbytes)
         mapping = mmap.mmap(self.fd, self.nbytes, flags=mmap.MAP_SHARED)
         exclude_from_core_dump(mapping)
@@ -61,7 +90,18 @@ class SharedHost:
         device = torch.accelerator.current_device_index()
         node = current_platform.get_device_numa_node(device)
         _prefer_numa_node(pointer, self.nbytes, node)
+        if thp_dir:
+            # Let the kernel compact memory to fault in huge pages...
+            mapping.madvise(mmap.MADV_HUGEPAGE)
         owner[:: mmap.PAGESIZE] = 0
+        if thp_dir:
+            # ...and collapse ranges that still fell back to base pages (e.g.
+            # when memory was too fragmented), 1 GB at a time.
+            for start in range(0, self.nbytes, 1 << 30):
+                with contextlib.suppress(OSError):
+                    mapping.madvise(
+                        MADV_COLLAPSE, start, min(1 << 30, self.nbytes - start)
+                    )
         self.cpu = torch.from_numpy(owner)
         pin_tensor(self.cpu)
         finalizer = weakref.finalize(owner, _unregister, mapping, pointer)

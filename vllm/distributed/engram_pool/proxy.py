@@ -163,13 +163,20 @@ class Owner:
             "device": dev.describe(),
         }
 
-    def connect(self, peers, requesters, box_sizes, max_tables):
+    def connect(self, peers, requesters, box_sizes, max_tables, same_node=()):
         """Connect peers' gathering QPs and requesters' request QPs; returns
-        this GPU's mailboxes (per requester and table) and their rkey and lkey."""
+        this GPU's mailboxes (per requester and table) and their rkey and lkey.
+        Gather QPs to `same_node` requesters connect to partner QPs on this NIC
+        (loopback) instead of to theirs: their buffers are registered here."""
         dev = self.device
         for peer, (gid, lid), theirs in peers:
             for qp, remote in zip(self.qps[peer], theirs):
                 dev.connect(qp, remote, (bytes.fromhex(gid), lid))
+        for peer in same_node:
+            for qp, qpn in zip(self.qps[peer], self.qpns[peer]):
+                partner, partner_qpn = dev.create_qp(self.data_cq, self.recv_cq, 1)
+                dev.connect(qp, partner_qpn, dev.address())
+                dev.connect(partner, qpn, dev.address())
         for qp, qpn, (partner, partner_qpn) in zip(
             self.qps[self.rank], self.qpns[self.rank], self.loopback
         ):

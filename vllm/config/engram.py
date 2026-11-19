@@ -91,6 +91,20 @@ class EngramConfig:
     it, so one engine's prefill delays another engine's decode by at most this
     backlog. The default (~2 MB) keeps prefill fetches at full rate."""
 
+    peer_group_rdma_owner_loopback: bool = False
+    """With `rdma`: keep the traffic between two GPUs of one node on the
+    owner's NIC (loopback) instead of sending it from one NIC to another.
+    Needed on rail-optimized fabrics, where the NICs of one node sit on
+    separate rails that cannot reach each other. Each NIC then also reads only
+    its own GPU's shard."""
+
+    peer_group_thp_dir: str | None = None
+    """With `rdma` and cpu_offload: a directory on a tmpfs mounted with
+    `huge=always`, where host shards are placed on transparent huge pages.
+    NICs gather rows at random, so a large shard on base pages misses the
+    NIC's address-translation cache on nearly every row, which can make large
+    fetches several times slower."""
+
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required
     with `peer_group_size`: the same path for every engine, reachable by all of
@@ -103,6 +117,15 @@ class EngramConfig:
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
+            )
+        if self.peer_group_thp_dir is not None and not (
+            self.peer_group_size
+            and self.cpu_offload
+            and self.peer_group_transport == "rdma"
+        ):
+            raise ValueError(
+                "peer_group_thp_dir requires peer_group_size, cpu_offload and "
+                "peer_group_transport='rdma'"
             )
         if (self.peer_group_size > 0) != (self.peer_group_store is not None):
             raise ValueError(

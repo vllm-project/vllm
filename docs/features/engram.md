@@ -215,10 +215,10 @@ launch. `peer_group_transport` picks how rows move:
 - `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
   with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
   libibverbs) that the fetching GPU builds and hands to the owner itself (it
-  rings the NIC's doorbell); no SM moves rows. Each GPU uses an active mlx5
-  RDMA device on its NUMA node and starts a proxy process that posts the WRs
-  it is handed. Peers exchange memory keys at startup, so the network must be
-  trusted.
+  rings the NIC's doorbell); no SM moves rows. Each GPU uses the active mlx5
+  RDMA device closest to it on PCIe (`VLLM_ENGRAM_RDMA_DEVICES` limits the
+  candidates) and starts a proxy process that posts the WRs it is handed.
+  Peers exchange memory keys at startup, so the network must be trusted.
 
 `peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
 compute stream, started before the decoder layers with each Engram layer
@@ -234,6 +234,29 @@ prefill-sized gathers each NIC keeps in flight, so one engine's prefill delays
 another's decode fetches only slightly while prefill fetches keep their rate.
 The DP ranks of one engine step together, so it does not matter within one
 engine.
+
+Two more `rdma` settings:
+
+- `peer_group_rdma_owner_loopback`: traffic between two GPUs of one node
+  stays on the owner's NIC (loopback) instead of crossing from one NIC to
+  another. Needed on rail-optimized fabrics, where the NICs of one node sit
+  on separate rails that cannot reach each other.
+- `peer_group_thp_dir` (with `cpu_offload`): places host shards on
+  transparent huge pages. NICs gather rows at random, so a large shard on
+  base pages misses the NIC's address-translation cache on nearly every row,
+  which can make large fetches several times slower. Give it a directory on
+  a tmpfs mounted with `huge=always`, sized to hold this node's shards:
+
+```bash
+# As root (or in a container started with
+# --tmpfs /engram-thp:huge=always,size=<size>):
+mount -t tmpfs -o huge=always,size=<size> none /engram-thp
+# Without root: mount it in a user and mount namespace for the server.
+unshare -Urm sh -c 'mount -t tmpfs -o huge=always,size=<size> none /engram-thp && exec vllm serve ...'
+```
+
+The files are unlinked as soon as they are created, so the memory is freed
+when the engines exit.
 
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
