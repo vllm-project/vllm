@@ -8,6 +8,7 @@
 from collections.abc import Sequence
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -85,6 +86,8 @@ def _partial_tail_non_mamba_puts(
     prompt_tokens = req_meta.num_prompt_tokens
     completed = req_meta.completed_token_len
     assert prompt_tokens is not None and completed is not None
+    if req_meta.max_offload_tokens is not None:
+        completed = min(completed, req_meta.max_offload_tokens)
     hash_block_size = coord.hash_block_size
     boundary = get_reusable_prefix_length(
         prompt_tokens,
@@ -366,6 +369,9 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                max_offload_tokens=get_max_offload_tokens(
+                    request_real.kv_transfer_params
+                ),
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -544,6 +550,13 @@ class MooncakeStoreScheduler:
                 continue
             if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+            if (
+                req_meta.max_offload_tokens is not None
+                and not req_meta.token_len_chunk
+                and not req_meta.boundary_puts
+            ):
+                req_meta.can_save = False
+                continue
             if self.enable_kv_events and coord.num_hash_lookahead_tokens:
                 request, _ = self._unfinished_requests[req_meta.req_id]
                 req_meta.num_hash_lookahead_tokens = coord.num_hash_lookahead_tokens
@@ -639,6 +652,11 @@ class MooncakeStoreScheduler:
         boundary_tokens = next(iter(boundaries))
         if boundary_tokens > tracker.prefill_end_tokens:
             return False
+        if (
+            tracker.max_offload_tokens is not None
+            and boundary_tokens > tracker.max_offload_tokens
+        ):
+            return False
 
         mamba_puts: list[BoundaryPut] = []
         for group_id, block_id, boundary in partial_tail_offloads:
@@ -660,6 +678,7 @@ class MooncakeStoreScheduler:
             prefill_end_tokens=tracker.prefill_end_tokens,
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
+            max_offload_tokens=tracker.max_offload_tokens,
         )
         coord = self._store_coord
         assert coord is not None
@@ -715,6 +734,11 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[BoundaryPut] = []
             for group_id, block_id, boundary_tokens in entries:
+                if (
+                    tracker.max_offload_tokens is not None
+                    and boundary_tokens > tracker.max_offload_tokens
+                ):
+                    continue
                 is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
                 if is_decode_boundary and not self.save_decode_cache:
                     continue
@@ -743,6 +767,7 @@ class MooncakeStoreScheduler:
                     prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_puts=accepted,
                     completed_token_len=tracker.token_len,
+                    max_offload_tokens=tracker.max_offload_tokens,
                 )
             )
 

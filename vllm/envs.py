@@ -348,6 +348,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_XPU_SUPPORT_FP8_QUERY: bool | None = None
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -2412,6 +2413,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
     # whether use xpu specific sample kernel
+    # Whether XPU attention takes an FP8 query. If unset, enabled on Xe3p
+    # (native FP8) and disabled otherwise.
+    "VLLM_XPU_SUPPORT_FP8_QUERY": lambda: (
+        bool(int(os.environ["VLLM_XPU_SUPPORT_FP8_QUERY"]))
+        if "VLLM_XPU_SUPPORT_FP8_QUERY" in os.environ
+        else None
+    ),
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
     ),
