@@ -17,7 +17,7 @@ from vllm.v1.worker.cpu.input_batch import InputBatch
 CHUNK_SIZE = 1024
 
 
-@dataclass
+@dataclass(slots=True)
 class _TokenIdScores:
     token_ids: torch.Tensor  # [num_rows, num_ids], on device
     pad: torch.Tensor  # [num_rows, num_ids] bool, True at padded columns

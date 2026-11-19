@@ -290,7 +290,7 @@ class MegaMHCKernel(VllmJitKernel["MegaMHCKernel.CompileKey"]):
     program for a size between them would be built mid-serving.
     """
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         program: str
         defines: tuple[tuple[str, Any], ...]

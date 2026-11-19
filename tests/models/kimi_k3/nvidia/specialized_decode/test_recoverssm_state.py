@@ -33,6 +33,7 @@ def _kda_builder(use_recoverssm: bool = True) -> KimiK3KDAMetadataBuilder:
 class _Group:
     def __init__(self, builder) -> None:
         self.builder = builder
+        self.metadata_builders = [builder]
 
     def get_metadata_builder(self, ubatch_id: int = 0):
         assert ubatch_id == 0

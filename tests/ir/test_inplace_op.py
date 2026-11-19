@@ -27,6 +27,23 @@ def _custom_mm2_inplace(x: Tensor, w: Tensor) -> Tensor:
     return x
 
 
+_functional_calls = 0
+
+
+def _custom_mm2_functional(x: Tensor, w: Tensor) -> Tensor:
+    global _functional_calls
+    _functional_calls += 1
+    return x @ w + 3
+
+
+@_custom_mm2.register_impl(
+    "inplace_with_functional", inplace=True, functional_impl=_custom_mm2_functional
+)
+def _custom_mm2_inplace_with_functional(x: Tensor, w: Tensor) -> Tensor:
+    x.copy_(x @ w + 3)
+    return x
+
+
 class TestInplaceOp:
     def test_registration(self):
         # Test that the inplace op is registered correctly.
@@ -79,6 +96,41 @@ class TestInplaceOp:
 
         torch.testing.assert_close(result_inplace, x1 @ w + 2)
         torch.testing.assert_close(result_regular, x1 @ w + 1)
+
+    def test_functional_impl(self):
+        # The default overload uses functional_impl instead of clone + inplace;
+        # maybe_inplace still runs the inplace impl.
+        w = torch.randn(3, 3)
+        x = torch.randn(2, 3)
+        x1 = x.clone()
+        calls = _functional_calls
+
+        with _custom_mm2.set_priority(["inplace_with_functional"]):
+            result = _custom_mm2(x, w)
+        assert _functional_calls == calls + 1
+        torch.testing.assert_close(x, x1, atol=0, rtol=0)
+        torch.testing.assert_close(result, x1 @ w + 3)
+
+        with _custom_mm2.set_priority(["inplace_with_functional"]):
+            result_inplace = _custom_mm2.maybe_inplace(x, w)
+        assert _functional_calls == calls + 1
+        assert result_inplace.data_ptr() == x.data_ptr()
+        torch.testing.assert_close(result_inplace, x1 @ w + 3)
+
+    def test_functional_impl_validation(self):
+        def bad_schema(x: Tensor) -> Tensor:
+            return x
+
+        with pytest.raises(ValueError, match="functional_impl"):
+            _custom_mm2.register_impl(
+                "bad_schema", inplace=True, functional_impl=bad_schema
+            )(_custom_mm2_inplace.impl_fn)
+        with pytest.raises(AssertionError, match="only valid for inplace"):
+            _custom_mm2.register_impl(
+                "not_inplace", functional_impl=_custom_mm2_functional
+            )(_custom_mm2_regular.impl_fn)
+        assert "bad_schema" not in _custom_mm2.impls
+        assert "not_inplace" not in _custom_mm2.impls
 
     def test_trace(self):
         # Test that the inplace op can be used in a graph.
