@@ -1177,6 +1177,7 @@ def test_pin_mmap_region_selects_by_savings_not_row_count(
         return True
 
     monkeypatch.setattr(gpu_worker, "host_register", register)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
     gpu_worker.pin_mmap_region(region, worker_slot_only=True)
 
     assert region.is_pinned
@@ -1185,6 +1186,32 @@ def test_pin_mmap_region_selects_by_savings_not_row_count(
         if own_slots
         else [(0x100000, region.total_size_bytes)]
     )
+
+
+@pytest.mark.parametrize("num_workers", [2, 4])
+def test_pin_mmap_region_rocm_registers_own_slots_whenever_a_page_is_saved(
+    monkeypatch, num_workers
+):
+    """On ROCm a worker never registers the other workers' slots: 4 PP workers
+    each registering a whole 1.25 TB region exceeded the driver's limit."""
+    slot = 796416  # GLM-5.2 PP4: 3.19 MB rows save 2.4 MB, under 3 MiB
+    region = _unmapped_registration_region(3, slot, num_workers)
+    registrations = []
+
+    def register(ptr, size):
+        registrations.append((ptr, size))
+        return True
+
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
+    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+
+    assert region.is_pinned
+    assert registrations == [
+        (0x100000 + offset, size) for offset, size in region.iter_worker_slot_ranges()
+    ]
+    assert len(registrations) == 3
+    assert all(size < region._row_stride for _, size in registrations)
 
 
 def test_host_registration_reuses_cudart(monkeypatch):

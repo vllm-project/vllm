@@ -242,7 +242,13 @@ def pin_mmap_region(
         for offset in range(0, total_size, chunk_size)
     )
     stride, slot, page = region._row_stride, region.cpu_page_size, region.page_size
-    min_savings = max(page, MIN_HOST_REGISTER_SAVED_BYTES)
+    # ROCm: every worker of a shared region registering all of it can exceed the
+    # driver's limit on registered memory (4 PP workers x 1.25 TB), while
+    # registering only the worker's slots, one call per row, is affordable (a
+    # 1 TB region of 3.2 MB rows: ~40 s per worker on MI355X).
+    min_savings = (
+        page if current_platform.is_rocm() else max(page, MIN_HOST_REGISTER_SAVED_BYTES)
+    )
     if worker_slot_only and region.rank is not None and stride - slot >= min_savings:
         # Round each slot out to pages; the worker's next slot is a page away.
         ranges = region.iter_worker_slot_ranges()
