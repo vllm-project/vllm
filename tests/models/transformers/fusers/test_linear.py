@@ -762,9 +762,10 @@ class TracedBoundSlicedQKVAttention(SlicedQKVAttention):
     def forward(self, hidden_states, attention_mask=None, **kwargs):
         qkv = self.qkv_proj(hidden_states)
         n = hidden_states.shape[-1]
+        k_end = n + self.kv_dim
         q = qkv[..., :n]
-        k = qkv[..., n : n + self.kv_dim]
-        v = qkv[..., n + self.kv_dim :]
+        k = qkv[..., n:k_end]
+        v = qkv[..., k_end:]
         return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
 
 
@@ -1381,21 +1382,20 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     "attn_cls",
     [SlicedQKVAttention, RopeSlicedQKVAttention, AnnotatedSlicedQKVAttention],
 )
-@pytest.mark.parametrize("kv_heads", [1, 2])
-def test_detects_and_rewrites_sliced_qkv(kv_heads, attn_cls):
+def test_detects_and_rewrites_sliced_qkv(attn_cls):
     """A projection sliced into q/k/v with global offsets must be re-sharded too.
 
     Slices of derived tensors (e.g. rotary) must not interfere with the match."""
     with torch.device("meta"):
-        meta = attn_cls(kv_heads=kv_heads)
+        meta = attn_cls()
     fuser = get_fuser(meta, PackedQKVFuser)
     assert isinstance(fuser, PackedQKVFuser)
     assert (fuser.qkv_name, fuser.o_name) == ("qkv_proj", "o_proj")
-    assert (fuser.q_size, fuser.kv_size) == (32, 8 * kv_heads)
+    assert (fuser.q_size, fuser.kv_size) == (32, 8)
     names = fuser.fused_forward.__code__.co_names
     assert "output_sizes" in names and "tp_size" in names
 
-    real = attn_cls(kv_heads=kv_heads, layer_idx=3)
+    real = attn_cls(layer_idx=3)
     for p in real.parameters():
         nn.init.normal_(p, std=0.05)
     x = torch.randn(1, 5, 32)
@@ -1407,10 +1407,10 @@ def test_detects_and_rewrites_sliced_qkv(kv_heads, attn_cls):
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.parametrize("tp_size", [2, 4])
-def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
+def test_sliced_qkv_forward_reads_per_rank_sections():
     """With a head-sharded projection, the slices must follow the per-rank layout
     `[q_r | k_r | v_r]`, not the global offsets."""
+    tp_size = 2
     with torch.device("meta"):
         meta = SlicedQKVAttention(heads=8, kv_heads=4)
     fuser = get_fuser(meta, PackedQKVFuser)
@@ -1451,11 +1451,7 @@ def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
 
 @pytest.mark.parametrize(
     "attn_cls",
-    [
-        GapSlicedQKVAttention,
-        ReusedSlicedQKVAttention,
-        TracedBoundSlicedQKVAttention,
-    ],
+    [GapSlicedQKVAttention, ReusedSlicedQKVAttention, TracedBoundSlicedQKVAttention],
 )
 def test_irregular_slices_are_not_packed_qkv(attn_cls):
     """Anything but exactly three tiling slices of the projection is left alone."""

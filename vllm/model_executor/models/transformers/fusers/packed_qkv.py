@@ -163,7 +163,7 @@ class PackedQKVFuser(RewriteFuser):
         """Point the three `qkv[..., a:b]` slices at the per-rank sections."""
         call = single_self_call(funcdef, self.qkv_name)
         targets = [
-            node.target if isinstance(node, ast.AnnAssign) else node.targets[0]
+            node.targets[0] if isinstance(node, ast.Assign) else node.target
             for node in ast.walk(funcdef)
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is call
         ]
