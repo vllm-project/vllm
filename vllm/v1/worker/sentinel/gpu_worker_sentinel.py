@@ -213,6 +213,11 @@ class WorkerSentinel:
         # group reinit; placement is fixed by the redistribution below.
         model_runner.eep_eplb_suppressed = True
         self.retry(ft_request)
+        if self.worker.parallel_config.all2all_backend == "nixl_ep":
+            newly_dead_ep_ranks = compute_dead_ep_ranks(
+                ft_request.params["newly_dead_dp_ranks"], tp_size, pcp_size
+            )
+            get_ep_all2all_manager().disconnect_ranks(sorted(newly_dead_ep_ranks))
 
         self._redistribute_experts(dead_ep_ranks)
 
