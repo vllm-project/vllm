@@ -14,6 +14,37 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(103), reason="needs SM103"
+)
+def test_local_mhc_cluster_entry():
+    """Also run under racecheck: DSM peers must exist before the first write."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.shared_boundary import (
+        FusedPostPre,
+    )
+
+    with torch.inference_mode(), set_current_vllm_config(VllmConfig()):
+        norm = RMSNorm(5120, eps=1e-6).to("cuda", torch.bfloat16)
+        x = torch.full((1, 5120), 0.5, device="cuda", dtype=torch.bfloat16)
+        residual = torch.full((1, 4, 5120), 0.25, device="cuda", dtype=torch.bfloat16)
+        post = torch.full((1, 4, 1), 0.5, device="cuda")
+        comb = torch.eye(4, device="cuda").unsqueeze(0)
+        pre = torch.full((1, 4), 0.25, device="cuda")
+        call = FusedPostPre()
+        args = (x, residual, post, comb, pre, norm, None, True)
+        call(*args)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = call(*args)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.all(output[0] == 0.5)
+        assert torch.all(output[1] == 1)
+        assert torch.all(output[2] == 0.5)
+
+
 def _worker(rank, width, port):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput

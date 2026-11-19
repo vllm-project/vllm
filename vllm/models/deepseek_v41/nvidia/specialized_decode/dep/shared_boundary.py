@@ -258,6 +258,9 @@ class _FusedMHCDeviceKernel(_LamportMHCDeviceKernel):
         warp_sums = smem.allocate_array(Float32, self.warps)
         cluster_sums = smem.allocate_array(Float32, self.cluster_size)
         cta_sum = group_leader_block_sum(thread_sum, warp_sums, self.warps, 1)
+        # Every peer CTA must exist before accessing its distributed shared memory.
+        cute.arch.cluster_arrive()
+        cute.arch.cluster_wait()
         if tidx < self.cluster_size:
             remote = map_shared_to_peer(cluster_sums + cluster_rank, Int32(tidx))
             store_shared_cluster_f32(remote, cta_sum)
