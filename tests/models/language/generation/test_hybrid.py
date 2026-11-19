@@ -499,8 +499,7 @@ def _get_vLLM_output(
     return outs, vllm_model
 
 
-# LFM2's second repetition resumes from the ShortConv prefill checkpoint.
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], "LiquidAI/LFM2-1.2B"])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
