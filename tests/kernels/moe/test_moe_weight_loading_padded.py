@@ -666,11 +666,13 @@ class TestLoadWeightsExpertMapping:
     def test_non_gated_mapping_uses_stacked_up_proj_without_warning(self, caplog_vllm):
         mapping = self._mapping(("up_proj", "down_proj", None), is_gated=False)
         assert "Unexpected gate/up projection names" not in caplog_vllm.text
-        assert mapping[:2] == [
+        assert mapping[:4] == [
+            ("experts.w13_input_scale", "experts.up_proj_input_scale", 0, "w1"),
+            ("experts.w2_input_scale", "experts.down_proj_input_scale", 0, "w2"),
             ("experts.w13_weight", "experts.up_proj", 0, "w1"),
             ("experts.w2_weight", "experts.down_proj", 0, "w2"),
         ]
-        assert mapping[2:] == [
+        assert mapping[4:] == [
             (param, f"experts.{expert}.{proj}.", expert, shard)
             for expert in range(16)
             for param, proj, shard in (
