@@ -316,6 +316,32 @@ def test_the_arena_admits_a_bucket_only_when_a_block_fits(server):
     assert s._blocks == {}
 
 
+def test_replicas_share_blocks_and_a_slow_one_frees_the_arena(server):
+    """Worker 0 of two deployments pulls one block per bucket, packed once. A
+    fast replica that fills the arena waits for the slow one, whose pulls of
+    blocks already packed need no room."""
+    s = server(arena_bytes=128, workers_per_replica=1)
+    for c in (0, 1):
+        s.register_consumer(c, [WHOLE_N] * 3)
+    with pytest.raises(ValueError, match="deployments must be identical"):
+        s.register_consumer(2, [WHOLE_N] * 2)
+    s.begin_sync([0, 1], 0)
+    _publish(s, _weights(), 0, 1)
+    fast = [s.bucket(0, seq, 0)[0] for seq in (0, 1)]
+    s.free()
+    third = _call(s.bucket, 0, 2, 0)
+    assert not third.done(), "the slow replica's blocks were freed early"
+    (slow,) = s.bucket(1, 0, 0)
+    assert slow.data_ptr() == fast[0].data_ptr() and s._packed_count == 2
+    s.free()
+    third.result(timeout=5)
+    s.bucket(1, 1, 0)
+    s.bucket(1, 2, 0)
+    s.free()
+    assert s._packed_count == 3 and s._blocks == {}
+    assert sorted(s.end_sync()) == [0, 1]
+
+
 @pytest.mark.parametrize(
     "bucket,match",
     [

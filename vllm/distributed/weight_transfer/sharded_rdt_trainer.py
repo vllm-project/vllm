@@ -128,6 +128,19 @@ class _ServedBucket:
     layout: tuple[FlatPiece, ...]
 
 
+@dataclass(slots=True)
+class _Block:
+    """An arena block packed once for every replica's worker that shares its
+    bucket; freed once each has pulled and freed it, or its sync is over."""
+
+    key: tuple[int, int]  # (share key, seq)
+    offset: int
+    sync_idx: int
+    pending: int  # live sharers yet to pull it
+    out: int = 0  # served copies Ray still holds
+    flat: torch.Tensor | None = None  # None while its pack is in flight
+
+
 @dataclass(frozen=True, slots=True)
 class _Sources:
     """One bucket's source boxes for one generation of its unit: the
@@ -253,6 +266,7 @@ class _RDTProducerServer:
         arena_bytes: int,
         bucket_bytes: int,
         stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
+        workers_per_replica: int = 0,
     ) -> None:
         self._device_index = torch.accelerator.current_device_index()
         self._served = {
@@ -264,6 +278,8 @@ class _RDTProducerServer:
         # the largest bucket a consumer may register (its `buffer_bytes`)
         self._bucket_bytes = int(bucket_bytes)
         self._stall_timeout = float(stall_timeout_s)
+        # worker j of every deployment pulls the same buckets: they share blocks
+        self._share_every = int(workers_per_replica)
 
         # One lock; each event wakes only the waits it can unblock.
         self._lock = threading.Lock()
@@ -288,15 +304,17 @@ class _RDTProducerServer:
         # the registered arena, and its served, unfreed blocks by offset
         self._arena: torch.Tensor | None = None
         self._blocks: dict[int, int] = {}
-        self._serve_wait, self._served_count = 0.0, 0
+        self._holds: dict[int, _Block] = {}  # by offset
+        self._shared: dict[tuple[int, int], _Block] = {}  # this sync's, by key
+        self._serve_wait, self._served_count, self._packed_count = 0.0, 0, 0
         # this sync's imports by export, so each export is rebuilt once
         self._base_cache: dict[tuple, torch.Tensor] = {}
         # per unit its last publish; per consumer and seq, the bucket's
         # sources, built once per generation of its unit
         self._published: dict[int, _Published] = {}
         self._gens = itertools.count(1)
-        self._sources: dict[int, dict[int, _Sources]] = {}
-        self._seqs: dict[int, dict[int, list[int]]] = {}  # consumer -> unit -> seqs
+        self._sources: dict[int, dict[int, _Sources]] = {}  # by share key
+        self._seqs: dict[int, dict[int, list[int]]] = {}  # share key -> unit -> seqs
         # per unit, the trainer's event its published tensors are ready at
         self._ready: dict[int, torch.cuda.Event | None] = {}
         # Packs run one at a time: the GIL serializes their Python anyway, and
@@ -376,7 +394,10 @@ class _RDTProducerServer:
             self._live = frozenset(int(c) for c in live_consumer_ids)
             self._freed = {c: Counter() for c in self._live}
             self._pulled = set()
-            self._serve_wait, self._served_count = 0.0, 0
+            self._serve_wait, self._served_count, self._packed_count = 0.0, 0, 0
+            self._shared = {}
+            for block in list(self._holds.values()):  # left by an earlier sync
+                self._maybe_free(block)
             for unit in self._resident:  # left by a failed sync
                 self._drop_import(unit)
             self._resident.clear()
@@ -477,10 +498,11 @@ class _RDTProducerServer:
             freed, self._freed_pending = self._freed_pending, []
             self._base_cache.clear()
             logger.info(
-                "Sharded RDT producer sync %d: served %d buckets, which waited "
-                "%.2f s in total for their unit or arena room",
+                "Sharded RDT producer sync %d: served %d buckets (%d packed), "
+                "which waited %.2f s in total for their unit or arena room",
                 self._sync_idx,
                 self._served_count,
+                self._packed_count,
                 self._serve_wait,
             )
             return freed
@@ -503,7 +525,8 @@ class _RDTProducerServer:
         Raises:
             ValueError: a bucket names a tensor this rank does not serve, a
                 box outside its tensor, or tensors of two units, or is larger
-                than the arena.
+                than the arena; or the same worker of another deployment
+                registered other buckets.
 
         """
         served: list[_ServedBucket] = []
@@ -539,12 +562,23 @@ class _RDTProducerServer:
             served.append(
                 _ServedBucket(units.pop(), tuple(pieces), nbytes, tuple(layout))
             )
+        key = self._share_key(consumer_id)
         with self._lock:
+            for other, theirs in self._buckets.items():
+                if other != consumer_id and self._share_key(other) == key:
+                    if theirs != served:
+                        raise ValueError(
+                            f"consumer {consumer_id} registered other buckets "
+                            f"than consumer {other}, the same worker of another "
+                            "deployment: deployments must be identical"
+                        )
+                    served = theirs
+                    break
             self._buckets[consumer_id] = served
-            self._sources[consumer_id] = {}
-            self._seqs[consumer_id] = {}
+            self._sources[key] = {}
+            self._seqs[key] = {}
             for seq, b in enumerate(served):
-                self._seqs[consumer_id].setdefault(b.unit, []).append(seq)
+                self._seqs[key].setdefault(b.unit, []).append(seq)
             self._needs[consumer_id] = Counter(b.unit for b in served)
             for unit in list(self._resident):
                 self._release_if_done(unit)
@@ -554,7 +588,8 @@ class _RDTProducerServer:
     def bucket(self, consumer_id: int, seq: int, sync_idx: int) -> list[torch.Tensor]:
         """Serve one registered bucket of sync `sync_idx` once its unit is
         gathered and the arena has room: its boxes packed, with one fused
-        copy, into an arena block at `flat_layout`.
+        copy, into an arena block at `flat_layout`. The same worker of every
+        deployment gets the same block, packed once.
 
         Raises:
             ValueError: an unregistered bucket, or a sync this producer left.
@@ -569,7 +604,8 @@ class _RDTProducerServer:
                     f"consumer {consumer_id} pulled bucket {seq}, which it "
                     "never registered here"
                 ) from None
-            sources = self._sources[consumer_id]  # the same registration
+            share = (self._share_key(consumer_id), seq)
+            sources = self._sources[share[0]]  # the same registration
             if self._sync_idx == sync_idx:  # before waiting on a released unit
                 self._check_first_pull(consumer_id, seq, sync_idx)
             self._wait_for(
@@ -593,12 +629,18 @@ class _RDTProducerServer:
                 self._check_first_pull(consumer_id, seq, sync_idx)
                 self._pulled.add((consumer_id, seq))
             # the unit stays resident until this bucket is served and freed
+
+            def blocked() -> bool:
+                if self._sync_idx != sync_idx:
+                    return False
+                block = self._shared.get(share)
+                if block is not None:
+                    return block.flat is None  # another sharer is packing it
+                return self._carve(spec.nbytes, dry_run=True) < 0
+
             self._wait_for(
                 self._room,
-                lambda: (
-                    self._sync_idx == sync_idx
-                    and self._carve(spec.nbytes, dry_run=True) < 0
-                ),
+                blocked,
                 f"arena room for unit {spec.unit} of sync {sync_idx}",
                 sync_idx,
             )
@@ -609,20 +651,57 @@ class _RDTProducerServer:
                 or published.tensors is None
             ):
                 raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
-            offset = self._carve(spec.nbytes)
+            block = self._shared.get(share)
+            if block is None:
+                offset = self._carve(spec.nbytes)
+                sharers = sum(self._share_key(c) == share[0] for c in self._live)
+                block = _Block(share, offset, sync_idx, pending=sharers)
+                self._shared[share] = self._holds[offset] = block
+                self._packed_count += 1
+            block.pending -= 1
+            block.out += 1
+            flat = block.flat
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
             tensors, gen = published.tensors, published.gen
             ready = self._ready.get(spec.unit)
             self._last_progress = time.monotonic()
-        try:
-            flat = self._pack_bucket(sources, seq, spec, offset, tensors, gen, ready)
-        except BaseException:
-            self._freed_bucket(-1, spec.unit, sync_idx, offset)  # only the block
-            raise
+        if flat is None:
+            try:
+                flat = self._pack_bucket(
+                    sources, seq, spec, block.offset, tensors, gen, ready
+                )
+            except BaseException:
+                with self._lock:  # drop the block; waiting sharers pack anew
+                    block.out -= 1
+                    block.flat = None
+                    self._shared.pop(share, None)
+                    block.pending = 0
+                    self._maybe_free(block)
+                raise
+            with self._lock:
+                block.flat = flat
+                self._room.notify_all()
         del published, tensors
-        self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
-        return [flat]
+        served = flat.view(flat.shape)  # its own object, for its own free
+        self._track_free(served, consumer_id, spec.unit, sync_idx, block.offset)
+        return [served]
+
+    def _share_key(self, consumer_id: int) -> int:
+        """The worker index `consumer_id` has in its deployment."""
+        return consumer_id % self._share_every if self._share_every else consumer_id
+
+    def _maybe_free(self, block: _Block) -> None:
+        """Free `block` once Ray holds no copy and no live sharer will pull it
+        (or its sync is over). Caller holds `_lock`."""
+        if block.out > 0 or (block.pending > 0 and block.sync_idx == self._sync_idx):
+            return
+        self._blocks.pop(block.offset, None)
+        if self._holds.get(block.offset) is block:
+            del self._holds[block.offset]
+        if self._shared.get(block.key) is block:
+            del self._shared[block.key]
+        self._room.notify_all()
 
     def _check_first_pull(self, consumer_id: int, seq: int, sync_idx: int) -> None:
         """Refuse a second pull of a bucket in a sync: two workers share the
@@ -700,11 +779,13 @@ class _RDTProducerServer:
     def _freed_bucket(
         self, consumer_id: int, unit: int, sync_idx: int, offset: int
     ) -> None:
-        """A served bucket's arena block at `offset` is free, and the bucket
-        no longer holds its unit."""
+        """Ray freed a served bucket in the block at `offset`: the bucket no
+        longer holds its unit, nor this copy the block."""
         with self._lock:
-            self._blocks.pop(offset, None)
-            self._room.notify_all()
+            block = self._holds.get(offset)
+            if block is not None:
+                block.out -= 1
+                self._maybe_free(block)
             if sync_idx == self._sync_idx and consumer_id in self._freed:
                 self._freed[consumer_id][unit] += 1
                 self._release_if_done(unit)
@@ -736,9 +817,9 @@ class _RDTProducerServer:
                 k: b for k, b in published.bases.items() if k in published.keep
             }
             # the cached sources are views of the import too
-            for consumer, seqs in self._seqs.items():
+            for key, seqs in self._seqs.items():
                 for seq in seqs.get(unit, ()):
-                    self._sources[consumer].pop(seq, None)
+                    self._sources[key].pop(seq, None)
 
     def shutdown(self) -> None:
         if self._arena is not None and self._arena.is_cuda:
@@ -947,15 +1028,18 @@ class ShardedRDTTrainerWeightTransferEngine(
         return [g[0] for g in gathered if g is not None]
 
     def _arena_bytes(self) -> int:
-        """`arena_bytes` for this rank, over the consumers that may pull from it."""
+        """`arena_bytes` for this rank, over the workers of one deployment that
+        may pull from it: the others share their blocks."""
         ii = self._init_info
+        per = ii.workers_per_replica
+        pullers = self._pullers()
         return arena_bytes(
             buffer_bytes=ii.buffer_bytes,
             num_buffers=ii.num_buffers,
-            num_consumers=self._num_pullers(),
+            num_consumers=len({c % per for c in pullers}) if per else len(pullers),
         )
 
-    def _num_pullers(self) -> int:
+    def _pullers(self) -> list[int]:
         """Consumers that may pull from this rank."""
         ii = self._init_info
         router = RdtRouter(
@@ -967,7 +1051,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             workers_per_replica=ii.workers_per_replica,
         )
         router.validate()
-        return len(router.consumers_of(self.rank))
+        return router.consumers_of(self.rank)
 
     def _spawn_server(self) -> None:
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -1011,7 +1095,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_gpus=0,
             # every in-flight pull may wait in `bucket` for its unit, plus
             # control calls; a smaller pool would queue a publish behind them
-            max_concurrency=self._num_pullers() * ii.num_buffers + 8,
+            max_concurrency=len(self._pullers()) * ii.num_buffers + 8,
             enable_tensor_transport=True,
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(), soft=False
@@ -1024,6 +1108,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             arena_bytes=self._arena_bytes(),
             bucket_bytes=ii.buffer_bytes,
             stall_timeout_s=ii.stall_timeout_s,
+            workers_per_replica=ii.workers_per_replica,
         )
         self._rpc("warmup_nixl")
 

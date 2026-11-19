@@ -51,7 +51,7 @@ end_sync
 
 A trainer rank runs at most `gather_lookahead` units ahead of the units its workers are still reading. Workers pull in unit order within each group of co-owning trainer ranks, and pull from independent groups (pipeline stages) side by side, so no rank waits on a unit its workers will pull later.
 
-Each trainer rank serves out of one arena it registers with NIXL at startup, sized for `num_buffers` buckets for every worker that may pull from it, plus one bucket of slack. To serve a pull, the rank packs the bucket's boxes, with one fused copy, into one byte tensor carved from the arena, so Ray only describes it. A rank admits a pull only while a block for it fits next to the buckets it has served and Ray has not yet freed, so a full arena slows pulls down rather than failing them.
+Each trainer rank serves out of one arena it registers with NIXL at startup, sized for `num_buffers` buckets for every worker of one deployment that may pull from it, plus one bucket of slack. Worker *j* of every deployment pulls the same buckets, so they share one block per bucket: the first pull packs it, the others read it, and the block is freed once each has. To serve a pull, the rank packs the bucket's boxes, with one fused copy, into one byte tensor carved from the arena, so Ray only describes it. A rank admits a pull only while a block for it fits next to the buckets it has served and Ray has not yet freed, so a full arena slows pulls down rather than failing them.
 
 **Every inference deployment must call `start_weight_update` before any calls `update_weights`.** The first `start_weight_update` registers the worker's buckets with every trainer rank, and a rank releases a unit only once every live worker has registered.
 
@@ -114,9 +114,9 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 | `gather_lookahead` | 2 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a worker that dies mid-sync, not a latency target |
 
-**Several deployments.** Set `workers_per_replica` on the trainer. Each deployment then sets `replica_rank` (its index, from 0) and `num_replicas` in the init info it forwards to its workers. Two deployments with the same `replica_rank` fail the sync at their first repeated pull.
+**Several deployments.** Set `workers_per_replica` on the trainer. Each deployment then sets `replica_rank` (its index, from 0) and `num_replicas` in the init info it forwards to its workers. Two deployments with the same `replica_rank` fail the sync at their first repeated pull. The deployments must be identical (model, parallelism, `buffer_bytes`); a worker whose buckets differ from the same worker of another deployment is refused when it registers. They share the trainer's arena, so a deployment that runs ahead may wait for a slower one.
 
-Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. With EP every worker may pull from every rank, so the arena grows with the number of workers.
+Each trainer rank's GPU holds its arena, `(num_buffers × workers of one deployment pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. With EP every worker of a deployment may pull from every rank, so the arena grows with the deployment's size, but not with the number of deployments.
 
 For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB, unless a single tensor is larger than `buffer_bytes`) per trainer rank, and a receive arena of at most 2 GiB per worker.
 

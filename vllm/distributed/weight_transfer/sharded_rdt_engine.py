@@ -600,10 +600,12 @@ class ShardedRDTWeightTransferEngine(
             spent[0] += time.perf_counter() - t0
             land(ready)
         logger.info(
-            "Sharded RDT sync %d: %d pulls in %.2f s (waiting %.2f s, fetching "
-            "%.2f s, applying %.2f s)",
+            "Sharded RDT sync %d: %d pulls, %.1f MiB, %d fallbacks, in %.2f s "
+            "(waiting %.2f s, fetching %.2f s, applying %.2f s)",
             sync_idx,
             len(self._buckets),
+            sum(b.nbytes for b in self._buckets) / (1 << 20),
+            len({id(st) for b in self._buckets for _, st, _ in b.staged}),
             time.perf_counter() - t_start,
             *spent,
         )

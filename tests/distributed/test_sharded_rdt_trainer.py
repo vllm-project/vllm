@@ -166,14 +166,17 @@ def test_owners_outside_the_trainer_are_refused():
         _engine(_Source(_PP, {"embed.weight": (0, 2)}), world=2)
 
 
-def test_arena_covers_the_consumers_that_may_pull_from_the_rank():
-    """Layer 1 only on rank 1: both consumers may pull from it, one from 0."""
+@pytest.mark.parametrize("replicas", [1, 3])
+def test_arena_covers_the_consumers_that_may_pull_from_the_rank(replicas):
+    """Layer 1 only on rank 1: both workers of a deployment may pull from it,
+    one from 0. Other deployments share their blocks: the arena is the same."""
     sizes = [
         _engine(
             _Source(_PP, {"model.layers.1.w": (1,)}, rank),
             rank=rank,
             world=2,
-            num_consumers=2,
+            num_consumers=2 * replicas,
+            workers_per_replica=2 if replicas > 1 else 0,
             buffer_bytes=100,
         )._arena_bytes()
         for rank in (0, 1)
