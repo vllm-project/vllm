@@ -149,6 +149,7 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+ServiceTier: TypeAlias = Literal["auto", "default", "flex", "scale", "priority"]
 
 
 def _default_input_image_details(value: Any) -> Any:
@@ -291,7 +292,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "without affecting model inference."
         ),
     )
-    service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
+    service_tier: ServiceTier = "auto"
     store: bool | None = True
     stream: bool | None = False
     temperature: float | None = None
@@ -483,7 +484,9 @@ class ResponsesRequest(OpenAIBaseModel):
     def _normalize_prompt_cache_retention(cls, value: object) -> object:
         return "in_memory" if value == "in-memory" else value
 
-    @field_validator("service_tier", mode="before")
+    @field_validator(
+        "service_tier", mode="before", json_schema_input_type=ServiceTier | None
+    )
     @classmethod
     def _default_null_service_tier(cls, value: object) -> object:
         return "auto" if value is None else value
@@ -934,7 +937,7 @@ class ResponsesResponse(OpenAIBaseModel):
     prompt_cache_retention: PromptCacheRetention | None = None
     reasoning: Reasoning | None = None
     safety_identifier: str | None = None
-    service_tier: Literal["auto", "default", "flex", "scale", "priority"]
+    service_tier: ServiceTier
     status: ResponseStatus
     text: ResponseTextConfig | None = None
     top_logprobs: int | None = None
