@@ -26,6 +26,35 @@ steps:
       pytest -v -s ir &&
       pytest -v -s kernels/ir'
 
+- label: ":intel: (BMG) Triton Unified Attention Tests"
+  key: triton-unified-attention-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/attention/ops/triton_unified_attention.py
+    - vllm/v1/attention/ops/triton_attention_helpers.py
+    - vllm/v1/attention/backends/triton_attn.py
+    - vllm/triton_utils
+    - tests/kernels/attention/test_triton_unified_attention.py
+  commands:
+    # XPU always runs the tensor-descriptor (USE_TD) path, so skip the three
+    # raw-pointer matrices (1584 of 1917 cases, ~29 of ~31 min of Triton JIT).
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/attention/test_triton_unified_attention.py
+      -k "not test_triton_unified_attn or use_td or clamped_mm"'
+
 - label: ":intel: (BMG) UVA Kernel Tests"
   key: uva-kernel-tests
   timeout_in_minutes: 20
