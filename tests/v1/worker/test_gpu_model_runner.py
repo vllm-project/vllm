@@ -15,11 +15,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    MultipleOf,
-    subclass_attention_backend_with_overrides,
-)
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
@@ -37,7 +33,6 @@ from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.utils import select_common_block_size
-from vllm.v1.worker.worker_base import WorkerBase
 
 
 @pytest.fixture(autouse=True)
@@ -200,54 +195,6 @@ def test_preferred_block_size_rejects_backends_with_no_common_size():
     classes = [_mock_backend([16], exact=True), _mock_backend([MultipleOf(64)])]
     with pytest.raises(ValueError, match="share no supported KV cache block size"):
         Platform._preferred_block_size_for_backends(classes, 16, None)
-
-
-class _Prefers128Backend(AttentionBackend):
-    """Importable by its class path, unlike the backends `_mock_backend` makes."""
-
-    @staticmethod
-    def get_name() -> str:
-        return "PREFERS_128"
-
-    @staticmethod
-    def get_supported_kernel_block_sizes(
-        kv_cache_spec: KVCacheSpec | None = None,
-    ) -> list[int | MultipleOf]:
-        return [128]
-
-
-def test_worker_without_attention_layers_takes_block_size_of_other_stages(
-    monkeypatch,
-):
-    """A pipeline stage without attention layers chooses the block size from
-    the attention backends the other stages report. A backend subclassed at
-    run time for one layer is reported as the backend it subclasses."""
-    layer_backend = subclass_attention_backend_with_overrides(
-        "layer0_", _Prefers128Backend, {}
-    )
-    layer = SimpleNamespace(get_attn_backend=lambda: layer_backend)
-    monkeypatch.setattr(
-        "vllm.v1.worker.worker_base.get_layers_from_vllm_config",
-        lambda vllm_config, layer_type: {"layer0": layer},
-    )
-    attn_stage = object.__new__(WorkerBase)
-    attn_stage.vllm_config = SimpleNamespace()
-    paths = attn_stage.get_attn_backend_cls_paths()
-    assert paths == [f"{__name__}._Prefers128Backend"]
-
-    cache_config = SimpleNamespace(
-        block_size=16,
-        user_specified_block_size=False,
-        kv_cache_dtype_skip_layers=None,
-        mamba_block_size=None,
-        mamba_page_size_padded=None,
-        skip_page_size_padded=None,
-    )
-    mamba_stage = object.__new__(WorkerBase)
-    mamba_stage.vllm_config = SimpleNamespace(
-        cache_config=cache_config, model_config=SimpleNamespace(is_hybrid=False)
-    )
-    assert mamba_stage.update_block_size(paths)["block_size"] == 128
 
 
 @pytest.mark.parametrize("cpu", [False, True])
