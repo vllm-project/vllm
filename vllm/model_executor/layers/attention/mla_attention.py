@@ -1190,6 +1190,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and num_mha_tokens == 0
             and self.is_aiter_triton_fp8_bmm_enabled
             and not self.is_aiter_triton_fp4_bmm_enabled
+            and not hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
         )
         if num_mqa_tokens > 0:
             has_mla_lora = hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
