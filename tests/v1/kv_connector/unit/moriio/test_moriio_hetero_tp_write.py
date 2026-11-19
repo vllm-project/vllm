@@ -46,10 +46,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -68,11 +67,14 @@ DECODE_BLOCKS = {"full": [5, 2], "swa": [0], "mamba": [3]}
 KEY_DIM, V_HEADS, V_DIM, K_DIM, CONV_ROWS = 4, 4, 2, 2, 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Layer:
     name: str
     kind: str  # "full", "swa", "mla" or "mamba"
     group: str  # transfer group the layer's blocks come from
+    # KV heads of this layer when they differ from the model-wide count.
+    heads: int | None = None
+    draft: bool = False
 
 
 MODELS = {
@@ -85,7 +87,63 @@ MODELS = {
         [Layer("attn0", "full", "full"), Layer("gdn0", "mamba", "mamba")],
     ),
     "mla_hybrid": (1, [Layer("mla0", "mla", "full"), Layer("kda0", "mamba", "mamba")]),
+    # Gemma4-like: 4 KV heads in sliding layers, 8 in full attention, and a
+    # model-wide count of 8 (the maximum).
+    "mixed_heads": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+        ],
+    ),
+    # Draft layers with their own KV cache: EAGLE-style drafters number them
+    # after the target's layers, Gemma4's DSpark drafter from 0.
+    "mixed_heads_draft": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer("model.layers.2.self_attn.attn", "full", "full", heads=4, draft=True),
+        ],
+    ),
+    "draft_from_zero": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer(
+                "draft_model.model.layers.0.self_attn.attn", "full", "full", draft=True
+            ),
+        ],
+    ),
 }
+
+
+def _layer_heads(layer: Layer, heads: int) -> int:
+    return heads if layer.heads is None else layer.heads
+
+
+class _ArchConfig:
+    """Per-layer KV-head counts, as ModelArchitectureConfig exposes them."""
+
+    def __init__(self, layers: list[Layer], heads: int):
+        counts = [_layer_heads(layer, heads) for layer in layers]
+        self.per_layer_overrides: list[dict[str, Any]] | None = (
+            None if len(set(counts)) == 1 else [{} for _ in counts]
+        )
+        self._counts = counts
+
+    def __getitem__(self, layer_idx: int) -> SimpleNamespace:
+        return SimpleNamespace(total_num_kv_heads=self._counts[layer_idx])
+
+
+def _model_config(layers: list[Layer], heads: int) -> SimpleNamespace:
+    """The KV-head counts a model config gives for `layers`."""
+    total = max(_layer_heads(layer, heads) for layer in layers)
+    return SimpleNamespace(
+        get_total_num_kv_heads=lambda: total,
+        model_arch_config=_ArchConfig(layers, heads),
+    )
 
 
 def _groups(model: str, hma: bool) -> list[str]:
@@ -95,20 +153,12 @@ def _groups(model: str, hma: bool) -> list[str]:
 
 
 def _spec(layer: Layer, num_heads: int, tp_size: int):
-    if layer.kind == "full":
-        return FullAttentionSpec(
+    if layer.kind in ("full", "swa"):
+        return AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=num_heads,
             head_size=2,
             dtype=torch.bfloat16,
-        )
-    if layer.kind == "swa":
-        return SlidingWindowSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=num_heads,
-            head_size=2,
-            dtype=torch.bfloat16,
-            sliding_window=8,
         )
     if layer.kind == "mla":
         return MLAAttentionSpec(
@@ -134,7 +184,9 @@ def _global_state(layers: list[Layer], heads: int) -> dict[str, torch.Tensor]:
             n = (2 * KEY_DIM + V_HEADS * V_DIM) * CONV_ROWS + V_HEADS * V_DIM * K_DIM
             shape: tuple[int, ...] = (NUM_BLOCKS, n)
         else:
-            spec = _spec(layer, 1 if layer.kind == "mla" else heads, 1)
+            spec = _spec(
+                layer, 1 if layer.kind == "mla" else _layer_heads(layer, heads), 1
+            )
             shape = (
                 NUM_BLOCKS,
                 spec.num_heads,
@@ -160,7 +212,7 @@ def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
     return torch.cat(parts), ssm[tp_rank * heads : (tp_rank + 1) * heads].reshape(-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class Rank:
     tp_rank: int
     tp_size: int
@@ -176,7 +228,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     groups = _groups(model, hma)
     caches, regions, specs, meta_counts = {}, [], {}, {}
     for layer in layers:
-        layer_heads = len(_rank_heads(tp_rank, tp_size, heads))
+        layer_heads = len(_rank_heads(tp_rank, tp_size, _layer_heads(layer, heads)))
         spec = _spec(layer, layer_heads, tp_size)
         specs[layer.name] = spec
         buffer = torch.zeros(spec.page_size_bytes * NUM_BLOCKS, dtype=torch.uint8)
@@ -206,7 +258,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
                 held = (
                     slice(None)
                     if layer.kind == "mla"
-                    else _rank_heads(tp_rank, tp_size, heads)
+                    else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
                 )
                 cache.copy_(state[layer.name][:, held])
             regions.append(buffer)
@@ -219,7 +271,23 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker.world_size = tp_size
     worker.use_mla = layers[0].kind == "mla"
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
-    worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: heads)
+    worker.model_config = _model_config(
+        [layer for layer in layers if not layer.draft], heads
+    )
+    drafter = [layer for layer in layers if layer.draft]
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                layer.name: SimpleNamespace(is_draft_layer=layer.draft)
+                for layer in layers
+            }
+        ),
+        speculative_config=(
+            SimpleNamespace(draft_model_config=_model_config(drafter, heads))
+            if drafter
+            else None
+        ),
+    )
     worker.kv_caches = caches
     worker.num_blocks = NUM_BLOCKS
     worker.layer_to_spec = specs
@@ -238,6 +306,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
         None,
     )
     worker.kv_layer_mr_offset = {}
+    worker.kv_region_mr_offsets = {}
     worker._mamba_offset_templates = {}
     worker._region_session_index = None
     worker.layer_name_to_local_kv_cache_metadata = {
@@ -338,7 +407,11 @@ def _expected(
             conv, ssm = _mamba_shard(state[layer.name][src], tp_rank, tp_size)
             expected[dst, : conv.numel() + ssm.numel()] = torch.cat([conv, ssm])
         return expected
-    held = slice(None) if layer.kind == "mla" else _rank_heads(tp_rank, tp_size, heads)
+    held = (
+        slice(None)
+        if layer.kind == "mla"
+        else _rank_heads(tp_rank, tp_size, _layer_heads(layer, heads))
+    )
     for src, dst in pairs:
         expected[dst] = state[layer.name][src, held]
     return expected
@@ -351,6 +424,12 @@ SCENARIOS = [
     for hma in (True, False)
     # Recurrent state needs the hybrid KV cache manager.
     if hma or "hybrid" not in model
+] + [
+    # More ranks than some layers have heads: those layers replicate.
+    (model, producer_tp, consumer_tp, hma)
+    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero")
+    for producer_tp, consumer_tp in [(4, 8), (8, 4)]
+    for hma in (True, False)
 ]
 
 

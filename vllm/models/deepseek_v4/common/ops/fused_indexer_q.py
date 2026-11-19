@@ -79,7 +79,7 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
 class FusedIndexerQRopeQuantTritonKernel(
     VllmTritonJitKernel["FusedIndexerQRopeQuantTritonKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         num_heads: int
@@ -206,7 +206,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -322,7 +322,7 @@ def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
 class FusedIndexerQRopeMxFp4TritonKernel(
     VllmTritonJitKernel["FusedIndexerQRopeMxFp4TritonKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dtype: torch.dtype
         weights_out_dtype: torch.dtype
@@ -441,7 +441,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

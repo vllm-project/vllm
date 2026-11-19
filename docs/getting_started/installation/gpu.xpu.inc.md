@@ -97,6 +97,9 @@ docker run --rm \
 
 To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
 
+XPU images use `/vllm-workspace` (previously `/workspace/vllm`) as the source
+checkout and default working directory.
+
 ???+ console "Commands"
     ```bash
     docker run --rm -it \
