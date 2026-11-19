@@ -59,7 +59,12 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_mamba_prefill_checkpoint_position,
@@ -258,6 +263,8 @@ class Scheduler(SchedulerInterface):
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
+        # Sessions whose streaming update was dropped for exceeding max_model_len.
+        self.dropped_streaming_updates: list[Request] = []
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -1903,11 +1910,23 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+        Returns False if the update was dropped for exceeding max_model_len.
         """
+        new_num_tokens = session.num_tokens - 1 + len(update.prompt_token_ids or ())
+        if new_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len:
+            logger.warning(
+                "Dropping streaming update for request %s: session would "
+                "exceed max_model_len=%d.",
+                session.request_id,
+                self.max_model_len,
+            )
+            self.dropped_streaming_updates.append(session)
+            return False
+
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
@@ -1946,6 +1965,17 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+        return True
+
+    def _emit_dropped_streaming_updates(
+        self, outputs: dict[int, list[EngineCoreOutput]]
+    ) -> None:
+        # End the reply to each dropped update with an empty turn.
+        for req in self.dropped_streaming_updates:
+            outputs[req.client_index].append(
+                EngineCoreOutput(req.request_id, [], finish_reason=FinishReason.LENGTH)
+            )
+        self.dropped_streaming_updates.clear()
 
     def _make_cached_request_data(
         self,
@@ -2290,6 +2320,8 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        # Updates dropped on arrival precede outputs of any later update.
+        self._emit_dropped_streaming_updates(outputs)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2664,6 +2696,9 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Updates dropped at turn end follow the turn's final output.
+        self._emit_dropped_streaming_updates(outputs)
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2829,16 +2864,16 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
 
-        if request.streaming_queue:
+        while request.streaming_queue:
             update = request.streaming_queue.popleft()
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
-        else:
-            request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
-            self.num_waiting_for_streaming_input += 1
+            if self._update_request_as_session(request, update):
+                return False
 
+        request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        self.num_waiting_for_streaming_input += 1
         return False
 
     def _update_request_with_output(
@@ -3272,6 +3307,7 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
+            or bool(self.dropped_streaming_updates)
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
