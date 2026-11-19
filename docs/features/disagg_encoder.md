@@ -45,12 +45,14 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
 #### Size an E+PD deployment
 
 For a fixed GPU budget with one GPU per worker, the sizing example estimates
-how many GPUs to assign to the encoder and combined prefill/decode pools. Run
-it from the vLLM checkout with measured saturation rates in requests per second:
+how many GPUs to assign to the encoder and combined prefill/decode pools. The
+example can measure saturation rates from worker metrics during a replay or
+predict rates from a frozen model and a sample of completed requests. For
+example, use the measurement files from an encoder and PD calibration pass:
 
 ```bash
 python examples/disaggregated/disaggregated_encoder/size_epd.py \
-    --num-gpus 8 --encoder-rps 57 --pd-rps 14.3
+    --num-gpus 4 --measured-rates encoder-rates.json pd-rates.json
 ```
 
 It reports the recommended split, estimated capacity, and limiting pool. See the
