@@ -786,6 +786,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core._checkpoint_error = None
     core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
+    core.model_executor.is_sleeping = False
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
