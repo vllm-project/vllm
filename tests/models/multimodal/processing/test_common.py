@@ -594,3 +594,39 @@ def _assert_inputs_equal(
         b_data.pop(key, None)
 
     assert batched_tensors_equal(a_data, b_data), msg
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "AIDC-AI/Ovis2-1B",
+        "AIDC-AI/Ovis2.5-2B",
+        "OpenGVLab/InternVL3-1B",
+        "PerceptronAI/Isaac-0.1",
+        "deepseek-ai/DeepSeek-OCR",
+        "deepseek-ai/deepseek-vl2-tiny",
+        "h2oai/h2ovl-mississippi-800m",
+        "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+    ],
+)
+def test_numpy_image_matches_pil(model_id: str):
+    """NumPy images, which vLLM's parser accepts, must process like PIL images."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = processor.dummy_inputs.get_dummy_text({"image": 1})
+    image = random_image(np.random.RandomState(0), min_wh=300, max_wh=400)
+
+    outputs = [
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data({"image": item}),
+            hf_processor_mm_kwargs={},
+        )
+        for item in (image, np.asarray(image))
+    ]
+
+    assert outputs[0]["prompt_token_ids"] == outputs[1]["prompt_token_ids"]
+    assert batched_tensors_equal(
+        outputs[0]["mm_kwargs"].get_data(), outputs[1]["mm_kwargs"].get_data()
+    )
