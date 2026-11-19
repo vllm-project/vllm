@@ -412,18 +412,11 @@ def test_all_reduce_int(monkeypatch):
     assert seen == [(dist.ReduceOp.MIN, group), (dist.ReduceOp.MAX, group)]
 
 
-@pytest.mark.parametrize(
-    ("elastic_ep", "draft_kv_pool", "match"),
-    [(True, False, "elastic EP"), (False, True, "draft-kv-pool")],
-    ids=["elastic_ep", "draft_kv_pool"],
-)
 @pytest.mark.parametrize("requested", [None, True])
-def test_extensible_kv_cache_off_with_fixed_kv_cache_size(
-    monkeypatch, requested, elastic_ep, draft_kv_pool, match
-):
-    """Elastic EP scale-up reuses the profiled KV cache size, and --draft-kv-pool
-    lays its pool out at an offset fixed when the KV cache is planned, so an
-    extensible cache stays off by default and an explicit request is an error."""
+def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
+    """Elastic EP scale-up skips warmup and reuses the profiled KV cache size,
+    so nothing would measure an extensible cache: it stays off by default and an
+    explicit request is an error."""
     import vllm.platforms
     from vllm.config.vllm import VllmConfig
 
@@ -436,18 +429,67 @@ def test_extensible_kv_cache_off_with_fixed_kv_cache_size(
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
-            draft_kv_pool=draft_kv_pool,
+            draft_kv_pool=False,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
-        parallel_config=SimpleNamespace(enable_elastic_ep=elastic_ep),
+        parallel_config=SimpleNamespace(enable_elastic_ep=True),
         kv_transfer_config=None,
     )
     if requested:
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ValueError, match="elastic EP"):
             VllmConfig._resolve_extensible_kv_cache(config)
     else:
         VllmConfig._resolve_extensible_kv_cache(config)
         assert config.cache_config.enable_extensible_kv_cache is False
+
+
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_on_with_draft_kv_pool(monkeypatch, requested):
+    """--draft-kv-pool gives its pool its own allocation under the extensible
+    cache, which therefore stays on."""
+    import vllm.platforms
+    from vllm.config.vllm import VllmConfig
+
+    monkeypatch.setattr(
+        vllm.platforms,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: False),
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            _extensible_kv_cache_resolved=False,
+            enable_extensible_kv_cache=requested,
+            kv_cache_memory_bytes=None,
+            num_gpu_blocks_override=None,
+            draft_kv_pool=True,
+        ),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(enable_elastic_ep=False),
+        kv_transfer_config=None,
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache is True
+
+
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_off_with_draft_kv_pool_and_connector(
+    monkeypatch, requested
+):
+    """A KV connector expects the drafter's pool in the shared pool's
+    allocation, which the extensible cache keeps apart: with --draft-kv-pool it
+    stays off by default and an explicit request is an error."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch, rocm=False, requested=requested, imex_channel=True
+    )
+    config.cache_config.draft_kv_pool = True
+    if requested:
+        with pytest.raises(ValueError, match="draft-kv-pool"):
+            VllmConfig._resolve_extensible_kv_cache(config)
+        return
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache is False
 
 
 @pytest.mark.parametrize(

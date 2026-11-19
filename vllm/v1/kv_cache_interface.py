@@ -883,6 +883,13 @@ class KVCacheConfig:
     pool_num_blocks: dict[int, int] = field(default_factory=dict)
     """Block counts of the device pools other than pool 0 (`num_blocks`)."""
 
+    separate_pool_backings: bool = False
+    """Whether each private pool has its own backing allocation, its tensors'
+    offsets and size relative to it, instead of following the shared pool in
+    one allocation. Set under the extensible KV cache, which grows the shared
+    pool's allocation after warmup; a private pool's size is fixed at
+    planning."""
+
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
 
@@ -954,6 +961,11 @@ class KVCacheConfig:
             for group_id, group in enumerate(self.kv_cache_groups)
             if group.host_resident
         )
+
+    def backing_of(self, tensor: KVCacheTensor) -> int:
+        """Key of the device allocation backing `tensor`: its pool with
+        `separate_pool_backings`, else 0 (one allocation)."""
+        return tensor.pool_id if self.separate_pool_backings else 0
 
     def num_blocks_of(self, tensor: KVCacheTensor) -> int:
         """Number of blocks addressable by the pool backing `tensor`."""

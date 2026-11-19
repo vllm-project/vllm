@@ -3405,10 +3405,11 @@ class VllmConfig:
                 "it sizes the KV cache from measured memory, which "
                 "num_gpu_blocks_override overrides"
             )
-        elif cache_config.draft_kv_pool:
+        elif cache_config.draft_kv_pool and self.kv_transfer_config is not None:
             unsupported = (
-                "--draft-kv-pool lays its pool out after the shared pool, at an "
-                "offset fixed when the KV cache is planned"
+                "with --draft-kv-pool, a KV connector expects the drafter's pool "
+                "in the shared pool's allocation, which the extensible KV cache "
+                "keeps apart"
             )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (

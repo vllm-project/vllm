@@ -871,19 +871,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
-        # Private pools keep the extensible cache off, so these views are never
-        # remapped; without them, block copies use the current `kv_caches`.
-        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
-        if kv_cache_config.pool_num_blocks:
-            pool_of_layer = {
-                layer_name: group.pool_id
-                for group in kv_cache_config.kv_cache_groups
-                for layer_name in group.layer_names
-            }
-            for layer_name, cache in kv_caches_dict.items():
-                if cache.device == self.device:
-                    pool_id = pool_of_layer.get(layer_name, 0)
-                    self.kv_caches_by_pool.setdefault(pool_id, []).append(cache)
+        self.set_kv_caches_by_pool(kv_caches_dict)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
@@ -902,6 +890,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+
+    def set_kv_caches_by_pool(self, kv_caches_by_layer: dict[str, Any]) -> None:
+        """Group the device KV caches by private pool for block copies; called
+        again when an extensible KV cache remaps the shared pool's views.
+        Without private pools, block copies use the current `kv_caches`."""
+        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
+        if not self.kv_cache_config.pool_num_blocks:
+            return
+        pool_of_layer = {
+            layer_name: group.pool_id
+            for group in self.kv_cache_config.kv_cache_groups
+            for layer_name in group.layer_names
+        }
+        for layer_name, cache in kv_caches_by_layer.items():
+            if cache.device == self.device:
+                pool_id = pool_of_layer.get(layer_name, 0)
+                self.kv_caches_by_pool.setdefault(pool_id, []).append(cache)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -2033,16 +2038,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch, valid_dummy_state_slots
                 )
                 if context_len:
-                    num_groups = len(self.kv_cache_config.kv_cache_groups)
-                    if self.extensible_kv_cache is not None:
-                        num_blocks = [
-                            self.extensible_kv_cache.num_committed_blocks
-                        ] * num_groups
-                    else:
-                        num_blocks = [
-                            self.kv_cache_config.num_blocks_of_group(group_id)
-                            for group_id in range(num_groups)
-                        ]
+                    # An extensible cache addresses its committed shared
+                    # blocks; private pools are allocated in full.
+                    num_blocks = [
+                        self.extensible_kv_cache.num_committed_blocks
+                        if self.extensible_kv_cache is not None and not group.pool_id
+                        else self.kv_cache_config.num_blocks_of_group(group_id)
+                        for group_id, group in enumerate(
+                            self.kv_cache_config.kv_cache_groups
+                        )
+                    ]
                     set_dummy_context(
                         input_batch,
                         self.block_tables,

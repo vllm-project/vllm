@@ -83,7 +83,9 @@ class ExtensibleKVCache:
     allocation splits into segments holding num_blocks blocks each: one per
     layer for block-compact layer-outermost layouts (sized by that layer's
     block stride, possibly padded apart by `pad_kv_cache_segments`), one
-    overall for block-outermost. Host-resident tensors live outside it.
+    overall for block-outermost. Host-resident tensors and private pools with
+    their own allocation (`KVCacheConfig.separate_pool_backings`, fixed in
+    size) live outside it.
     """
 
     def __init__(
@@ -96,9 +98,12 @@ class ExtensibleKVCache:
         tensors = [
             tensor
             for tensor in kv_cache_config.kv_cache_tensors
-            if not tensor.host_resident
+            if not tensor.host_resident and not kv_cache_config.backing_of(tensor)
         ]
         assert tensors, "Extensible KV cache requires at least one KV cache tensor."
+        assert kv_cache_config.separate_pool_backings or not any(
+            tensor.pool_id for tensor in tensors
+        ), "Private KV pools must have their own allocation to extend the cache."
         sizes = {tensor.size for tensor in tensors}
         assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
         self.size = sizes.pop()
@@ -231,15 +236,16 @@ class ExtensibleKVCache:
 
         `kv_cache_config.num_blocks` must equal the committed count. Connectors
         derive extents from `untyped_storage().nbytes()`, so they must not see the
-        reservation. Host-resident layers are omitted. None for layouts whose
-        layers span several segments.
+        reservation. Host-resident layers and private pools with their own
+        allocation, whose views never change, are omitted. None for layouts
+        whose layers span several segments.
         """
         if not layout.is_block_compact:
             return None
         assert kv_cache_config.num_blocks == self.num_committed_blocks
         kv_caches: dict[str, torch.Tensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
-            if tensor.host_resident:
+            if tensor.host_resident or kv_cache_config.backing_of(tensor):
                 continue
             group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
             if not spec.has_layer_views:
@@ -335,15 +341,20 @@ class ExtensibleKVCache:
         one-layer tensor placed at the start of that storage.
         """
         size = num_blocks * self.bytes_per_block
+
+        def outside(tensor: KVCacheTensor) -> bool:
+            # Host-resident, or a private pool with its own allocation.
+            return tensor.host_resident or bool(kv_cache_config.backing_of(tensor))
+
         tensors = [
-            tensor if tensor.host_resident else replace(tensor, size=size)
+            tensor if outside(tensor) else replace(tensor, size=size)
             for tensor in kv_cache_config.kv_cache_tensors
         ]
         if layout.is_block_outermost:
             return tensors
         committed: list[KVCacheTensor] = []
         for tensor in tensors:
-            if tensor.host_resident:
+            if outside(tensor):
                 committed.append(tensor)
                 continue
             _, spec = layer_spec_for_tensor(kv_cache_config, tensor)
@@ -442,7 +453,13 @@ def pad_kv_cache_segments(
         assert not registers_memory, f"{layout.name} has no per-layer segments."
         return kv_cache_config
     num_blocks = kv_cache_config.num_blocks
-    tensors = kv_cache_config.kv_cache_tensors
+    # Private pools with their own allocation are not extended.
+    tensors = [
+        t for t in kv_cache_config.kv_cache_tensors if not kv_cache_config.backing_of(t)
+    ]
+    others = [
+        t for t in kv_cache_config.kv_cache_tensors if kv_cache_config.backing_of(t)
+    ]
     assert all(t.layer_stride == num_blocks * t.block_stride for t in tensors)
     # Cache groups alias each other's layer regions.
     regions = {
@@ -466,7 +483,7 @@ def pad_kv_cache_segments(
             layer_stride=round_up(tensor.layer_stride, granule),
         )
         for tensor in tensors
-    ]
+    ] + others
     return padded
 
 
@@ -574,6 +591,8 @@ def extend_kv_cache(
             for cache in runner.kv_caches_by_layer.values()
             if cache.device == runner.device
         ]
+        if hasattr(runner, "set_kv_caches_by_pool"):
+            runner.set_kv_caches_by_pool(runner.kv_caches_by_layer)
         if runner.vllm_config.cache_config.use_replayssm:
             from vllm.v1.worker.replayssm_utils import (
                 get_replayssm_block_copy_tensors,

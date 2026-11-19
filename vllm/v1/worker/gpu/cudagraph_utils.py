@@ -1116,19 +1116,20 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
+    from vllm.v1.core.kv_cache_planning import get_profiling_kv_cache_config
 
-    builder = get_kv_cache_config_builder(runner.vllm_config)
-    kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
-    )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
         min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
         or 1
     )
-    minimal_config = builder.get_kv_cache_config_from_groups(
-        runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
+    # Group the layers as the served cache does, so graphs are profiled with
+    # the drafter in its own pool under --draft-kv-pool.
+    minimal_config = get_profiling_kv_cache_config(
+        get_kv_cache_config_builder(runner.vllm_config),
+        runner.vllm_config,
+        runner.get_kv_cache_layer_configs(),
+        num_blocks=min_blocks,
     )
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)

@@ -2325,6 +2325,8 @@ def _draft_kv_pool_config(method="dspark") -> VllmConfig:
         cache_config=CacheConfig(draft_kv_pool=True),
     )
     config.cache_config.kv_cache_layout = "BLHNC"
+    # Resolved on by default where CUDA is present; tests opt in.
+    config.cache_config.enable_extensible_kv_cache = False
     config.speculative_config = fake_speculative_config(
         method=method,
         num_speculative_tokens=3,
@@ -2411,6 +2413,139 @@ def test_draft_kv_pool_sizes_agree_across_pp_stages():
     assert any(t.pool_id for t in last.kv_cache_tensors)
     scheduler_config = generate_scheduler_kv_cache_config([first, last])
     assert scheduler_config.kv_cache_groups[-1].pool_id == 1
+
+
+def test_draft_kv_pool_has_its_own_allocation_under_extensible_kv_cache():
+    """The extensible KV cache grows the shared pool's allocation after warmup,
+    so the drafter's pool, fixed at planning, gets its own: offsets from 0 and
+    its own size. Shrinking the shared pool to the measured size leaves it be."""
+    config = _draft_kv_pool_config()
+    config.cache_config.enable_extensible_kv_cache = True
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**30]
+    )
+
+    assert kv_cache_config.separate_pool_backings
+    shared = [t for t in kv_cache_config.kv_cache_tensors if not t.pool_id]
+    (pool_tensor,) = [t for t in kv_cache_config.kv_cache_tensors if t.pool_id]
+    *_, draft_group = kv_cache_config.kv_cache_groups
+    pool_bytes = kv_cache_config.pool_num_blocks[1] * draft_group.page_size_bytes
+    shared_bytes = kv_cache_config.num_blocks * kv_cache_planning._pool_bytes_per_block(
+        config, kv_cache_config.kv_cache_groups
+    )
+    assert {t.size for t in shared} == {shared_bytes}
+    assert pool_tensor.offset == 0
+    assert pool_tensor.size == pool_bytes
+    assert kv_cache_config.backing_of(pool_tensor) == 1
+    # The shared pool gets the memory the drafter's pool leaves, as without it.
+    assert kv_cache_config.num_blocks == (2**30 - pool_bytes) // (
+        shared_bytes // kv_cache_config.num_blocks
+    )
+
+    pool_num_blocks = dict(kv_cache_config.pool_num_blocks)
+    capacity = kv_cache_config.num_blocks
+    num_blocks = capacity // 2
+    kv_cache_planning.shrink_kv_cache_configs(config, [kv_cache_config], num_blocks)
+    assert kv_cache_config.num_blocks == num_blocks
+    assert kv_cache_config.pool_num_blocks == pool_num_blocks
+    (shrunk_pool,) = [t for t in kv_cache_config.kv_cache_tensors if t.pool_id]
+    assert shrunk_pool == pool_tensor
+    assert {t.size for t in kv_cache_config.kv_cache_tensors if not t.pool_id} == {
+        num_blocks * shared_bytes // capacity
+    }
+
+
+def test_draft_kv_pool_allocates_its_own_backing_under_extensible_kv_cache():
+    """`allocate_kv_cache` backs a private pool with its own allocation, and
+    only the shared pool's with the extensible cache's allocator."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = _draft_kv_pool_config()
+    config.cache_config.enable_extensible_kv_cache = True
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**28]
+    )
+    shared_size = next(
+        t.size for t in kv_cache_config.kv_cache_tensors if not t.pool_id
+    )
+    requested: list[int] = []
+
+    def allocate(size: int) -> torch.Tensor:
+        requested.append(size)
+        return torch.zeros(size, dtype=torch.int8)
+
+    kv_caches = allocate_kv_cache(
+        kv_cache_config,
+        torch.device("cpu"),
+        config.cache_config.get_resolved_kv_cache_layout(),
+        allocate=allocate,
+    )
+    assert requested == [shared_size]
+    shared_storage = kv_caches["layers.0"].untyped_storage()
+    pool_storage = kv_caches["draft.0"].untyped_storage()
+    assert pool_storage.data_ptr() != shared_storage.data_ptr()
+    assert pool_storage.nbytes() == next(
+        t.size for t in kv_cache_config.kv_cache_tensors if t.pool_id
+    )
+    assert kv_caches["draft.0"].untyped_storage().data_ptr() == (
+        kv_caches["draft.1"].untyped_storage().data_ptr()
+    )
+
+
+def test_pad_kv_cache_segments_leaves_a_separate_pool_alone():
+    """Granule padding of a layer-outermost extensible cache covers the shared
+    pool's layer regions; a private pool in its own allocation keeps its
+    placement."""
+    from vllm.v1.worker.extensible_kv_cache import pad_kv_cache_segments
+
+    config = _draft_kv_pool_config()
+    config.cache_config.kv_cache_layout = "LBHNC"
+    config.cache_config.enable_extensible_kv_cache = True
+    (kv_cache_config,) = get_kv_cache_configs(
+        config, [_draft_kv_pool_layers()], [2**28]
+    )
+    layout = config.cache_config.get_resolved_kv_cache_layout()
+    assert not layout.is_block_outermost
+    granule = 1 << 16
+    padded = pad_kv_cache_segments(kv_cache_config, layout, granule)
+
+    pool_before = [t for t in kv_cache_config.kv_cache_tensors if t.pool_id]
+    pool_after = [t for t in padded.kv_cache_tensors if t.pool_id]
+    assert pool_after == pool_before
+    shared_after = [t for t in padded.kv_cache_tensors if not t.pool_id]
+    assert all(t.offset % granule == 0 for t in shared_after)
+    assert len({t.size for t in shared_after}) == 1
+
+
+@pytest.mark.parametrize("extensible", [False, True])
+def test_draft_kv_pool_profiling_cache_holds_the_drafter_in_its_pool(extensible):
+    """The minimal cache CUDA graph profiling captures with groups the layers as
+    the served cache does: the drafter in pool 1, with the minimal block count
+    too, and no padding of its layers to the target's group size."""
+    config = _draft_kv_pool_config()
+    config.cache_config.enable_extensible_kv_cache = extensible
+    builder = kv_cache_planning.get_kv_cache_config_builder(config)
+    minimal = kv_cache_planning.get_profiling_kv_cache_config(
+        builder, config, _draft_kv_pool_layers(), num_blocks=4
+    )
+    *shared_groups, draft_group = minimal.kv_cache_groups
+    assert draft_group.pool_id == 1
+    assert draft_group.layer_names == ["draft.0", "draft.1"]
+    assert not any(
+        name.startswith("draft") for g in shared_groups for name in g.layer_names
+    )
+    assert minimal.num_blocks == 4
+    assert minimal.pool_num_blocks == {1: 4}
+    assert minimal.separate_pool_backings is extensible
+
+    # A PP stage without the drafter's layers has no pool.
+    layers = _draft_kv_pool_layers()
+    first_stage = {name: layers[name] for name in ("layers.0", "layers.1")}
+    minimal = kv_cache_planning.get_profiling_kv_cache_config(
+        builder, config, first_stage, num_blocks=4
+    )
+    assert not minimal.pool_num_blocks
+    assert not any(g.pool_id for g in minimal.kv_cache_groups)
 
 
 @pytest.mark.parametrize(

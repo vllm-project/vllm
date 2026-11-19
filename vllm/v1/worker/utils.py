@@ -602,26 +602,35 @@ def allocate_kv_cache(
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation: layer `l` of
-    block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
-    groups overlay each other, so tensors may address the same bytes.
+    Every KVCacheTensor places its layers in one backing allocation: layer `l`
+    of block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
+    groups overlay each other, so tensors may address the same bytes. All
+    tensors share one allocation, unless
+    `kv_cache_config.separate_pool_backings` gives each private pool its own.
 
-    allocate replaces the default zeroed backing allocation: it takes the
-    size in bytes and returns a one-byte-per-element tensor.
+    allocate replaces the default zeroed allocation backing the shared pool:
+    it takes the size in bytes and returns a one-byte-per-element tensor.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
 
-    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
-    assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
-    raw_size = sizes.pop()
-    if allocate is not None:
-        buf = allocate(raw_size)
-    else:
-        buf = _allocate_kv_cache_buffer(raw_size, device)
+    sizes: dict[int, set[int]] = {}
+    for tensor in kv_cache_config.kv_cache_tensors:
+        sizes.setdefault(kv_cache_config.backing_of(tensor), set()).add(tensor.size)
+    bufs: dict[int, torch.Tensor] = {}
+    for backing, backing_sizes in sorted(sizes.items()):
+        assert len(backing_sizes) == 1, (
+            "KV cache tensors of one backing allocation must share its size."
+        )
+        (raw_size,) = backing_sizes
+        if allocate is not None and backing == 0:
+            bufs[backing] = allocate(raw_size)
+        else:
+            bufs[backing] = _allocate_kv_cache_buffer(raw_size, device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
+        buf = bufs[kv_cache_config.backing_of(tensor)]
         group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)

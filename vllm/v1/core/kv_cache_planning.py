@@ -785,9 +785,14 @@ def _get_multi_pool_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
     available_memory: int,
+    private_pool_num_blocks: int | None = None,
 ) -> KVCacheConfig:
     """Lay out the shared pool in `available_memory`, then each private pool
-    after it, in the same backing allocation."""
+    after it, in the same backing allocation. Under the extensible KV cache,
+    which grows the shared pool's allocation after warmup, each private pool
+    gets its own allocation instead (`KVCacheConfig.separate_pool_backings`).
+    `private_pool_num_blocks` overrides each private pool's planned size (e.g.
+    a minimal profiling cache)."""
     shared_groups = [group for group in kv_cache_groups if not group.pool_id]
     assert all(group.pool_id for group in kv_cache_groups[len(shared_groups) :]), (
         "Groups of private KV pools must follow the shared pool's groups."
@@ -795,47 +800,59 @@ def _get_multi_pool_kv_cache_config(
     config = get_kv_cache_config_from_groups(
         vllm_config, shared_groups, available_memory
     )
-    offset = config.kv_cache_tensors[0].size if config.kv_cache_tensors else 0
+    separate_backings = bool(vllm_config.cache_config.enable_extensible_kv_cache)
+    shared_size = config.kv_cache_tensors[0].size if config.kv_cache_tensors else 0
+    offset = 0 if separate_backings else shared_size
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     pool_num_blocks: dict[int, int] = {}
     pool_tensors: list[KVCacheTensor] = []
     for pool_id, groups in _private_pool_groups(kv_cache_groups).items():
-        num_blocks = _private_pool_num_blocks(vllm_config, groups)
+        num_blocks = private_pool_num_blocks or _private_pool_num_blocks(
+            vllm_config, groups
+        )
         pool_num_blocks[pool_id] = num_blocks
         if not any(group.layer_names for group in groups):
             continue
+        if separate_backings:
+            offset = 0
         validate_kv_cache_layout(layout, groups)
         bytes_per_block = _get_kv_cache_bytes_per_block(groups, layout)
         pool_tensors += _place_kv_cache_tensors(
             groups, layout, num_blocks, bytes_per_block, offset, pool_id
         )
-        shared_blocks = (
-            bytes_per_block
-            * num_blocks
-            // _pool_bytes_per_block(vllm_config, shared_groups)
-        )
-        logger.info_once(
-            "KV cache pool %d: %d blocks of %.2f MiB (%s GiB) for %d layers. It "
-            "takes the memory of %d shared pool blocks (%d tokens).",
-            pool_id,
-            num_blocks,
-            bytes_per_block / 2**20,
-            format_gib(bytes_per_block * num_blocks),
-            sum(len(group.layer_names) for group in groups),
-            shared_blocks,
-            shared_blocks * shared_groups[0].block_size,
-        )
+        if private_pool_num_blocks is None:
+            shared_blocks = (
+                bytes_per_block
+                * num_blocks
+                // _pool_bytes_per_block(vllm_config, shared_groups)
+            )
+            logger.info_once(
+                "KV cache pool %d: %d blocks of %.2f MiB (%s GiB) for %d layers. "
+                "It takes the memory of %d shared pool blocks (%d tokens).",
+                pool_id,
+                num_blocks,
+                bytes_per_block / 2**20,
+                format_gib(bytes_per_block * num_blocks),
+                sum(len(group.layer_names) for group in groups),
+                shared_blocks,
+                shared_blocks * shared_groups[0].block_size,
+            )
         offset += bytes_per_block * num_blocks
 
-    return replace(
-        config,
-        kv_cache_tensors=[
+    if separate_backings:
+        kv_cache_tensors = [*config.kv_cache_tensors, *pool_tensors]
+    else:
+        kv_cache_tensors = [
             replace(tensor, size=offset)
             for tensor in [*config.kv_cache_tensors, *pool_tensors]
-        ],
+        ]
+    return replace(
+        config,
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
         pool_num_blocks=pool_num_blocks,
+        separate_pool_backings=separate_backings,
     )
 
 
@@ -1818,6 +1835,44 @@ def _pop_draft_kv_pool_layers(
     return draft_layers
 
 
+def get_profiling_kv_cache_config(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    layer_configs: dict[str, KVCacheLayerConfig],
+    num_blocks: int,
+) -> KVCacheConfig:
+    """A minimal KV cache config for one worker's layers, with `num_blocks`
+    blocks in every device pool, grouped as `get_global_kv_cache_groups`
+    groups them: under --draft-kv-pool, the drafter's sliding-window layers sit
+    in their own pool, as they do in the served cache. Used to profile CUDA
+    graph memory before the real KV cache is planned."""
+    layer_configs = dict(layer_configs)
+    draft_layers: dict[str, KVCacheLayerConfig] = {}
+    # A PP stage without the drafter's layers has no pool.
+    if vllm_config.cache_config.draft_kv_pool and any(
+        config.manager_cls is DFlashSlidingWindowManager
+        for config in layer_configs.values()
+    ):
+        draft_layers = _pop_draft_kv_pool_layers(vllm_config, layer_configs, builder)
+    kv_cache_groups = get_kv_cache_groups_from_builder(
+        builder, vllm_config, layer_configs
+    )
+    if not draft_layers:
+        return builder.get_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks=num_blocks
+        )
+    kv_cache_groups.append(
+        KVCacheGroup.from_layers(draft_layers, pool_id=DRAFT_KV_POOL_ID)
+    )
+    # _pop_draft_kv_pool_layers refused custom placements: the default applies.
+    return _get_multi_pool_kv_cache_config(
+        vllm_config,
+        kv_cache_groups,
+        num_blocks * _pool_bytes_per_block(vllm_config, kv_cache_groups),
+        private_pool_num_blocks=num_blocks,
+    )
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1948,9 +2003,11 @@ def shrink_kv_cache_configs(
     builder = get_kv_cache_config_builder(vllm_config)
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
+        # Host-resident tensors and private pools with their own allocation
+        # keep their size.
         kv_cache_config.kv_cache_tensors = [
             tensor
-            if tensor.host_resident
+            if tensor.host_resident or kv_cache_config.backing_of(tensor)
             else replace(
                 tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks
             )
