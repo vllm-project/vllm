@@ -1325,6 +1325,40 @@ def test_flashinfer_resolves_layerwise_cache_dtype(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_uses_dense_draft_dtype_next_to_packed_mla(dist_init):
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    config = create_vllm_config(
+        dtype="bfloat16", block_size=64, max_num_seqs=1, max_num_batched_tokens=128
+    )
+    config.cache_config.cache_dtype = "fp8"
+    config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+    with set_current_vllm_config(config), set_default_torch_dtype(torch.bfloat16):
+        draft = Attention(
+            num_heads=16,
+            head_size=128,
+            scale=128**-0.5,
+            num_kv_heads=8,
+            cache_config=config.cache_config,
+            prefix="draft",
+        )
+        layer_config = draft.get_kv_cache_config(config)
+        assert layer_config is not None
+        config.cache_config.cache_dtype = "fp8_ds_mla"
+        builder = FlashInferMetadataBuilder(
+            layer_config.spec, ["draft"], config, torch.device(DEVICE_TYPE)
+        )
+
+    assert builder.kv_cache_dtype == torch.float8_e4m3fn
+    assert config.cache_config.cache_dtype == "fp8_ds_mla"
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_rejects_unresolved_quantized_layer(dist_init):
     from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 

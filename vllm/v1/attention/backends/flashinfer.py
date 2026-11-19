@@ -1242,7 +1242,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _resolve_cache_dtype(self) -> str:
         cache_dtype = self.cache_config.cache_dtype
-        if cache_dtype != "auto":
+        # A dense draft group can have its own KV encoding alongside a
+        # target whose cache_config describes packed sparse MLA.
+        if cache_dtype not in ("auto", "fp8_ds_mla"):
             return cache_dtype
 
         layer_cache_dtype = get_kv_cache_dtype_from_layers(
