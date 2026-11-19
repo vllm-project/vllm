@@ -54,6 +54,8 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         ),
     )
     config.model_config = SimpleNamespace(supports_kv_cache_grouping=False)
+    # The two workers deliberately expose different full-attention block sizes.
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.kv_cache_layout = "BLHNC"
     workers = []
     specs = []
