@@ -42,11 +42,13 @@ logger = init_logger(__name__)
 def dsv4_swa_replay_enabled(vllm_config: VllmConfig) -> bool:
     """Whether DeepSeek-V4 rebuilds its sliding-window state by replay.
 
-    ROCm only, and only when the KV connector asks for it (UMBP): the SWA cache
-    and compressor states then stay out of prefix caching, so the connector
-    stores just the compressed KV and the scheduler recomputes the last window
-    of every hit. The ROCm sparse SWA metadata clamps the window at
-    `replay_start`.
+    ROCm only, and only when the KV connector asks for it (UMBP with
+    `rebuild_sliding_window: true`): the SWA cache and compressor states then
+    stay out of prefix caching, so the connector stores just the compressed KV
+    and the scheduler recomputes the last window of every hit. The ROCm sparse
+    SWA metadata clamps the window at `replay_start`. Unlike DeepSeek-V4.1,
+    V4 needs about `sliding_window * num_layers` replayed tokens for an exact
+    window state, so the one-window replay is an approximation.
     """
     kv_transfer_config = vllm_config.kv_transfer_config
     if not current_platform.is_rocm() or kv_transfer_config is None:

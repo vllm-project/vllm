@@ -866,13 +866,14 @@ def test_dsv4_swa_replay_only_with_a_connector_that_asks() -> None:
     from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
 
     def config(connector="UMBPStoreConnector", extra=None, pcp=1):
+        extra = {"rebuild_sliding_window": True} if extra is None else extra
         return SimpleNamespace(
             kv_transfer_config=None
             if connector is None
             else KVTransferConfig(
                 kv_connector=connector,
                 kv_role="kv_both",
-                kv_connector_extra_config=extra or {},
+                kv_connector_extra_config=extra,
             ),
             cache_config=SimpleNamespace(swa_bounded_replay=True),
             parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp),
@@ -881,5 +882,6 @@ def test_dsv4_swa_replay_only_with_a_connector_that_asks() -> None:
     assert dsv4_swa_replay_enabled(config())
     assert not dsv4_swa_replay_enabled(config(None))
     assert not dsv4_swa_replay_enabled(config("ExampleConnector"))
+    assert not dsv4_swa_replay_enabled(config(extra={}))
     assert not dsv4_swa_replay_enabled(config(extra={"rebuild_sliding_window": False}))
     assert not dsv4_swa_replay_enabled(config(pcp=2))

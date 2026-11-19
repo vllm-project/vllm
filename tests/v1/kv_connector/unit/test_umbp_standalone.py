@@ -1271,5 +1271,8 @@ def test_dspark_draft_rebuilt_by_replay_is_accepted(server):
     # replay that rebuilds the target's window rebuilds the draft's too.
     config = _draft_replay_kv_cache_config()
     assert config.prefix_cacheable_group_ids == (0,)
-    UMBPStoreConnector(_standalone_config(), KVConnectorRole.SCHEDULER, config)
-
+    UMBPStoreConnector(
+        _standalone_config(rebuild_sliding_window=True),
+        KVConnectorRole.SCHEDULER,
+        config,
+    )
