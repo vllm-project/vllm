@@ -32,6 +32,7 @@ from vllm.config.utils import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.plugins.model_metadata import MetadataSource
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -477,6 +478,11 @@ class ModelConfig:
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
+    metadata_source: MetadataSource | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Original source data for process-local metadata preparation."""
+
     def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config, add it to
         `ignored_factors` if it does not affect the computation graph.
@@ -488,6 +494,7 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
+            "metadata_source",
             "convert",
             "tokenizer",
             "tokenizer_mode",

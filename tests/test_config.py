@@ -56,6 +56,7 @@ from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.plugins.model_metadata import MetadataSource
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -115,6 +116,24 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     fixed_hash = hash_config(config)
     config.enable_adaptive_verification = True
     assert hash_config(config) != fixed_hash
+
+
+def test_metadata_source_shares_graph_cache():
+    source = MetadataSource(
+        model="Qwen/Qwen3-0.6B",
+        tokenizer=None,
+        revision=None,
+        tokenizer_revision=None,
+        code_revision=None,
+        cache_root="cache",
+        offline=False,
+        use_modelscope=False,
+    )
+    configs = [
+        ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048, metadata_source=value)
+        for value in (None, source)
+    ]
+    assert hash_config(configs[0]) == hash_config(configs[1])
 
 
 @pytest.mark.parametrize(
