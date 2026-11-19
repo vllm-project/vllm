@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests that the ranks of each node prefetch what the node will read."""
+"""Tests that each node prefetches what it reads, and how ranks read it."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -54,12 +54,12 @@ def test_each_node_prefetches_what_it_reads(
 
     def tensor_bytes(path, ids=None):
         with open(path, "rb") as f:
-            offsets = weight_utils._tensor_offsets(f).items()
+            header = weight_utils._read_header(f).items()
         return {
             (path, b)
-            for n, (start, end) in offsets
+            for n, t in header
             if not should_skip_weight(n, ids)
-            for b in range(start, end)
+            for b in range(*t["data_offsets"])
         }
 
     prefetched: set[tuple[str, int]] = set()
@@ -111,3 +111,45 @@ def test_prefetch_checkpoint_sends_the_ranges(tmp_path, monkeypatch):
     sent.clear()
     weight_utils._prefetch_checkpoint(str(path))
     assert sent == [(0, 5000)]
+
+
+def test_read_matches_safe_open(tmp_path):
+    tensors = {
+        "embed.weight": torch.randn(7, 5, dtype=torch.bfloat16),
+        "layers.0.mlp.experts.0.down_proj.weight": torch.randint(-9, 9, (4, 3)).char(),
+        "layers.0.mlp.experts.1.down_proj.weight": torch.randn(4, 3),
+        "layers.0.mlp.experts.1.down_proj.weight_scale": torch.tensor(2.0),
+        "layers.0.empty": torch.empty(0, 3),
+    }
+    path = str(tmp_path / "model.safetensors")
+    save_file(tensors, path)
+    loaded = dict(weight_utils.safetensors_weights_iterator([path], False, "lazy", {0}))
+    expected = {
+        k: v for k, v in load_file(path).items() if not should_skip_weight(k, {0})
+    }
+    assert loaded.keys() == expected.keys()
+    for name, tensor in loaded.items():
+        assert tensor.dtype == expected[name].dtype
+        assert torch.equal(tensor, expected[name]), name
+
+
+@pytest.mark.parametrize(
+    "strategy,whole,reads",
+    [("prefetch", True, True), ("prefetch", False, False), ("lazy", False, True)],
+)
+def test_read_whole_tensors_when_the_rank_uses_them(
+    monkeypatch, tmp_path, strategy, whole, reads
+):
+    path = str(tmp_path / "model.safetensors")
+    save_file({"a": torch.randn(64, 8)}, path)
+    monkeypatch.setattr(weight_utils, "_rank_reads_whole_tensors", lambda: whole)
+    monkeypatch.setattr(weight_utils, "_prefetch_all_checkpoints", lambda *a, **k: None)
+    calls = []
+    read = weight_utils._read_safetensors_file
+    monkeypatch.setattr(
+        weight_utils, "_read_safetensors_file", lambda *a: calls.append(a) or read(*a)
+    )
+    dict(weight_utils.safetensors_weights_iterator([path], False, strategy))
+    # Under TP/PP with prefetch, the loader copies its slices from the cached
+    # mapping; without prefetch, reading whole tensors beats cold faults.
+    assert bool(calls) == reads

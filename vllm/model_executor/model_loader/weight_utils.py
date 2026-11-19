@@ -3,6 +3,7 @@
 """Utilities for downloading and initializing model weights."""
 
 import asyncio
+import collections
 import concurrent.futures
 import fnmatch
 import glob
@@ -25,7 +26,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from safetensors.torch import load, load_file, safe_open
+from safetensors.torch import _TYPES, load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -38,10 +39,12 @@ from vllm.config.load import (
 )
 from vllm.distributed import (
     get_node_count,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
     in_single_pp_stage,
+    model_parallel_is_initialized,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -997,16 +1000,81 @@ def _get_fs_type(files: list[str]) -> str:
         return ""
 
 
-def _tensor_offsets(f: IO[bytes]) -> dict[str, tuple[int, int]]:
-    """Map each tensor in an open safetensors file to its absolute byte range."""
+def _read_header(f: IO[bytes]) -> dict[str, dict[str, Any]]:
+    """Return the tensor entries of an open safetensors file, with absolute
+    data_offsets."""
     header_len = int.from_bytes(f.read(8), "little")
     header = json.loads(f.read(header_len))
     header.pop("__metadata__", None)
-    base = 8 + header_len
-    return {
-        name: (base + t["data_offsets"][0], base + t["data_offsets"][1])
-        for name, t in header.items()
-    }
+    for t in header.values():
+        t["data_offsets"] = [8 + header_len + o for o in t["data_offsets"]]
+    return header
+
+
+# safe_open also maps F8_E8M0, which older safetensors' _TYPES lacks.
+_SAFETENSORS_DTYPES = {**_TYPES, "F8_E8M0": torch.float8_e8m0fnu}
+
+
+def _read_safetensors_file(
+    path: str, local_expert_ids: set[int] | None, num_threads: int
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Yield the tensors of a safetensors file this rank keeps, in file order,
+    read into ordinary memory by num_threads threads at most 1 GiB ahead.
+
+    Faults on safe_open's mapping read the file a few pages at a time, and
+    copies from a file mapping to the GPU are slow even when it is cached."""
+
+    def read(name: str, t: dict[str, Any]) -> torch.Tensor:
+        dtype = _SAFETENSORS_DTYPES.get(t["dtype"])
+        pos, end = t["data_offsets"]
+        if (
+            dtype is None
+            or torch.Size(t["shape"]).numel() * dtype.itemsize != end - pos
+        ):
+            return st.get_tensor(name)  # e.g. packed sub-byte dtypes
+        param = torch.empty(t["shape"], dtype=dtype)
+        buf = memoryview(param.view(-1).view(torch.uint8).numpy())
+        while buf:
+            n = os.preadv(f.fileno(), [buf], pos)
+            if n == 0:
+                raise EOFError(f"{path} is truncated")
+            buf, pos = buf[n:], pos + n
+        return param
+
+    pending: collections.deque = collections.deque()
+    ahead = 0
+
+    def take(limit: int) -> Generator[tuple[str, torch.Tensor], None, None]:
+        nonlocal ahead
+        while pending and ahead > limit:
+            name, future, nbytes = pending.popleft()
+            ahead -= nbytes
+            yield name, future.result()
+
+    with (
+        open(path, "rb") as f,
+        safe_open(path, framework="pt") as st,
+        concurrent.futures.ThreadPoolExecutor(num_threads) as pool,
+    ):
+        for name, t in sorted(
+            _read_header(f).items(), key=lambda e: e[1]["data_offsets"]
+        ):
+            if should_skip_weight(name, local_expert_ids):
+                continue
+            nbytes = t["data_offsets"][1] - t["data_offsets"][0]
+            yield from take((1 << 30) - nbytes)
+            pending.append((name, pool.submit(read, name, t), nbytes))
+            ahead += nbytes
+        yield from take(-1)
+
+
+def _rank_reads_whole_tensors() -> bool:
+    """Whether this rank uses whole tensors: under TP or PP it keeps slices or
+    skips other stages' layers, and reading them whole would read TP x PP times
+    the bytes it uses."""
+    return not model_parallel_is_initialized() or (
+        get_tensor_model_parallel_world_size() == 1 and get_pp_group().world_size == 1
+    )
 
 
 def _node_local_rank() -> tuple[int, int]:
@@ -1032,11 +1100,11 @@ def _node_prefetch_ranges(
     for i, path in enumerate(files):
         shared, mine = [], []
         with open(path, "rb") as f:
-            for name, r in _tensor_offsets(f).items():
+            for name, t in _read_header(f).items():
                 if not should_skip_weight(name, set()):
-                    shared.append(r)
+                    shared.append(t["data_offsets"])
                 elif not should_skip_weight(name, local_expert_ids):
-                    mine.append(r)
+                    mine.append(t["data_offsets"])
         shared_bytes += sum(end - start for start, end in shared)
         mine_bytes += sum(end - start for start, end in mine)
         merged: list[list[int]] = []
@@ -1303,6 +1371,12 @@ def safetensors_weights_iterator(
                     unflatten_tensor_state_dict(state_dict, metadata)
                 )
             yield from unflattened_state_dict.items()
+        elif not should_prefetch or _rank_reads_whole_tensors():
+            # Without prefetch, faulting cold pages of the mapping is slower
+            # than reading whole tensors even when the rank keeps only slices.
+            yield from _read_safetensors_file(
+                st_file, local_expert_ids, safetensors_prefetch_num_threads
+            )
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
