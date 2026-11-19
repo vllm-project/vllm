@@ -27,7 +27,7 @@ from fnmatch import fnmatchcase
 
 import torch
 
-import vllm.envs as envs
+import vllm.config.direct_reload as reload_config
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -68,25 +68,18 @@ _LOADER_ATTRS = (
 
 
 def direct_reload_enabled(vllm_config: VllmConfig | None = None) -> bool:
-    """Whether `vllm_config` (default: the current one) selects direct reload:
-    runtime weight updates on a backend other than sharded_rdt, and
-    `VLLM_RELOAD_MODE=direct`."""
+    """Whether `vllm_config` (default: the current one) selects direct reload."""
     if vllm_config is None:
         vllm_config = get_current_vllm_config_or_none()
-    transfer = getattr(vllm_config, "weight_transfer_config", None)
-    return (
-        transfer is not None
-        and transfer.backend != "sharded_rdt"
-        and envs.VLLM_RELOAD_MODE == "direct"
-    )
+    return reload_config.direct_reload_enabled(vllm_config)
 
 
 def direct_reload_applies(vllm_config: VllmConfig | None = None) -> bool:
-    """Whether direct reload is enabled and the configuration does not refuse
-    it, which quant-method selection must know before loading."""
+    """Whether direct reload is enabled and not refused by `vllm_config`
+    (default: the current one)."""
     if vllm_config is None:
         vllm_config = get_current_vllm_config_or_none()
-    return direct_reload_enabled(vllm_config) and not _config_refusals(vllm_config)
+    return reload_config.direct_reload_applies(vllm_config)
 
 
 def reloads_directly(model: torch.nn.Module) -> bool:
@@ -175,43 +168,6 @@ def _check_update_complete(model: torch.nn.Module, model_config: ModelConfig) ->
         )
 
 
-def _config_refusals(vllm_config: VllmConfig | None) -> list[str]:
-    """Reasons a configuration cannot reload directly."""
-    if vllm_config is None:
-        return []
-    reasons = []
-    offload = vllm_config.offload_config
-    if (
-        offload.offload_backend != "auto"
-        or offload.prefetch.offload_group_size > 0
-        or offload.uva.cpu_offload_gb > 0
-    ):
-        # CPU/UVA offload gives parameters new storage on every post-load
-        # processing; prefetch offload shares one buffer between layers
-        reasons.append("weight offloading")
-    load_configs = (
-        getattr(vllm_config, "load_config", None),
-        getattr(vllm_config.speculative_config, "draft_load_config", None),
-    )
-    if any(
-        getattr(c, "load_format", None) in ("ipc_cache", "peer_cache")
-        for c in load_configs
-    ):
-        # the weight cache's runtime-layout weights have no checkpoint layout
-        reasons.append("pre-processed weights")
-    model_config = vllm_config.model_config
-    if model_config is not None and model_config.quantization == "torchao":
-        # its load_weights runs a layerwise reload, and its post-load
-        # processing replaces the weight parameter
-        reasons.append("torchao quantization")
-    spec = vllm_config.speculative_config
-    if spec is not None and spec.draft_lm_head_quantization is not None:
-        # after `begin` the draft's quantized lm_head is a view of the target
-        # lm_head's storage: post-load processing would write it there
-        reasons.append("draft_lm_head_quantization")
-    return reasons
-
-
 def _module_refusal(model: torch.nn.Module) -> str | None:
     """Why the model's modules cannot reload directly, if they cannot."""
     from vllm.model_executor.layers.quantization.humming import (
@@ -242,7 +198,9 @@ def _module_refusal(model: torch.nn.Module) -> str | None:
 
 def _refusals(model: torch.nn.Module) -> list[str]:
     """Reasons direct reload cannot update `model` under the current config."""
-    reasons = _config_refusals(get_current_vllm_config_or_none())
+    reasons = reload_config.direct_reload_config_refusals(
+        get_current_vllm_config_or_none()
+    )
     if (module_reason := _module_refusal(model)) is not None:
         reasons.append(module_reason)
     return reasons

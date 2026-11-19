@@ -75,6 +75,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.loading import (
+    writes_outside_weight_loaders,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -703,12 +706,6 @@ class K2HorizonAttention(nn.Module):
         return output
 
 
-class _VExpertProj(ColumnParallelLinear):
-    # `K2HorizonModel.load_weights` loads it with `default_weight_loader`,
-    # bypassing its weight loader.
-    writes_outside_weight_loaders = True
-
-
 class K2HorizonMoVAAttention(nn.Module):
     def __init__(
         self,
@@ -782,18 +779,20 @@ class K2HorizonMoVAAttention(nn.Module):
                 self.v_router.bias.float(), requires_grad=False
             )
 
-        self.v_experts = nn.ModuleList(
-            [
-                _VExpertProj(
-                    hidden_size,
-                    self.kv_size * tp_size,
-                    bias=False,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.v_experts.{value}",
-                )
-                for value in range(num_experts)
-            ]
-        )
+        # `K2HorizonModel.load_weights` loads them with `default_weight_loader`
+        with writes_outside_weight_loaders():
+            self.v_experts = nn.ModuleList(
+                [
+                    ColumnParallelLinear(
+                        hidden_size,
+                        self.kv_size * tp_size,
+                        bias=False,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.v_experts.{value}",
+                    )
+                    for value in range(num_experts)
+                ]
+            )
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,

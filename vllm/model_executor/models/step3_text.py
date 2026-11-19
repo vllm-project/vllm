@@ -31,6 +31,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.loading import (
+    writes_outside_weight_loaders,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -136,12 +139,6 @@ class Step3TextMLP(nn.Module):
         return output
 
 
-class _Step3QKVProj(ReplicatedLinear):
-    # `Step3TextModel.load_weights` writes q/k/v with `narrow().copy_`,
-    # bypassing the weight loaders.
-    writes_outside_weight_loaders = True
-
-
 class Step3TextAttention(nn.Module):
     def __init__(
         self,
@@ -175,13 +172,15 @@ class Step3TextAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.q_size = share_q_dim if share_q_dim else self.head_dim
 
-        self.qkv_proj = _Step3QKVProj(
-            hidden_size,
-            self.q_size + self.kv_size * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        # `Step3TextModel.load_weights` writes q/k/v with `narrow().copy_`
+        with writes_outside_weight_loaders():
+            self.qkv_proj = ReplicatedLinear(
+                hidden_size,
+                self.q_size + self.kv_size * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,

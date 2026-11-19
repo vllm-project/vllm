@@ -113,12 +113,12 @@ def test_model_writing_outside_its_loaders_keeps_the_online_method(
     # quantize-on-load checkpoint method would hold unscaled FP8 casts
     from vllm.config import WeightTransferConfig
     from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+    from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.utils import quant_utils as qu
-    from vllm.model_executor.models.step3_text import _Step3QKVProj
 
     default_vllm_config.model_config = SimpleNamespace(
         dtype=torch.bfloat16, quantization=None
@@ -126,8 +126,12 @@ def test_model_writing_outside_its_loaders_keeps_the_online_method(
     default_vllm_config.weight_transfer_config = WeightTransferConfig()
     spec = QuantSpec(weight=qu.kFp8StaticTensorSym)
     config = OnlineQuantizationConfig(QuantizationConfigArgs(linear=spec))
-    layer = _Step3QKVProj(64, 96, bias=False, quant_config=config)
+    with loading.writes_outside_weight_loaders():
+        layer = ReplicatedLinear(64, 96, bias=False, quant_config=config)
+    assert type(layer) is ReplicatedLinear
     assert isinstance(layer.quant_method, OnlineLinearBase)
+    layer = ReplicatedLinear(64, 96, bias=False, quant_config=config)
+    assert not isinstance(layer.quant_method, OnlineLinearBase)
 
 
 @pytest.fixture
@@ -160,13 +164,31 @@ def test_block_method_fits_only_aligned_shards(tp2, sizes, fits):
 
 
 @pytest.mark.parametrize(
-    "ispp,fits",
-    [(256, True), (192, True), (48, False)],
-    ids=["aligned", "refined-scales", "unrefinable"],
+    "ispp,backend,lora,fits",
+    [
+        (256, "auto", False, True),
+        (192, "auto", False, True),
+        (48, "auto", False, False),
+        # DeepGEMM needs whole 128 blocks: the shards are padded to them
+        (192, "deep_gemm", False, True),
+        # padding is unsupported with LoRA, so the method would raise
+        (192, "deep_gemm", True, False),
+    ],
+    ids=["aligned", "refined-scales", "unrefinable", "padded", "unpaddable"],
 )
-def test_block_moe_method_fits_aligned_or_refinable_shards(tp2, ispp, fits):
+def test_block_moe_method_fits_like_the_checkpoint_method(
+    tp2, ispp, backend, lora, fits
+):
     # e.g. Qwen3-30B-A3B at TP4 (192) refines its scale blocks to 64x64
     moe = SimpleNamespace(
-        intermediate_size_per_partition=ispp, tp_size=2, hidden_dim=2048
+        intermediate_size_per_partition=ispp,
+        intermediate_size=ispp * 2,
+        tp_size=2,
+        ep_size=1,
+        hidden_dim=2048,
+        moe_backend=backend,
+        is_lora_enabled=lora,
+        has_bias=False,
     )
     assert loading._moe_block_shapes_fit(moe) is fits
+    assert moe.intermediate_size_per_partition == ispp  # left unpadded

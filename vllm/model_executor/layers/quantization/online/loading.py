@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+import copy
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import partial
 from typing import Any
 
@@ -107,6 +110,22 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     method.process_weights_after_loading = process_weights_after_loading
 
 
+_writes_outside_loaders: ContextVar[bool] = ContextVar(
+    "writes_outside_weight_loaders", default=False
+)
+
+
+@contextmanager
+def writes_outside_weight_loaders() -> Iterator[None]:
+    """Build layers whose weights the model writes without their weight loaders,
+    so direct reload keeps their online quantization method."""
+    token = _writes_outside_loaders.set(True)
+    try:
+        yield
+    finally:
+        _writes_outside_loaders.reset(token)
+
+
 _FP8_BLOCK = (128, 128)  # the block size of the block FP8 online scheme
 
 
@@ -134,20 +153,24 @@ def _block_shapes_fit(layer: torch.nn.Module) -> bool:
 
 def _moe_block_shapes_fit(moe: Any) -> bool:
     """Whether the block FP8 checkpoint MoE method accepts these experts'
-    tensor-parallel shards, refining its scale blocks if needed."""
+    tensor-parallel shards, refining its scale blocks or padding them as it
+    would."""
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        refine_fp8_moe_block_shape,
+        resolve_fp8_moe_weight_block_shape,
     )
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         validate_fp8_block_shape_moe,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+    )
 
-    if refine_fp8_moe_block_shape(moe, list(_FP8_BLOCK)) is not None:
-        return True
+    trial = copy.copy(moe)  # padding the shards resizes the config
     try:
-        validate_fp8_block_shape_moe(
-            moe.intermediate_size_per_partition, list(_FP8_BLOCK)
+        block, _ = resolve_fp8_moe_weight_block_shape(
+            trial, list(_FP8_BLOCK), kFp8Dynamic128Sym, True
         )
+        validate_fp8_block_shape_moe(trial.intermediate_size_per_partition, block)
     except ValueError:
         return False
     return True
@@ -167,7 +190,7 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     from vllm.model_executor.layers.quantization.utils import quant_utils as qu
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
-    if getattr(layer, "writes_outside_weight_loaders", False):
+    if _writes_outside_loaders.get():
         return None  # its loads bypass the loaders that would quantize them
     is_moe = isinstance(layer, RoutedExperts)
     moe: Any = getattr(layer, "moe_config", None)

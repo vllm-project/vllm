@@ -40,6 +40,7 @@ from .compilation import (
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
+from .direct_reload import direct_reload_applies, uses_online_quantization
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
@@ -55,7 +56,6 @@ from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
-from .quantization import ONLINE_QUANT_SHORTHAND_NAMES
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
@@ -591,22 +591,9 @@ class VllmConfig:
             "ec_transfer": get_factors(self.ec_transfer_config),
             "aux_output": get_factors(self.aux_output_config),
         }
-        model_config = self.model_config
-        if (
-            self.weight_transfer_config is not None
-            and model_config is not None
-            and (
-                model_config.quantization in ONLINE_QUANT_SHORTHAND_NAMES
-                or model_config.quantization_config is not None
-            )
-        ):
-            from vllm.model_executor.model_loader.reload.direct import (
-                direct_reload_applies,
-            )
-
-            # direct reload swaps online methods for checkpoint methods
-            if direct_reload_applies(self):
-                factors["direct_reload"] = True
+        # direct reload swaps online methods for checkpoint methods
+        if uses_online_quantization(self) and direct_reload_applies(self):
+            factors["direct_reload"] = True
         if include_version:
             from vllm import __version__
 
