@@ -75,6 +75,31 @@ def test_multiple_pooling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("method_name", "input_value"),
+    [
+        ("generate", "Hello"),
+        ("enqueue", "Hello"),
+        ("chat", [{"role": "user", "content": "Hello"}]),
+        ("enqueue_chat", [{"role": "user", "content": "Hello"}]),
+    ],
+)
+def test_generation_apis_reject_pooling_model(
+    llm: LLM, method_name: str, input_value: object
+):
+    method = getattr(llm, method_name)
+
+    with pytest.raises(
+        VLLMValidationError,
+        match=rf"LLM\.{method_name}\(\) is only supported for generative models",
+    ) as exc_info:
+        method(input_value, use_tqdm=False)
+
+    assert exc_info.value.parameter == "runner"
+    assert exc_info.value.value == "pooling"
+
+
 def test_right_side_truncation(llm: LLM):
     # Embeddings models should truncate the end of the prompt
     tokenizer = llm.get_tokenizer()

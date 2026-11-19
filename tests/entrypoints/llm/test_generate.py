@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
+from unittest.mock import patch
 
 import pytest
 
@@ -23,6 +24,36 @@ TOKEN_IDS = [
     [0, 2, 1],
     [0, 3, 1, 2],
 ]
+
+
+@pytest.mark.skip_global_cleanup
+def test_invalid_kv_transfer_config_raises_validation_error():
+    with pytest.raises(
+        VLLMValidationError,
+        match="Invalid 'kv_transfer_config' provided",
+    ) as exc_info:
+        LLM(
+            MODEL_NAME,
+            kv_transfer_config={"kv_connector": "NixlConnector"},
+        )
+
+    assert exc_info.value.parameter == "kv_transfer_config"
+    assert exc_info.value.value is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_single_process_data_parallel_raises_validation_error():
+    with (
+        patch("vllm.entrypoints.llm.current_platform.is_tpu", return_value=False),
+        pytest.raises(
+            VLLMValidationError,
+            match=r"LLM\(data_parallel_size=2\) is not supported",
+        ) as exc_info,
+    ):
+        LLM(MODEL_NAME, data_parallel_size=2)
+
+    assert exc_info.value.parameter == "data_parallel_size"
+    assert exc_info.value.value == 2
 
 
 @pytest.fixture(scope="module")
