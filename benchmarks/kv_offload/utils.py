@@ -195,6 +195,7 @@ class VLLMServer:
         config_path: Path | None,
         port: int,
         log_path: Path,
+        shm_engine_id: str | None = None,
     ) -> None:
         self.model = model
         self.tensor_parallel_size = tensor_parallel_size
@@ -202,6 +203,7 @@ class VLLMServer:
         self.config_path = config_path
         self.port = port
         self.log_path = log_path
+        self.shm_engine_id = shm_engine_id
         self.proc: subprocess.Popen | None = None
         self.signal_handlers = _SignalHandlers(self._handle_termination)
         self.graceful_shutdown_timeout_s = VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S
@@ -276,12 +278,10 @@ class VLLMServer:
         self._stopped = True
         proc = self.proc
         if proc is None:
-            self.signal_handlers.restore()
             return
 
-        pgid = self.pgid
-
         try:
+            pgid = self.pgid
             if proc.poll() is None:
                 print(f"      Sending SIGTERM to vLLM process {proc.pid}...")
                 proc.terminate()
@@ -323,7 +323,10 @@ class VLLMServer:
                 )
             print("      vLLM successfully terminated.")
         finally:
-            self.signal_handlers.restore()
+            try:
+                self._cleanup_shm()
+            finally:
+                self.signal_handlers.restore()
 
     def _signal_process_group(self, pgid: int | None, signum: int) -> None:
         if pgid is None:
@@ -378,6 +381,16 @@ class VLLMServer:
             time.sleep(0.5)
         return self._port_available()
 
+    def _cleanup_shm(self) -> None:
+        if self.shm_engine_id is None:
+            return
+
+        uid = os.getuid()
+        pattern = f"vllm_offload_{self.shm_engine_id}.mmap*"
+        for shm in Path("/dev/shm").glob(pattern):
+            if shm.stat().st_uid == uid:
+                shm.unlink()
+
     def assert_running(self) -> None:
         """Raise if the server exited before expected."""
         assert self.proc is not None
@@ -396,12 +409,16 @@ class VLLMServer:
         )
 
     def __enter__(self) -> VLLMServer:
+        self._cleanup_shm()
         self.start()
         try:
             self.wait_ready()
         except BaseException:
             self.stop()
             raise
+        # cleanup safe as we only unlink the mmaps.
+        # kernel will free the memory when the process exits.
+        self._cleanup_shm()
         return self
 
     def __exit__(self, *exc) -> None:
