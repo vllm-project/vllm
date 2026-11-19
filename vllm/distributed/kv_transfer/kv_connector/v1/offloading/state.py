@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     get_offloading_event_group_spec,
@@ -131,11 +132,11 @@ class SchedulerOffloadConfig(NamedTuple):
     def max_eagle_proof_margin(self) -> int:
         return max(self.eagle_proof_margins, default=0)
 
-    def partial_tail_key_tokens(self, config_idx: int, boundary: int) -> int:
+    def partial_tail_key_tokens(self, config_group_idx: int, boundary: int) -> int:
         """Token position whose hash keys a group's partial-tail block."""
         if not self.eagle_proof_margins:
             return boundary
-        return boundary + self.eagle_proof_margins[config_idx]
+        return boundary + self.eagle_proof_margins[config_group_idx]
 
     @classmethod
     def from_spec(
@@ -393,17 +394,13 @@ class RequestOffloadState:
             )
 
         # NOTE: This field is experimental and subject to change in the future.
-        raw = params.get("max_offload_tokens") if params else None
-        if type(raw) is int and raw >= 0:
-            self.max_offload_tokens = raw
+        max_offload_tokens = get_max_offload_tokens(params)
+        if max_offload_tokens is not None:
+            self.max_offload_tokens = max_offload_tokens
             logger.debug(
                 "Request %s: max_offload_tokens set to %d",
                 self.req.request_id,
-                raw,
-            )
-        elif raw is not None:
-            logger.warning(
-                "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+                self.max_offload_tokens,
             )
 
     def update_offload_keys(self) -> None:

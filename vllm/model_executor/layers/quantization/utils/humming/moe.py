@@ -224,7 +224,6 @@ def select_humming_moe_experts(
     except (NotImplementedError, ValueError):
         return None
 
-
 def make_humming_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,

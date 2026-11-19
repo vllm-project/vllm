@@ -34,6 +34,7 @@ MODELS = [
     ),
     EmbedModelInfo(
         "nomic-ai/nomic-embed-text-v2-moe",
+        trust_remote_code=True,
         architecture="NomicBertModel",
         mteb_score=0.715488912,
         mteb_tol=2e-3,
