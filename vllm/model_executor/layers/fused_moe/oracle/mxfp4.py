@@ -612,15 +612,14 @@ def _applies_requested_activation(
 ) -> bool:
     """Whether `backend` quantizes activations to the requested key itself
     rather than to a key of its own."""
-    # Humming quantizes activations itself to the user's override.
-    return (
-        backend == Mxfp4MoeBackend.EMULATION
-        or (
-            backend == Mxfp4MoeBackend.HUMMING
-            and requested_activation_key == _user_moe_activation_override()
-        )
-        or _serves_requested_activation(backend, requested_activation_key, config)
-    )
+    # EMULATION quantizes activations to any requested key.
+    if backend == Mxfp4MoeBackend.EMULATION:
+        return True
+    # Humming quantizes activations itself, but only to the user's override.
+    if backend == Mxfp4MoeBackend.HUMMING:
+        return requested_activation_key == _user_moe_activation_override()
+    # AITER_MXFP4_BF16 runs BF16 or MXFP8 depending on the layer's layout.
+    return _serves_requested_activation(backend, requested_activation_key, config)
 
 
 def _warn_on_bf16_fallback(
@@ -684,24 +683,22 @@ def _filter_by_activation(
     config: FusedMoEConfig,
 ) -> list[Mxfp4MoeBackend]:
     """Prefer matching activations, then actual BF16 fallbacks unless strict."""
-    bf16 = [
-        b
-        for b in backends
-        if _backend_activation_key(b) is None
-        and (
-            b != Mxfp4MoeBackend.AITER_MXFP4_BF16
-            or _serves_requested_activation(b, None, config)
-        )
-    ]
+
+    def runs_activation(b: Mxfp4MoeBackend, key: QuantKey | None) -> bool:
+        """Whether `b` computes with `key` activations for this layer."""
+        if b == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+            # Its activation depends on the layer's layout, not a fixed key.
+            return _serves_requested_activation(b, key, config)
+        return _backend_activation_key(b) == key
+
+    # Backends that compute with BF16 activations for this layer.
+    bf16 = [b for b in backends if runs_activation(b, None)]
     if requested_activation_key is not None:
+        # Backends that compute with the requested activation (EMULATION runs any).
         matching = [
             b
             for b in backends
-            if (
-                _serves_requested_activation(b, requested_activation_key, config)
-                if b == Mxfp4MoeBackend.AITER_MXFP4_BF16
-                else _backend_activation_key(b) == requested_activation_key
-            )
+            if runs_activation(b, requested_activation_key)
             or b == Mxfp4MoeBackend.EMULATION
         ]
         if envs.VLLM_STRICT_QUANT_SCHEME:
@@ -713,12 +710,15 @@ def _filter_by_activation(
         return matching + [b for b in bf16 if b not in matching]
     if bf16:
         return bf16
-    if user_activation_override("moe", get_current_vllm_config_or_none()) == (
-        None,
-        True,
-    ):
+    # No backend runs BF16 activations here.
+    activation_key, is_set = user_activation_override(
+        "moe", get_current_vllm_config_or_none()
+    )
+    if is_set and activation_key is None:
+        # The user explicitly requested BF16 (`activation: null`): nothing serves it.
         return []
     if envs.VLLM_STRICT_QUANT_SCHEME:
+        # AITER_MXFP4_BF16 may add activation quantization the model did not request.
         return [b for b in backends if b != Mxfp4MoeBackend.AITER_MXFP4_BF16]
     return backends
 
