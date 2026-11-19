@@ -52,7 +52,6 @@ def _qsa_mqa_paged_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
-    DOT_DTYPE: tl.constexpr,
 ) -> None:
     rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     row_valid = rows < num_rows
@@ -108,8 +107,7 @@ def _qsa_mqa_paged_kernel(
                 mask=key_valid[:, None] & (dims[None, :] < HEAD_DIM),
                 other=0.0,
             )
-            # tl.dot needs matching operands; bf16 is exact for fp8 inputs.
-            keys = tl.trans(keys).to(DOT_DTYPE)
+            keys = tl.trans(keys).to(q_ptr.dtype.element_ty)
             request_score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for head in tl.static_range(0, NUM_HEADS):
                 query = tl.load(
@@ -119,7 +117,7 @@ def _qsa_mqa_paged_kernel(
                     + dims[None, :] * stride_q_dim,
                     mask=in_request[:, None] & (dims[None, :] < HEAD_DIM),
                     other=0.0,
-                ).to(DOT_DTYPE)
+                )
                 dot = tl.dot(query, keys, out_dtype=tl.float32)
                 request_score += tl.maximum(dot, 0.0)
             request_valid_2d = (
@@ -852,10 +850,8 @@ def qsa_mqa_paged(
         HEAD_DIM=q.shape[2],
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        # tl.dot needs K >= 16.
-        BLOCK_D=max(16, triton.next_power_of_2(q.shape[2])),
+        BLOCK_D=triton.next_power_of_2(q.shape[2]),
         COMPRESS_RATIO=compress_ratio,
-        DOT_DTYPE=tl.float16 if q.dtype == torch.float16 else tl.bfloat16,
         num_warps=4,
     )
     return logits, visible_blocks
