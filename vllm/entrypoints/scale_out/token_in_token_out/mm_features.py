@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Helpers for render-time multimodal feature extraction and generate input."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Collection, Mapping, Sequence
+from typing import cast
+
+import torch
+
+from vllm.entrypoints.generate.base.protocol import MMPayload
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    decode_mm_kwargs_item,
+    encode_mm_kwargs_item,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
+from vllm.inputs import (
+    EngineInput,
+    MultiModalHashes,
+    MultiModalInput,
+    MultiModalPlaceholders,
+)
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsOptionalItems,
+    PlaceholderRange,
+)
+
+
+def merge_mm_kwargs_items(
+    kwargs_item: MultiModalKwargsItem | None,
+    metadata_item: MultiModalKwargsItem | None,
+) -> MultiModalKwargsItem | None:
+    """Merge full multimodal data with its metadata-only counterpart."""
+    if kwargs_item is None:
+        return metadata_item
+    if metadata_item is None:
+        return kwargs_item
+    return MultiModalKwargsItem({**kwargs_item, **metadata_item})
+
+
+def _encode_metadata_items(
+    items: Sequence[MultiModalKwargsItem | None],
+    *,
+    declared: Collection[str],
+) -> list[str | None]:
+    """Serialize placeholder-metadata and `keep_on_cpu` fields per item."""
+    metadata_items: list[str | None] = []
+    for item in items:
+        if item is None:
+            metadata_items.append(None)
+            continue
+
+        metadata_item = MultiModalKwargsItem(
+            {
+                key: elem
+                for key, elem in item.items()
+                if elem.field.keep_on_cpu or key in declared
+            }
+        )
+        metadata_items.append(
+            encode_mm_kwargs_item(metadata_item) if metadata_item else None
+        )
+    return metadata_items
+
+
+def _encode_mm_metadata(
+    raw_mm_kwargs: MultiModalKwargsOptionalItems,
+    *,
+    metadata_fields_for: Callable[[str], Collection[str]] | None = None,
+) -> dict[str, list[str | None]] | None:
+    """Serialize metadata-only subsets, or `None` if a modality has none."""
+    metadata_by_modality: dict[str, list[str | None]] = {}
+
+    for modality, items in raw_mm_kwargs.items():
+        declared = (
+            set(metadata_fields_for(modality))
+            if metadata_fields_for is not None
+            else set()
+        )
+        metadata_items = _encode_metadata_items(items, declared=declared)
+        if not any(item is not None for item in metadata_items):
+            return None
+        metadata_by_modality[modality] = metadata_items
+
+    return metadata_by_modality
+
+
+def mm_kwargs_from_features(
+    features: MultiModalFeatures,
+) -> dict[str, list[MultiModalKwargsItem | None]]:
+    """Deserialize `features` into per-modality kwargs for `mm_input`."""
+    mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+    kwargs_data = features.kwargs_data or {}
+    mm_metadata = features.mm_metadata or {}
+    for modality, hashes in features.mm_hashes.items():
+        n = len(hashes)
+        kwargs_items = [
+            decode_mm_kwargs_item(item) if item is not None else None
+            for item in kwargs_data.get(modality, [None] * n)
+        ]
+        metadata_items = [
+            decode_mm_kwargs_item(item) if item is not None else None
+            for item in mm_metadata.get(modality, [None] * n)
+        ]
+        mm_kwargs[modality] = [
+            merge_mm_kwargs_items(kwargs_item, metadata_item)
+            for kwargs_item, metadata_item in zip(
+                kwargs_items, metadata_items, strict=True
+            )
+        ]
+    return mm_kwargs
+
+
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Inverse of `placeholder_ranges_from_engine_input`."""
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
+
+
+def placeholder_ranges_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[PlaceholderRangeInfo]] | None:
+    """Return per-modality placeholder ranges, or `None` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    raw_placeholders: MultiModalPlaceholders = cast(MultiModalInput, engine_input)[
+        "mm_placeholders"
+    ]
+    return {
+        modality: [
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in raw_placeholders.items()
+    }
+
+
+def mm_hashes_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[str]] | None:
+    """Return per-modality processor cache keys, or `None` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_hashes: MultiModalHashes = cast(MultiModalInput, engine_input)["mm_hashes"]
+    return {modality: list(hashes) for modality, hashes in mm_hashes.items()}
+
+
+def extract_mm_features(
+    engine_input: EngineInput,
+    *,
+    metadata_fields_for: Callable[[str], Collection[str]] | None = None,
+    mm_payload: MMPayload = "tensors",
+) -> MultiModalFeatures | None:
+    """Extract multimodal features from a rendered engine prompt.
+
+    Returns `None` for text-only prompts. `mm_metadata` keeps the
+    intersection of processed kwargs that prefill needs after EC transfer:
+    fields declared as embedding metadata, plus fields marked
+    `keep_on_cpu` (for example M-RoPE grid dims). It is `None` if any
+    modality has no such fields. `mm_payload="metadata"` omits `kwargs_data`
+    and `mm_payload="none"` omits both.
+    """
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_engine_input = cast(MultiModalInput, engine_input)
+    mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+    mm_placeholders = placeholder_ranges_from_engine_input(engine_input)
+    assert mm_placeholders is not None
+
+    kwargs_data: dict[str, list[str | None]] | None = None
+    mm_metadata: dict[str, list[str | None]] | None = None
+    raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+    if raw_mm_kwargs and mm_payload != "none":
+        mm_metadata = _encode_mm_metadata(
+            raw_mm_kwargs,
+            metadata_fields_for=metadata_fields_for,
+        )
+        if mm_payload == "metadata" and mm_metadata is None:
+            raise ValueError(
+                "mm_payload='metadata' requires metadata for every modality "
+                "in the request. Render with mm_payload='tensors' instead."
+            )
+        if mm_payload == "tensors":
+            kwargs_data = {
+                modality: [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+                for modality, items in raw_mm_kwargs.items()
+            }
+
+    return MultiModalFeatures(
+        mm_hashes=mm_hashes,
+        mm_placeholders=mm_placeholders,
+        kwargs_data=kwargs_data,
+        mm_metadata=mm_metadata,
+    )

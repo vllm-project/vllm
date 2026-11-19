@@ -6,12 +6,12 @@ from typing import TypeAlias
 import numpy as np
 from fastapi.responses import JSONResponse
 
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
 
 from ..base.serving import PoolingServing
-from ..typing import PoolingServeContext
+from ..types import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
     ClassificationData,

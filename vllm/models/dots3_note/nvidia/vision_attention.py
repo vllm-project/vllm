@@ -17,7 +17,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.logger import init_logger
 from vllm.vllm_flash_attn import flash_attn_varlen_func, is_fa_version_supported
+
+logger = init_logger(__name__)
 
 _flash_attn_available = is_fa_version_supported(2)
 _flash_attn3_available = is_fa_version_supported(3)
@@ -36,15 +39,28 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+VisionRotaryPositionEmbedding = tuple[torch.Tensor, torch.Tensor]
+
+
+def prepare_rotary_pos_emb_vision(
+    freqs: torch.Tensor,
+) -> VisionRotaryPositionEmbedding:
+    """Materialize vision RoPE cos/sin once for every encoder layer."""
+    cos = freqs.cos().unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+    sin = freqs.sin().unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+    return cos, sin
+
+
 def apply_rotary_pos_emb_vision(
-    tensor: torch.Tensor, freqs: torch.Tensor
+    tensor: torch.Tensor,
+    rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding,
 ) -> torch.Tensor:
     orig_dtype = tensor.dtype
     tensor = tensor.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+    if isinstance(rotary_pos_emb, torch.Tensor):
+        cos, sin = prepare_rotary_pos_emb_vision(rotary_pos_emb)
+    else:
+        cos, sin = rotary_pos_emb
     output = (tensor * cos) + (rotate_half(tensor) * sin)
     return output.to(orig_dtype)
 
@@ -52,7 +68,7 @@ def apply_rotary_pos_emb_vision(
 class VisionRotaryEmbedding(nn.Module):
     """2D vision RoPE frequency table.
 
-    When ``cache_seq_len`` is set, precomputes and reuses frequencies up to that
+    When `cache_seq_len` is set, precomputes and reuses frequencies up to that
     length (MoE default). Otherwise frequencies are computed on each forward
     (dense default).
     """
@@ -94,8 +110,8 @@ class VisionRotaryEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class _RMSNorm(nn.Module):
-    """Q/K norm inside attention; matches Dots ViT RMSNorm (fp32 reduce, then cast back)."""
+class VisionRMSNorm(nn.Module):
+    """Dots ViT RMSNorm with an fp32 reduction and input-dtype output."""
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -106,11 +122,14 @@ class _RMSNorm(nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
+    def extra_repr(self) -> str:
+        return f"{tuple(self.weight.shape)}, eps={self.eps}"
+
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VisionAttentionParams:
     dim: int
     num_heads: int
@@ -143,13 +162,23 @@ class _VisionAttentionBase(nn.Module):
         self.qkv = nn.Linear(params.dim, params.dim * 3, bias=params.bias)
         self.proj = nn.Linear(params.dim, params.dim, bias=params.bias)
         if self.use_qk_norm:
-            self.q_norm = _RMSNorm(self.head_dim, eps=params.rms_norm_eps)
-            self.k_norm = _RMSNorm(self.head_dim, eps=params.rms_norm_eps)
+            self.q_norm = VisionRMSNorm(self.head_dim, eps=params.rms_norm_eps)
+            self.k_norm = VisionRMSNorm(self.head_dim, eps=params.rms_norm_eps)
+
+    def _segment_ids(self, cu_seqlens: torch.Tensor, seq_length: int) -> torch.Tensor:
+        """Assign every token position to its varlen segment, on the device.
+
+        Using the `cu_seqlens` elements as Python slice bounds would copy
+        them back to the host once per segment.
+        """
+        positions = torch.arange(seq_length, device=cu_seqlens.device)
+        boundaries = cu_seqlens[1:].to(torch.int64)
+        return torch.searchsorted(boundaries, positions, right=True)
 
     def _qkv_with_rope(
         self,
         hidden_states: torch.Tensor,
-        rotary_pos_emb: torch.Tensor | None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -161,6 +190,8 @@ class _VisionAttentionBase(nn.Module):
         if self.use_qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
+        if rotary_pos_emb is None:
+            raise ValueError("Vision rotary position embedding is required")
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
         return q, k, v
@@ -174,24 +205,19 @@ class VisionAttention(_VisionAttentionBase):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_pos_emb: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None = None,
         seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self._qkv_with_rope(hidden_states, rotary_pos_emb)
 
-        attention_mask = torch.full(
-            [1, seq_length, seq_length],
+        seg_ids = self._segment_ids(cu_seqlens, seq_length)
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=q.device, dtype=q.dtype
+        ).masked_fill_(
+            (seg_ids[:, None] != seg_ids[None, :]).unsqueeze(0),
             torch.finfo(q.dtype).min,
-            device=q.device,
-            dtype=q.dtype,
         )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = 0
 
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
@@ -205,14 +231,14 @@ class VisionAttention(_VisionAttentionBase):
 
 
 class VisionAttentionV2(_VisionAttentionBase):
-    """Eager attention per varlen segment (lower peak memory than :class:`VisionAttention`)."""
+    """Eager attention per varlen segment (lower peak memory than `VisionAttention`)."""
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_pos_emb: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None = None,
         seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -239,7 +265,7 @@ class VisionAttentionV2(_VisionAttentionBase):
         return self.proj(attn_output)
 
 
-# MoE checkpoints historically named this implementation ``VisionEagerAttention``.
+# MoE checkpoints historically named this implementation `VisionEagerAttention`.
 VisionEagerAttention = VisionAttentionV2
 
 
@@ -249,7 +275,7 @@ class VisionFlashAttention2(_VisionAttentionBase):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_pos_emb: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None = None,
         seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -274,7 +300,7 @@ class VisionFlashAttention3(_VisionAttentionBase):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_pos_emb: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None = None,
         seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -313,21 +339,14 @@ class VisionSdpaAttention(_VisionAttentionBase):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_pos_emb: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding | None = None,
         seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = self._qkv_with_rope(hidden_states, rotary_pos_emb)
 
-        attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
+        seg_ids = self._segment_ids(cu_seqlens, seq_length)
+        attention_mask = (seg_ids[:, None] == seg_ids[None, :]).unsqueeze(0)
 
         q = q.transpose(0, 1).unsqueeze(0)
         k = k.transpose(0, 1).unsqueeze(0)
@@ -365,17 +384,20 @@ def resolve_attn_implementation(
 ) -> str:
     """Apply FA3 → FA2 → eager fallback when backends are missing.
 
-    ``eager_fallback`` selects which eager backend is used when flash-attn is
-    unavailable. MoE historically used per-segment eager (``eager_v2``); dense
-    uses full-mask ``eager``.
+    `eager_fallback` selects which eager backend is used when flash-attn is
+    unavailable. MoE historically used per-segment eager (`eager_v2`); dense
+    uses full-mask `eager`.
     """
     if attn_implementation == "flash_attention_3" and not _flash_attn3_available:
-        print(
+        logger.warning_once(
             "flash attention 3 not available! fallback to flash attention 2 implementation"
         )
         attn_implementation = "flash_attention_2"
     if attn_implementation == "flash_attention_2" and not _flash_attn_available:
-        print("flash attention 2 not available! fallback to eager implementation")
+        logger.warning_once(
+            "flash attention 2 not available! fallback to %s implementation",
+            eager_fallback,
+        )
         attn_implementation = eager_fallback
     return attn_implementation
 
@@ -389,7 +411,7 @@ def build_vision_attention(
     bias: bool | None = None,
     eager_fallback: str = "eager",
 ) -> nn.Module:
-    """Instantiate a vision attention module from ``attn_implementation`` and config."""
+    """Instantiate a vision attention module from `attn_implementation` and config."""
     attn_implementation = resolve_attn_implementation(
         attn_implementation, eager_fallback=eager_fallback
     )
@@ -418,28 +440,13 @@ def attn_uses_seqlens(attn_implementation: str) -> bool:
     return attn_implementation == "eager_v2"
 
 
-def prepare_seqlens_for_attention(
-    attn_implementation: str,
-    cu_seqlens: torch.Tensor,
-    *,
-    eager_fallback: str = "eager",
-) -> list[int] | None:
-    """Return per-segment lengths when the resolved backend needs ``seqlens``."""
-    resolved = resolve_attn_implementation(
-        attn_implementation, eager_fallback=eager_fallback
-    )
-    if attn_uses_seqlens(resolved):
-        return torch.diff(cu_seqlens).tolist()
-    return None
-
-
 def apply_vision_attention_residual(
     attn: nn.Module,
     norm: nn.Module,
     hidden_states: torch.Tensor,
     cu_seqlens: torch.Tensor,
     max_seqlen: int,
-    rotary_pos_emb: torch.Tensor,
+    rotary_pos_emb: torch.Tensor | VisionRotaryPositionEmbedding,
     *,
     seqlens: list[int] | None = None,
     uses_seqlens: bool = False,
@@ -465,12 +472,14 @@ __all__ = [
     "VisionFlashAttention2",
     "VisionFlashAttention3",
     "VisionRotaryEmbedding",
+    "VisionRotaryPositionEmbedding",
+    "VisionRMSNorm",
     "VisionSdpaAttention",
     "apply_rotary_pos_emb_vision",
     "apply_vision_attention_residual",
     "attn_uses_seqlens",
     "build_vision_attention",
-    "prepare_seqlens_for_attention",
+    "prepare_rotary_pos_emb_vision",
     "resolve_attn_implementation",
     "rotate_half",
     "vision_attention_params_from_config",

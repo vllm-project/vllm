@@ -20,7 +20,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -30,18 +30,19 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -64,7 +65,7 @@ from .utils import (
 class ExaoneMoe(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         swiglu_limit: float | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -85,11 +86,9 @@ class ExaoneMoe(nn.Module):
                 f"the number of experts {config.num_experts}."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -112,6 +111,7 @@ class ExaoneMoe(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        self.shared_experts: ExaoneMoeGatedMLP | None
         if getattr(config, "num_shared_experts", 0) > 0:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
             self.shared_experts = ExaoneMoeGatedMLP(
@@ -227,24 +227,31 @@ class ExaoneMoeAttention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
 
-        if config.sliding_windows is not None:
-            self.sliding_window_size = config.sliding_windows[layer_idx]
-
-        if config.layer_types[layer_idx] == "full_attention":
-            self.sliding_window_size = None
-
+        # Configs published before K-EXAONE 2.0 only have the scalar
+        # `sliding_window` and no MTP fields; their MTP layer follows the main
+        # layer with the same index.
+        layer_types = config.layer_types
+        sliding_windows = getattr(config, "sliding_windows", None)
         if is_mtp:
-            self.sliding_window = (
-                config.mtp_layer_types[layer_idx] == "sliding_attention"
+            layer_types = getattr(config, "mtp_layer_types", None) or layer_types
+            sliding_windows = (
+                getattr(config, "mtp_sliding_windows", None) or sliding_windows
             )
-            if config.mtp_sliding_windows is not None:
-                self.sliding_window_size = config.mtp_sliding_windows[layer_idx]
 
-            if config.mtp_layer_types[layer_idx] == "full_attention":
-                self.sliding_window_size = None
+        if layer_types[layer_idx] == "full_attention":
+            self.sliding_window_size = None
+        elif sliding_windows is not None:
+            self.sliding_window_size = sliding_windows[layer_idx]
+        else:
+            self.sliding_window_size = config.sliding_window
 
-        # apply rotary embeddings to every layer in full attention models
-        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
+        # Full-attention layers are NoPE when sliding layers are present, except
+        # the MTP layer, which is trained with RoPE.
+        self.use_rope = (
+            bool(self.sliding_window_size)
+            or is_mtp
+            or "sliding_attention" not in config.layer_types
+        )
 
         set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
@@ -279,7 +286,7 @@ class ExaoneMoeAttention(nn.Module):
         k = self.k_norm(k)
         k = k.flatten(-2, -1)
 
-        if self.sliding_window_size or self.apply_rope_all_layers:
+        if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -289,10 +296,10 @@ class ExaoneMoeAttention(nn.Module):
 class ExaoneMoeDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        is_mtp: bool = None,
+        is_mtp: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -381,26 +388,19 @@ class ExaoneMoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
@@ -471,7 +471,8 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".mlp.up_proj": (".mlp.gate_up_proj", 1),
             ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
             ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        }
+        },
+        orig_to_new_prefix={"mtp.": None},
     )
     packed_modules_mapping = {
         "qkv_proj": [
@@ -496,10 +497,8 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config.get_text_config()
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
         self.quant_config = quant_config
 
         self.model = ExaoneMoeModel(
@@ -508,17 +507,9 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config
-                else lora_config.lora_vocab_padding_size,
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
@@ -560,12 +551,6 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            # With tie_word_embeddings, we can skip lm_head.weight
-            # The weight might appear unnecessarily in the files if the model is
-            # processed with quantization, LoRA, fine-tuning, etc.
-            skip_prefixes=(
-                ["lm_head.", "mtp."] if self.config.tie_word_embeddings else ["mtp."]
-            ),
             # Skip loading extra parameters for GPTQ/modelopt models.
             ignore_unexpected_suffixes=[
                 ".bias",

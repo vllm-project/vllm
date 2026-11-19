@@ -62,7 +62,7 @@ from vllm.v1.structured_output.backend_xgrammar import (
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkMetrics:
     completed: int
     total_input: int
@@ -92,7 +92,7 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SampleRequest:
     """A class representing a single inference request for benchmarking.
 
@@ -102,6 +102,7 @@ class SampleRequest:
             images).
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
+
     """
 
     prompt: str
@@ -305,8 +306,7 @@ async def get_request(
     request_rate: float,
     burstiness: float = 1.0,
 ) -> AsyncGenerator[tuple[int, SampleRequest], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
 
     Args:
@@ -322,6 +322,7 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
+
     """
     input_requests = iter(input_requests)
 

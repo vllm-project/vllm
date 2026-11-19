@@ -14,7 +14,7 @@ import pytest
 from fastapi import HTTPException
 from prometheus_client import CollectorRegistry
 
-from vllm.entrypoints.openai.api_server import build_app
+from vllm.entrypoints.launchers.api_server.entry import build_app
 from vllm.exceptions import (
     VLLMNotFoundError,
     VLLMServerError,
@@ -29,7 +29,7 @@ def should_do_global_cleanup_after_test() -> bool:
 
 
 def _build_args() -> Namespace:
-    """Minimal args for ``build_app``; avoids ``make_arg_parser`` device probing."""
+    """Minimal args for `build_app`; avoids `make_arg_parser` device probing."""
     return Namespace(
         disable_fastapi_docs=True,
         enable_offline_docs=False,
@@ -56,8 +56,8 @@ def registry():
 def app(registry):
     """Build the real vLLM FastAPI app once and attach probe routes that raise.
 
-    Patch the name used by ``attach_router`` (imported into the instrumentator
-    metrics module), not ``vllm.v1.metrics.prometheus`` alone — that binding is
+    Patch the name used by `attach_router` (imported into the instrumentator
+    metrics module), not `vllm.v1.metrics.prometheus` alone — that binding is
     captured at import time.
     """
     import vllm.entrypoints.serve.instrumentator.metrics as metrics_mod

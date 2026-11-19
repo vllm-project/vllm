@@ -17,6 +17,7 @@ def get_prometheus_metrics(server: RemoteOpenAIServer) -> dict[str, dict[str, fl
         For example: {"vllm:request_success": {
             "engine=0": 5.0, "engine=1": 3.0}
         }
+
     """
     try:
         response = requests.get(server.url_for("metrics"), timeout=10)
@@ -72,6 +73,7 @@ def get_engine_request_counts(metrics: dict[str, dict[str, float]]) -> dict[str,
     Returns:
         Dict mapping engine indices to request counts.
         For example: {"0": 15.0, "1": 12.0}
+
     """
     engine_counts = {}
 
@@ -97,6 +99,7 @@ def check_request_balancing(server: RemoteOpenAIServer, dp_size: int):
     Args:
         server: The RemoteOpenAIServer instance
         dp_size: Number of data parallel ranks
+
     """
     if dp_size <= 1:
         return

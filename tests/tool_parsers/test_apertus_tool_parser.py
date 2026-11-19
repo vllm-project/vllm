@@ -244,6 +244,22 @@ class TestStreamingExtraction:
         assert tcs[0]["name"] == "get_weather"
         assert json.loads(tcs[0]["arguments"]) == {"location": "Paris, France"}
 
+    @pytest.mark.parametrize(
+        "arguments",
+        ['{"value": -2e-3}', '{"value": 1.5e3}', '{"values": [1.5e3, -2e-3]}'],
+    )
+    def test_streaming_scientific_notation(self, parser, mock_request, arguments):
+        model_output = (
+            f'{TOOL_CALLS_PREFIX}[{{"calculate": {arguments}}}]{TOOL_CALLS_SUFFIX}'
+        )
+
+        results = self._simulate_streaming(parser, mock_request, list(model_output))
+        tool_calls = self._collect_tool_calls(results)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "calculate"
+        assert json.loads(tool_calls[0]["arguments"]) == json.loads(arguments)
+
     def test_streaming_missing_tool_suffix(self, parser, mock_request):
         chunks = [
             "<|tools_prefix|>",
@@ -343,8 +359,11 @@ class TestStreamingExtraction:
         """Simulates MTP predicting text, tool calls,
         and trailing text all in a single chunk."""
         chunks = [
-            "Sure! "
-            '<|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|>'
+            (
+                "Sure! "
+                '<|tools_prefix|>[{"get_weather": '
+                '{"location": "London"}}]<|tools_suffix|>'
+            )
         ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
@@ -359,9 +378,11 @@ class TestStreamingExtraction:
     def test_mtp_streaming_multiple_tools_burst(self, parser, mock_request):
         """Simulates MTP predicting an array of multiple tools in one single chunk."""
         chunks = [
-            '<|tools_prefix|>[{"get_weather": '
-            '{"location": "London"}}, '
-            '{"get_time": {"location": "Paris"}}]<|tools_suffix|>'
+            (
+                '<|tools_prefix|>[{"get_weather": '
+                '{"location": "London"}}, '
+                '{"get_time": {"location": "Paris"}}]<|tools_suffix|>'
+            )
         ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 

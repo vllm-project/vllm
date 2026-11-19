@@ -27,7 +27,7 @@ class ReasoningConfig:
     natural_reasoning_end_token_ids = [END_TOKEN_ID]
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class BenchmarkCase:
     req_states: RequestState
     state: ThinkingBudgetState

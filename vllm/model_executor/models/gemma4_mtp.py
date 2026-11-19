@@ -7,7 +7,7 @@ with the target (backbone) model.  All assistant decoder layers are
 KV-shared: they only have Q projections (no K/V projections or norms),
 and read K/V from the target model's cache at runtime.
 
-Checkpoint layout (``gemma4_assistant``)::
+Checkpoint layout (`gemma4_assistant`)::
 
     model.embed_tokens.*          -- token embeddings
     model.layers.{i}.*            -- decoder layers (Q-only attention + MLP)
@@ -44,8 +44,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -101,6 +102,7 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         Returns:
             logits: (num_tokens, num_selected) sparse logits.
             indices: (num_tokens, num_selected) corresponding vocab indices.
+
         """
         num_tokens = hidden_states.shape[0]
         _, top_k_indices = torch.topk(
@@ -150,7 +152,7 @@ class Gemma4MTPAttention(nn.Module):
     """Q-only attention for Gemma4 MTP layers.
 
     K/V come from the target model's KV cache via
-    ``kv_sharing_target_layer_name`` (set by the proposer after
+    `kv_sharing_target_layer_name` (set by the proposer after
     model construction).
     """
 
@@ -218,7 +220,7 @@ class Gemma4MTPAttention(nn.Module):
         )
 
         # kv_sharing_target_layer_name is set after model construction
-        # by Gemma4Proposer._setup_gemma4_kv_sharing().
+        # by Gemma4Speculator._setup_gemma4_kv_sharing().
         self.is_kv_shared_layer = True
         self.attn = Attention(
             self.num_heads,
@@ -246,16 +248,8 @@ class Gemma4MTPAttention(nn.Module):
 
         q, _ = self.rotary_emb(positions, q, None)
 
-        # Attention reads K/V from the target's cache via KV sharing;
-        # these dummy tensors are never consumed but required by the API.
-        num_tokens = q.shape[0]
-        kv_dummy = torch.empty(
-            num_tokens,
-            self.num_kv_heads * self.head_dim,
-            dtype=q.dtype,
-            device=q.device,
-        )
-        attn_output = self.attn(q, kv_dummy, kv_dummy)
+        # Attention reads K/V from the target's cache via KV sharing.
+        attn_output = self.attn(q, None, None)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -272,7 +266,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_config = gemma4_layer_config(config, layer_idx)
+        layer_config = config.per_layer_config[layer_idx]
         head_dim = layer_config.head_dim
         num_kv_heads = layer_config.num_key_value_heads
 
@@ -345,7 +339,9 @@ class Gemma4MultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
         quant_config = get_draft_quant_config(vllm_config)
         self.config = text_config
@@ -452,6 +448,9 @@ class Gemma4MTP(nn.Module):
     hidden-state feedback buffer.
     """
 
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = Gemma4MTPSpeculatorConfig
+
     has_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -467,7 +466,9 @@ class Gemma4MTP(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
         self.quant_config = get_draft_quant_config(vllm_config)
         self.config = config
@@ -496,6 +497,7 @@ class Gemma4MTP(nn.Module):
             soft_cap=getattr(text_config, "final_logit_softcapping", None),
         )
 
+        self.masked_embedding: Gemma4MTPMaskedEmbedder | None
         if getattr(config, "use_ordered_embeddings", False):
             num_centroids = getattr(config, "num_centroids", 2048)
             top_k = getattr(config, "centroid_intermediate_top_k", 32)
@@ -516,9 +518,13 @@ class Gemma4MTP(nn.Module):
         else:
             self.masked_embedding = None
 
-        draft_cfg = vllm_config.speculative_config.draft_model_config
+        draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        # Materialized on-device after loading: compute_logits runs under CUDA
+        # graph capture in the V2 speculator, where indexing with a Python list
+        # would issue an unpinned H2D copy (illegal during capture).
+        self._suppress_idx: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -545,6 +551,10 @@ class Gemma4MTP(nn.Module):
     def _get_full_lm_head_weight(self) -> torch.Tensor:
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
+        return self._gather_full_lm_head_weight()
+
+    def _gather_full_lm_head_weight(self) -> torch.Tensor:
+        assert self.masked_embedding is not None
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1:
@@ -555,7 +565,6 @@ class Gemma4MTP(nn.Module):
         lm_head_weight = lm_head_weight[: self.masked_embedding.vocab_size]
         if tp_size > 1:
             lm_head_weight = lm_head_weight.contiguous()
-            self._stable_full_lm_head_weight = lm_head_weight
         return lm_head_weight
 
     def compute_logits(
@@ -570,8 +579,8 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_idx is not None:
+            logits.index_fill_(1, self._suppress_idx, -float("inf"))
         return logits
 
     def get_top_tokens(
@@ -579,12 +588,30 @@ class Gemma4MTP(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Sparse argmax via centroids masking. Returns token IDs directly."""
+        assert self.masked_embedding is not None
         return self.masked_embedding.get_top_tokens(
             hidden_states,
             self._get_full_lm_head_weight(),
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # Built here, outside inference mode, and refilled in place on reload.
+        if (
+            self.masked_embedding is not None
+            and get_tensor_model_parallel_world_size() > 1
+        ):
+            refill_derived(
+                self,
+                "_stable_full_lm_head_weight",
+                self._gather_full_lm_head_weight(),
+            )
+        if self._suppress_token_ids and self._suppress_idx is None:
+            self._suppress_idx = torch.tensor(
+                self._suppress_token_ids,
+                dtype=torch.long,
+                device=next(self.parameters()).device,
+            )

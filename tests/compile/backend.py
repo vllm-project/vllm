@@ -6,11 +6,11 @@ from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 
-import depyf
 from torch import fx
 from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
+from vllm.compilation import depyf_compat
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.inductor_pass import (
     InductorPass,
@@ -29,8 +29,7 @@ logger = init_logger("vllm.tests.compile.backend")
 
 
 class LazyInitPass(InductorPass):
-    """
-    If there's a pass that we want to initialize lazily in a test,
+    """If there's a pass that we want to initialize lazily in a test,
     we can wrap it in LazyInitPass, which will initialize the pass when invoked
     and then immediately invoke it.
     """
@@ -45,8 +44,7 @@ class LazyInitPass(InductorPass):
 
 
 class TestBackend:
-    """
-    This class provides a simple Inductor backend that can be used for testing.
+    """This class provides a simple Inductor backend that can be used for testing.
     It takes a list of custom passes and runs them after Inductor's passes.
     It also saves the graph before and after the custom passes for inspection.
 
@@ -73,7 +71,7 @@ class TestBackend:
 
         if debug_dump_path := vllm_config.compile_debug_dump_path():
             logger.debug("Dumping depyf output to %s", debug_dump_path)
-            self.debug_ctx = depyf.prepare_debug(debug_dump_path.as_posix())
+            self.debug_ctx = depyf_compat.prepare_debug(debug_dump_path.as_posix())
         else:
             self.debug_ctx = nullcontext()
 

@@ -22,24 +22,43 @@ class DescriptorBuffers(NamedTuple):
     src_ptrs: torch.Tensor
     dst_ptrs: torch.Tensor
     sizes: torch.Tensor
-    # Numpy aliases of src_ptrs/dst_ptrs, written via set_ptrs().
+    # Numpy aliases of the three tensors, written via add_copies().
     src_np: np.ndarray
     dst_np: np.ndarray
+    sizes_np: np.ndarray
 
-    def set_ptrs(self, idx: int, src: int, dst: int) -> None:
-        """Record the source and destination address of descriptor *idx*.
+    def add_copies(
+        self,
+        first: int,
+        sources: np.ndarray,
+        destinations: np.ndarray,
+        byte_counts: np.ndarray,
+    ) -> None:
+        """Store a batch of copies in these buffers, the first at *first*.
 
-        TODO(torch>=2.14): drop this indirection and assign the tensors
-        directly once the minimum supported torch is 2.14. The numpy detour
-        exists only because torch's setitem unpacks the value as a signed
-        long long before 2.14 (pytorch#191458), rejecting XPU USM pointers
-        >= 2**63, while the two's-complement rewrite those versions accept is
-        in turn rejected by uint64 from 2.14 on. Numpy casts against the
-        array dtype and so works on either. `sizes` holds byte counts and
-        needs no such care.
+        One copy is one source address, one destination address, and a number
+        of bytes. `swap_blocks_batch` performs every copy held in the buffers
+        in a single call, so a caller fills in all of a step's copies before
+        asking for any of them to run, and passes *first* to say where its own
+        copies begin.
+
+        Whole batches go in at once because storing a single number into a
+        torch tensor costs microseconds. Adding copies one at a time can take
+        longer than performing them.
+
+        TODO(torch>=2.14): write the tensors directly and drop these numpy
+        aliases once the minimum supported torch is 2.14. They exist only
+        because torch's setitem unpacks the value as a signed long long before
+        2.14 (pytorch#191458), rejecting XPU USM addresses >= 2**63, while the
+        two's-complement rewrite those versions accept is in turn rejected by
+        uint64 from 2.14 on. Numpy casts against the array's own type and so
+        works on either. Byte counts are small enough to need none of this
+        care, and use their alias only to match the addresses.
         """
-        self.src_np[idx] = src
-        self.dst_np[idx] = dst
+        last = first + len(sources)
+        self.src_np[first:last] = sources
+        self.dst_np[first:last] = destinations
+        self.sizes_np[first:last] = byte_counts
 
 
 class DescriptorBufferPool:
@@ -62,7 +81,9 @@ class DescriptorBufferPool:
             if bufs.src_ptrs.numel() >= n:
                 return bufs
         src, dst, sizes = (torch.empty(n, dtype=_PTR_DTYPE) for _ in range(3))
-        return DescriptorBuffers(src, dst, sizes, src.numpy(), dst.numpy())
+        return DescriptorBuffers(
+            src, dst, sizes, src.numpy(), dst.numpy(), sizes.numpy()
+        )
 
     def release(self, bufs: DescriptorBuffers) -> None:
         """Return a buffer triple to the pool for reuse."""

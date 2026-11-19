@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
@@ -11,6 +11,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.pooler import TokenPoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
@@ -33,8 +34,10 @@ class TokenPoolingMethod(nn.Module, ABC):
 
 
 class AllPool(TokenPoolingMethod):
-    def __init__(self):
+    def __init__(self, output_sizes_fn: Callable[[], list[int]] | None = None):
         super().__init__()
+        # Logical output widths in the current request order.
+        self.output_sizes_fn = output_sizes_fn
 
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
@@ -62,6 +65,13 @@ class AllPool(TokenPoolingMethod):
         hidden_states_lst = list(
             torch.split(hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
+        if self.output_sizes_fn is not None:
+            hidden_states_lst = [
+                hs[:, :size]
+                for hs, size in zip(
+                    hidden_states_lst, self.output_sizes_fn(), strict=True
+                )
+            ]
 
         if not self.enable_chunked_prefill:
             if self.clone_finished:
@@ -69,7 +79,7 @@ class AllPool(TokenPoolingMethod):
             return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
-        finished_mask = pooling_cursor.is_finished().tolist()
+        finished_mask = pooling_cursor.get_finished_mask()
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
@@ -131,7 +141,7 @@ class StepPool(AllPool):
 
                 if step_tag_id is not None:
                     idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
-                    idx = idx_cpu.to(data.device, non_blocking=True)
+                    idx = async_tensor_h2d(idx_cpu, data.device)
                     data = data[idx]
 
                 pooled_data.append(data)

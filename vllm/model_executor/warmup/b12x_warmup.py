@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm B12X JIT kernels used by a loaded model."""
+"""Warm b12x JIT kernels used by a loaded model."""
 
 from collections import Counter
 from collections.abc import Iterable
@@ -61,9 +61,20 @@ def b12x_warmup(worker: "Worker", cudagraph_capture_sizes: list[int]) -> None:
     )
     if output_dtype not in (torch.bfloat16, torch.float16):
         output_dtype = torch.bfloat16
+    compile_sizes = worker.vllm_config.compilation_config.compile_sizes or []
+    max_num_batched_tokens = worker.scheduler_config.max_num_batched_tokens
+    serving_sizes = [
+        max_num_batched_tokens,
+        *cudagraph_capture_sizes,
+        *(size for size in compile_sizes if isinstance(size, int)),
+    ]
+    max_tokens = max_num_batched_tokens
+    max_num_scheduled_tokens = worker.scheduler_config.max_num_scheduled_tokens
+    if max_num_scheduled_tokens is not None:
+        max_tokens = max(max_tokens, max_num_scheduled_tokens)
     token_counts = b12x_warmup_token_counts(
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
+        max_tokens=max_tokens,
+        cudagraph_capture_sizes=serving_sizes,
     )
     units = _collect_warmup_units(
         worker.get_model(),
@@ -72,7 +83,7 @@ def b12x_warmup(worker: "Worker", cudagraph_capture_sizes: list[int]) -> None:
     )
     for name, count in _compile_warmup_units(units).items():
         logger.info_once(
-            "Warmed up %d B12X %s linear GEMM signatures.",
+            "Warmed up %d b12x %s kernel signature(s).",
             count,
             name,
         )

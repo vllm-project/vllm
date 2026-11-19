@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
+from transformers import PreTrainedTokenizerBase
+
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -102,10 +106,11 @@ def run_reasoning_extraction_streaming(
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
     previous_tokens: list[int] = []
+    tokenizer = cast(PreTrainedTokenizerBase, reasoning_parser.model_tokenizer)
     for delta in model_deltas:
         token_delta = [
-            reasoning_parser.vocab.get(token)
-            for token in reasoning_parser.model_tokenizer.tokenize(delta)
+            reasoning_parser.vocab[token]
+            for token in tokenizer.tokenize(delta)
             if token in reasoning_parser.vocab
         ]
         current_text = previous_text + delta
