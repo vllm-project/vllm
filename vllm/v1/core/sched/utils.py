@@ -24,20 +24,6 @@ def prompt_embeds_bytes_per_token(vllm_config: "VllmConfig") -> int:
     return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
-def keep_prompt_embeds_until_finished(vllm_config: "VllmConfig") -> bool:
-    """Whether workers keep a request's `prompt_embeds` until it finishes.
-
-    Otherwise they are dropped once the prompt is computed. A KV load that
-    fails under `kv_load_failure_policy="recompute"` rolls a running request
-    back without re-sending it to the workers, so its rows must stay.
-    """
-    kv_transfer_config = vllm_config.kv_transfer_config
-    return (
-        kv_transfer_config is not None
-        and kv_transfer_config.kv_load_failure_policy == "recompute"
-    )
-
-
 def _has_repeating_pattern(
     token_ids: Sequence[int],
     pattern_len: int,

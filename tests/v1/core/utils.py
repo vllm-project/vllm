@@ -99,7 +99,6 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     enable_prompt_embeds: bool = False,
-    kv_load_failure_policy: str | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -188,9 +187,6 @@ def create_scheduler(
             kv_role=kv_role,
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
-    if kv_load_failure_policy is not None:
-        assert kv_transfer_config is not None
-        kv_transfer_config.kv_load_failure_policy = kv_load_failure_policy
 
     if num_speculative_tokens is not None:
         assert speculative_config is None

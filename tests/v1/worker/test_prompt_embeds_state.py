@@ -51,14 +51,13 @@ class _Batch:
     num_computed_tokens_np: np.ndarray | None = None
 
 
-def _make_state(keep_until_finished: bool = False) -> PromptEmbedsState:
+def _make_state() -> PromptEmbedsState:
     return PromptEmbedsState(
         MAX_NUM_REQS,
         MAX_NUM_ROWS,
         HIDDEN,
         torch.float32,
         DEVICE,
-        keep_until_finished=keep_until_finished,
     )
 
 
@@ -188,21 +187,6 @@ def test_drops_embeds_after_last_prompt_step():
     out, _ = _apply(state, _batch([2], [0], ["a"]), num_computed=[4], num_tokens=2)
     torch.testing.assert_close(out, embeds[4:6].to(DEVICE))
     assert "a" not in state.gpu_tensors
-
-
-def test_keeps_embeds_until_finished_for_recompute():
-    """With keep_until_finished (kv_load_failure_policy="recompute"), rows stay
-    after the prompt is computed, so a request rolled back below its prompt
-    end recomputes from its own embeddings."""
-    state = _make_state(keep_until_finished=True)
-    embeds = torch.randn(6, HIDDEN, dtype=torch.float32)
-    state.add_request(0, _NewReqData("a", embeds))
-    state.apply_staged_writes()
-
-    _apply(state, _batch([6], [0], ["a"]), num_computed=[0], num_tokens=6)
-    out, _ = _apply(state, _batch([4], [0], ["a"]), num_computed=[2], num_tokens=4)
-
-    torch.testing.assert_close(out, embeds[2:6].to(DEVICE))
 
 
 def test_rows_over_budget_fail_loudly():

@@ -641,26 +641,6 @@ def test_prompt_embeds_budget_released_on_preemption():
     assert _new_req_ids(scheduler.schedule()) == ["b"]
 
 
-def test_prompt_embeds_held_until_finished_with_recompute_policy():
-    """With kv_load_failure_policy="recompute", a failed KV load can roll a
-    running request back without re-sending it, so its rows stay on the GPU,
-    and count against the budget, until it finishes."""
-    scheduler = create_scheduler(
-        max_model_len=64,
-        enable_prompt_embeds=True,
-        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
-        kv_load_failure_policy="recompute",
-    )
-    scheduler.add_request(_prompt_embeds_request("a", 40))
-    scheduler.add_request(_prompt_embeds_request("b", 40))
-
-    assert _new_req_ids(scheduler.schedule()) == ["a"]
-    assert _new_req_ids(scheduler.schedule()) == []
-
-    scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
-    assert _new_req_ids(scheduler.schedule()) == ["b"]
-
-
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
