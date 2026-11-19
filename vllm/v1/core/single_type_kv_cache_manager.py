@@ -977,7 +977,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         self._cache_partial_tail_block(request, num_tokens)
 
     def _cache_partial_tail_block(
-        self,
+        self: SingleTypeKVCacheManager,
         request: Request,
         num_tokens: int,
     ) -> None:
