@@ -1183,10 +1183,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # clusters. The mixes and norms of its kernels must not contract into FMAs.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
-      "10.0f;10.3f" "${CUDA_ARCHS}")
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
-      "10.0a;10.3a" "${CUDA_ARCHS}")
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(INKLING2_KERNEL_ARCHS)
     set(INKLING2_KERNEL_SRCS
