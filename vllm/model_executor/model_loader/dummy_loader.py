@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
+from vllm.config.quantization import layer_target_spec_scope
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -63,6 +64,7 @@ class DummyModelLoader(BaseModelLoader):
 
         quant_method = getattr(layer, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
-            quant_method.process_weights_after_loading(layer)
+            with layer_target_spec_scope(layer):
+                quant_method.process_weights_after_loading(layer)
 
         info.reset()
