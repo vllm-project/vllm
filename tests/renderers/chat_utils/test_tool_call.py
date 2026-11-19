@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+from copy import deepcopy
 
-from vllm.renderers.chat_utils import ConversationMessage
+import pytest
+from transformers import LlamaConfig
+
+from vllm.config import ModelConfig
+from vllm.renderers.chat_utils import (
+    ConversationMessage,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
 from vllm.renderers.chat_utils.chat_message import _postprocess_messages
 
 
@@ -146,3 +154,102 @@ def test_postprocess_messages_null_arguments_string():
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+@pytest.fixture
+def tool_result_model_config(tmp_path):
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"], max_position_embeddings=128
+    ).save_pretrained(tmp_path)
+    return ModelConfig(str(tmp_path), max_model_len=128)
+
+
+def _tool_result_messages(call_ids, result_ids):
+    messages = _assistant_tool_calls(
+        [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "echo_payload", "arguments": {}},
+            }
+            for call_id in call_ids
+        ]
+    )
+    messages.extend(
+        {
+            "role": "tool",
+            "tool_call_id": result_id,
+            "content": {"call_A": "7c92e1", "call_B": "3f84d6"}.get(result_id, "other"),
+        }
+        for result_id in result_ids
+    )
+    return messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("content_format", ["string", "openai"])
+@pytest.mark.parametrize("result_ids", [("call_A", "call_B"), ("call_B", "call_A")])
+async def test_tool_results_follow_call_order(
+    tool_result_model_config, is_async, content_format, result_ids
+):
+    """An ID-less template must see each result in its original call position."""
+    messages = _tool_result_messages(("call_A", "call_B"), result_ids)
+    original = deepcopy(messages)
+    if is_async:
+        conversation, _, _ = await parse_chat_messages_async(
+            messages, tool_result_model_config, content_format
+        )
+    else:
+        conversation, _, _ = parse_chat_messages(
+            messages, tool_result_model_config, content_format
+        )
+    assert [
+        (message["tool_call_id"], message["content"])
+        for message in conversation
+        if message["role"] == "tool"
+    ] == [("call_A", "7c92e1"), ("call_B", "3f84d6")]
+    assert messages == original
+
+
+@pytest.mark.parametrize(
+    "call_ids, result_ids, separator",
+    [
+        (("call_A", "call_B"), ("call_B",), None),
+        (("call_A", "call_B"), ("call_B", "call_B"), None),
+        (("call_A", "call_A"), ("call_A", "call_A"), None),
+        (("call_A", "call_B"), ("call_B", "call_C"), None),
+        (("call_A", "call_B"), ("call_B", "call_A", "call_A"), None),
+        (("call_A", None), ("call_B", "call_A"), None),
+        (("call_A", ""), ("call_B", "call_A"), None),
+        (("call_A", "call_B"), (None, "call_A"), None),
+        (("call_A", "call_B"), ("", "call_A"), None),
+        (("call_A", "call_B"), ("call_B", "call_A"), "user"),
+        (("call_A", "call_B"), ("call_B", "call_A"), "assistant"),
+    ],
+    ids=[
+        "partial",
+        "duplicate-result",
+        "duplicate-call",
+        "unknown-result",
+        "extra-result",
+        "missing-call-id",
+        "empty-call-id",
+        "missing-result-id",
+        "empty-result-id",
+        "intervening-user",
+        "intervening-assistant",
+    ],
+)
+def test_ambiguous_tool_results_keep_received_order(
+    tool_result_model_config, call_ids, result_ids, separator
+):
+    messages = _tool_result_messages(call_ids, result_ids)
+    if separator:
+        messages.insert(2, {"role": separator, "content": "intervening turn"})
+    expected = deepcopy(messages)
+    conversation, _, _ = parse_chat_messages(
+        messages, tool_result_model_config, content_format="string"
+    )
+    assert conversation == expected
+    assert messages == expected
