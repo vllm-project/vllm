@@ -46,6 +46,7 @@ WATERMARK_CONFIG_FIELDS = (
     "context_width",
     "deduplicate_contexts",
     "deduplicate_contexts_max_history",
+    "deduplicate_block_contexts_max_history",
     "prf",
     "allow_target_only_watermarking",
     "enforce",

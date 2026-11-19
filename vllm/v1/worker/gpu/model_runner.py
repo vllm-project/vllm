@@ -94,6 +94,7 @@ from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
+    speculative_draft_watermark_key,
     speculative_target_watermark_key,
 )
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -543,6 +544,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     deduplicate_contexts_max_history=(
                         wm_config.deduplicate_contexts_max_history
                     ),
+                    deduplicate_block_contexts_max_history=(
+                        wm_config.deduplicate_block_contexts_max_history
+                    ),
+                    draft_key=speculative_draft_watermark_key(wm_config),
                     **sampler_kwargs,
                 )
             custom = self.model_state.custom_sampler(self.sampler)
