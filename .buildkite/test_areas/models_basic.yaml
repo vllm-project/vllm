@@ -137,6 +137,7 @@ steps:
       - tests/models/test_deepseek_v41_pcp.py
       - tests/models/test_deepseek_v41_amd_replay_forward.py
       - tests/models/test_deepseek_v4_dspark_rocm.py
+      - tests/models/test_deepseek_dspark_packed_mapping.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
       - tests/models/test_dsv41_mono_decode.py
@@ -168,6 +169,7 @@ steps:
         models/test_deepseek_v41_pcp.py
         models/test_deepseek_v41_amd_replay_forward.py
         models/test_deepseek_v4_dspark_rocm.py
+        models/test_deepseek_dspark_packed_mapping.py
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
         models/test_dsv41_mono_decode.py
@@ -399,6 +401,10 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/index_group.py
+  - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
   - tests/models/qwen4_exp/
   commands:
     - >-
@@ -568,6 +574,7 @@ steps:
   - tests/models/deepseek_v32/test_sequence_parallel.py
   - tests/models/deepseek_v32/test_pp_topk.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
+  - tests/models/test_deepseek_dspark_packed_mapping.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   - tests/models/test_cohere2_moe_parallel_block.py
@@ -587,6 +594,7 @@ steps:
       models/deepseek_v32/test_sequence_parallel.py
       models/deepseek_v32/test_pp_topk.py
       models/test_deepseek_v4_fi_moe_ep.py
+      models/test_deepseek_dspark_packed_mapping.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
       models/test_dory.py

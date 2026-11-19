@@ -1805,6 +1805,8 @@ def init_indexer_wk_weights_proj(
     hidden_size: int,
     quant_config: QuantizationConfig | None,
     prefix: str,
+    *,
+    fused_linear_cls: type[MergedColumnParallelLinear] = MergedColumnParallelLinear,
 ) -> None:
     """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
     checkpoint stores it and run in BF16: `bf16_linear`) and
@@ -1828,7 +1830,7 @@ def init_indexer_wk_weights_proj(
     indexer.weights_proj = ReplicatedLinear(
         hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
     )
-    fused = MergedColumnParallelLinear(
+    fused = fused_linear_cls(
         hidden_size,
         [indexer.head_dim, indexer.n_head],
         bias=False,

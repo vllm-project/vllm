@@ -5,6 +5,7 @@ mod abort_requests;
 mod cache;
 mod checkpoint;
 mod collective_rpc;
+mod generative_scoring;
 mod health;
 mod inference;
 mod kv_event_sources;
@@ -162,8 +163,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
             "/v1/responses/{response_id}/cancel",
             post(openai::cancel_response),
         )
-        // TODO: implement generative scoring.
-        .route("/generative_scoring", post(not_supported))
+        .route(
+            "/generative_scoring",
+            post(generative_scoring::generative_scoring),
+        )
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
