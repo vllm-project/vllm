@@ -54,6 +54,9 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
     # ShardQ computes every head for each rank's token slice.
     supports_shardq: ClassVar[bool] = True
+    # The sink-aware kernel has not been validated with HiSparse's
+    # host-backed prefill path; keep the combination closed.
+    supports_shardq_with_hisparse: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -284,15 +287,19 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             # all heads, so the kernel reduces across the head group and NaNs
             # from uninitialized memory would leak into the real heads.
             if out is None:
-                q_padded = q.new_zeros((q.shape[0], padded_num_heads, q.shape[2]))
+                q_padded = q.new_zeros((num_tokens, padded_num_heads, q.shape[2]))
             else:
-                *_, q_padded, _, _ = current_workspace_manager().get_simultaneous(
+                *_, q_workspace, _, _ = current_workspace_manager().get_simultaneous(
                     *self.workspace_specs
                 )
-                q_padded = q_padded[:num_tokens]
-                q_padded[:, actual_num_heads:].zero_()
-            q_padded[:, :actual_num_heads, :] = q
+                q_padded = q_workspace[:num_tokens, :padded_num_heads]
+            q_padded[:, actual_num_heads:padded_num_heads].zero_()
+            q_padded[:, :actual_num_heads].copy_(q[:, :actual_num_heads])
             q = q_padded
+
+        q = q[:, :padded_num_heads]
+        if out is not None:
+            out = out[:, :padded_num_heads]
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
         output, _, lse = flash_mla_sparse_fwd(

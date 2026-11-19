@@ -64,7 +64,7 @@ steps:
     - vllm/v1/attention/
     - tests/v1/attention/test_shardq.py
   commands:
-    - pytest -v -s v1/attention/test_shardq.py -k builder_selects_mqa_after_shardq_split
+    - pytest -v -s v1/attention/test_shardq.py -k builder_selects
 
 - label: ":nvidia: (B200) V1 Attention"
   key: v1-attention-b200

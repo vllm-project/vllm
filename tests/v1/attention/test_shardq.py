@@ -63,9 +63,9 @@ def test_zigzag_split_partitions_tokens(world, lens):
 @pytest.mark.parametrize("num_spec", [0, 2])
 def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     """The MLA and indexer builders derive the same split from the batch:
-    requests of at most 1 + num_spec tokens stay head-sharded, and the tokens
-    after them are split once they reach sparse_mla_shard_q_min_tokens and a
-    request is longer than the top-k."""
+    requests the builder classifies as decodes stay head-sharded, and the
+    tokens after them are split once they reach
+    sparse_mla_shard_q_min_tokens and a request is longer than the top-k."""
     monkeypatch.setattr(
         shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
     )
@@ -81,7 +81,12 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     hf_config = SimpleNamespace(index_topk=5299)
     vllm_config = SimpleNamespace(
         speculative_config=(
-            SimpleNamespace(num_speculative_tokens=num_spec) if num_spec else None
+            SimpleNamespace(
+                num_speculative_tokens=num_spec,
+                max_num_new_slots_for_drafting=0,
+            )
+            if num_spec
+            else None
         ),
         attention_config=attention_config,
         model_config=SimpleNamespace(hf_text_config=hf_config),
@@ -106,20 +111,24 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     assert build_shardq_split(short, vllm_config) is None
 
 
-@pytest.mark.parametrize("query_lens", [[4, 2, 4096], [4, 4, 4096]])
-def test_build_shardq_split_skips_mixed_spec_verify_under_hisparse(
-    monkeypatch, query_lens
+@pytest.mark.parametrize(
+    "query_lens, expect_split",
+    [([4, 2, 4096], False), ([4, 4, 4096], True)],
+)
+def test_build_shardq_split_uses_hisparse_builder_boundary(
+    monkeypatch, query_lens, expect_split
 ):
-    """HiSparse forces the sparse-MLA builder to treat only 1-token requests as
-    decodes with uniform lengths, so speculative-verification tokens in a mixed
-    batch are prefills there. ShardQ's 1 + num_spec boundary would count them as
-    decodes and disagree with both the indexer's token-sharded top-k layout and
-    the separate prefill path, so it must be skipped for that step."""
+    """Under HiSparse the builder classifies decodes with max_decode_query_len
+    and requires uniform decode lengths. [4, 4, long] is uniform in both
+    derivations; [4, 2, long] diverges and must skip ShardQ."""
     monkeypatch.setattr(
         shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
     )
     vllm_config = SimpleNamespace(
-        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            max_num_new_slots_for_drafting=0,
+        ),
         attention_config=SimpleNamespace(
             hisparse_config=object(), sparse_mla_shard_q_min_tokens=1024
         ),
@@ -130,7 +139,12 @@ def test_build_shardq_split_skips_mixed_spec_verify_under_hisparse(
         block_size=16,
         device=torch.device("cpu"),
     )
-    assert build_shardq_split(metadata, vllm_config) is None
+    split = build_shardq_split(metadata, vllm_config)
+    if expect_split:
+        assert split is not None
+        assert split.num_decode_tokens == 8
+    else:
+        assert split is None
 
     # A regular decode step batched with a long prefill has the same boundary in
     # both derivations and still shards.
@@ -143,6 +157,44 @@ def test_build_shardq_split_skips_mixed_spec_verify_under_hisparse(
     assert split is not None
     assert split.num_decode_tokens == 2
     assert split.num_tokens_per_rank.sum() == 4096
+
+
+def test_build_shardq_split_uses_drafting_extra_slots(monkeypatch):
+    """max_decode_query_len includes drafter-added query slots, so a 5-token
+    request is still a decode when the drafter has one extra slot."""
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3,
+            max_num_new_slots_for_drafting=1,
+        ),
+        attention_config=SimpleNamespace(
+            hisparse_config=object(), sparse_mla_shard_q_min_tokens=1024
+        ),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+    )
+    metadata = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[305, 305, 4396],
+            query_lens=[5, 5, 4096],
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    split = build_shardq_split(metadata, vllm_config)
+    assert split is not None
+    assert split.num_decode_tokens == 10
+
+
+def test_fp8_separate_prefill_is_shardq_local_defaults_to_false():
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        FlashMLASparseMetadata,
+    )
+
+    metadata = FlashMLASparseMetadata.FP8SeparatePrefillDecode()
+    assert metadata.is_shardq_local is False
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
@@ -300,6 +352,68 @@ def _check_builder_shardq_route(rank, world, port, hisparse=False):
                     else SparseMLAPrefillRoute.DENSE_MHA
                 )
                 assert metadata.prefill.route is expected, metadata.prefill.route
+
+            if hisparse:
+                # Mixed decode + prefill: the local ShardQ FP8 metadata must
+                # rebase request ids by the full batch's decode-request offset.
+                mixed = create_common_attn_metadata(
+                    BatchSpec(
+                        seq_lens=[301, 364, 2347],
+                        query_lens=[1, 64, 2047],
+                    ),
+                    64,
+                    device,
+                    arange_block_indices=True,
+                )
+                mixed_metadata = builder.build(0, mixed)
+                assert mixed_metadata.num_decodes == 1
+                assert mixed_metadata.num_decode_tokens == 1
+                assert mixed_metadata.shardq is not None
+                assert mixed_metadata.shardq.num_decode_tokens == 1
+                assert mixed_metadata.fp8_extra_metadata.is_shardq_local is False
+
+                local = mixed_metadata.shardq.attn_metadata
+                assert local.num_decodes == 0
+                assert local.num_decode_tokens == 0
+                assert local.shardq_num_decodes == 1
+
+                expected_ids = mixed_metadata.req_id_per_token[
+                    mixed_metadata.shardq.local_token_ids
+                    + mixed_metadata.num_decode_tokens
+                ]
+                torch.testing.assert_close(
+                    local.req_id_per_token,
+                    expected_ids,
+                    atol=0,
+                    rtol=0,
+                )
+
+                local_fp8 = local.fp8_extra_metadata
+                assert local_fp8.is_shardq_local is True
+                assert local_fp8.prefill is not None
+                torch.testing.assert_close(
+                    local_fp8.prefill.request_ids,
+                    local.req_id_per_token - mixed_metadata.num_decodes,
+                    atol=0,
+                    rtol=0,
+                )
+
+                full_chunks = mixed_metadata.fp8_extra_metadata.prefill.chunks
+                full_by_start = {chunk.req_start_idx: chunk for chunk in full_chunks}
+                covered = 0
+                for chunk in local_fp8.prefill.chunks:
+                    start, stop = chunk.tokens_slice.start, chunk.tokens_slice.stop
+                    assert 0 <= start < stop <= local_fp8.num_prefill_tokens
+                    covered += stop - start
+                    full_chunk = full_by_start[chunk.req_start_idx]
+                    torch.testing.assert_close(
+                        chunk.block_table, full_chunk.block_table
+                    )
+                    torch.testing.assert_close(
+                        chunk.workspace_starts, full_chunk.workspace_starts
+                    )
+                    assert chunk.chunk_tot_seqlen == full_chunk.chunk_tot_seqlen
+                assert covered == local_fp8.num_prefill_tokens
         finally:
             reset_workspace_manager()
             destroy_model_parallel()

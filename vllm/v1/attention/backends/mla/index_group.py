@@ -269,9 +269,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
         num_decodes = self._prefill_num_decodes(attn_metadata)
-        staged_cache = cache.stage_prefill_rows(
-            kv_cache, staging_plan, num_decodes
-        )
+        staged_cache = cache.stage_prefill_rows(kv_cache, staging_plan, num_decodes)
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
         if num_decodes > 0:
             req_ids = req_ids - num_decodes
@@ -280,9 +278,11 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     @staticmethod
     def _prefill_num_decodes(attn_metadata: Any) -> int:
         # A ShardQ-narrowed batch reports no decodes but still stages against
-        # the full batch's prefill rows.
-        return getattr(attn_metadata, "shardq_num_decodes", 0) or (
-            attn_metadata.num_decodes
+        # the full batch's prefill rows. The shared HiSparse index group also
+        # serves metadata without shardq_num_decodes (e.g. Qwen4 QSA), so fall
+        # back to num_decodes.
+        return (
+            getattr(attn_metadata, "shardq_num_decodes", 0) or attn_metadata.num_decodes
         )
 
     def _prefill_gather_plan(
