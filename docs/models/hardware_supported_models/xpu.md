@@ -64,6 +64,9 @@ Note: Online FP8 = [Online Quantization](https://docs.vllm.ai/en/latest/features
 | THUDM/GLM-4v-9B               | GLM4vForConditionalGeneration        | BF16/Online FP8 |
 | openbmb/MiniCPM-V-4           | MiniCPMVForConditionalGeneration     | BF16/Online FP8 |
 
+Qwen3.5 models on XPU use eager execution. MoE decode fusion is opt-in; see the
+[configuration and supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen3_5/xpu/specialized_decode/README.md).
+
 ### Embedding and Reranker Language Models
 
 | Model                   | Architecture                   | Dtype           |
