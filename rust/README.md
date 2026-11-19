@@ -83,8 +83,6 @@ backend on the server and pause generation during updates, as shown there.
 
 ### External Engine
 
-For standalone containers, see [Using Docker](../docs/deployment/docker.md#standalone-rust-frontend).
-
 `vllm-rs serve` can be run standalone with `--data-parallel-size-local 0` when the Python engines
 are started elsewhere and this node should run only the Rust frontend. The frontend still uses
 the global `--data-parallel-size` to determine how many engines it expects to join the shared handshake.

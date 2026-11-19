@@ -2,7 +2,6 @@
 set -euo pipefail
 staging=public.ecr.aws/q9t5s3a7/vllm-release-repo
 hub=vllm/vllm-rust-frontend
-aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${staging%/*}"
 
 manifest_digest() {
     docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | jq -er .
@@ -14,12 +13,11 @@ for arch in x86_64 aarch64; do
     [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
     sources+=("$staging@$digest")
 done
-if [[ ${NIGHTLY:-} == 1 ]]; then
+tag=${1:?expected nightly or a version tag}
+if [[ $tag == nightly ]]; then
     tag="nightly-$BUILDKITE_COMMIT"
     moving=nightly
 else
-    version=$(buildkite-agent meta-data get release-version)
-    tag="v${version#v}"
     moving=latest
 fi
 

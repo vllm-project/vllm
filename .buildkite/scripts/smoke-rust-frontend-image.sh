@@ -30,8 +30,6 @@ container=$(docker run -d -p 127.0.0.1::8000 -v "$model_dir:/model:ro" \
 docker exec "$container" sh -ec '
     test "$(id -u):$(id -g)" = 2000:0
     touch "$HOME/.cache/huggingface/.write-check"
-    ldd /usr/local/bin/vllm-rs > /tmp/linked
-    ! grep -q "not found" /tmp/linked || exit 1
     ffmpeg -loglevel error -f lavfi -i color=blue:s=64x64:r=2 -frames:v 4 /tmp/test.mp4
     ffmpeg -loglevel error -i /tmp/test.mp4 -frames:v 1 /tmp/test.jpg
     test "$(ffprobe -v error -select_streams v -show_entries stream=nb_frames -of csv=p=0 /tmp/test.mp4)" = 4

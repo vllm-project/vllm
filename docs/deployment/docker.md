@@ -35,46 +35,17 @@ Release images for ROCm and XPU are also published as `vllm/vllm-rocm` and
 
 ## Standalone Rust frontend
 
-The `vllm/vllm-rust-frontend` image runs on Linux AMD64 and ARM64 CPUs.
-Use it for engine-free rendering or to serve requests with separate headless
-vLLM engines. The runtime includes FFmpeg for video and audio preprocessing.
-Use matching release tags or `nightly-<full-commit-sha>` for the frontend
-and engine. The most recent 14 nightly builds are retained. The short tags
-`vllm/vllm:{latest,v<version>,nightly}-rust-frontend` select the same image.
-
-To build from a checkout, run
-`docker buildx bake -f docker/docker-bake.hcl rust-frontend` from the repository
-root and use `local/vllm-rust-frontend:dev` in place of the published image.
-
-For a standalone render service:
+Use `vllm/vllm-rust-frontend` on Linux AMD64 or ARM64 for engine-free rendering:
 
 ```bash
-docker run --rm -p 127.0.0.1:8000:8000 \
-    -v frontend-cache:/home/vllm/.cache/huggingface \
-    vllm/vllm-rust-frontend:latest render Qwen/Qwen3-0.6B --host 0.0.0.0
+docker run --rm -p 127.0.0.1:8000:8000 vllm/vllm-rust-frontend:latest \
+    render Qwen/Qwen3-0.6B --host 0.0.0.0
 ```
 
-For inference, use two containers with a shared network namespace on one Linux
-host. Only the engine needs a GPU. The handshake and engine I/O can use
-loopback inside that namespace. On separate hosts use the reachable IP of the
-frontend for `--data-parallel-address` on both commands.
-
-```bash
-# Set TAG to a release published for both images or a commit-pinned nightly.
-: "${TAG:?Set TAG to the matching vLLM image tag}"
-docker run -d --name rust-frontend -p 127.0.0.1:8000:8000 \
-    -v frontend-cache:/home/vllm/.cache/huggingface \
-    "vllm/vllm-rust-frontend:$TAG" serve Qwen/Qwen3-0.6B --host 0.0.0.0 \
-    --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 62100 \
-    --data-parallel-size 1 --data-parallel-size-local 0
-docker run --rm --gpus all --shm-size 2g --network container:rust-frontend \
-    --entrypoint vllm "vllm/vllm-openai:$TAG" serve Qwen/Qwen3-0.6B --headless \
-    --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 62100 \
-    --data-parallel-size 1 --data-parallel-size-local 1
-```
-
-Send requests to `http://127.0.0.1:8000/v1`. After stopping the engine,
-run `docker rm -f rust-frontend` to remove the frontend container.
+For inference with an [external engine](https://github.com/vllm-project/vllm/blob/main/rust/README.md#external-engine),
+use `serve --data-parallel-size-local 0` and match the frontend and engine tags
+(`v<version>` or `nightly-<full-commit-sha>`). Build locally from the repository
+root with `docker buildx bake -f docker/docker-bake.hcl rust-frontend`.
 
 ## Run a vLLM Recipes configuration
 

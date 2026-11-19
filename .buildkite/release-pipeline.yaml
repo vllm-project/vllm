@@ -528,7 +528,8 @@ steps:
         concurrency: 1
         concurrency_group: rust-frontend-nightly-publish
         commands:
-          - bash .buildkite/scripts/publish-rust-frontend-image.sh
+          - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+          - bash .buildkite/scripts/publish-rust-frontend-image.sh nightly
           - bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-rust-frontend
         secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
         plugins:
