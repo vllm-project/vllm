@@ -584,8 +584,13 @@ class BertWithRope(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class NomicBertModel(BertWithRope):
+class NomicBertModel(BertWithRope, SupportsLoRA):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
+
+    packed_modules_mapping = {
+        "qkv_proj": ["qkv_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
