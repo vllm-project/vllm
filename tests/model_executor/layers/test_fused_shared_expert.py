@@ -1132,6 +1132,20 @@ def test_fused_shared_expert_layers_matches_container_index_space() -> None:
     assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_layers)
     assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_layers)
 
+    # A single shared expert is only renamed, including 0-D per-tensor scales.
+    scale = torch.tensor(2.0)
+    [(out_name, out_weight)] = list(
+        maybe_fuse_shared_experts(
+            [("layers.0.mlp.shared_expert.down_proj.weight_scale", scale)],
+            n_routed_experts=4,
+            n_shared_experts=1,
+            fused_shared_expert_layers=list_layers,
+            ckpt_prefix="mlp.shared_expert",
+        )
+    )
+    assert out_name == "layers.0.mlp.experts.4.down_proj.weight_scale"
+    assert out_weight is scale
+
 
 @pytest.mark.parametrize(
     ("enable_expert_parallel", "match"),

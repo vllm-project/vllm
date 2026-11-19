@@ -676,6 +676,18 @@ def maybe_fuse_shared_experts(
         if extract_layer_index(name) not in fused_shared_expert_layers:
             yield name, loaded_weight
             continue
+        suffix = name.split(prefix, 1)[1]
+        if ckpt_proj_names:
+            projection, dot, tail = suffix.partition(".")
+            suffix = ckpt_proj_names.get(projection, projection) + dot + tail
+        if n_shared_experts == 1:
+            # Nothing to split: also keeps 0-D tensors (e.g. per-tensor scales).
+            yield (
+                name.split(prefix, 1)[0]
+                + f"{experts_prefix}.{n_routed_experts}.{suffix}",
+                loaded_weight,
+            )
+            continue
         # gate/up split on the output dim; down_proj on the input dim.
         split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
         total = loaded_weight.shape[split_dim]
@@ -685,10 +697,6 @@ def maybe_fuse_shared_experts(
                 f"{split_dim}, not divisible by n_shared_experts={n_shared_experts}."
             )
         chunk = total // n_shared_experts
-        suffix = name.split(prefix, 1)[1]
-        if ckpt_proj_names:
-            projection, dot, tail = suffix.partition(".")
-            suffix = ckpt_proj_names.get(projection, projection) + dot + tail
         for j in range(n_shared_experts):
             sl = slice(j * chunk, (j + 1) * chunk)
             if loaded_weight.ndim == 1:
