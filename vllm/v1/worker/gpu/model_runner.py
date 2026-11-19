@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.direct import follow_target_reload_mode
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
@@ -449,6 +450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             load_dummy_weights,
                         )
                     self.speculator.free_unused_weights(self.model)
+                    follow_target_reload_mode(self.speculator.model, self.model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

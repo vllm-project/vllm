@@ -44,6 +44,7 @@ __all__ = [
     "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "follow_target_reload_mode",
     "layerwise_reason",
     "loadable_tensors",
     "mark_loaded",
@@ -102,14 +103,14 @@ def _config_refusal() -> str | None:
 
 def reloads_directly(model: torch.nn.Module) -> bool:
     """Whether `model`'s updates reload directly: its cold start recorded a layout."""
-    if envs.VLLM_RELOAD_MODE == "layerwise" or not hasattr(model, "_ckpt_param_names"):
-        return False
-    if envs.VLLM_RELOAD_MODE == "auto" and _shares_refused(model):
-        # follow the layerwise model it shares tensors with (a draft's target)
-        del model._ckpt_param_names
-        _refuse(model, _SHARED)
-        return False
-    return True
+    return envs.VLLM_RELOAD_MODE != "layerwise" and hasattr(model, "_ckpt_param_names")
+
+
+def follow_target_reload_mode(draft: torch.nn.Module, target: torch.nn.Module) -> None:
+    """A draft reloads layerwise whenever its target does: they may share tensors."""
+    if reloads_directly(draft) and not reloads_directly(target):
+        del draft._ckpt_param_names
+        _refuse(draft, "a draft whose target reloads layerwise")
 
 
 def layerwise_reason(model: torch.nn.Module) -> str:
@@ -119,22 +120,13 @@ def layerwise_reason(model: torch.nn.Module) -> str:
     return model.__dict__.get("_layerwise_reason", "no checkpoint layout was recorded")
 
 
-_SHARED = "tensors shared with a model that reloads layerwise"
-
-
-def _shares_refused(model: torch.nn.Module) -> bool:
-    return any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model))
-
-
 def _refuse(model: torch.nn.Module, reason: str) -> None:
-    """Mark `model` to reload layerwise and its tensors as refused."""
+    """Mark `model` to reload layerwise."""
     model._layerwise_reason = reason
     model.__dict__.pop("_loaded_params", None)
     logger.info(
         "Direct reload does not support %s: weight updates reload layerwise.", reason
     )
-    for _, t in loadable_tensors(model):
-        t._ckpt_refused = True  # a direct model sharing it must refuse too
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -268,11 +260,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
         return
     if is_weights_pre_processed():
         reason = "pre-processed weights"  # already in runtime layout
-    elif reason := _module_refusal(model):
-        if envs.VLLM_RELOAD_MODE == "direct":
-            raise RuntimeError(f"direct reload: {reason} is not supported")
-    elif envs.VLLM_RELOAD_MODE == "auto" and _shares_refused(model):
-        reason = _SHARED
+    elif (reason := _module_refusal(model)) and envs.VLLM_RELOAD_MODE == "direct":
+        raise RuntimeError(f"direct reload: {reason} is not supported")
     if reason:
         _refuse(model, reason)
         return
@@ -363,12 +352,6 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    # e.g. a layerwise target's lm_head shared into a direct draft
-    if any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model)):
-        raise RuntimeError(
-            "direct reload: this model shares tensors with a model that reloads "
-            "layerwise; set VLLM_RELOAD_MODE=layerwise"
-        )
     _check_params_kept(model)
     views = _checkpoint_views(model)
 

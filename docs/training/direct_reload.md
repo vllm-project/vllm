@@ -70,8 +70,8 @@ Models (with `VLLM_RELOAD_MODE=direct` they raise an error when loaded):
   of checkpoint-quantized layers, gpt-oss models, and `fp8_per_block` linear
   layers whose tensor-parallel shards are not multiples of 128.
 - Layers using Humming kernels.
-- A draft model sharing tensors with a target that reloads layerwise follows
-  the target (`auto`), or raises at its first update (`direct`).
+
+A draft model reloads layerwise whenever its target does.
 
 The NCCL weight transfer load plan (`use_load_plan`) requires direct reload and
 refuses online quantization.

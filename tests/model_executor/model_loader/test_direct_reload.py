@@ -36,6 +36,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     direct_reload_enabled,
     finish_direct_reload,
+    follow_target_reload_mode,
     layerwise_reason,
     record_checkpoint_layout,
     reloads_directly,
@@ -802,13 +803,13 @@ def test_auto_refused_model_and_its_draft_reload_layerwise(monkeypatch):
     start_reload(target)
     finish_reload(target, _MODEL_CONFIG, _DEVICE)
     assert calls == ["init", "finalize"]
-    # a direct draft holding the target's tensors follows it; `direct` raises
+    # a draft follows a layerwise target, even one sharing its tensors
     draft = _cold_start(_checkpoint())
     draft.attn = target.attn
+    follow_target_reload_mode(draft, target)
     assert not reloads_directly(draft)
-    assert "shared" in layerwise_reason(draft)
+    assert "target" in layerwise_reason(draft)
+    # a direct target leaves its draft's own decision
     draft = _cold_start(_checkpoint())
-    draft.attn = target.attn
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    with pytest.raises(RuntimeError, match="reloads layerwise"):
-        begin_direct_reload(draft)
+    follow_target_reload_mode(draft, _cold_start(_checkpoint()))
+    assert reloads_directly(draft)
