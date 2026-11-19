@@ -1030,8 +1030,15 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
-        mapping_by_expert = _index_expert_mapping(expert_mapping)
+        # Built once per layer: hand-written model loaders call this per tensor.
+        # Only the LoRA wrapping changes the mapping after construction.
+        lora_prefix = getattr(self, "lora_base_layer_prefix", "")
+        cache = self.__dict__.get("_expert_mapping_cache")
+        if cache is None or cache[0] != lora_prefix:
+            expert_mapping = self.get_expert_mapping(include_fused=True)
+            cache = (lora_prefix, expert_mapping, _index_expert_mapping(expert_mapping))
+            self.__dict__["_expert_mapping_cache"] = cache
+        _, expert_mapping, mapping_by_expert = cache
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"

@@ -256,7 +256,7 @@ class DeepseekV32Model(torch.nn.Module):
                 continue
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
-            if "mlp.experts." in name:
+            if "mlp.experts." in name and name not in params_dict:
                 # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue

@@ -1133,7 +1133,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     mlp.experts.load_shared_expert_weight(name, loaded_weight)
                 )
                 continue
-            if not self.use_mega_moe and "mlp.experts." in name:
+            if (
+                not self.use_mega_moe
+                and "mlp.experts." in name
+                and name not in params_dict
+            ):
                 # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue

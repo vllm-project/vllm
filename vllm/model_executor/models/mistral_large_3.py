@@ -93,10 +93,10 @@ class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):
     # we must apply hf_to_vllm_mapper before the loader walks the tree.
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # The fused shared expert transform matches vLLM names, while a mapper
-        # runs its transforms before its renames: rename with this class's
-        # mapper first (not the instance's, which also holds the transform),
-        # then fuse the shared experts.
-        weights = MistralLarge3ForCausalLM.hf_to_vllm_mapper.apply(weights)
+        # runs its transforms before its renames: rename with the class mapper
+        # first (not the instance's, which also holds the transform; subclasses
+        # such as Eagle extend it), then fuse the shared experts.
+        weights = type(self).hf_to_vllm_mapper.apply(weights)
         weights = maybe_fuse_shared_experts(
             weights,
             n_routed_experts=self.config.n_routed_experts,
