@@ -977,7 +977,13 @@ class Platform:
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
@@ -1026,6 +1032,25 @@ class Platform:
                     else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
                 ),
             ).page_size_bytes
+            # The layer's backend sets the packed row (e.g. 528-byte fp8_ds_mla
+            # rows on SM120), so size the block for the page an MLA layer
+            # allocates. Platforms that register no layers keep the estimate.
+            mla_config = next(
+                (
+                    layer.get_kv_cache_config(vllm_config)
+                    for layer in get_layers_from_vllm_config(
+                        vllm_config,
+                        AttentionLayerBase,  # type: ignore[type-abstract]
+                    ).values()
+                    if layer.get_attn_backend().is_mla()
+                ),
+                None,
+            )
+            if mla_config is not None and isinstance(mla_config.spec, AttentionSpec):
+                mla_spec = mla_config.spec
+                attn_page_size_1_token = (
+                    mla_spec.real_page_size_bytes // mla_spec.block_size
+                )
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"

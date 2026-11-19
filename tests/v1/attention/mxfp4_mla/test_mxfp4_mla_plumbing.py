@@ -95,6 +95,7 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
     )
     config = types.SimpleNamespace(
         cache_config=cache,
+        compilation_config=types.SimpleNamespace(static_forward_context={}),
         parallel_config=None,
         model_config=types.SimpleNamespace(
             dtype=torch.bfloat16,
