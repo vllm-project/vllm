@@ -5203,7 +5203,7 @@ def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, con
     with pytest.raises(ValidationError, match="decimal integer") as error:
         WatermarkConfig(key_file=str(key_file))
 
-    assert content not in str(error.value)
+    assert content not in str(error.value).replace(str(key_file), "")
 
 
 def test_missing_watermark_key_file_is_rejected(tmp_path):
