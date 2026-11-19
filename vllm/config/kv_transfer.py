@@ -234,18 +234,3 @@ class KVTransferConfig:
             child.get("kv_connector") in connector_names
             for child in self.kv_connector_extra_config.get("connectors", [])
         )
-
-    def add_connector(self, connector: dict[str, Any]) -> None:
-        """Append `connector`, wrapping a single connector in MultiConnector."""
-        if self.kv_connector != "MultiConnector":
-            self.kv_connector_extra_config = {
-                "connectors": [
-                    {
-                        "kv_connector": self.kv_connector,
-                        "kv_role": self.kv_role,
-                        "kv_connector_extra_config": self.kv_connector_extra_config,
-                    }
-                ]
-            }
-            self.kv_connector = "MultiConnector"
-        self.kv_connector_extra_config.setdefault("connectors", []).append(connector)

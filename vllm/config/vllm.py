@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -1311,9 +1311,22 @@ class VllmConfig:
                 "offload_indexer=False or add an OffloadingConnector."
             )
             return
-        kv_transfer_config.add_connector(
-            {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
-        )
+        offloading = {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
+        if kv_transfer_config.kv_connector == "MultiConnector":
+            kv_transfer_config.kv_connector_extra_config["connectors"].append(
+                offloading
+            )
+        else:
+            child = {
+                f.name: getattr(kv_transfer_config, f.name)
+                for f in fields(kv_transfer_config)
+                if f.name != "engine_id"
+            }
+            kv_transfer_config.kv_connector = "MultiConnector"
+            kv_transfer_config.kv_connector_module_path = None
+            kv_transfer_config.kv_connector_extra_config = {
+                "connectors": [child, offloading]
+            }
         logger.info(
             "HiSparse: added an OffloadingConnector for the indexer cache group "
             "so prefix hits survive GPU eviction; host_pool_gib is split between "
