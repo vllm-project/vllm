@@ -97,6 +97,17 @@ async def test_check_health(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
+@pytest.mark.skipif(envs.VLLM_USE_RUST_FRONTEND, reason="Python frontend only")
+@pytest.mark.parametrize("server_args", [["--disable-sagemaker-routes"]], indirect=True)
+def test_disable_sagemaker_routes(server: RemoteOpenAIServer):
+    assert requests.get(server.url_for("health")).status_code == HTTPStatus.OK
+    assert requests.get(server.url_for("ping")).status_code == HTTPStatus.NOT_FOUND
+    assert (
+        requests.post(server.url_for("invocations"), json={}).status_code
+        == HTTPStatus.NOT_FOUND
+    )
+
+
 @pytest.mark.parametrize(
     "server_args",
     [

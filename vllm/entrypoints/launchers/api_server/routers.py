@@ -37,11 +37,12 @@ def register_api_routers(
 
     register_decisions_api_router(app)
 
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
+    if not getattr(args, "disable_sagemaker_routes", False):
+        from vllm.entrypoints.serve.sagemaker.api_router import (
+            attach_router as register_sagemaker_api_router,
+        )
 
-    register_sagemaker_api_router(app, supported_tasks, model_config)
+        register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if envs.VLLM_SERVER_DEV_MODE:
         from vllm.entrypoints.serve import register_vllm_dev_api_routers
