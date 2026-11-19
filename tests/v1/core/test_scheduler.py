@@ -625,6 +625,21 @@ def test_prompt_embeds_admission_waits_for_gpu_budget():
     assert "a" in scheduler.requests
 
 
+def test_prompt_embeds_waiting_request_is_not_starved():
+    """A prompt_embeds request that does not fit holds back later prompt_embeds
+    requests, even ones that fit, so short prompts cannot keep a long one
+    waiting. Requests without prompt_embeds still go ahead."""
+    scheduler = create_scheduler(max_model_len=64, enable_prompt_embeds=True)
+    scheduler.add_request(_prompt_embeds_request("a", 40))
+    scheduler.add_request(_prompt_embeds_request("b", 60))
+    scheduler.add_request(_prompt_embeds_request("c", 16))
+    scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["d"])[0])
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "d"]
+    # a's prompt was computed in one step, so its rows are released.
+    assert _new_req_ids(scheduler.schedule()) == ["b"]
+
+
 def test_prompt_embeds_budget_released_on_preemption():
     """Preempting a request mid-prefill releases its rows (the workers drop
     them), so a waiting prompt_embeds request that did not fit is admitted."""
