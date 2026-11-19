@@ -308,12 +308,10 @@ class ClientRole:
         self._active_loads.add(kv_request_id)
         st.peer_lookup_open = False
         self._send(fetch)
-        # Issuing the fetch closes this lookup round. Once the peer serves
-        # the fetch both sides unpin, so a cached True could point at a
-        # block the producer has since evicted, and a probe sent under this
-        # round can no longer be answered for it: both are re-probed under
-        # the next round. A MISS pins nothing, so it is kept, and keys not
-        # yet sent go out under the next round.
+        # Issuing the fetch closes this lookup round, and the peer unpins
+        # once it serves it: a cached HIT, and a probe sent under this
+        # round, are re-probed under the next one. A MISS pins nothing and
+        # is kept; keys not yet sent go out under the next round.
         if st.probed and keys:
             assert st.probes, (
                 f"symmetric fetch for {kv_request_id} has keys but no probes"
