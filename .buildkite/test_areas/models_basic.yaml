@@ -401,6 +401,10 @@ steps:
   - vllm/config/compilation.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/index_group.py
+  - vllm/model_executor/warmup/qwen4_exp_qsa_warmup.py
   - tests/models/qwen4_exp/
   commands:
     - >-
@@ -679,6 +683,7 @@ steps:
 
 - label: ":nvidia: (B200) Mistral Large 4"
   key: mistral-large-4-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -690,6 +695,7 @@ steps:
     --ignore=models/mistral/mistral_large4/amd_specialized_decode
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Mistral Large 4"
       dind: false
       device: mi355_1
