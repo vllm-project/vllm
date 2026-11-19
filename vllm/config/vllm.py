@@ -1297,6 +1297,18 @@ class VllmConfig:
         if model_config is None or not model_config.enable_trace_replay:
             return
 
+    def _verify_prefill_hold(self) -> None:
+        # Only the DP engine core feeds the hold; anywhere else it never holds.
+        if self.scheduler_config.prefill_hold_ttft_target is None:
+            return
+        if self.parallel_config.data_parallel_size == 1 or (
+            self.model_config is not None and not self.model_config.is_moe
+        ):
+            raise ValueError(
+                "prefill_hold_ttft_target requires data parallelism "
+                "(data_parallel_size > 1) on a MoE model."
+            )
+
     def _check_supports_watermarking(
         self,
         config: "SamplingParams | BeamSearchParams | None" = None,
@@ -1519,6 +1531,7 @@ class VllmConfig:
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
+        self._verify_prefill_hold()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (

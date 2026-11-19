@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.config import ModelConfig
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold
 from vllm.v1.outputs import ModelRunnerOutput
@@ -18,6 +19,12 @@ RANKS = 8
 # Extra ms of a mixed step: fixed, per busiest-rank Ktok, per total Ktok and
 # per busiest-rank Gtok^2 of attention work.
 TRUTH = (15.0, 12.0, 3.0, 40.0)
+
+
+@pytest.fixture(autouse=True)
+def _moe_model(monkeypatch):
+    """The hold needs DP on a MoE model; the dense test model stands in."""
+    monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: True))
 
 
 def _row(**fields: float) -> list[float]:
@@ -147,10 +154,21 @@ def _finish_step(scheduler, output) -> None:
 
 def _hold_scheduler(ttft_target: float = T, **kwargs):
     """A scheduler with the hold enabled, and its hold."""
-    scheduler = create_scheduler(prefill_hold_ttft_target=ttft_target, **kwargs)
+    scheduler = create_scheduler(
+        prefill_hold_ttft_target=ttft_target, data_parallel_size=2, **kwargs
+    )
     hold = scheduler.prefill_hold
     assert hold is not None
     return scheduler, hold
+
+
+@pytest.mark.parametrize(("dp_size", "is_moe"), [(1, True), (2, False)])
+def test_requires_dp_on_a_moe_model(monkeypatch, dp_size: int, is_moe: bool):
+    """Only the DP engine core of a MoE model feeds the hold; anywhere else it
+    would silently never hold, so the config is rejected."""
+    monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: is_moe))
+    with pytest.raises(ValueError, match="requires data parallelism"):
+        create_scheduler(prefill_hold_ttft_target=T, data_parallel_size=dp_size)
 
 
 def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():
