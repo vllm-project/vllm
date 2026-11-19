@@ -675,8 +675,6 @@ accessible when this happens.
 ### Image Inputs
 
 Image input is supported according to [OpenAI Vision API](https://platform.openai.com/docs/guides/vision).
-Convert Apple Icon Image (`.icns`) files to PNG or JPEG before submitting them.
-
 Here is a simple example using Phi-3.5-Vision.
 
 First, launch the OpenAI-compatible server:
