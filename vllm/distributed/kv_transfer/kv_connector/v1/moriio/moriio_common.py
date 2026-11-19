@@ -61,6 +61,15 @@ def coerce_kv_int_param(
         ) from e
 
 
+def get_remote_tp_size(params: dict[str, Any], default: int = 0) -> int:
+    """Resolve the current and legacy peer TP fields."""
+    if params.get("remote_tp_size") not in (None, 0):
+        return coerce_kv_int_param(params, "remote_tp_size", 0)
+    if params.get("tp_size") not in (None, 0):
+        return coerce_kv_int_param(params, "tp_size", default)
+    return default
+
+
 Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
@@ -739,11 +748,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             # defaulted to 1, collapsing every producer rank onto decode rank 0
             # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
             # (treated as homogeneous downstream).
-            tp_size=int(
-                kv_transfer_params.get("remote_tp_size")
-                or kv_transfer_params.get("tp_size")
-                or 0
-            ),
+            tp_size=get_remote_tp_size(kv_transfer_params),
             remote_dp_size=_remote_dp_size,
             remote_dp_rank=_remote_dp_rank,
             multi_pod_hosts=_pod_hosts,

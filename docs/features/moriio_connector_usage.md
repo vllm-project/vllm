@@ -130,6 +130,10 @@ through the router's encoded request ID or explicit `remote_host` and
 `remote_notify_port` fields. Missing peer details are rejected instead of
 leaving the request waiting for a transfer.
 
+For requests that start a MoRIIO handshake or notify peers, the remote DP size
+multiplied by the remote TP size must be at most 1024. An unknown remote TP size
+uses the local TP size for this check.
+
 **Control-plane configuration:** MoRI moves KV bytes over RDMA/xGMI, but producers and consumers also need out-of-band TCP channels for handshake, block id exchange, liveness, and completion signaling. These keys live under `kv_connector_extra_config`:
 
 - `proxy_ip`: IP address of the disaggregation proxy/router that fronts the prefiller and decoder. Each vLLM instance uses it to register itself and to send heartbeats so the proxy knows where to route incoming requests.

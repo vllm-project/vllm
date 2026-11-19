@@ -54,6 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_moriio_mode,
     get_moriio_write_notify_address,
     get_port_offset,
+    get_remote_tp_size,
     get_role,
     pod_index,
     resolve_host_ip,
@@ -90,6 +91,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
+    validate_remote_topology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -231,8 +233,9 @@ def validate_moriio_heterogeneous_tp_kv_heads(
 
 def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
     """TP size of the peer named in `kv_transfer_params`; unknown means equal."""
-    params = params or {}
-    return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
+    tp_size = get_remote_tp_size(params or {}, local_tp_size)
+    validate_remote_topology(1, tp_size or local_tp_size)
+    return tp_size
 
 
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
@@ -867,12 +870,20 @@ class MoRIIOConnectorScheduler:
                 parameter="kv_transfer_params",
             )
         try:
+            remote_dp_size = coerce_kv_int_param(params, "remote_dp_size", 1) or 1
             for key, default in (
-                ("remote_dp_size", 1),
                 ("remote_dp_size_local", 0),
                 ("remote_dp_rank", 0),
             ):
                 coerce_kv_int_param(params, key, default)
+            if params.get("do_remote_prefill") or (
+                self.mode == MoRIIOMode.WRITE and params.get("do_remote_decode")
+            ):
+                remote_tp_size = (
+                    get_remote_tp_size(params)
+                    or self.vllm_config.parallel_config.tensor_parallel_size
+                )
+                validate_remote_topology(remote_dp_size, remote_tp_size)
             if (
                 self.mode == MoRIIOMode.WRITE
                 and not self.is_producer
@@ -2428,6 +2439,7 @@ class MoRIIOConnectorWorker:
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
+            validate_remote_topology(remote_dp_size, tp_size or self.world_size)
             # Wide-EP multi-pod: remote DP ranks span pods at different IPs
             # (ranks per pod = dp_local), so resolve the host per cur_dp_rank
             # below instead of using a single host for all ranks.
@@ -3216,6 +3228,9 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
+            validate_remote_topology(
+                int(meta.remote_dp_size), int(meta.tp_size) or self.world_size
+            )
             # we only need to check if dp0 in rank
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
@@ -3336,6 +3351,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size = int(meta.remote_dp_size)
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
+            validate_remote_topology(remote_dp_size, tp_size or self.world_size)
 
             # Flexible mirror (TP prefill + MLA, world_size==1 decode): the read
             # round-robins over prefill TP ranks, so pre-warm a session to EVERY

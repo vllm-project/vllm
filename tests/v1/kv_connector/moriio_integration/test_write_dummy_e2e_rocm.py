@@ -573,11 +573,12 @@ def _moriio_config(
 
 
 @pytest.fixture(scope="module")
-def validation_server() -> Generator[RemoteOpenAIServer]:
+def validation_server(request: pytest.FixtureRequest) -> Generator[RemoteOpenAIServer]:
     """Use real weights to check rejection and subsequent ordinary inference."""
     selector, devices = _visible_devices()
     port, ping_port = _open_port(), _open_port()
-    config = _moriio_config("kv_consumer", port, ping_port)
+    role = getattr(request, "param", "kv_consumer")
+    config = _moriio_config(role, port, ping_port)
     with (
         _proxy(ping_port),
         RemoteOpenAIServer(
@@ -655,14 +656,31 @@ def test_invalid_transfer_params_preserve_serving(
     validation_server, path, payload, params
 ):
     """Reject one malformed request without killing or occupying the engine."""
-    server = validation_server
+    _assert_transfer_params_rejected(
+        validation_server, path, payload, params, "kv_transfer_params"
+    )
+
+
+@pytest.mark.parametrize("validation_server", ["kv_producer"], indirect=True)
+@pytest.mark.parametrize("path", ["v1/completions", "invocations"])
+def test_oversized_topology_preserves_serving(validation_server, path):
+    _assert_transfer_params_rejected(
+        validation_server,
+        path,
+        {"prompt": "Hello", "max_tokens": 1},
+        {"do_remote_decode": True, "remote_dp_size": 33, "remote_tp_size": 32},
+        "remote ranks",
+    )
+
+
+def _assert_transfer_params_rejected(server, path, payload, params, error_message):
     response = requests.post(
         server.url_for(path),
         json={"model": "Qwen/Qwen3-0.6B", **payload, "kv_transfer_params": params},
         timeout=60,
     )
     assert response.status_code == 400, response.text
-    assert "kv_transfer_params" in response.json()["error"]["message"]
+    assert error_message in response.json()["error"]["message"]
     healthy = requests.post(
         server.url_for("v1/completions"),
         json={

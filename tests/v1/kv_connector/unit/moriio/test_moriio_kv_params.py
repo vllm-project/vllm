@@ -10,15 +10,13 @@ import torch
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import SamplingParams
 from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_common
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     get_role,
     set_role,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
-    MoRIIOConnector,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.v1.kv_cache_interface import (
@@ -34,21 +32,33 @@ ROUTER_REQUEST_ID = (
 
 
 @pytest.fixture
-def connector():
+def connector(request):
+    role, read_mode, use_multi = getattr(
+        request, "param", ("kv_consumer", False, False)
+    )
     original_role = get_role()
+    moriio_config = {
+        "kv_connector": "MoRIIOConnector",
+        "kv_role": role,
+        "kv_connector_extra_config": {
+            "read_mode": read_mode,
+            "host_ip": "127.0.0.1",
+            "handshake_port": 6301,
+            "notify_port": 61005,
+        },
+    }
+    if use_multi:
+        transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role=role,
+            kv_connector_extra_config={"connectors": [moriio_config]},
+        )
+    else:
+        transfer_config = KVTransferConfig(**moriio_config)
     config = VllmConfig(
         device_config=DeviceConfig("cpu"),
         cache_config=CacheConfig(block_size=32),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="MoRIIOConnector",
-            kv_role="kv_consumer",
-            kv_connector_extra_config={
-                "read_mode": False,
-                "host_ip": "127.0.0.1",
-                "handshake_port": 6301,
-                "notify_port": 61005,
-            },
-        ),
+        kv_transfer_config=transfer_config,
     )
     spec = AttentionSpec(
         block_size=32, num_kv_heads=4, head_size=64, dtype=torch.float16
@@ -58,7 +68,9 @@ def connector():
         kv_cache_tensors=[],
         kv_cache_groups=[make_kv_cache_group(["layer0"], spec)],
     )
-    instance = MoRIIOConnector(config, KVConnectorRole.SCHEDULER, cache)
+    instance = KVConnectorFactory.create_connector(
+        config, KVConnectorRole.SCHEDULER, cache
+    )
     try:
         yield instance
     finally:
@@ -75,6 +87,64 @@ def make_request(params, request_id="request"):
         ),
         pooling_params=None,
     )
+
+
+@pytest.mark.parametrize(
+    ("connector", "transfer_flag"),
+    [
+        (("kv_producer", False, False), "do_remote_decode"),
+        (("kv_consumer", False, False), "do_remote_prefill"),
+        (("kv_consumer", True, False), "do_remote_prefill"),
+    ],
+    indirect=["connector"],
+)
+@pytest.mark.parametrize(
+    "topology",
+    [
+        {"remote_dp_size": 1025},
+        {"remote_tp_size": 1025},
+        {"tp_size": "1025"},
+        {"remote_dp_size": 33, "remote_tp_size": 32},
+        {"remote_dp_size": -1},
+        {"remote_tp_size": -1},
+        {"remote_tp_size": [1]},
+        {"remote_tp_size": []},
+    ],
+)
+def test_rejects_unbounded_remote_topology(connector, transfer_flag, topology):
+    request = make_request({transfer_flag: True, **topology}, ROUTER_REQUEST_ID)
+
+    with pytest.raises(VLLMValidationError, match="remote_(dp|tp)_size") as error:
+        connector.validate_request(request)
+
+    assert error.value.parameter == "kv_transfer_params"
+
+
+@pytest.mark.parametrize("connector", [("kv_producer", False, True)], indirect=True)
+def test_multi_connector_rejects_oversized_moriio_topology(connector):
+    request = make_request({"do_remote_decode": True, "remote_dp_size": 1025})
+
+    with pytest.raises(VLLMValidationError, match="remote ranks"):
+        connector.validate_request(request)
+
+
+@pytest.mark.parametrize("connector", [("kv_producer", False, False)], indirect=True)
+@pytest.mark.parametrize(
+    "topology",
+    [
+        {},
+        {"remote_tp_size": None, "remote_dp_size": None},
+        {"remote_tp_size": 0},
+        {"remote_dp_size": "32", "remote_tp_size": "32"},
+    ],
+)
+def test_admits_supported_remote_topology(connector, topology):
+    params = {"do_remote_decode": True, **topology}
+    request = make_request(params, ROUTER_REQUEST_ID)
+
+    connector.validate_request(request)
+
+    assert request.kv_transfer_params == params
 
 
 @pytest.mark.parametrize(
