@@ -116,8 +116,6 @@ For example:
 **7. Mamba:**
 
 ```python
---8<-- "vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
-
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
 
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
