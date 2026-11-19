@@ -461,6 +461,11 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub h11_max_header_count: Option<Unsupported>,
 
+    /// Maximum number of tokens allowed in /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests.
+    #[arg(long)]
+    pub max_tokenize_tokens: Option<Unsupported>,
+
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.
     #[arg(
