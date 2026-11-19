@@ -21,6 +21,8 @@ class StoreCandidates(NamedTuple):
     keys: list[OffloadKey]
     # (start_chunk_idx, end_chunk_idx) of each group
     group_ranges: list[tuple[int, int]]
+    # (end token, key, group idx, chunk idx) of each key, only when requested.
+    key_ends: list[tuple[int, OffloadKey, int, int]] = []
 
 
 def select_store_candidates(
@@ -28,6 +30,7 @@ def select_store_candidates(
     scheduler_output: SchedulerOutput,
     req_status: RequestOffloadState,
     start_chunk_idxs: Sequence[int],
+    put_batching: bool = False,
 ) -> StoreCandidates:
     """Select the computed chunks of a request, from the given chunk of each group.
 
@@ -37,6 +40,9 @@ def select_store_candidates(
         req_status: the request.
         start_chunk_idxs: for each group, the first chunk that the trigger did
             not store yet.
+        put_batching: whether PUT batching clips the result. A batch may have
+            deferred the prompt's final tail into decode, so it stays reachable
+            as that prompt's end, and the result carries `key_ends`.
 
     Returns:
         The keys and positions of the reachable chunks, and the chunk range of
@@ -61,6 +67,7 @@ def select_store_candidates(
     # or unreachable by the load path's alignment constraints.
     new_offload_keys: list[OffloadKey] = []
     group_store_ranges: list[tuple[int, int]] = []
+    key_ends: list[tuple[int, OffloadKey, int, int]] = []
 
     apply_eagle_drop = not config.num_hash_lookahead_tokens
     reachable_boundaries: tuple[int, ...] = ()
@@ -93,7 +100,9 @@ def select_store_candidates(
             store_horizon_chunks = None
         elif req.is_finished():
             store_horizon_chunks = num_chunks
-        elif num_chunks <= prompt_horizon_chunks:
+        elif num_chunks <= prompt_horizon_chunks or (
+            put_batching and start_chunk_idx < prompt_horizon_chunks
+        ):
             store_horizon_chunks = prompt_horizon_chunks
         else:
             # An active decode frontier is not a final request
@@ -186,8 +195,19 @@ def select_store_candidates(
             ):
                 continue
             new_offload_keys.append(offload_key)
+            if put_batching:
+                key_ends.append(
+                    (
+                        (abs_chunk_idx + 1) * group_config.tokens_per_chunk,
+                        offload_key,
+                        group_config.group_idx,
+                        abs_chunk_idx,
+                    )
+                )
 
-    return StoreCandidates(num_offloadable_tokens, new_offload_keys, group_store_ranges)
+    return StoreCandidates(
+        num_offloadable_tokens, new_offload_keys, group_store_ranges, key_ends
+    )
 
 
 def _reachable_store_block_mask(
