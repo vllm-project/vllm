@@ -57,6 +57,7 @@ def server(tmp_path_factory):
         "0.3",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0, "video": 0}),
+        "--enable-decisions-api",
     ]
     with RemoteOpenAIServer(checkpoint, args) as remote_server:
         yield remote_server

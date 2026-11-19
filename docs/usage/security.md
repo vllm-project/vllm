@@ -175,10 +175,10 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
-- `/v1/decisions` - Text decisions API
+- `/v1/decisions` - Text decisions API (available only when `--enable-decisions-api` is set)
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
-- `/v1/systemone` - Structured decisions API
+- `/v1/systemone` - Structured decisions API (available only when `--enable-decisions-api` is set)
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`; otherwise returns HTTP 403 with instructions to enable it)

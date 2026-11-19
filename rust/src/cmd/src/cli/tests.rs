@@ -3133,6 +3133,7 @@ fn unsupported_args_fail_startup() {
             "enable_tower_connector_lora",
         ),
         ("--enable-elastic-ep", "true", "enable_elastic_ep"),
+        ("--enable-decisions-api", "true", "enable_decisions_api"),
     ];
     for (flag, value, key) in cases {
         let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])

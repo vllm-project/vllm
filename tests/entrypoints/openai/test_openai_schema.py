@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, settings
 from jsonschema import Draft202012Validator
 from schemathesis import GenerationMode
-from schemathesis.checks import not_a_server_error
 from schemathesis.config import (
     ChecksConfig,
     CoveragePhaseConfig,
@@ -234,16 +233,8 @@ def test_openapi_stateless(case: schemathesis.Case):
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
-    unsupported_decisions = case.operation.path in {
-        "/v1/systemone",
-        "/v1/decisions",
-    }
-    response = case.call_and_validate(
+    case.call_and_validate(
         verify=False,
         timeout=timeout,
         headers={"Content-Type": "application/json"},
-        excluded_checks=[not_a_server_error] if unsupported_decisions else None,
     )
-    if unsupported_decisions:
-        # SmolVLM does not support either decision endpoint.
-        assert response.status_code < 500 or response.status_code == 501

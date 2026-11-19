@@ -31,6 +31,7 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     parse_questions,
 )
+from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
 from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
@@ -130,13 +131,18 @@ def test_strategy_selection():
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
 
 
-def test_route_is_registered_by_default():
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("path", ["/v1/systemone", "/v1/decisions"])
+def test_routes_follow_enable_decisions_api(path, enabled):
     app = FastAPI()
-    register_structured_decisions_api_router(app)
-    register_decisions_api_router(app)
-    paths = {getattr(route, "path", None) for route in app.routes}
-    assert "/v1/systemone" in paths
-    assert "/v1/decisions" in paths
+    args = Namespace(enable_decisions_api=enabled, log_error_stack=False)
+    app.state.args = args
+    init_exception_handler(app)
+    register_api_routers(args, app, ("generate",))
+
+    response = TestClient(app).post(path, content="not JSON")
+    assert (path in app.openapi()["paths"]) == enabled
+    assert response.status_code == (400 if enabled else 404)
 
 
 def test_unsupported_model_returns_501():

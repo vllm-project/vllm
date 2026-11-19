@@ -27,6 +27,7 @@ def server():
         "--diffusion-config",
         f'{{"canvas_length": {CANVAS}}}',
         "--enable-prefix-caching",
+        "--enable-decisions-api",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args, max_wait_seconds=900) as remote_server:
         yield remote_server
