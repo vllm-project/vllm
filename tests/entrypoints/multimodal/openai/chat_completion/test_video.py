@@ -32,7 +32,6 @@ def server():
         "--max-num-seqs",
         "2",
         "--enforce-eager",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
         "--media-io-kwargs",
@@ -40,13 +39,11 @@ def server():
         "--trust-request-mm-kwargs",
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # video processing when downloading multiple videos from external sources
+    # ROCm: Allow more time to download videos from external sources.
     env_overrides = {}
     if current_platform.is_rocm():
         env_overrides = {
             "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
         }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
@@ -98,7 +95,7 @@ def describe_video_messages(
     family of tests. *extra_video_fields* is merged into the top-level
     video content block (for uuid / bad-key tests).
 
-    Pass ``None`` for *video_url* to omit media (uuid-backed cache hits).
+    Pass `None` for *video_url* to omit media (uuid-backed cache hits).
     """
     video_block: dict = {
         "type": "video_url",
@@ -515,3 +512,37 @@ async def test_omitted_video_url_requires_cached_uuid(
         omitted_video_messages,
         context="reuse cached video without URL",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_omitted_media_cache_miss_names_every_item(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+):
+    """The rejection names every uncached item sent without data, across
+    modalities, so the client can resend them all at once."""
+    video_uuids = ["uncached-video-uuid-0", "uncached-video-uuid-1"]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *(
+                    {"type": "video_url", "video_url": {}, "uuid": video_uuid}
+                    for video_uuid in video_uuids
+                ),
+                {"type": "image_url", "image_url": None, "uuid": "uncached-image"},
+                {"type": "text", "text": "What's in these videos and this image?"},
+            ],
+        }
+    ]
+
+    # The chat path orders modalities image, audio, video, so the image comes first.
+    with pytest.raises(
+        openai.BadRequestError,
+        match=(
+            "Cache miss for image at index 0; video at index 0, 1 "
+            "but data is not provided"
+        ),
+    ):
+        await client.chat.completions.create(model=model_name, messages=messages)

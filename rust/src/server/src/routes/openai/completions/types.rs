@@ -2,14 +2,18 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
+use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
     Usage, default_true, deserialize_request_top_k, validate_stop,
@@ -21,6 +25,31 @@ fn default_completion_max_tokens() -> Option<u32> {
     Some(16)
 }
 
+/// The `prompt` of a completions request: one prompt, or a batch of prompts
+/// that each get `n` choices.
+///
+/// Like Python and OpenAI, a batch holds either texts or token-ID lists, not
+/// a mix of both. An empty array is a single empty token-ID prompt, so there
+/// is always at least one prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CompletionPrompt {
+    Single(Prompt),
+    Texts(Vec<String>),
+    TokenIds(Vec<Vec<u32>>),
+}
+
+impl CompletionPrompt {
+    /// The prompts to generate completions for, in choice order.
+    pub fn into_prompts(self) -> Vec<Prompt> {
+        match self {
+            Self::Single(prompt) => vec![prompt],
+            Self::Texts(texts) => texts.into_iter().map(Prompt::Text).collect(),
+            Self::TokenIds(token_ids) => token_ids.into_iter().map(Prompt::TokenIds).collect(),
+        }
+    }
+}
+
 /// vLLM-compatible request type for the Completions API.
 ///
 /// Mirrors the Python vLLM `CompletionRequest` class. The local copy keeps the
@@ -28,6 +57,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 /// [`vllm_text::Prompt`] and add vLLM-only fields directly instead of layering
 /// wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
@@ -35,12 +65,11 @@ pub struct CompletionRequest {
     pub model: Option<String>,
 
     /// The prompt(s) to generate completions for.
-    ///
-    /// We use [`vllm_text::Prompt`] here to support token-id input.
-    pub prompt: Prompt,
+    pub prompt: CompletionPrompt,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub echo: bool,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -75,10 +104,14 @@ pub struct CompletionRequest {
 
     /// Whether to stream back partial progress
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
 
     /// The suffix that comes after a completion of inserted text
     pub suffix: Option<String>,
+
+    /// Prompt embeddings to generate from. Not supported yet.
+    pub prompt_embeds: Option<Value>,
 
     /// What sampling temperature to use, between 0 and 2
     pub temperature: Option<f32>,
@@ -91,8 +124,8 @@ pub struct CompletionRequest {
 
     // -------- vLLM Sampling Parameters --------
     /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`.
+    pub watermarking: Option<bool>,
 
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
@@ -114,6 +147,12 @@ pub struct CompletionRequest {
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
 
+    /// Number of tokens to batch into each streamed chunk. Raises the server's
+    /// `--stream-interval` for this request. Values below the server setting
+    /// are clamped up to it. The first and last chunks are always sent
+    /// immediately. Ignored for non-streaming requests.
+    pub stream_interval: Option<NonZeroU32>,
+
     /// Length penalty for beam search
     pub length_penalty: Option<f32>,
 
@@ -131,11 +170,13 @@ pub struct CompletionRequest {
     /// Minimum number of tokens to generate
     pub min_tokens: Option<u32>,
 
-    /// Skip special tokens during detokenization
-    #[serde(default = "default_true")]
-    pub skip_special_tokens: bool,
+    /// Skip special tokens during detokenization; unset takes the model's
+    /// generation-config default
+    pub skip_special_tokens: Option<bool>,
 
-    /// Add spaces between special tokens during detokenization
+    /// Add spaces between special tokens during detokenization. Accepted as a
+    /// no-op: the detokenizers of the served tokenizers already emit adjacent
+    /// added tokens without a separator, which is what `false` asks for.
     #[serde(default = "default_true")]
     pub spaces_between_special_tokens: bool,
 
@@ -148,8 +189,16 @@ pub struct CompletionRequest {
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
+
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
+    pub logprob_token_ids: Option<Vec<u32>>,
 
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt
@@ -183,6 +232,13 @@ pub struct CompletionRequest {
 
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
+
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens.
+    pub return_weight_versions: Option<bool>,
+
+    /// Skip the first N prompt tokens from the returned routed-expert rows.
+    pub routed_experts_prompt_start: Option<u32>,
 
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
@@ -226,7 +282,10 @@ pub(super) struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -243,6 +302,11 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// The request's routed-expert rows as a base64 NumPy `.npy`, when
+    /// `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Contiguous weight-version spans over output-token indexes.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
@@ -253,6 +317,11 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl CompletionStreamResponse {
@@ -262,6 +331,9 @@ impl CompletionStreamResponse {
             envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
+            metrics: None,
+            system_fingerprint: None,
+            kv_transfer_params: None,
         }
     }
 }
@@ -273,10 +345,14 @@ pub(super) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
+    /// Sent as `null` until the choice finishes, as Python and OpenAI do.
+    #[serialize_always]
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,4 +362,56 @@ pub(super) enum CompletionSseChunk {
     Chunk(CompletionStreamResponse),
     /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
     Usage(CompletionStreamResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use vllm_text::Prompt;
+
+    use super::CompletionRequest;
+
+    #[test]
+    fn prompt_accepts_one_prompt_or_a_batch_of_one_kind() {
+        let prompts = |prompt: Value| {
+            serde_json::from_value::<CompletionRequest>(json!({ "prompt": prompt }))
+                .map(|request| request.prompt.into_prompts())
+        };
+        assert_eq!(prompts(json!("a")).unwrap(), [Prompt::Text("a".into())]);
+        assert_eq!(
+            prompts(json!([1, 2])).unwrap(),
+            [Prompt::TokenIds(vec![1, 2])]
+        );
+        assert_eq!(prompts(json!([])).unwrap(), [Prompt::TokenIds(vec![])]);
+        assert_eq!(
+            prompts(json!(["a", "b"])).unwrap(),
+            [Prompt::Text("a".into()), Prompt::Text("b".into())]
+        );
+        assert_eq!(
+            prompts(json!([[1], [2, 3]])).unwrap(),
+            [Prompt::TokenIds(vec![1]), Prompt::TokenIds(vec![2, 3])]
+        );
+        // Like Python, a batch does not mix texts and token IDs.
+        assert!(prompts(json!(["a", [1]])).is_err());
+    }
+
+    /// Python declares these fields `bool | None`, so an explicit `null` means
+    /// the same as omitting the field.
+    #[test]
+    fn nullable_booleans_treat_null_as_omitted() {
+        let base = json!({"prompt": "hi"});
+        let omitted: CompletionRequest = serde_json::from_value(base.clone()).unwrap();
+        for field in ["echo", "stream", "watermarking"] {
+            let mut body = base.clone();
+            body[field] = Value::Null;
+            let request: CompletionRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("`{field}: null` rejected: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::to_value(&omitted).unwrap(),
+                "`{field}: null`"
+            );
+        }
+    }
 }

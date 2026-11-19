@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from vllm import ModelRegistry
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
@@ -34,10 +35,11 @@ from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
-from ...utils import dummy_hf_overrides
+from ...utils import dummy_hf_overrides, skip_unavailable_models
 from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
@@ -45,11 +47,10 @@ VideoInput: TypeAlias = (
     list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
 )
 AudioInput = list[tuple[np.ndarray, int]]
+ResizedData: TypeAlias = Image.Image | np.ndarray | list[Image.Image]
 
 
-def _resize_data(
-    _data: Image.Image | np.ndarray, size_factor: float
-) -> Image.Image | np.ndarray:
+def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -75,7 +76,7 @@ def _resize_data(
 
 def resize_mm_data(
     data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
-) -> ImageInput | VideoInput | AudioInput:
+) -> list[ResizedData]:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
@@ -124,6 +125,12 @@ def create_batched_mm_kwargs(
     )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
+
+
 # TODO(Isotr0py): Don't initialize model during test
 @contextmanager
 def initialize_dummy_model(
@@ -144,6 +151,7 @@ def initialize_dummy_model(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
+        init_workspace_manager(torch.device(current_platform.device_type, 0))
 
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
@@ -152,11 +160,15 @@ def initialize_dummy_model(
         yield model
 
     del model
+    reset_workspace_manager()
     cleanup_dist_env_and_memory()
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model_id", get_model_ids_to_test())
+@pytest.mark.parametrize(
+    "model_id",
+    skip_unavailable_models(get_model_ids_to_test(), HF_EXAMPLE_MODELS.find_hf_info),
+)
 def test_model_tensor_schema(model_id: str):
     if model_id == "moonshotai/Kimi-K2.5":
         # FIXME(Isotr0py): Fix Kimi-K2.5's offline inference about vision chunks.
@@ -173,13 +185,13 @@ def test_model_tensor_schema(model_id: str):
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")
 
+    if (
+        model_id == "thinkingmachines/Inkling-2-Small"
+        and not current_platform.is_cuda()
+    ):
+        pytest.skip("Inkling 2 Small is only supported on CUDA")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
-    )
 
     model_arch = next(
         arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info
@@ -213,8 +225,20 @@ def test_model_tensor_schema(model_id: str):
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    assert supports_multimodal(model_cls)
+    assert isinstance(model_cls, type)
 
+    if (
+        model_config.hf_config.model_type == "hy_v4_flash_vl"
+        and not current_platform.is_cuda()
+    ):
+        # Flash has no non-CUDA implementation; enforce its runtime contract.
+        with pytest.raises(
+            NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+        ):
+            model_cls(vllm_config=VllmConfig(model_config=model_config))
+        return
+
+    assert supports_multimodal(model_cls)
     factories = model_cls._processor_factory
 
     # Capture helpers return capture-buffer containers (e.g.

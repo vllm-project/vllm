@@ -148,6 +148,11 @@ def mma_mxfp8(
     loc=None,
     ip=None,
 ) -> None:
+    # CuTe DSL 4.8 renamed the block-scale enum and keyword.
+    if hasattr(nvvm, "Tcgen05MMABlockScale"):
+        scale_kwargs = {"block_scale": nvvm.Tcgen05MMABlockScale.DEFAULT}
+    else:
+        scale_kwargs = {"scale_vec_size": nvvm.Tcgen05MMAScaleVecSize.X1}
     with cute.arch.elect_one():
         nvvm.tcgen05_mma_block_scale(
             nvvm.Tcgen05MMAKind.MXF8F6F4,
@@ -159,9 +164,9 @@ def mma_mxfp8(
             Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
             _make_tmem_llvm_ptr(sfa_tmem, loc=loc, ip=ip),
             _make_tmem_llvm_ptr(sfb_tmem, loc=loc, ip=ip),
-            scale_vec_size=nvvm.Tcgen05MMAScaleVecSize.X1,
             loc=loc,
             ip=ip,
+            **scale_kwargs,
         )
 
 

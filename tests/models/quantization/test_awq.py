@@ -61,6 +61,7 @@ def run_awq_test(
         source_model,
         max_model_len=4096,
         dtype=dtype,
+        trust_remote_code=True,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=True,
@@ -78,6 +79,7 @@ def run_awq_test(
         quantization="awq",
         max_model_len=4096,
         dtype=dtype,
+        trust_remote_code=True,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=True,
@@ -106,7 +108,7 @@ def run_awq_test(
 @pytest.mark.parametrize(
     ("model", "quantization", "dtype"),
     [
-        ("mattbucci/gemma-4-26B-AWQ", "awq", "float16"),
+        ("vllm-project/gemma-4-26B-AWQ", "awq", "float16"),
         ("cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", "compressed-tensors", "bfloat16"),
     ],
     ids=[

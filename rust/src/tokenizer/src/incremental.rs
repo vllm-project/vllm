@@ -42,6 +42,10 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     prefix: String,
     prefix_index: usize,
     prefix_seeded: bool,
+    /// Joint decode from the last `push_token` that left tokens pending, i.e.
+    /// `decode(context ++ pending)`. Used to split the pending group from the
+    /// next token when that token provably does not merge with it.
+    pending_string: Option<String>,
     decoded: AttributedTextBuffer,
 }
 
@@ -60,6 +64,7 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             prefix: String::new(),
             prefix_index: 0,
             prefix_seeded: prompt_token_ids.is_empty(),
+            pending_string: None,
             decoded: AttributedTextBuffer::default(),
         }
     }
@@ -72,6 +77,44 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
+    /// Decide whether `token_id` can be anchored at its own first byte inside
+    /// `new_chunk`, separately from the older tokens still pending.
+    ///
+    /// Pending tokens (an incomplete UTF-8 sequence, or text still empty in
+    /// context) normally share one anchor with the token that completes them,
+    /// because the tokenizer only defines their joint decode. That sharing is
+    /// wrong when the new token does *not* merge with them, e.g. a stray
+    /// incomplete byte followed by a special token or plain ASCII: the joint
+    /// decode is then exactly `decode(pending) ++ decode([token_id])`, and the
+    /// new token's first byte is known. Returns that split offset, or `None`
+    /// when the tokens merge (byte fallback completing a character), when
+    /// nothing is pending, or when the isolated decode is not provably
+    /// consistent with the joint one. `pending` is the joint decode kept from the
+    /// push that left tokens pending. Decoded text is never changed by this;
+    /// only anchor placement is.
+    fn pending_group_split(
+        &self,
+        pending: Option<&str>,
+        token_id: u32,
+        new_chunk: &str,
+    ) -> Result<Option<usize>> {
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let prefix_len = self.prefix.len();
+        let pending_chunk = &pending[pending.floor_char_boundary(prefix_len)..];
+        // Empty pending text: today's shared anchor is already this token's first
+        // byte. Not a prefix: the new token completed the pending character.
+        if pending_chunk.is_empty() || !new_chunk.starts_with(pending_chunk) {
+            return Ok(None);
+        }
+        let own = self.tokenizer.decode(&[token_id], self.skip_special_tokens)?;
+        let independent = !own.is_empty()
+            && new_chunk.len() == pending_chunk.len() + own.len()
+            && new_chunk.ends_with(&own);
+        Ok(independent.then_some(pending_chunk.len()))
+    }
+
     /// Decode prompt-only context for prefix seeding.
     ///
     /// Prompt ids may come from the model vocabulary rather than the local
@@ -145,16 +188,40 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
             || (!produced_text && self.tokenizer.id_to_token(token_id).is_none());
         if zero_width {
             self.decoded.record_zero_width_token(token_id);
-        } else {
-            self.decoded.record_pending_token(token_id);
         }
-
         if !produced_text {
+            if !zero_width {
+                self.decoded.record_pending_token(token_id);
+                self.pending_string = Some(string);
+            }
             return Ok(0);
         }
+
         // Ensure we split at a utf-8 char boundary.
         let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
-        self.decoded.append_visible_text(new_chunk);
+        // Text is released, so the pending group resolves in this push either
+        // way; never carry its joint decode into a later push.
+        let pending = self.pending_string.take();
+        let split = if zero_width {
+            None
+        } else {
+            self.pending_group_split(pending.as_deref(), token_id, new_chunk)?
+        };
+        match split {
+            Some(split) => {
+                // Older pending tokens own the prefix (including any U+FFFD from
+                // an incomplete character); this token owns exactly its own text.
+                self.decoded.append_visible_text(&new_chunk[..split]);
+                self.decoded.record_pending_token(token_id);
+                self.decoded.append_visible_text(&new_chunk[split..]);
+            }
+            None => {
+                if !zero_width {
+                    self.decoded.record_pending_token(token_id);
+                }
+                self.decoded.append_visible_text(new_chunk);
+            }
+        }
         self.ids.drain(..self.prefix_index);
         self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         self.prefix_index = self.ids.len();
@@ -184,6 +251,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
             }
         }
         self.decoded.resolve_pending_zero_width();
+        self.pending_string = None;
         self.ids.clear();
         self.prefix.clear();
         self.prefix_index = 0;

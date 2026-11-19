@@ -11,7 +11,7 @@ def validate_and_normalize_dynamic_sd_schedule(
 
     The schedule is expressed as a list of inclusive ranges:
 
-    ``[(range_start, range_end, num_speculative_tokens), ...]``
+    `[(range_start, range_end, num_speculative_tokens), ...]`
     """
     if num_speculative_tokens_per_batch_size is None:
         raise ValueError(
@@ -81,7 +81,7 @@ def build_dynamic_sd_schedule_lookup(
 ) -> list[int]:
     """Expand the configured schedule into a dense batch_size -> K lookup.
 
-    "dense_schedule" means a 1-indexed lookup table where index ``batch_size``
+    "dense_schedule" means a 1-indexed lookup table where index `batch_size`
     stores the exact K to use for that runtime batch size. This lets the
     scheduler do a simple array lookup instead of searching the configured
     ranges on every scheduling step.

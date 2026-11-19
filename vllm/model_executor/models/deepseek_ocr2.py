@@ -180,6 +180,7 @@ class DeepseekOCR2MultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             images_spatial_crop=MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
             ),
@@ -207,14 +208,9 @@ class DeepseekOCR2MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
-                size = images.get_image_size(item_idx)
-
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=CROP_MODE,
-                )
+                token_count = out_mm_kwargs["image"][item_idx]["num_image_tokens"].data
+                assert isinstance(token_count, torch.Tensor)
+                num_image_tokens = int(token_count.item())
             return [image_token_id] * num_image_tokens
 
         return [
@@ -318,7 +314,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
             return None
 
         base_size = self.vision_config.image_size
@@ -343,7 +339,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         return features.view(-1, dim)
 
     def _encode_local_features(self, patches: torch.Tensor) -> torch.Tensor | None:
-        if torch.sum(patches).item() == 0:
+        if patches.numel() == 0:
             return None
 
         local_features = self.sam_model(patches)

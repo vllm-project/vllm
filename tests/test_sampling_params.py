@@ -12,7 +12,7 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     is_diffusion: bool = False
     max_logprobs: int = 20
@@ -23,11 +23,26 @@ class MockModelConfig:
         return 1024
 
 
+def _admit(params: SamplingParams, async_scheduling: bool = False) -> None:
+    """Run the engine's admission checks for a diffusion model."""
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(is_diffusion=True),
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        diffusion_config=DiffusionConfig(canvas_length=8),
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    InputProcessor._validate_params(processor, params, ("generate",))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"temperature": 0.7},
-        {"temperature": 0.0},
         {"min_p": 0.1},
         {"seed": 42},
         {"min_tokens": 5},
@@ -39,21 +54,40 @@ class MockModelConfig:
 def test_diffusion_rejects_unsupported_params(kwargs: dict):
     params = SamplingParams(**kwargs)
     with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
-        params.verify(MockModelConfig(is_diffusion=True), None, None, None)
+        _admit(params)
 
 
 def test_diffusion_accepts_default_params():
-    SamplingParams().verify(MockModelConfig(is_diffusion=True), None, None, None)
+    _admit(SamplingParams())
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_diffusion_accepts_request_temperature(temperature: float):
+    _admit(SamplingParams(temperature=temperature))
 
 
 def test_diffusion_accepts_top_k_top_p():
-    params = SamplingParams(top_p=0.9, top_k=10)
-    params.verify(MockModelConfig(is_diffusion=True), None, None, None)
+    _admit(SamplingParams(top_p=0.9, top_k=10))
 
 
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"min_p": 0.1},
+        {"logit_bias": {0: 1.0}},
+        {"min_p": 0.05, "logit_bias": {1: -1.0}},
+    ],
+)
+def test_spec_decode_accepts_min_p_and_logit_bias(kwargs: dict):
+    """min_p and logit_bias are applied to target logits before rejection
+    sampling, so a speculative config must not reject the request."""
+    params = SamplingParams(**kwargs)
+    params.verify(MockModelConfig(), object(), None, None)
 
 
 def test_verify_leaves_logits_processors_to_admission():
@@ -71,7 +105,6 @@ def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
         params,
         canvas_length=canvas_length,
         vocab_size=model_config.get_vocab_size(),
-        async_scheduling=True,
     )
 
 
@@ -100,26 +133,10 @@ def test_diffusion_extra_args_are_validated_without_a_served_canvas():
         {"diffusion_canvas_length": 8},
     ],
 )
-def test_narrow_diffusion_canvas_requires_async_scheduling(
+def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     async_scheduling, extra_args
 ):
-    processor = SimpleNamespace(
-        model_config=MockModelConfig(is_diffusion=True),
-        vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
-        ),
-        speculative_config=None,
-        structured_outputs_config=None,
-        diffusion_config=DiffusionConfig(canvas_length=8),
-        tokenizer=None,
-        validate_logits_processors_params=lambda params: None,
-    )
-    params = SamplingParams(extra_args=extra_args)
-    if not async_scheduling and extra_args.get("diffusion_canvas_length") == 4:
-        with pytest.raises(VLLMValidationError, match="requires --async-scheduling"):
-            InputProcessor._validate_params(processor, params, ("generate",))
-    else:
-        InputProcessor._validate_params(processor, params, ("generate",))
+    _admit(SamplingParams(extra_args=extra_args), async_scheduling=async_scheduling)
 
 
 @pytest.mark.parametrize(

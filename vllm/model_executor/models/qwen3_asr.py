@@ -28,7 +28,9 @@ from typing import Any
 import regex as re
 import torch
 import torch.nn as nn
+from transformers import Qwen3ASRConfig
 from transformers.feature_extraction_utils import BatchFeature
+from transformers.models.qwen3_asr import Qwen3ASRFeatureExtractor, Qwen3ASRProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -39,6 +41,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -53,7 +56,6 @@ from vllm.model_executor.models.qwen2_5_omni_thinker import (
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeAudioEncoder,
-    Qwen3OmniMoeThinkerMultiModalProcessor,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -79,6 +81,7 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
@@ -86,16 +89,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen3_asr import (
-    Qwen3ASRConfig,
-    Qwen3ASRThinkerConfig,
-)
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.processors.qwen3_asr import (
-    Qwen3ASRProcessor,
-)
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -153,13 +147,13 @@ class Qwen3ASRStreamingPostProcessor(StreamingTranscriptionPostProcessor):
 def _sanitize_transcription_user_text(text: str) -> str:
     """Strip ChatML-style special tokens from user-controlled transcription fields.
 
-    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    Applies the regex / `<asr_text>` substitutions to a fixpoint so nested
     payloads cannot reconstruct a valid token after a single pass:
 
-    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+    - `<|im<|x|>_end|>` would, with a single `re.sub`, leave `<|im_end|>`
       (a real ChatML control token).
-    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
-      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+    - `<asr_te<asr_text>xt>` would, with a single `str.replace`, leave
+      `<asr_text>` (the model-significant assistant-prefix delimiter).
 
     Looping both substitutions until the string stabilises eliminates these
     reconstruction attacks.
@@ -184,21 +178,22 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
 
 class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3ASRConfig).thinker_config
+        return self.ctx.get_hf_config(Qwen3ASRConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
-        processor = self.ctx.get_hf_processor(
+        return self.ctx.get_hf_processor(
             Qwen3ASRProcessor,
             **kwargs,
         )
-        if not hasattr(processor, "audio_token"):
-            processor.audio_token = "<|audio_pad|>"
-        return processor
 
-    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
+    def get_feature_extractor(
+        self, **kwargs: object
+    ) -> WhisperFeatureExtractor | Qwen3ASRFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor
-        assert isinstance(feature_extractor, WhisperFeatureExtractor)
+        assert isinstance(
+            feature_extractor, (WhisperFeatureExtractor, Qwen3ASRFeatureExtractor)
+        )
         return feature_extractor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -274,8 +269,60 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor[Qwen3ASRProcessingInfo]
+    BaseMultiModalProcessor[Qwen3ASRProcessingInfo],
 ):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        audios = hf_data.get("audio")
+        if not audios:
+            return BatchFeature()
+        assert isinstance(audios, list)
+
+        if len(audios) == 1:
+            return super()._call_hf_processor(hf_data, hf_kwargs)
+
+        # HF requires one text per audio, and batch padding changes clip features.
+        # Keep clips independent so partial cache hits cannot change their inputs.
+        text = self._get_hf_mm_text({"audio": 1})
+        outputs: dict[str, list[torch.Tensor]] = {
+            "input_features": [],
+            "input_features_mask": [],
+        }
+        for audio in audios:
+            processed = super()._call_hf_processor(
+                dict(hf_data, text=text, audio=audio), hf_kwargs
+            )
+            for key, values in outputs.items():
+                values.append(processed[key][0])
+
+        return BatchFeature(outputs)
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if "input_features" not in processed_data:
+            return processed_data
+
+        features = processed_data.pop("input_features")
+        masks = processed_data.pop("input_features_mask")
+        processed_data["input_audio_features"] = torch.cat(
+            [feature[:, mask.bool()] for feature, mask in zip(features, masks)], dim=1
+        )
+        processed_data["feature_attention_mask"] = masks
+        processed_data["audio_feature_lengths"] = torch.stack(
+            [mask.sum() for mask in masks]
+        )
+        return processed_data
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -345,6 +392,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsMRoPE,
     SupportsTranscription,
     SupportsLoRA,
+    SupportsEagle3,
 ):
     # LoRA support
     packed_modules_mapping = {
@@ -387,25 +435,23 @@ class Qwen3ASRForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config  # needed for torch compile forward context
-        thinker_config: Qwen3ASRThinkerConfig = (
-            vllm_config.model_config.hf_config.thinker_config
-        )
+        config: Qwen3ASRConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.config = thinker_config
+        self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
-                thinker_config.audio_config,
+                config.audio_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3ForCausalLM(
                 vllm_config=vllm_config.with_hf_config(
-                    thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
+                    config.text_config, architectures=["Qwen3ForCausalLM"]
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
@@ -425,8 +471,10 @@ class Qwen3ASRForConditionalGeneration(
 
         # inputs features from rust frontend is batched and padded
         # with shape [batch_size, n_mels, padded_seq_len], different
-        # from python's shape [n_mels, batch_size * seq_len]
-        if (
+        # from python's shape [n_mels, batch_size * seq_len].
+        # Requests with different padded lengths are batched as a
+        # list of [n_mels, padded_seq_len] tensors.
+        if isinstance(input_audio_features, (list, tuple)) or (
             isinstance(input_audio_features, torch.Tensor)
             and input_audio_features.dim() == 3
         ):
@@ -461,12 +509,8 @@ class Qwen3ASRForConditionalGeneration(
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # keep_on_cpu, so the lengths below are host values.
+        audio_feature_lengths = audio_input["audio_feature_lengths"]
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
         audio_features = self.audio_tower(
@@ -474,9 +518,7 @@ class Qwen3ASRForConditionalGeneration(
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        with gpu_sync_allowed():
-            split_sizes = audio_output_lengths.tolist()
-        return audio_features.split(split_sizes)
+        return audio_features.split(audio_output_lengths.tolist())
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -649,9 +691,9 @@ class Qwen3ASRForConditionalGeneration(
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests.
 
-        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
-        is only emitted when the caller supplied a ``prompt``, mirroring the
-        SDK's ``_build_messages`` (which omits the system role when context is
+        Matches the official Qwen3-ASR SDK prompt format. The `system` turn
+        is only emitted when the caller supplied a `prompt`, mirroring the
+        SDK's `_build_messages` (which omits the system role when context is
         empty) and preserving the prior no-prompt behavior:
 
           [system: {context}]                         # only when prompt given
@@ -696,7 +738,7 @@ class Qwen3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"

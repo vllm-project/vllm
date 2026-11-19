@@ -13,12 +13,16 @@ from tests.kernels.quant_utils import (
     native_w8a8_block_matmul,
 )
 from tests.kernels.utils import fp8_ulp_distance
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    _flashinfer_fp8_blockscale_gemm_impl,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -36,8 +40,10 @@ from vllm.utils.flashinfer import (
     has_flashinfer_fp8_blockscale_gemm,
 )
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.torch_utils import set_random_seed
 
-if current_platform.get_device_capability() < (9, 0):
+capability = current_platform.get_device_capability()
+if capability is None or capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
@@ -69,10 +75,6 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.skipif(
-    current_platform.is_fp8_fnuz(),
-    reason="This platform supports e4m3fnuz, not e4m3fn.",
-)
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,column_major_scales,tma_aligned_scales,seed",
     itertools.product(
@@ -367,6 +369,88 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.bfloat16) - ref_out.to(torch.bfloat16))
     ) / torch.mean(torch.abs(ref_out.to(torch.bfloat16)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported() or current_platform.is_fp8_fnuz(),
+    reason="AITER block-scaled FP8 GEMM requires ROCm with aiter and e4m3fn.",
+)
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(
+        M, N, [k for k in K if k % 128 == 0], BLOCK_SIZE, OUT_DTYPES, SEEDS
+    ),
+)
+@pytest.mark.parametrize(
+    "gemm,max_rel_diff",
+    # CK split-K configs reduce partial sums into the bf16 output with atomics.
+    [("ck", 0.005), ("ck_bpreshuffle", 0.005), ("triton", 0.001)],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_aiter_matmul(
+    M, N, K, block_size, out_dtype, seed, gemm, max_rel_diff
+):
+    set_random_seed(seed)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+    A_bf16 = (torch.rand(M, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    B_bf16 = (torch.rand(N, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+
+    A_fp8, As = per_token_group_quant_fp8(A_bf16, block_size[1], use_ue8m0=False)
+    B_fp8, Bs = per_block_cast_to_fp8(B_bf16, block_size, use_ue8m0=False)
+
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+
+    if gemm == "ck":
+        out = rocm_aiter_ops.gemm_a8w8_blockscale(
+            A_fp8, B_fp8, As, Bs, block_size, out_dtype
+        )
+    elif gemm == "triton":
+        out = rocm_aiter_ops.triton_gemm_a8w8_blockscale(
+            A_fp8, B_fp8, As, Bs, block_size, out_dtype
+        )
+    else:
+        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A_fp8,
+            rocm_aiter_ops.shuffle_weight(B_fp8, layout=(16, 16)),
+            As.t().contiguous().t(),
+            Bs,
+            out_dtype,
+        )
+
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
+    assert rel_diff < max_rel_diff
+
+
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
+@pytest.mark.parametrize("M", [2, 31])
+@torch.inference_mode()
+def test_flashinfer_fp8_blockscale_gemm_strided_input(M):
+    """A column slice has a row stride larger than K; the sm90 kernel only takes
+    a data pointer and used to misread rows 1..M-1."""
+    if not has_flashinfer_fp8_blockscale_gemm():
+        pytest.skip(
+            "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
+        )
+    torch.manual_seed(0)
+    K, N = 768, 512
+    strided = torch.randn(M, 8 * K, dtype=torch.bfloat16)[:, K : 2 * K]
+    assert not strided.is_contiguous()
+    weight, weight_scale = per_block_cast_to_fp8(
+        torch.randn(N, K, dtype=torch.bfloat16), [128, 128], use_ue8m0=False
+    )
+    weight_scale = weight_scale.to(torch.float32)
+
+    expected = _flashinfer_fp8_blockscale_gemm_impl(
+        strided.contiguous(), weight, weight_scale
+    )
+    actual = _flashinfer_fp8_blockscale_gemm_impl(strided, weight, weight_scale)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import HyperCLOVAXConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -51,7 +52,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.hyperclovax import HyperCLOVAXConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -119,7 +119,6 @@ class HyperCLOVAXAttention(nn.Module):
         bias: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -137,9 +136,7 @@ class HyperCLOVAXAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = getattr(
-            config, "head_dim", self.hidden_size // self.total_num_heads
-        )
+        self.head_dim = config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.attention_multiplier
@@ -166,8 +163,7 @@ class HyperCLOVAXAttention(nn.Module):
             self.head_dim,
             max_position=max_position_embeddings,
             is_neox_style=True,
-            rope_parameters=getattr(config, "rope_parameters", None),
-            dual_chunk_attention_config=dual_chunk_attention_config,
+            rope_parameters=config.rope_parameters,
         )
 
         self.attn = Attention(
@@ -212,33 +208,24 @@ class HyperCLOVAXDecoderLayer(nn.Module):
             "max_position_embeddings",
             8192,
         )
-        dual_chunk_attention_config = getattr(
-            config,
-            "dual_chunk_attention_config",
-            None,
-        )
-        attention_bias = getattr(config, "attention_bias", False)
 
         self.self_attn = HyperCLOVAXAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(
-                config, "num_key_value_heads", config.num_attention_heads
-            ),
+            num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
-            bias=attention_bias,
+            bias=config.attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.mlp = HyperCLOVAXMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            bias=getattr(config, "mlp_bias", False),
+            bias=config.mlp_bias,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

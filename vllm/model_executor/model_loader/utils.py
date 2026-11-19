@@ -3,13 +3,13 @@
 """Utilities for selecting and loading models."""
 
 import inspect
+import time
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import Any
+from typing import Any, assert_never
 
 import torch
 from torch import nn
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import (
@@ -20,25 +20,32 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.model_loader.reload import (
-    record_metadata_for_reloading,
-    set_torchao_reload_attrs,
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    TensorKind,
+    check_ipc_quant_support,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    weights_already_processed,
+)
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    get_accelerator_view_from_cpu_tensor,
+    set_default_torch_dtype,
+)
 
 logger = init_logger(__name__)
 
@@ -52,7 +59,10 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     ):
         return speculative_config.draft_load_config
     load_config = vllm_config.load_config
-    if load_config is not None and load_config.load_format != "ipc_cache":
+    if load_config is not None and load_config.load_format not in (
+        "ipc_cache",
+        "peer_cache",
+    ):
         return load_config
     kwargs = (
         # Route the draft to the daemon's draft group.
@@ -83,6 +93,12 @@ def initialize_model(
         model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
+
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -135,15 +151,27 @@ def process_weights_after_loading(
 ) -> None:
     """Post-process loaded weights into runtime format.
 
-    Under ``weights_already_processed`` (weight cache IPC loader), quant
+    Under `weights_already_processed` (weight cache IPC loader), quant
     methods skip tensor transforms and must declare
-    ``supports_pre_processed_weights``, otherwise this raises ``RuntimeError``.
+    `supports_pre_processed_weights`, otherwise this raises `RuntimeError`.
     """
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload.direct import (
+        direct_reload_enabled,
+        record_checkpoint_layout,
+    )
+
     maybe_retie_word_embeddings(model, model_config)
 
-    for name, module in model.named_modules():
+    if direct_reload_enabled():
+        record_checkpoint_layout(model)  # cold start only; reloads reuse it
+
+    for name, module in model.__dict__.get("_ckpt_modules") or model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             if (
@@ -166,7 +194,18 @@ def process_weights_after_loading(
                 if quant_method.requires_device_loading
                 else nullcontext()
             )
-            with loading_context:
+            timing_context = (
+                online_quantization_timing_context(module, quant_method)
+                if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+                else nullcontext()
+            )
+            with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -179,29 +218,12 @@ def process_weights_after_loading(
             # the caching allocator, which starves the OS on UMA devices.
             release_device_memory_under_pressure(target_device)
 
-    # Initialize post-load attention weights for any attention layer and MM
-    # encoder. NOTE: Happens after other modules so we can easily decompress
-    # weights.
-    for _, module in model.named_modules():
-        if is_deferred_attention_layer(module):
-            # TODO(lucas): see if there is a way to unify the signatures
-            # of process_weights_after_loading
-            with device_loading_context(module, target_device):
-                module.process_weights_after_loading(model_config.dtype)
-
-    # Model-level post-load hook, after the per-layer quant finalize.
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
-
-    # Needed for torchao model reloading via model.reload_weights
-    # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
-    if model_config.quantization == "torchao":
-        set_torchao_reload_attrs(model, model_config)
+    finalize_model_weights(model, target_device)
 
 
 @contextmanager
-def device_loading_context(module: torch.nn.Module, target_device: torch.device):
-    if target_device.type == "cpu":
+def device_loading_context(module: torch.nn.Module, target_device: torch.device | None):
+    if target_device is None or target_device.type == "cpu":
         # If target is CPU, no need to move anything
         yield module
         return
@@ -245,13 +267,48 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
                 p._vllm_is_uva_offloaded = True
 
 
+@contextmanager
+def online_quantization_timing_context(
+    layer: nn.Module, quant_method: QuantizeMethodBase
+):
+    """Accumulate online quantization processing time for `quant_method`."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+
+    assert isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+    quant_config = layer.quant_config
+    assert quant_config is not None
+    online_quantization_config = (
+        quant_config
+        if isinstance(quant_config, OnlineQuantizationConfig)
+        else quant_config.online_quantization_config
+    )
+    # reload/layerwise.py's _layerwise_process calls this for experts_int8,
+    # whose online MoE method has no OnlineQuantizationConfig.
+    if online_quantization_config is None:
+        yield
+        return
+    assert isinstance(online_quantization_config, OnlineQuantizationConfig)
+
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        online_quantization_config.online_quantization_time += (
+            time.perf_counter() - start_time
+        )
+
+
 _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 """Caches the outputs of `_get_model_architecture`."""
 
 
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
-    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
-
     architectures = getattr(model_config.hf_config, "architectures", None) or []
 
     model_cls, arch = model_config.registry.resolve_model_cls(
@@ -269,6 +326,14 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
                 arch,
             )
 
+    return convert_model_cls(model_cls, model_config), arch
+
+
+def convert_model_cls(
+    model_cls: type[nn.Module], model_config: ModelConfig
+) -> type[nn.Module]:
+    from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
+
     convert_type = model_config.convert_type
     if convert_type == "none":
         pass
@@ -281,7 +346,7 @@ def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module],
     else:
         assert_never(convert_type)
 
-    return model_cls, arch
+    return model_cls
 
 
 def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
@@ -332,3 +397,150 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def log_layer_backends(
+    model: nn.Module, model_config: ModelConfig, load_failed: bool = False
+) -> None:
+    """Log the backends the layers of `model` selected. The individual
+    selections are logged at DEBUG where they are made.
+
+    The model runner calls this for each model it loads; the base loader only
+    when loading fails, as the runner never receives that model."""
+    from vllm.model_inspection import collect_layer_backends, format_layer_backends
+
+    # Only a log: nothing here may fail the load, or mask a load error.
+    try:
+        backends = collect_layer_backends(model)
+        if not backends:
+            return
+        # A draft model can share its class with the target: name the model.
+        logger.info_once(
+            "Backends selected for %s (%s)%s:\n%s",
+            type(model).__name__,
+            model_config.model,
+            " before loading failed" if load_failed else "",
+            format_layer_backends(backends),
+            scope="global",
+        )
+    except Exception as e:
+        logger.warning_once(
+            "Could not summarize the backends selected for %s (%r). Set "
+            "VLLM_LOGGING_LEVEL=DEBUG to log each selection.",
+            type(model).__name__,
+            e,
+        )
+
+
+def build_model_from_processed_weights(
+    vllm_config: VllmConfig,
+    model_config: ModelConfig,
+    prefix: str,
+    tensors: dict[str, torch.Tensor],
+    kinds: dict[str, TensorKind],
+    aliases: dict[str, str],
+    attrs: dict[str, Any],
+    load_config: LoadConfig,
+) -> nn.Module:
+    """Build a model on meta and install already post-processed weights."""
+    target_device, device_index = _load_device(load_config, vllm_config)
+    with set_default_torch_dtype(model_config.dtype):
+        with torch.device("meta"):
+            model = initialize_model(
+                vllm_config=vllm_config,
+                model_config=model_config,
+                prefix=prefix,
+            )
+        check_ipc_quant_support(model)
+        _register_processed_tensors(model, tensors, kinds, aliases)
+        # Flags that load_weights would have set (e.g. EAGLE ownership of
+        # embed_tokens / lm_head); the source ran it, this process did not.
+        for name, value in attrs.items():
+            setattr(model, name, value)
+        with weights_already_processed():
+            process_weights_after_loading(model, model_config, target_device)
+        _materialize_remaining_meta_tensors(
+            model, torch.device(target_device.type, device_index)
+        )
+    return model.eval()
+
+
+def _load_device(
+    load_config: LoadConfig, vllm_config: VllmConfig
+) -> tuple[torch.device, int]:
+    device_config = vllm_config.device_config
+    load_device = (
+        device_config.device if load_config.device is None else load_config.device
+    )
+    target_device = torch.device(load_device)
+    device_index = (
+        target_device.index
+        if target_device.index is not None
+        else torch.accelerator.current_device_index()
+    )
+    return target_device, device_index
+
+
+def _register_processed_tensors(
+    model: nn.Module,
+    tensors: dict[str, torch.Tensor],
+    kinds: dict[str, TensorKind],
+    aliases: dict[str, str],
+) -> None:
+    """Replace the meta model's parameters and buffers, keeping ties."""
+    # remove_duplicate=False keeps tied module aliases reachable by name:
+    # a tied lm_head *is* the embedding module, so the deduplicated view
+    # would not contain "lm_head" at all.
+    modules = dict(model.named_modules(remove_duplicate=False))
+    registered: dict[str, torch.Tensor] = {}
+
+    def _register(name: str, tensor: torch.Tensor, is_param: bool) -> None:
+        module_name, _, leaf = name.rpartition(".")
+        module = modules.get(module_name)
+        if module is None:
+            raise RuntimeError(f"Cached tensor {name} has no matching module")
+        module._parameters.pop(leaf, None)
+        module._buffers.pop(leaf, None)
+        if is_param:
+            obj: torch.Tensor = (
+                tensor
+                if isinstance(tensor, nn.Parameter)
+                else nn.Parameter(tensor, requires_grad=False)
+            )
+            module.register_parameter(leaf, obj)
+        else:
+            obj = tensor
+            module.register_buffer(leaf, obj)
+        registered[name] = obj
+
+    for name, tensor in tensors.items():
+        _register(name, tensor, kinds[name] == "param")
+
+    for alias_name, canonical_name in aliases.items():
+        obj = registered.get(canonical_name)
+        if obj is None:
+            logger.warning(
+                "Cached alias %s references missing canonical tensor %s",
+                alias_name,
+                canonical_name,
+            )
+            continue
+        _register(alias_name, obj, isinstance(obj, nn.Parameter))
+
+
+def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
+    """Allocate tensors the daemon did not provide (left uninitialized)."""
+    for module_name, module in model.named_modules():
+        for leaf, param in list(module._parameters.items()):
+            if param is not None and param.device.type == "meta":
+                logger.warning(
+                    "Materializing empty parameter %s.%s missing from the weight cache",
+                    module_name,
+                    leaf,
+                )
+                module._parameters[leaf] = nn.Parameter(
+                    torch.empty_like(param, device=device), requires_grad=False
+                )
+        for leaf, buffer in list(module._buffers.items()):
+            if buffer is not None and buffer.device.type == "meta":
+                module._buffers[leaf] = torch.empty_like(buffer, device=device)

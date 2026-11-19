@@ -131,13 +131,17 @@ Some architectures (e.g., Bamba, Jamba, Minimax) interleave standard attention l
 The current algorithm is:
 
 1. Increase the `block_size` of attention layers until
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
     $$
+
 2. Pad the mamba state per layer to
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}}
     $$
+
 3. Apply the grouping strategy in case 3.
 
 !!! note
@@ -204,7 +208,7 @@ The second question is the cache eviction policy. For now, we use one LRU queue 
 
 ### Case 3: mamba models
 
-The prefix caching support of the mamba model is work in progress. Once implemented, models with mamba layer + full attention layer can be supported via the full attention + X algorithm in case 2.
+Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
 
 ## Implementation
 

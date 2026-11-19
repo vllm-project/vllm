@@ -19,6 +19,13 @@ if current_platform.is_rocm():
         ("TritonAttn", "FULL", True),
         ("TritonAttn", "FULL_AND_PIECEWISE", True),
     ]
+elif current_platform.is_xpu():
+    combo_cases_1 = [
+        ("FA2", "FULL", True),
+        ("FA2", "FULL_AND_PIECEWISE", True),
+        ("TritonAttn", "FULL", True),
+        ("TritonAttn", "FULL_AND_PIECEWISE", True),
+    ]
 else:
     combo_cases_1 = [
         ("FA3", "FULL", True),
@@ -56,7 +63,6 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=16,
             max_num_batched_tokens=128,
-            trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
@@ -103,7 +109,6 @@ def test_cudagraph_compilation_combo(
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=16,
             max_num_batched_tokens=128,
-            trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,

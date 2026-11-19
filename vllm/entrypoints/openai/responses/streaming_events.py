@@ -18,7 +18,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, ClassVar, Final, NamedTuple
+from typing import Any, ClassVar, Final, Literal, NamedTuple
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -29,6 +29,9 @@ from openai.types.responses import (
     ResponseCodeInterpreterToolCallParam,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseCustomToolCall,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
@@ -38,6 +41,7 @@ from openai.types.responses import (
     ResponseMcpCallArgumentsDoneEvent,
     ResponseMcpCallCompletedEvent,
     ResponseMcpCallInProgressEvent,
+    ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -51,6 +55,7 @@ from openai.types.responses import (
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
     response_function_web_search,
+    response_output_text,
     response_text_delta_event,
 )
 from openai.types.responses.response_output_item import McpCall
@@ -67,16 +72,20 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_responses_tool_call_name_map,
+    custom_tool_names,
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
+    extend_custom_tool_input_prefix,
     resolve_responses_tool_call_name,
 )
+from vllm.logprobs import LogprobsOnePosition
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.utils import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
@@ -89,7 +98,7 @@ TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
 def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     """Resolve MCP tool name and server label from a recipient string.
 
-    - ``mcp.*`` recipients: strip prefix, use the bare name as both
+    - `mcp.*` recipients: strip prefix, use the bare name as both
       name and server_label.
     - Everything else: use the recipient as the name and look up the
       server_label in TOOL_NAME_TO_MCP_SERVER_LABEL.
@@ -100,7 +109,7 @@ def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     return recipient, TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingState:
     """Mutable state for streaming event processing."""
 
@@ -110,6 +119,11 @@ class StreamingState:
     current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
+    # (token_id, logprobs) of output text tokens not yet sent on a delta,
+    # e.g. part of a multi-byte character whose delta is still empty.
+    pending_logprobs: list[tuple[int, LogprobsOnePosition]] = field(
+        default_factory=list
+    )
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
@@ -118,6 +132,7 @@ class StreamingState:
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.pending_logprobs = []
 
 
 def is_mcp_tool_by_namespace(
@@ -126,7 +141,7 @@ def is_mcp_tool_by_namespace(
 ) -> bool:
     """Determine if a tool call is an MCP tool based on recipient prefix.
 
-    Inverse of :func:`is_function_recipient` — everything that is not
+    Inverse of `is_function_recipient` — everything that is not
     a function call is an MCP tool.
     """
     if recipient is None:
@@ -142,6 +157,7 @@ def is_mcp_tool_by_namespace(
 def emit_text_delta_events(
     delta: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for text content delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -186,8 +202,7 @@ def emit_text_delta_events(
             output_index=state.current_output_index,
             item_id=state.current_item_id,
             delta=delta,
-            # TODO, use logprobs from ctx.last_request_output
-            logprobs=[],
+            logprobs=_to_stream_logprobs(logprobs or []),
         )
     )
     return events
@@ -201,7 +216,7 @@ def emit_reasoning_delta_events(
     events: list[StreamingResponsesResponse] = []
     if not state.sent_output_item_added:
         state.sent_output_item_added = True
-        state.current_item_id = f"msg_{random_uuid()}"
+        state.current_item_id = f"rs_{random_uuid()}"
         events.append(
             ResponseOutputItemAddedEvent(
                 type="response.output_item.added",
@@ -217,16 +232,13 @@ def emit_reasoning_delta_events(
         )
         state.current_content_index += 1
         events.append(
-            ResponseReasoningPartAddedEvent(
-                type="response.reasoning_part.added",
+            ResponseContentPartAddedEvent(
+                type="response.content_part.added",
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
                 content_index=state.current_content_index,
-                part=ResponseReasoningTextContent(
-                    text="",
-                    type="reasoning_text",
-                ),
+                part={"text": "", "type": "reasoning_text"},
             )
         )
     events.append(
@@ -380,12 +392,14 @@ def emit_code_interpreter_delta_events(
 def emit_text_output_done_events(
     text: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
     text_content = ResponseOutputText(
         type="output_text",
         text=text,
         annotations=[],
+        logprobs=logprobs,
     )
     events: list[StreamingResponsesResponse] = []
     events.append(
@@ -454,13 +468,13 @@ def emit_reasoning_done_events(
         )
     )
     events.append(
-        ResponseReasoningPartDoneEvent(
-            type="response.reasoning_part.done",
+        ResponseContentPartDoneEvent(
+            type="response.content_part.done",
             sequence_number=-1,
             item_id=state.current_item_id,
             output_index=state.current_output_index,
             content_index=state.current_content_index,
-            part=content,
+            part=content.model_dump(),
         )
     )
     events.append(
@@ -565,6 +579,7 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -581,7 +596,7 @@ def emit_content_delta_events(
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_delta_events(delta, state)
+        return emit_text_delta_events(delta, state, logprobs)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
@@ -603,6 +618,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -634,7 +650,7 @@ def emit_previous_item_done_events(
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        return emit_text_output_done_events(text, state, logprobs)
     return []
 
 
@@ -810,17 +826,24 @@ class _StateType(Enum):
     TOOL_CALL = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class SimpleStreamingState:
     output_index: int = 0
     current_item_id: str = ""
     content_index: int = 0
     accumulated_text: str = ""
+    accumulated_logprobs: list[response_output_text.Logprob] = field(
+        default_factory=list
+    )
     tool_call_id: str = ""
     tool_call_name: str = ""
     tool_call_namespace: str | None = None
     tool_call_index: int | None = None
-    has_emitted_tool_call_delta: bool = False
+    tool_call_is_custom: bool = False
+    tool_call_payload: str = ""
+    # End of the custom-tool arguments decoded into tool_call_payload, or -1
+    # once they need a full decode.
+    tool_call_payload_end: int = 0
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -828,9 +851,10 @@ def emit_simple_content_open(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.CONTENT
-    state.current_item_id = random_uuid()
+    state.current_item_id = f"msg_{random_uuid()}"
     state.content_index = 0
     state.accumulated_text = ""
+    state.accumulated_logprobs = []
     return [
         ResponseOutputItemAddedEvent(
             type="response.output_item.added",
@@ -860,12 +884,32 @@ def emit_simple_content_open(
     ]
 
 
+def _to_stream_logprobs(
+    logprobs: list[response_output_text.Logprob],
+) -> list[response_text_delta_event.Logprob]:
+    return [
+        response_text_delta_event.Logprob(
+            token=lp.token,
+            logprob=lp.logprob,
+            top_logprobs=[
+                response_text_delta_event.LogprobTopLogprob(
+                    token=tl.token, logprob=tl.logprob
+                )
+                for tl in lp.top_logprobs
+            ],
+        )
+        for lp in logprobs
+    ]
+
+
 def emit_simple_content_delta(
     state: SimpleStreamingState,
     delta: str,
-    logprobs: list[response_text_delta_event.Logprob] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
+    if logprobs:
+        state.accumulated_logprobs.extend(logprobs)
     return [
         ResponseTextDeltaEvent(
             type="response.output_text.delta",
@@ -874,18 +918,20 @@ def emit_simple_content_delta(
             output_index=state.output_index,
             item_id=state.current_item_id,
             delta=delta,
-            logprobs=logprobs or [],
+            logprobs=_to_stream_logprobs(logprobs or []),
         )
     ]
 
 
 def emit_simple_content_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     part = ResponseOutputText(
         type="output_text",
         text=state.accumulated_text,
         annotations=[],
+        logprobs=state.accumulated_logprobs or None,
     )
     events: list[StreamingResponsesResponse] = [
         ResponseTextDoneEvent(
@@ -914,8 +960,7 @@ def emit_simple_content_done(
                 type="message",
                 role="assistant",
                 content=[part] if state.accumulated_text else [],
-                status="completed",
-                summary=[],
+                status=status,
             ),
         ),
     ]
@@ -928,7 +973,7 @@ def emit_simple_reasoning_open(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.REASONING
-    state.current_item_id = random_uuid()
+    state.current_item_id = f"rs_{random_uuid()}"
     state.content_index = 0
     state.accumulated_text = ""
     return [
@@ -943,16 +988,13 @@ def emit_simple_reasoning_open(
                 status="in_progress",
             ),
         ),
-        ResponseReasoningPartAddedEvent(
-            type="response.reasoning_part.added",
+        ResponseContentPartAddedEvent(
+            type="response.content_part.added",
             sequence_number=-1,
             output_index=state.output_index,
             item_id=state.current_item_id,
             content_index=state.content_index,
-            part=ResponseReasoningTextContent(
-                text="",
-                type="reasoning_text",
-            ),
+            part={"text": "", "type": "reasoning_text"},
         ),
     ]
 
@@ -976,6 +1018,7 @@ def emit_simple_reasoning_delta(
 
 def emit_simple_reasoning_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     part = ResponseReasoningTextContent(
         text=state.accumulated_text,
@@ -990,13 +1033,13 @@ def emit_simple_reasoning_done(
             content_index=state.content_index,
             text=state.accumulated_text,
         ),
-        ResponseReasoningPartDoneEvent(
-            type="response.reasoning_part.done",
+        ResponseContentPartDoneEvent(
+            type="response.content_part.done",
             sequence_number=-1,
             item_id=state.current_item_id,
             output_index=state.output_index,
             content_index=state.content_index,
-            part=part,
+            part=part.model_dump(),
         ),
         ResponseOutputItemDoneEvent(
             type="response.output_item.done",
@@ -1005,7 +1048,7 @@ def emit_simple_reasoning_done(
             item=ResponseReasoningItem(
                 type="reasoning",
                 content=[part],
-                status="completed",
+                status=status,
                 id=state.current_item_id,
                 summary=[],
             ),
@@ -1021,31 +1064,84 @@ def emit_simple_tool_call_open(
     name: str,
     index: int | None,
     namespace: str | None = None,
+    is_custom: bool = False,
+    call_id: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
-    state.current_item_id = random_uuid()
-    state.tool_call_id = f"call_{random_uuid()}"
+    state.current_item_id = (
+        f"ctc_{random_uuid()}" if is_custom else f"fc_{random_uuid()}"
+    )
+    state.tool_call_id = call_id or make_tool_call_id()
     state.tool_call_name = name
     state.tool_call_namespace = namespace
     state.tool_call_index = index
+    state.tool_call_is_custom = is_custom
+    state.tool_call_payload = ""
+    state.tool_call_payload_end = 0
     state.accumulated_text = ""
-    state.has_emitted_tool_call_delta = False
+    item: ResponseOutputItem
+    if is_custom:
+        item = ResponseCustomToolCall(
+            type="custom_tool_call",
+            id=state.current_item_id,
+            call_id=state.tool_call_id,
+            name=name,
+            input="",
+        )
+    else:
+        item = ResponseFunctionToolCallItem(
+            type="function_call",
+            id=state.current_item_id,
+            call_id=state.tool_call_id,
+            name=name,
+            namespace=namespace,
+            arguments="",
+            status="in_progress",
+        )
     return [
         ResponseOutputItemAddedEvent(
             type="response.output_item.added",
             sequence_number=-1,
             output_index=state.output_index,
-            item=ResponseFunctionToolCallItem(
-                type="function_call",
-                id=state.current_item_id,
-                call_id=state.tool_call_id,
-                name=name,
-                namespace=namespace,
-                arguments="",
-                status="in_progress",
-            ),
+            item=item,
         ),
     ]
+
+
+def _emit_custom_tool_input_delta(
+    state: SimpleStreamingState,
+    payload: str,
+) -> list[StreamingResponsesResponse]:
+    streamed = state.tool_call_payload
+    if payload == streamed:
+        return []
+    state.tool_call_payload = payload
+    # A payload that is not an extension of what was streamed cannot be
+    # retracted, so the authoritative value is resent in full.
+    delta = payload[len(streamed) :] if payload.startswith(streamed) else payload
+    return [
+        ResponseCustomToolCallInputDeltaEvent(
+            type="response.custom_tool_call_input.delta",
+            sequence_number=-1,
+            output_index=state.output_index,
+            item_id=state.current_item_id,
+            delta=delta,
+        )
+    ]
+
+
+def _custom_tool_input_prefix(state: SimpleStreamingState) -> str:
+    if state.tool_call_payload_end >= 0:
+        result = extend_custom_tool_input_prefix(
+            state.accumulated_text,
+            state.tool_call_payload,
+            state.tool_call_payload_end,
+        )
+        if result is not None:
+            payload, state.tool_call_payload_end = result
+            return payload
+        state.tool_call_payload_end = -1
+    return decode_custom_tool_input_prefix(state.accumulated_text)
 
 
 def emit_simple_tool_call_delta(
@@ -1053,7 +1149,8 @@ def emit_simple_tool_call_delta(
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
-    state.has_emitted_tool_call_delta = True
+    if state.tool_call_is_custom:
+        return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
         ResponseFunctionCallArgumentsDeltaEvent(
             type="response.function_call_arguments.delta",
@@ -1067,10 +1164,31 @@ def emit_simple_tool_call_delta(
 
 def emit_simple_tool_call_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
-    events: list[StreamingResponsesResponse] = []
-    if state.has_emitted_tool_call_delta:
+    events: list[StreamingResponsesResponse]
+    item: ResponseOutputItem
+    if state.tool_call_is_custom:
+        payload = decode_custom_tool_input(state.accumulated_text)
+        events = _emit_custom_tool_input_delta(state, payload)
         events.append(
+            ResponseCustomToolCallInputDoneEvent(
+                type="response.custom_tool_call_input.done",
+                sequence_number=-1,
+                output_index=state.output_index,
+                item_id=state.current_item_id,
+                input=payload,
+            )
+        )
+        item = ResponseCustomToolCall(
+            type="custom_tool_call",
+            id=state.current_item_id,
+            call_id=state.tool_call_id,
+            name=state.tool_call_name,
+            input=payload,
+        )
+    else:
+        events = [
             ResponseFunctionCallArgumentsDoneEvent(
                 type="response.function_call_arguments.done",
                 sequence_number=-1,
@@ -1079,25 +1197,27 @@ def emit_simple_tool_call_done(
                 arguments=state.accumulated_text,
                 name=state.tool_call_name,
             )
+        ]
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            name=state.tool_call_name,
+            namespace=state.tool_call_namespace,
+            arguments=state.accumulated_text,
+            status=status,
+            id=state.current_item_id,
+            call_id=state.tool_call_id,
         )
     events.append(
         ResponseOutputItemDoneEvent(
             type="response.output_item.done",
             sequence_number=-1,
             output_index=state.output_index,
-            item=ResponseFunctionToolCall(
-                type="function_call",
-                name=state.tool_call_name,
-                namespace=state.tool_call_namespace,
-                arguments=state.accumulated_text,
-                status="completed",
-                id=state.current_item_id,
-                call_id=state.tool_call_id,
-            ),
-        ),
+            item=item,
+        )
     )
     state.output_index += 1
     state.tool_call_namespace = None
+    state.tool_call_is_custom = False
     state.current_state = _StateType.NONE
     return events
 
@@ -1181,6 +1301,8 @@ class SimpleStreamingEventProcessor:
     ) -> None:
         self.state = state or SimpleStreamingState()
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
+        self.custom_tool_names = custom_tool_names(tools)
+        self.output_items: list[ResponseOutputItem] = []
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
@@ -1221,12 +1343,20 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self, status: Literal["completed", "incomplete"] = "completed"
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
-        return handlers.done_fn(self.state)
+        events = handlers.done_fn(self.state, status)
+        self.output_items.extend(
+            event.item
+            for event in events
+            if isinstance(event, ResponseOutputItemDoneEvent)
+        )
+        return events
 
     def open(
         self, target_state: _StateType, tool_call: Any = None
@@ -1244,6 +1374,8 @@ class SimpleStreamingEventProcessor:
                 call_name.name,
                 tool_call.index,
                 call_name.namespace,
+                call_name.name in self.custom_tool_names,
+                tool_call.id,
             )
         return handlers.open_fn(self.state)
 
@@ -1251,9 +1383,7 @@ class SimpleStreamingEventProcessor:
         self,
         delta_message: DeltaMessage,
         output: CompletionOutput,
-        get_logprobs: Callable[
-            [CompletionOutput], list[response_text_delta_event.Logprob]
-        ]
+        get_logprobs: Callable[[CompletionOutput], list[response_output_text.Logprob]]
         | None = None,
     ) -> list[StreamingResponsesResponse]:
         """Emit incremental events for the current state from the delta."""

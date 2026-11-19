@@ -41,9 +41,18 @@ def get_num_active_loras_for_dispatch(
     req_ids: list[str],
     dummy_run: bool,
 ) -> int:
-    """Compute num_active_loras for cudagraph dispatch."""
+    """Compute num_active_loras for cudagraph dispatch.
+
+    Counts no-LoRA requests as one more active LoRA when they share the batch
+    with adapters, as the LoRA kernels do.
+    """
     if lora_config and not dummy_run:
-        return len(lora_state.get_activate_loras(req_ids))
+        num_active_loras = len(lora_state.get_activate_loras(req_ids))
+        if num_active_loras and any(
+            req_id not in lora_state.lora_requests for req_id in req_ids
+        ):
+            num_active_loras += 1
+        return num_active_loras
     if dummy_run and lora_config:
         return lora_config.max_loras + 1
     return 0
@@ -96,9 +105,12 @@ class LoraState:
         req_ids: list[str],
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
+        num_logits: np.ndarray,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
         lora_ids = self.lora_ids[idx_mapping]
-        prompt_lora_mapping = tuple(lora_ids)
+        # One lm_head id per logits row: 1 + num_drafts rows per request
+        # under spec decode.
+        prompt_lora_mapping = tuple(lora_ids.repeat(num_logits))
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests

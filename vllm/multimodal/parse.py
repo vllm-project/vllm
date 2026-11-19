@@ -13,11 +13,11 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
+    assert_never,
 )
 
 import numpy as np
 import torch
-from typing_extensions import assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
@@ -641,7 +641,7 @@ class MultiModalDataParser:
         if isinstance(audio, np.ndarray):
             return audio, None
         if isinstance(audio, torch.Tensor):
-            return audio.numpy(), None
+            return audio.detach().cpu().numpy(), None
 
         assert_never(audio)
 
@@ -772,6 +772,14 @@ class MultiModalDataParser:
         data_items = [
             convert_image_mode(normalize_image(item), "RGB")
             if isinstance(item, PILImage.Image)
+            else item
+            for item in data_items
+        ]
+
+        data_items = [
+            np.ascontiguousarray(item)
+            if isinstance(item, np.ndarray)
+            and any(stride < 0 for stride in item.strides)
             else item
             for item in data_items
         ]

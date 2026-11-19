@@ -12,9 +12,14 @@ from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import ProfilerAlreadyActiveError, VLLMValidationError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
@@ -94,6 +99,8 @@ class LLMEngine:
 
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
+        # lora_int_id -> (lora_name, lora_path) of every adapter seen so far.
+        self._lora_adapters: dict[int, tuple[str, str]] = {}
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
@@ -116,6 +123,7 @@ class LLMEngine:
             log_stats=self.log_stats,
             renderer=renderer,
         )
+        self._profile_session_active = False
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
@@ -254,6 +262,13 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             request = self.input_processor.process_inputs(
                 request_id,
@@ -270,6 +285,8 @@ class LLMEngine:
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
+        if request.lora_request is not None:
+            self._register_lora(request.lora_request)
         self.input_processor.assign_request_id(request)
 
         req_id = request.request_id
@@ -312,6 +329,12 @@ class LLMEngine:
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            if self.dp_group is not None and not getattr(
+                self.engine_core, "last_step_model_executed", True
+            ):
+                # Each DP rank joins one forward's DP sync per step; a step that
+                # ran no forward joins with a dummy batch, as DPEngineCoreProc.
+                self.engine_core.execute_dummy_batch()
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
@@ -322,7 +345,16 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                weight_version=outputs.weight_version,
             )
+
+            mm_processor_cache = self.renderer.mm_processor_cache
+            if mm_processor_cache is not None:
+                for engine_core_output in outputs.outputs:
+                    if engine_core_output.mm_cache_miss_hashes:
+                        for mm_hash in engine_core_output.mm_cache_miss_hashes:
+                            mm_processor_cache.invalidate(mm_hash)
+
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
@@ -343,11 +375,35 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self, profile_prefix: str | None = None):
-        self.engine_core.profile(True, profile_prefix)
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
+    ):
+        if self._profile_session_active:
+            raise ProfilerAlreadyActiveError()
+        validate_profile_prefix(profile_prefix)
+        validate_profile_iteration_bounds(delay_iterations, max_iterations)
+
+        self._profile_session_active = True
+        try:
+            self.engine_core.profile(
+                True,
+                profile_prefix,
+                delay_iterations,
+                max_iterations,
+                profiler_kwargs=profiler_kwargs,
+            )
+        except BaseException:
+            self._profile_session_active = False
+            raise
 
     def stop_profile(self):
         self.engine_core.profile(False)
+        self._profile_session_active = False
 
     def reset_mm_cache(self):
         # Join the background MM warmup first: the mm_processor_cache is not
@@ -371,26 +427,30 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         fully_awake = self.engine_core.wake_up(tags)
 
         if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
+
+        return fully_awake
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -422,11 +482,31 @@ class LLMEngine:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        self._register_lora(lora_request)
         return self.engine_core.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         """Remove an already loaded LoRA adapter."""
-        return self.engine_core.remove_lora(lora_id)
+        removed = self.engine_core.remove_lora(lora_id)
+        if removed:
+            self._lora_adapters.pop(lora_id, None)
+        return removed
+
+    def _register_lora(self, lora_request: LoRARequest) -> None:
+        """Rejects a `lora_int_id` already used by a different adapter, since
+        the workers would serve it with the other adapter's weights.
+        `load_inplace` replaces the adapter behind the id. The online server
+        assigns ids itself, so only offline callers can collide."""
+        adapter = (lora_request.lora_name, lora_request.lora_path)
+        known = self._lora_adapters.get(lora_request.lora_int_id)
+        if known is not None and known != adapter and not lora_request.load_inplace:
+            raise VLLMValidationError(
+                f"lora_int_id {lora_request.lora_int_id} is already used by "
+                f"adapter '{known[0]}' from '{known[1]}', so it can't be used "
+                f"for '{adapter[0]}' from '{adapter[1]}'. Give each adapter its "
+                "own lora_int_id."
+            )
+        self._lora_adapters[lora_request.lora_int_id] = adapter
 
     def list_loras(self) -> set[int]:
         """List all registered adapters."""
@@ -463,14 +543,11 @@ class LLMEngine:
     @staticmethod
     def _cleanup_instance_caches(model_ref: "weakref.ref[nn.Module]") -> None:
         """Remove the bytecode hooks that pin the compiled model."""
-        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+        from vllm.compilation.wrapper import remove_bytecode_hooks
 
         model = model_ref()
-        if model is None:
-            return
-        for module in model.modules():
-            if isinstance(module, TorchCompileWithNoGuardsWrapper):
-                module.cleanup()
+        if model is not None:
+            remove_bytecode_hooks(model)
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)

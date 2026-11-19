@@ -6,7 +6,7 @@ from typing import Literal
 
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
-    # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
+    # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html
     if os.getenv("READTHEDOCS_VERSION_TYPE") == "tag":
         # remove the warning banner if the version is a tagged release
         mkdocs_dir = Path(__file__).parent.parent
