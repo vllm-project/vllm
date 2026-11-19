@@ -194,17 +194,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         local_rank = int(os.environ["LOCAL_RANK"])
         return distributed_init_method, rank, local_rank
 
-    def get_attn_backend_cls_paths(self) -> list[list[str]]:
-        # Each engine holds one worker; take the attention backends of all of
-        # them, since pipeline stages hold different layers.
-        paths = super().get_attn_backend_cls_paths()
-        from vllm.distributed.parallel_state import get_world_group
-
-        world_group = get_world_group()
-        all_paths: list[Any] = [None] * world_group.world_size
-        dist.all_gather_object(all_paths, paths[0], group=world_group.cpu_group)
-        return all_paths
-
     def determine_available_memory(self) -> list[int]:  # in bytes
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
