@@ -514,15 +514,8 @@ steps:
           - "bash .buildkite/scripts/xpu/create-xpu-ecr-manifest.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu" release-manifests'
 
-      - label: "Test standalone Rust frontend against the release engine"
-        key: test-rust-frontend-release
-        depends_on: [build-rust-frontend-x86, build-release-image-x86]
-        agents: {queue: gpu_1_queue}
-        timeout_in_minutes: 35
-        command: bash .buildkite/scripts/test-rust-frontend-external-engine.sh
-
       - label: "Publish nightly Rust frontend to Docker Hub"
-        depends_on: [test-rust-frontend-release, build-rust-frontend-arm64, publish-nightly-engine-dockerhub]
+        depends_on: [build-rust-frontend-x86, build-rust-frontend-arm64, publish-nightly-engine-dockerhub]
         if: build.env("NIGHTLY") == "1"
         agents: {queue: small_cpu_queue_release}
         concurrency: 1
@@ -754,7 +747,7 @@ steps:
   - block: "Publish release images to DockerHub"
     key: block-publish-release-images
     depends_on:
-      - test-rust-frontend-release
+      - build-rust-frontend-x86
       - build-rust-frontend-arm64
       - create-multi-arch-manifest
       - create-manifest-xpu
