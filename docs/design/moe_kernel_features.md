@@ -91,7 +91,7 @@ There are a number of MoE experts kernel implementations for different quantizat
 
 Each kernel must be provided with one of the supported input activation formats. Some flavors of kernels support both standard and batched formats through different entry points, e.g. `TritonExperts` and `BatchedTritonExperts`. Batched format kernels are currently only needed for matching with certain all2all backends, e.g. `DeepEPLLPrepareAndFinalize`.
 
-Similar to the backend kernels, each experts kernel only supports certain quantization formats. For non-modular experts, the activations will be in the original type and quantized internally by the kernel. Modular experts will expect the activations to already be in the quantized format. Both types of experts will yield outputs in the original activation type.
+Similar to the backend kernels, each experts kernel only supports certain quantization formats. Quantized modular experts normally receive inputs quantized by prepare, but implementations declaring `expects_unquantized_inputs=True` perform input quantization internally. The kernel passes this requirement to prepare as `defer_input_quant=True`; the prepare/finalize implementation must support that mode. For example, `FlashInferB12xExperts` requires unquantized BF16 inputs, whereas `DeepEPLLPrepareAndFinalize` rejects deferred input quantization. Modular and non-modular experts yield outputs in the original activation type. See the [prepare/finalize contract](./fused_moe_modular_kernel.md#fusedmoeprepareandfinalizemodular) for details.
 
 Each experts kernel supports one or more activation functions, e.g. silu or gelu, which are applied to the intermediate results.
 
@@ -99,7 +99,7 @@ As with the backends, some experts support applying topk weights on the input ac
 
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.
 
-To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE kernels must have compatible activation formats, quantization types and quantization formats.
+To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE kernels must have compatible activation formats, quantization types, quantization formats, and input-quantization ownership. Platform and parallel-configuration support must also match.
 
 | Kernel | Input act. format | Quant. types | Quant. format | Activation function | Apply Weight On Input | Modular | Source |
 | ------ | ----------------- | ------------ | ------------- | ------------------- | --------------------- | ------- | ------ |
@@ -115,17 +115,18 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 | trtllm | standard | mxfp4,</br>nvfp4 | G(16),G(32) | <sup>7</sup> | N | Y | [`TrtLlmMxfp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsMonolithic],</br>[`TrtLlmMxfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular],</br>[`TrtLlmNvFp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsMonolithic],</br>[`TrtLlmNvfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsModular] |
 | hpc | standard | fp8 | G(128),T | silu | Y | Y | [`HPCExperts`][vllm.model_executor.layers.fused_moe.hpc_moe.HPCExperts] |
 | rocm aiter moe | standard | none,</br>mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai,</br>situ | Y | Y | [`rocm_aiter_fused_experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.rocm_aiter_fused_experts],</br>[`AiterUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterUnquantizedExperts],</br>[`AiterFp8BlockExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8BlockExperts],</br>[`AiterFp8TensorExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8TensorExperts],</br>[`AiterFp8ChannelExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8ChannelExperts],</br>[`AiterMxfp4Experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterMxfp4Experts] |
-| cpu_moe | standard | N/A | N/A | silu, gelu,</br>gelu_tanh,</br>swigluoai | Y | N | [`X86CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.X86CPUUnquantizedExperts],</br>[`ArmCPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.ArmCPUUnquantizedExperts],</br>[`CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.CPUUnquantizedExperts] |
+| cpu_moe | standard | N/A | N/A | silu, gelu,</br>gelu_tanh,</br>swigluoai | Y | Y | [`X86CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.X86CPUUnquantizedExperts],</br>[`ArmCPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.ArmCPUUnquantizedExperts],</br>[`CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.CPUUnquantizedExperts] |
 | naive batched<sup>4</sup> | batched | int8,</br>fp8 | G,A,T | silu, gelu | <sup>6</sup> | Y | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_batched_moe.NaiveBatchedExperts] |
 | trtllm fp8 | standard | fp8 | T | <sup>5</sup> | N | Y | [`TrtLlmFp8ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe.TrtLlmFp8ExpertsModular],</br>[`TrtLlmFp8ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe.TrtLlmFp8ExpertsMonolithic] |
 | trtllm bf16 | standard | N/A | N/A | <sup>5</sup> | N | Y | [`TrtLlmBf16ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular],</br>[`TrtLlmBf16ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic] |
 | trtllm mxint4 | standard | mxint4 | G | <sup>5</sup> | N | N | [`TrtLlmMxint4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe.TrtLlmMxint4ExpertsMonolithic] |
 | trtllm lora | standard | N/A | N/A | <sup>5</sup> | N | Y | [`TrtLlmBf16LoRAExperts`][vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe.TrtLlmBf16LoRAExperts] |
-| deep gemm fp4 | standard,</br>padded standard | nvfp4 | G | silu, gelu | <sup>6</sup> | Y | [`DeepGemmFP4Experts`][vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe.DeepGemmFP4Experts] |
+| deep gemm fp4 | standard,</br>padded standard | mxfp4 (weights),</br>fp8 (activations) | G(32) weights,</br>G(128) activations | silu,</br>swiglustep,</br>situ | <sup>6</sup> | Y | [`DeepGemmFP4Experts`][vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe.DeepGemmFP4Experts] |
 | cutlass mxfp4 | standard | mxfp4 | G | silu | Y | Y | [`CutlassExpertsMxfp4`][vllm.model_executor.layers.fused_moe.experts.cutlass_moe.CutlassExpertsMxfp4] |
 | cutlass w4a8fp8 | standard | fp8,int4 | A,T | silu | Y | Y | [`CutlassExpertsW4A8Fp8`][vllm.model_executor.layers.fused_moe.experts.cutlass_moe.CutlassExpertsW4A8Fp8] |
-| flashinfer cutedsl | standard,</br>batched | fp8 | G,A,T | <sup>5</sup> | N | Y | [`FlashInferCuteDSLExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe.FlashInferCuteDSLExperts],</br>[`FlashInferCuteDSLBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe.FlashInferCuteDSLBatchedExperts] |
-| flashinfer b12x | standard | fp8 | T | <sup>5</sup> | N | Y | [`FlashInferB12xExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe.FlashInferB12xExperts] |
+| flashinfer cutedsl | standard | nvfp4 | G(16),A,T | silu, swigluoai,</br>swigluoai_uninterleave,</br>relu2_no_mul, situ | N | Y | [`FlashInferCuteDSLExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe.FlashInferCuteDSLExperts] |
+| flashinfer cutedsl (batched) | batched | nvfp4 | G(16),T | silu | N | Y | [`FlashInferCuteDSLBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe.FlashInferCuteDSLBatchedExperts] |
+| flashinfer b12x | standard | nvfp4<sup>9</sup> | G(16),T | silu, gelu_tanh,</br>relu2_no_mul | N | Y | [`FlashInferB12xExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe.FlashInferB12xExperts] |
 | humming | standard,</br>padded standard,</br>batched | mxfp4,nvfp4,</br>mxfp8,fp8,</br>int4,int8 | G,A,T | <sup>8</sup> | Y | Y | [`HummingIndexedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.HummingIndexedExperts],</br>[`HummingGroupedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.HummingGroupedExperts],</br>[`BatchedHummingGroupedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.BatchedHummingGroupedExperts] |
 | triton wna16 | standard | int4,int8 | G | silu, gelu | Y | Y | [`TritonWNA16Experts`][vllm.model_executor.layers.fused_moe.experts.triton_moe.TritonWNA16Experts] |
 | triton-or-deepgemm | standard,</br>padded standard | fp8 | G(128),A,T | silu, gelu | <sup>6</sup> | Y | [`TritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe.TritonOrDeepGemmExperts] |
@@ -146,6 +147,7 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
     6. Only handled by or supported when used with modular kernels.
     7. Supported activations depend on the quantization format and FlashInfer version. NVFP4 supports `swiglustep`.
     8. Humming supports the activation functions handled by `apply_moe_activation`, including gated and no-mul SiLU/GELU variants, SiTU, and SwiGLU variants.
+    9. B12x accepts NVFP4 weight schemes with either NVFP4 activation quantization or no checkpoint activation-quantization key (W4A16). It consumes BF16 inputs and quantizes them internally. Expert parallelism is not supported.
 
 ## Modular Kernel "families"
 
@@ -162,5 +164,7 @@ The following table shows "families" of modular kernels that are intended to wor
 | moonep | `MoonEPPrepareAndFinalize` | `MoonEPExperts` |
 | alltoall_batched | `AllToAllBatchedPrepareAndFinalize` | `BatchedTritonExperts` |
 | allgather_reducescatter | `MoEPrepareAndFinalizeNaiveDPEPModular` | `TritonExperts`,</br>`DeepGemmExperts` |
-| flashinfer | `FlashInferNVLinkTwoSidedPrepareAndFinalize`,</br>`FlashInferNVLinkOneSidedPrepareAndFinalize` | `FlashInferExperts`,</br>`FlashInferCuteDSLExperts`,</br>`FlashInferB12xExperts` |
+| flashinfer | `FlashInferNVLinkTwoSidedPrepareAndFinalize`,</br>`FlashInferNVLinkOneSidedPrepareAndFinalize` | `FlashInferExperts`,</br>`FlashInferCuteDSLExperts` |
 | (no dispatch) | `MoEPrepareAndFinalizeNoDPEPModular` | (any standard-format experts) |
+
+These families remain subject to each implementation's platform, quantization, and parallel-configuration checks. `FlashInferB12xExperts` is not an EP pairing: its support check rejects `use_ep=True` and it requires all experts to be local.

@@ -74,7 +74,19 @@ The `FusedMoEKernelModularImpl` acts as a bridge between the `FusedMoEExpertsMod
 ### FusedMoEPrepareAndFinalizeModular
 
 The `FusedMoEPrepareAndFinalizeModular` abstract class (inheriting from `FusedMoEPrepareAndFinalize`) exposes `prepare`, `prepare_async`, `finalize`, and `finalize_async` functions.
-The `prepare` function is responsible for input activation Quantization and All2All Dispatch. If `supports_async()` returns True, the class also implements `prepare_async` and `finalize_async`. `prepare_async` is like `prepare` except it does not wait to receive results from other workers — instead it returns a "receiver" callback that must be invoked to wait for the final results. This can be used to interleave work with the initial all-to-all communication, e.g. overlapping shared experts with fused experts via DBO (Dual Batch Overlap). `finalize_async` similarly allows overlapping the combine step with shared expert computation. The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section).
+The `prepare` function handles input activation quantization and All2All Dispatch. Input quantization may instead belong to the experts: when `FusedMoEExperts.expects_unquantized_inputs` is True, the kernel passes `defer_input_quant=True` to `prepare` or `prepare_async`. The prepare/finalize implementation must support leaving those inputs unquantized; implementations such as `DeepEPLLPrepareAndFinalize` reject this mode. Matching activation layouts and quantization schemes alone is therefore not sufficient to establish compatibility.
+
+The `finalize` function invokes All2All Combine and may also perform TopK weight application and reduction (see [TopKWeightAndReduce](#topkweightandreduce)). The prepare/finalize object's `output_is_reduced()` method declares whether the routed output has already been reduced across ranks. This is distinct from summing the top-k expert contributions for each token: `MoERunner` uses the flag to decide whether another cross-rank reduction is needed and whether shared expert output must be reduced separately.
+
+#### Asynchronous prepare and finalize
+
+If `supports_async()` returns True, the class implements `prepare_async` and `finalize_async`. Both initiate work without waiting for the final result and return either a `receiver` callback or a `(hook, receiver)` pair.
+
+* The optional `hook` handles communication completion separately from result processing. Outside DBO (Dual Batch Overlap), the kernel invokes it before the receiver; with DBO, the kernel registers it with the microbatch scheduler and yields before invoking the receiver.
+* The `prepare_async` receiver completes preparation and returns the same tuple as `prepare`: activations, scales, expert-token metadata, and optional dispatched top-k IDs and weights.
+* The `finalize_async` receiver completes finalization into the caller-provided `output` buffer. As with synchronous `finalize`, the result is written in place rather than returned as a tensor. The output is ready for use only after the hook/receiver sequence has completed.
+
+This split allows communication to overlap other work, including shared expert computation during combine. `DeepEPLLPrepareAndFinalize` is an example that returns a hook/receiver pair.
 
 ![FusedMoEPrepareAndFinalizeModular Blocks](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png)
 
@@ -170,6 +182,8 @@ class FusedMoEKernelModularImpl:
 
 ## How-To
 
+For end-to-end workflows covering production selection, weight loading, and validation, see [Contributing Fused MoE Implementations](../contributing/fused_moe.md). The sections below describe the individual kernel interfaces.
+
 ### How To Add a FusedMoEPrepareAndFinalizeModular Type
 
 Typically a FusedMoEPrepareAndFinalizeModular type is backed by an All2All Dispatch & Combine implementation / kernel. For example,
@@ -185,17 +199,19 @@ The purpose of the All2All Manager is to set up the All2All kernel implementatio
 
 This section describes the significance of the various functions exposed by the `FusedMoEPrepareAndFinalizeModular` abstract class.
 
-`FusedMoEPrepareAndFinalizeModular::prepare()`: The prepare method implements the Quantization and All2All Dispatch. Typically the Dispatch function from the relevant All2All Manager is invoked.
+`FusedMoEPrepareAndFinalizeModular::prepare()`: Implements input quantization and All2All Dispatch, typically by invoking the relevant All2All Manager. Honor `defer_input_quant=True` when the experts require unquantized inputs, or reject that pairing explicitly if unsupported.
 
 `FusedMoEPrepareAndFinalize::supports_async()`: Indicates whether or not this subclass implements `prepare_async` and `finalize_async`. Defaults to False.
 
-`FusedMoEPrepareAndFinalizeModular::prepare_async()`: The prepare_async method implements the Quantization and All2All Dispatch. It does not wait for the result of the dispatch operation but instead returns a thunk that can be invoked to wait for the final results. Typically the Dispatch function from the relevant All2All Manager is invoked.
+`FusedMoEPrepareAndFinalizeModular::prepare_async()`: Initiates preparation and returns a receiver or `(hook, receiver)` pair, following the [asynchronous contract](#asynchronous-prepare-and-finalize). The receiver returns the same result tuple as `prepare`.
 
-`FusedMoEPrepareAndFinalizeModular::finalize_async()`: Like `finalize` but allows overlapping the combine step with other work (e.g. shared expert computation).
+`FusedMoEPrepareAndFinalizeModular::finalize_async()`: Initiates finalization and returns a receiver or `(hook, receiver)` pair, allowing combine to overlap other work. Completion writes into the supplied `output` buffer; it does not return an output tensor.
 
 `FusedMoEPrepareAndFinalizeModular::finalize()`: Maybe perform TopK Weight Application and Reduction and All2All Combine. Typically the Combine function from the relevant All2AllManager is invoked.
 
-`FusedMoEPrepareAndFinalizeModular::activation_format()`: Return `FusedMoEActivationFormat.BatchedExperts` when dispatch produces per-expert batches, `FusedMoEActivationFormat.PaddedStandard` when it produces a token-major buffer whose row count is an upper bound with inactive padding rows, and `FusedMoEActivationFormat.Standard` for an exact token-major buffer.
+`FusedMoEPrepareAndFinalize::output_is_reduced()`: Required abstract method indicating whether `finalize` has already reduced routed output across ranks. Return True only when no further cross-rank reduction of that output is needed; an incorrect value can cause a missing or duplicate reduction in `MoERunner`.
+
+`FusedMoEPrepareAndFinalize::activation_format`: Required abstract property, implemented with `@property`, not a method called as `activation_format()`. Return `FusedMoEActivationFormat.BatchedExperts` when dispatch produces per-expert batches, `FusedMoEActivationFormat.PaddedStandard` when it produces a token-major buffer whose row count is an upper bound with inactive padding rows, and `FusedMoEActivationFormat.Standard` for an exact token-major buffer.
 
 `FusedMoEPrepareAndFinalizeModular::topk_indices_dtype()`: Data type of the TopK ids. Some All2All kernels have strict requirements pertaining to the data type of the TopK ids. This requirement is passed on to the `FusedMoe::select_experts` function so it could be respected. If there are no strict requirements return None.
 
@@ -230,7 +246,7 @@ Kernel selection has been refactored into an **oracle** system under [`fused_moe
 
 Each `FusedMoEExperts` subclass declares its capabilities via the static `is_supported_config()` method. The oracle iterates through backends in priority order, finds a compatible experts class, pairs it with the appropriate `FusedMoEPrepareAndFinalize`, and constructs the `FusedMoEKernel`.
 
-The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`. The `FusedMoEMethodBase.apply()` and `apply_monolithic()` methods delegate to the kernel.
+The resulting `FusedMoEKernel` is stored on the quantization method's `moe_kernel` attribute. Concrete quantization methods implement `apply()` and/or `apply_monolithic()` for their supported execution modes, forwarding the layer's weights and execution settings to the kernel. The base implementations in `FusedMoEMethodBase` raise `NotImplementedError`; setting `moe_kernel` makes `supports_internal_mk` True but does not provide automatic forwarding. See the [contribution guide](../contributing/fused_moe.md#4-implement-execution-entry-points) for details.
 
 ### How To Unit Test
 
@@ -252,7 +268,22 @@ with incompatible types, the script will error.
 Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
 The script can be used to generate Torch traces for a single `FusedMoEKernel::apply()` call for any compatible
 `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types.
-Example: `.venv/bin/python -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
+
+Run the following example from the repository root after installing vLLM and the test dependencies. It requires two CUDA GPUs and a communication setup supported by DeepEP low-latency, with the [DeepEP dependencies installed](../serving/expert_parallel_deployment.md#prerequisites). The test registry currently excludes this backend on SM100 GPUs.
+
+The `--torch-trace-dir-path` argument is required, and its directory must already exist:
+
+```bash
+moe_trace_dir=$(mktemp -d)
+.venv/bin/python -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel \
+    --pf-type DeepEPLLPrepareAndFinalize \
+    --experts-type BatchedTritonExperts \
+    --world-size 2 \
+    --topk 4 \
+    --torch-trace-dir-path "$moe_trace_dir"
+```
+
+This writes one trace per rank to the directory in `$moe_trace_dir` for the selected token count and top-k value.
 
 ## FusedMoEPrepareAndFinalizeModular Implementations
 

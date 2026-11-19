@@ -276,7 +276,7 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 
 - `moe: FusedMoEConfig` — the MoE layer configuration
 - `moe_quant_config: FusedMoEQuantConfig | None` — cached quantization config built by `get_fused_moe_quant_config()`
-- `moe_kernel: FusedMoEKernel | None` — the unified kernel facade constructed by the oracle (see section 9). It selects either a modular or monolithic implementation; when set, `apply()` and `apply_monolithic()` delegate to it.
+- `moe_kernel: FusedMoEKernel | None` — the unified kernel facade constructed by the oracle (see section 9). It wraps either a modular or monolithic implementation. Concrete quantization methods provide the execution entry points that call it.
 
 **Key methods**:
 
@@ -284,6 +284,8 @@ Central dataclass carrying all MoE layer configuration. Created once by the fact
 - `apply()` — execute the fused MoE kernel with pre-computed routing (modular path)
 - `apply_monolithic()` — execute a kernel that handles routing internally (monolithic path)
 - `get_fused_moe_quant_config()` — produce a `FusedMoEQuantConfig` describing scales/shapes
+
+The base `apply()` and `apply_monolithic()` implementations raise `NotImplementedError`. Concrete quantization methods must implement the execution modes they support, forwarding the layer's weights and execution settings to the kernel when using the internal kernel interface. Setting `moe_kernel` does not supply this forwarding. See the [contribution guide](../contributing/fused_moe.md#4-implement-execution-entry-points) for the implementation requirements.
 
 **Key properties**:
 
