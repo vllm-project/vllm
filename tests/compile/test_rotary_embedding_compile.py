@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import pytest
 import torch
 
@@ -147,10 +149,14 @@ def test_rotary_embedding_kernel_lowering_has_no_copies(monkeypatch):
             model(positions, qkv)
             torch.accelerator.synchronize()
 
+    torch.testing.assert_close(out_q, ref_q, atol=3e-2, rtol=2e-2)
+    torch.testing.assert_close(out_k, ref_k, atol=3e-2, rtol=2e-2)
     kernels = [e.name for e in prof.events() if e.device_type.name == "CUDA"]
+    # A tool in ROCP_TOOL_LIBRARIES (e.g. CI's kernel recorder) can initialize
+    # rocprofiler-sdk before Kineto registers, leaving torch.profiler blind.
+    if not kernels and os.environ.get("ROCP_TOOL_LIBRARIES"):
+        pytest.skip("torch.profiler is blind under a ROCP_TOOL_LIBRARIES tool")
     rope = [k for k in kernels if "rotary_embedding_out_kernel" in k]
     # Anything else (e.g. a clone of q/k) is an extra copy; memsets are benign.
     others = [k for k in kernels if k not in rope and "memset" not in k.lower()]
     assert len(rope) == 1 and not others, kernels
-    torch.testing.assert_close(out_q, ref_q, atol=3e-2, rtol=2e-2)
-    torch.testing.assert_close(out_k, ref_k, atol=3e-2, rtol=2e-2)
