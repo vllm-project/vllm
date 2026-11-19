@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Helpers for weight shard seeding (manifest format, fingerprint, launcher logic)."""
+
+import socket
+from collections.abc import Mapping
+from dataclasses import fields
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+import torch
+from pydantic import TypeAdapter
+
+from vllm.config import replace
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    TensorKind,
+    WeightCacheKey,
+    parse_seed_address,
+    recv_msg,
+    send_msg,
+    verify_socket_owner,
+)
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+_CONNECT_TIMEOUT_S = 5.0
+
+
+class WeightsSeedPayload(TypedDict):
+    """What a source daemon's `weights` resolve sends to a peer loader."""
+
+    cache_config: dict[str, Any]
+    """`asdict(WeightCacheKey)` of the source's shard."""
+    model: str
+    manifest: dict[str, Any]
+    """Storage manifest, as `build_manifest` produces."""
+    aliases: dict[str, str]
+    attrs: dict[str, bool]
+    seed: dict[str, Any]
+    """Mover-specific transfer seed; `seed["backend"]` picks the mover."""
+
+
+def build_manifest(
+    tensors: Mapping[str, torch.Tensor], kinds: Mapping[str, TensorKind]
+) -> tuple[dict[str, Any], list[torch.UntypedStorage]]:
+    """Describe `tensors` as views over their unique storages."""
+    storages: list[torch.UntypedStorage] = []
+    index_by_storage: dict[tuple[torch.device, int], int] = {}
+    views: dict[str, dict[str, Any]] = {}
+    for name, tensor in tensors.items():
+        storage = tensor.untyped_storage()
+        index = index_by_storage.setdefault(
+            (tensor.device, storage.data_ptr()), len(storages)
+        )
+        if index == len(storages):
+            storages.append(storage)
+        views[name] = {
+            "storage": index,
+            "offset": tensor.storage_offset(),
+            "shape": list(tensor.shape),
+            "stride": list(tensor.stride()),
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "is_param": kinds[name] == "param",
+        }
+    manifest = {
+        "storages": [
+            {"nbytes": storage.nbytes(), "device": storage.device.type}
+            for storage in storages
+        ],
+        "tensors": views,
+    }
+    return manifest, storages
+
+
+def manifest_dtype(dtype_name: str) -> torch.dtype:
+    dtype = getattr(torch, dtype_name, None)
+    if not isinstance(dtype, torch.dtype):
+        raise RuntimeError(
+            f"Weight-cache seed manifest uses unsupported dtype {dtype_name!r}"
+        )
+    return dtype
+
+
+def manifest_nbytes(manifest: Mapping[str, Any]) -> int:
+    return sum(storage["nbytes"] for storage in manifest["storages"])
+
+
+def _view_extent(view: Mapping[str, Any], itemsize: int) -> int:
+    """Bytes from the start of its storage that a strided view reaches."""
+    if 0 in view["shape"]:
+        return 0
+    last = view["offset"] + sum(
+        (size - 1) * stride
+        for size, stride in zip(view["shape"], view["stride"], strict=True)
+    )
+    return (last + 1) * itemsize
+
+
+def rebuild_tensors(
+    manifest: Mapping[str, Any], buffers: list[torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Recreate every manifest tensor on the mirror's copies; bounds-checked first."""
+    tensors: dict[str, torch.Tensor] = {}
+    for name, view in manifest["tensors"].items():
+        index = view["storage"]
+        if not isinstance(index, int) or not 0 <= index < len(buffers):
+            raise RuntimeError(f"Seed manifest entry {name!r} names no storage")
+        buffer = buffers[index]
+        dtype = manifest_dtype(view["dtype"])
+        if _view_extent(view, dtype.itemsize) > buffer.nbytes:
+            raise RuntimeError(f"Seed manifest entry {name!r} overruns its storage")
+        tensors[name] = torch.empty(0, dtype=dtype, device=buffer.device).set_(
+            buffer.untyped_storage(), view["offset"], view["shape"], view["stride"]
+        )
+    return tensors
+
+
+def allocate_storage(storage: Mapping[str, Any], device: torch.device) -> torch.Tensor:
+    """A fresh byte buffer for one manifest storage, on the source's device type."""
+    target = torch.device("cpu") if storage["device"] == "cpu" else device
+    return torch.empty(storage["nbytes"], dtype=torch.uint8, device=target)
+
+
+def storage_bytes(storage: torch.UntypedStorage) -> torch.Tensor:
+    """A flat byte tensor covering the whole storage."""
+    return torch.empty(0, dtype=torch.uint8, device=storage.device).set_(storage)
+
+
+def seed_mismatches(
+    local: WeightCacheKey,
+    source: WeightCacheKey,
+    model: str,
+    source_model: str | None,
+) -> list[str]:
+    """Fields on which a seed source's shard differs (model-path fallback)."""
+    mismatched = local.mismatched_fields(source)
+    if "checkpoint" in mismatched and local.checkpoint == model == source_model:
+        mismatched.remove("checkpoint")
+    return mismatched
+
+
+SeedAddress = str | tuple[str, int]
+
+
+def parse_seed_addresses(value: str | None) -> list[SeedAddress]:
+    return [
+        parse_seed_address(address)
+        for address in (value or "").split(",")
+        if address.strip()
+    ]
+
+
+def seed_address(
+    addresses: list[SeedAddress],
+    local_rank: int,
+    global_rank: int,
+    port_offset: int = 0,
+    *,
+    node_rank: int = 0,
+    is_draft: bool = False,
+) -> SeedAddress | None:
+    """Resolve one daemon's rank-matched source socket or remote endpoint."""
+    if not addresses:
+        return None
+    address = addresses[0]
+    if isinstance(address, str):
+        address = addresses[local_rank]
+        assert isinstance(address, str)
+        if is_draft:
+            return f"{address.removesuffix('.sock')}_draft.sock"
+        return address
+    address = addresses[node_rank]
+    assert not isinstance(address, str)
+    host, port = address
+    return host, port + port_offset + global_rank
+
+
+def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
+    """Switch one daemon's config to the `peer_cache` load format."""
+    extra = dict(config.load_config.model_loader_extra_config or {})
+    extra["is_draft"] = is_draft
+    return replace(
+        config,
+        load_config=replace(
+            config.load_config,
+            load_format="peer_cache",
+            model_loader_extra_config=extra,
+        ),
+    )
+
+
+def mirror_device_indices(addresses: list[SeedAddress], num_local: int) -> list[int]:
+    """A same-host mirror's GPU indices: the free ones past the source's."""
+    source_uuids = set()
+    for path in addresses:
+        # The launcher only calls this for the all-Unix-socket form.
+        assert isinstance(path, str)
+        verify_socket_owner(path, strict_perms=False)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(_CONNECT_TIMEOUT_S)
+            sock.connect(path)
+            send_msg(sock, {"cmd": "get_memory"})
+            response = recv_msg(sock)
+        gpu_uuid = response.get("gpu_uuid") if isinstance(response, dict) else None
+        if not isinstance(gpu_uuid, str):
+            raise ValueError(
+                f"Source daemon at {path} did not report its GPU UUID; "
+                "is it an up-to-date weight cache daemon?"
+            )
+        source_uuids.add(gpu_uuid)
+    device_count = torch.accelerator.device_count()
+    occupied = {
+        index
+        for index in range(device_count)
+        if current_platform.get_device_uuid(index) in source_uuids
+    }
+    if len(occupied) != len(source_uuids):
+        raise ValueError(
+            "A --weight-cache-seed source socket belongs to a GPU that is "
+            "not visible here; a same-host mirror must see every GPU"
+        )
+    free = [index for index in range(device_count) if index not in occupied]
+    if len(free) < num_local:
+        raise ValueError(
+            f"Only {len(free)} GPU(s) are free of the source replica, but "
+            f"{num_local} local daemon(s) each need one"
+        )
+    return free
+
+
+def validate_weights_payload(
+    payload: Any, expected_key: WeightCacheKey, model: str
+) -> WeightsSeedPayload:
+    """Structural checks plus the shard fingerprint against the expected key."""
+    if not isinstance(payload, dict):
+        raise ValueError("Seed daemon returned a malformed payload")
+    source_model = payload.get("model")
+    if source_model is not None and not isinstance(source_model, str):
+        raise ValueError("Seed daemon returned a malformed model name")
+    manifest = payload.get("manifest")
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(manifest.get("storages"), list)
+        or not isinstance(manifest.get("tensors"), dict)
+    ):
+        raise ValueError("Seed daemon returned a malformed manifest")
+    seed = payload.get("seed")
+    if not isinstance(seed, dict) or not isinstance(seed.get("backend"), str):
+        raise ValueError("Seed daemon returned a malformed transfer seed")
+    for key in ("aliases", "attrs"):
+        if payload.get(key) is not None and not isinstance(payload[key], dict):
+            raise ValueError(f"Seed daemon returned malformed {key}")
+    cache_config = payload.get("cache_config")
+    if not isinstance(cache_config, dict):
+        raise ValueError("Seed daemon returned a malformed cache key")
+    declared = {f.name for f in fields(WeightCacheKey)}
+    if unknown := set(cache_config) - declared:
+        raise ValueError(f"Unknown WeightCacheKey fields: {sorted(unknown)}")
+    source_key = TypeAdapter(WeightCacheKey).validate_python(cache_config)
+    mismatched = seed_mismatches(expected_key, source_key, model, source_model)
+    if mismatched:
+        hint = (
+            f"; no safetensors under {model} to fingerprint here, so the "
+            "mirror needs the source's --model path or the checkpoint files"
+            if mismatched == ["checkpoint"] and expected_key.checkpoint == model
+            else ""
+        )
+        raise ValueError(
+            f"Seed daemon cache differs on fields {mismatched}; refusing "
+            f"to mirror a different weight shard{hint}"
+        )
+    return cast(WeightsSeedPayload, payload)

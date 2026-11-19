@@ -322,6 +322,13 @@ def test_decode_mxfp8_output_multi_request_xcd_splits(num_reqs, splits):
     _assert_multi_request_mxfp8(num_reqs, 8, 150_000, splits=splits, xcd_count=8)
 
 
+@pytest.mark.parametrize("num_reqs", [9, 10, 33, 48])
+def test_decode_mxfp8_output_balanced_plan(num_reqs):
+    """The MXFP8 epilogue on the plans with balanced placement (9-10 requests)
+    and the two-workgroups-a-CU build (33-48 requests)."""
+    _assert_multi_request_mxfp8(num_reqs, 8, 150_000, xcd_count=8)
+
+
 @pytest.mark.parametrize("splits", [1, 2, 4, 8])
 @pytest.mark.parametrize("xcd_count", [0, 8])
 @pytest.mark.parametrize("num_kv_heads", [1, 4])
@@ -388,18 +395,46 @@ def test_o_proj_mxfp8_handoff_is_decode_only(
     assert emits(layer) is False
 
 
-def test_xcd_splits_table():
-    """Splits of the XCD-aware grid: 4 up to 8 requests (one per XCD) and for
-    17-24, 2 for 9-16, the cost model beyond and off the tuned shape."""
-    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+def test_xcd_plan_table():
+    """Splits, placement and occupancy of the XCD-aware grid (8 XCDs x 32 CUs):
+    4 splits up to 8 requests, 3 balanced for 9-10, 2 for 11-16, unsplit for
+    17-32, 2 balanced at two workgroups a CU for 33-48, the cost model beyond
+    and off the tuned shape."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host, kernel
 
-    got = [host._xcd_splits(n, 8, 16, 8, 1) for n in (1, 5, 8, 9, 16, 17, 24, 25)]
-    assert got == [4, 4, 4, 2, 2, 4, 4, None]
-    assert host._xcd_splits(5, 8, 16, 4, 1) is None  # DSpark 3: not tuned
-    assert host._xcd_splits(5, 0, 16, 8, 1) is None  # no XCD-aware grid
-    assert host._xcd_splits(5, 8, 32, 8, 1) is None  # other top-k width
-    assert host._xcd_splits(5, 8, 16, 8, 2) is None  # TP2: over-splits
-    assert host._xcd_splits(5, 8, 16, 8, 4) is None  # TP1: over-splits
+    req, bal = kernel.PLACE_REQ, kernel.PLACE_BAL
+    reqs = (1, 5, 8, 9, 10, 11, 16, 17, 24, 25, 32, 33, 48, 49)
+    got = [host._xcd_plan(n, 8, 16, 8, 1, 256) for n in reqs]
+    assert got == [
+        (4, req, 0), (4, req, 0), (4, req, 0), (3, bal, 0), (3, bal, 0),
+        (2, req, 0), (2, req, 0), (1, req, 0), (1, req, 0), (1, req, 0),
+        (1, req, 0), (2, bal, 2), (2, bal, 2), None,
+    ]  # fmt: skip
+    assert host._xcd_plan(5, 8, 16, 4, 1, 256) is None  # DSpark 3: not tuned
+    assert host._xcd_plan(5, 0, 16, 8, 1, 256) is None  # no XCD-aware grid
+    assert host._xcd_plan(5, 8, 32, 8, 1, 256) is None  # other top-k width
+    assert host._xcd_plan(5, 8, 16, 8, 2, 256) is None  # TP2: over-splits
+    assert host._xcd_plan(5, 8, 16, 8, 4, 256) is None  # TP1: over-splits
+
+
+@pytest.mark.parametrize("splits", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("num_reqs", [3, 9, 12, 17, 25])
+def test_balanced_placement_bitwise(splits, num_reqs):
+    """PLACE_BAL (and any placement) only moves rows between workgroups: the
+    output equals PLACE_REQ's and the plain grid's at the same split count."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import kernel
+
+    q, cache, topk, table, seq_lens = _default_split_case(1, num_reqs)
+    outs = [
+        _decode(q, cache, topk, table, seq_lens, 8, splits=splits, **kw)
+        for kw in (
+            dict(xcd_count=8, place=kernel.PLACE_BAL),
+            dict(xcd_count=8, place=kernel.PLACE_REQ),
+            dict(xcd_count=0),
+        )
+    ]
+    assert torch.isfinite(outs[0]).all()
+    assert torch.equal(outs[0], outs[1]) and torch.equal(outs[0], outs[2])
 
 
 @pytest.mark.parametrize("num_reqs", [1, 3, 5, 8, 9, 12, 16, 17, 24, 40])
@@ -442,12 +477,13 @@ def _default_split_case(num_kv_heads, num_reqs):
 
 
 def _record_kernels(monkeypatch, host):
-    """The (splits, topk, xcds) of every kernel the default path compiles."""
+    """The (splits, topk, xcds, place, waves_per_eu) of every kernel the
+    default path compiles."""
     chosen = []
     real = host._get_kernel
 
     def record(*args):
-        chosen.append(args[:3])  # not the kernel variant (fp8_out)
+        chosen.append(args[:3] + args[4:])  # not the kernel variant (fp8_out)
         return real(*args)
 
     monkeypatch.setattr(host, "_get_kernel", record)
@@ -489,7 +525,7 @@ def test_default_splits_without_the_xcd_grid(monkeypatch, num_kv_heads, num_reqs
     expected = host.decode_splits(rows * num_kv_heads, 16, host.cu_count(q.device))
     if rows * num_kv_heads > host.MAX_SPLIT_ROWS:
         expected = 1
-    assert chosen == [(expected, 16, 0)]
+    assert chosen == [(expected, 16, 0, 0, 0)]
     unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
     real_rows = (seq_lens.repeat_interleave(8) > 0).cpu()
     assert torch.isfinite(out).all()
@@ -498,14 +534,14 @@ def test_default_splits_without_the_xcd_grid(monkeypatch, num_kv_heads, num_reqs
 
 
 @pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24, 40])
+@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 10, 11, 16, 17, 24, 25, 32, 40, 56])
 def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
-    """The default split count is the XCD table at one KV head per rank and the
-    cost model otherwise, counted over every request including padding
-    (seq_len 0), and agrees with the unsplit kernel."""
-    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+    """The default split count and placement are the XCD plan at one KV head per
+    rank and the cost model otherwise, counted over every request including
+    padding (seq_len 0), and agree with the unsplit kernel."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host, kernel
 
-    # The table is tuned for the full 8-XCD device; partitioned (DPX/QPX)
+    # The plan is tuned for the full 8-XCD device; partitioned (DPX/QPX)
     # devices report fewer XCDs and run the default path without the XCD grid.
     if host._xcd_count(torch.accelerator.current_device_index()) != 8:
         pytest.skip("needs an 8-XCD device")
@@ -515,16 +551,19 @@ def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
 
     xcds = host._xcd_count(q.device.index)
     rows = num_reqs * 8
-    expected = host._xcd_splits(num_reqs, xcds, 16, 8, num_kv_heads)
-    if expected is None:
-        expected = host.decode_splits(rows * num_kv_heads, 16, host.cu_count(q.device))
-    grid_x = -(-rows // (xcds * 8)) * xcds * 8
+    cus = host.cu_count(q.device)
+    plan = host._xcd_plan(num_reqs, xcds, 16, 8, num_kv_heads, cus)
+    expected, place, wpe = plan if plan else (None, kernel.PLACE_REQ, 0)
+    grid_x = host._grid_x(rows, 8, xcds, place)
     if grid_x * num_kv_heads > host.MAX_SPLIT_ROWS:
         expected = 1
-    assert chosen == [(expected, 16, xcds)]
+    elif expected is None:
+        expected = host.decode_splits(rows * num_kv_heads, 16, cus)
+    assert chosen == [(expected, 16, xcds, place, wpe)]
     if num_kv_heads == 1:
-        table_splits = {1: 4, 5: 4, 8: 4, 9: 2, 16: 2, 17: 4, 24: 4}
-        assert expected == table_splits.get(num_reqs, expected)
+        table_plans = {1: 4, 5: 4, 8: 4, 9: 3, 10: 3, 11: 2, 16: 2, 17: 1, 24: 1}
+        table_plans.update({25: 1, 32: 1, 40: 2})
+        assert expected == table_plans.get(num_reqs, expected)
 
     unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
     real_rows = (seq_lens.repeat_interleave(8) > 0).cpu()

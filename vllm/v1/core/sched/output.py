@@ -191,7 +191,7 @@ class CachedRequestData:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class IterationDetails:
     """Scheduled prefill/decode request and input counts."""
 
@@ -220,7 +220,7 @@ class IterationDetails:
         return self.num_decode_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
@@ -342,8 +342,14 @@ class SchedulerOutput:
             free_encoder_mm_hashes=[],
         )
 
+    def shares_requests_with(self, other: "SchedulerOutput") -> bool:
+        """Whether any request is scheduled in both this step and `other`."""
+        return not self.num_scheduled_tokens.keys().isdisjoint(
+            other.num_scheduled_tokens
+        )
 
-@dataclass
+
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

@@ -146,6 +146,7 @@ def _setup_kv_transfer_request(
 def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.is_producer = False
+    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
@@ -327,12 +328,7 @@ def create_vllm_config(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=False,
     )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        seed=42,
-    )
+    model_config = ModelConfig(model=model, dtype="bfloat16", seed=42)
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
