@@ -74,7 +74,9 @@ class FakeQSA:
     def flydsl_qsa_paged_gqa_supported(self, q, k_cache, v_cache, indices, page_table):
         return self.k2_reason
 
-    def flydsl_qsa_paged_gqa(self, q, k_cache, v_cache, indices, page_table, token_to_req, out):
+    def flydsl_qsa_paged_gqa(
+        self, q, k_cache, v_cache, indices, page_table, token_to_req, out
+    ):
         self.k2_calls.append(q.shape[0])
         out.fill_(1)
         return out
@@ -190,7 +192,7 @@ def test_select_trims_the_table_on_prefill_batches(
 ):
     from types import SimpleNamespace
 
-    from vllm.models.qwen4_exp.amd.indexer_qsa import QSAIndexer
+    from vllm.models.qwen4_exp.amd.qsa_indexer import QSAIndexer
 
     widths = []
 
@@ -222,8 +224,8 @@ def test_select_trims_the_table_on_prefill_batches(
 def test_select_stays_on_triton_without_the_flydsl_backend(monkeypatch):
     from types import SimpleNamespace
 
-    from vllm.models.qwen4_exp.amd import indexer_qsa
-    from vllm.models.qwen4_exp.amd.indexer_qsa import QSAIndexer
+    from vllm.models.qwen4_exp.amd import qsa_indexer
+    from vllm.models.qwen4_exp.amd.qsa_indexer import QSAIndexer
 
     def flydsl(*args):
         raise AssertionError("FlyDSL selected without the flydsl backend")
@@ -251,7 +253,7 @@ def test_select_stays_on_triton_without_the_flydsl_backend(monkeypatch):
         compress_ratio=COMPRESS_RATIO,
     )
     assert QSAIndexer._select(indexer, None, metadata, None) is sentinel
-    assert indexer_qsa  # the module imports without AITER
+    assert qsa_indexer  # the module imports without AITER
 
 
 def test_missing_aiter_raises(monkeypatch):

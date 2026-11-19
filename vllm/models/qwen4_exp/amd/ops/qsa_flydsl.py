@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AITER FlyDSL kernels for the Qwen4Exp QSA indexer and sparse GQA.
 
-Opt-in with ``--attention-config.qwen4_exp_qsa_backend flydsl``. K1 replaces
+Opt-in with `--attention-config.qwen4_exp_qsa_backend flydsl`. K1 replaces
 paged MQA scoring plus top-k and writes the same compressed block ids, so the
 Triton expand kernel and the MTP top-k reuse are unchanged. K2 replaces the
 sparse paged GQA and reads the K|V cache views in place. A shape either kernel
@@ -43,7 +43,7 @@ def flydsl_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    """``qsa_select_paged_tokens`` with FlyDSL K1 scoring and top-k.
+    """`qsa_select_paged_tokens` with FlyDSL K1 scoring and top-k.
 
     Returns None when K1 cannot serve these tensors.
     """
@@ -108,12 +108,14 @@ def flydsl_sparse_paged_attention(
     token_to_req: torch.Tensor,
     out: torch.Tensor,
 ) -> bool:
-    """Run FlyDSL K2 into ``out``. Returns False when K2 cannot serve it."""
+    """Run FlyDSL K2 into `out`. Returns False when K2 cannot serve it."""
     qsa = flydsl_qsa()
     if not out.is_contiguous() or not logical_indices.is_contiguous():
         logger.warning_once("FlyDSL QSA K2 skipped: strided output or indices.")
         return False
-    reason = qsa.flydsl_qsa_paged_gqa_supported(q, k_cache, v_cache, logical_indices, block_table)
+    reason = qsa.flydsl_qsa_paged_gqa_supported(
+        q, k_cache, v_cache, logical_indices, block_table
+    )
     if reason is not None:
         logger.warning_once("FlyDSL QSA K2 skipped: %s", reason)
         return False
