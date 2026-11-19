@@ -27,6 +27,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -34,6 +35,55 @@ EngineId = str
 # block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
 # mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
+
+# kv_transfer_params key under which a prefill instance reports how far the
+# prompt's M-RoPE positions trail its token indices. A decode instance that gets
+# the expanded prompt without its multimodal inputs (e.g. one started with
+# --language-model-only) cannot derive this, and would otherwise place every
+# token it computes as if the prompt were plain text.
+MROPE_POSITION_DELTA_KEY = "mrope_position_delta"
+
+
+def get_transferred_mrope_position_delta(
+    vllm_config: VllmConfig, sampling_params: "SamplingParams | None"
+) -> int | None:
+    """The M-RoPE position delta the prefill instance reported for a request
+    whose KV this instance receives, or None if there is none to apply."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None or not kv_transfer_config.is_kv_consumer:
+        return None
+    if sampling_params is None or not sampling_params.extra_args:
+        return None
+    kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+    if not isinstance(kv_transfer_params, dict):
+        return None
+    delta = kv_transfer_params.get(MROPE_POSITION_DELTA_KEY)
+    if delta is None:
+        return None
+    # Transports that carry kv_transfer_params as a protobuf Struct turn every
+    # number into a float.
+    if isinstance(delta, float) and delta.is_integer():
+        delta = int(delta)
+    if isinstance(delta, bool) or not isinstance(delta, int):
+        logger.warning_once(
+            "Ignoring non-integer %s in kv_transfer_params: %r",
+            MROPE_POSITION_DELTA_KEY,
+            delta,
+        )
+        return None
+    return delta
+
+
+def get_max_offload_tokens(kv_transfer_params: dict[str, Any] | None) -> int | None:
+    """Parse the request's offload cap, preserving zero and rejecting booleans."""
+    raw = kv_transfer_params.get("max_offload_tokens") if kv_transfer_params else None
+    if type(raw) is int and raw >= 0:
+        return raw
+    if raw is not None:
+        logger.warning(
+            "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+        )
+    return None
 
 
 def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
@@ -122,6 +172,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        mrope_position_deltas: dict[str, int] = {}
 
         salvaged, self._salvaged_outputs = self._salvaged_outputs, []
 
@@ -193,6 +244,9 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
             self._failed_recving_pending |= kv_output.failed_recving
+            # Every rank computes the same deltas for the requests it adds.
+            if kv_output.mrope_position_deltas:
+                mrope_position_deltas.update(kv_output.mrope_position_deltas)
 
         failed_recving = self._failed_recving_pending & finished_recving
         self._failed_recving_pending -= failed_recving
@@ -209,6 +263,7 @@ class KVOutputAggregator:
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
+            mrope_position_deltas=mrope_position_deltas or None,
             expected_finished_count=self._expected_finished_count,
         )
 
@@ -396,31 +451,45 @@ def get_current_attn_backends_and_specs(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     fallback: list[type[AttentionBackend]],
-) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
+) -> tuple[
+    list[type[AttentionBackend]], list[AttentionSpec | None], list[list[str]] | None
+]:
+    """Distinct (backend, spec, query heads) groups of the transfer layers, with
+    their layer names, else `fallback` with no layer names.
 
-    Attention caches in a block-outermost layout are skipped: blocks there are
-    never split group-wide (`prepare_kernel_block_sizes`), and a cache that
-    needs smaller kernel blocks views them inside each block, so its kernel
-    pages never split transferred blocks. Compressed caches are skipped too
-    (`check_compressed_kernel_split` guards them).
+    The layer names let kernel block selection match the model runner's, which
+    picks per attention group. Attention caches in a block-outermost layout are
+    skipped: blocks there are never split group-wide
+    (`prepare_kernel_block_sizes`), and a cache that needs smaller kernel blocks
+    views them inside each block, so its kernel pages never split transferred
+    blocks. Compressed caches are skipped too (`check_compressed_kernel_split`
+    guards them).
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    groups: dict[
+        tuple[type[AttentionBackend], AttentionSpec | None, int], list[str]
+    ] = {}
     has_layers = False
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
             has_layers = True
-            spec = group.kv_cache_specs[name]
-            if not isinstance(spec, AttentionSpec):
-                pairs[layer.get_attn_backend(), None] = None
-            elif spec.tokens_per_state == 1 and not layout.is_block_outermost:
-                pairs[layer.get_attn_backend(), spec] = None
+            group_spec = group.kv_cache_specs[name]
+            spec: AttentionSpec | None = None
+            if isinstance(group_spec, AttentionSpec):
+                if group_spec.tokens_per_state != 1 or layout.is_block_outermost:
+                    continue
+                spec = group_spec
+            key = (layer.get_attn_backend(), spec, getattr(layer, "num_heads", 0))
+            groups.setdefault(key, []).append(name)
     if not has_layers:
-        return fallback, [None] * len(fallback)
-    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+        return fallback, [None] * len(fallback), None
+    return (
+        [backend for backend, _, _ in groups],
+        [spec for _, spec, _ in groups],
+        list(groups.values()),
+    )
 
 
 def check_compressed_kernel_split(
@@ -453,7 +522,7 @@ def get_current_attn_backend(
 # ---- Per-engine transfer info ----
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EngineTransferInfo:
     """Common per-remote-engine transfer state, computed at handshake.
 
