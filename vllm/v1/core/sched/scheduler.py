@@ -22,6 +22,7 @@ from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -305,6 +306,10 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
+        if self.ec_connector is not None:
+            self.ec_connector.bind_encoder_cache_query(
+                self.encoder_cache_manager.get_cached_num_encoder_embeds
+            )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
@@ -539,11 +544,17 @@ class Scheduler(SchedulerInterface):
         # step that samples. This step samples one.
         min_num_output_tokens = request.num_output_tokens + 1
         if request.num_output_placeholders > 0:
-            # Async scheduling: a step that samples is still in flight, and it
-            # adds one more.
-            min_num_output_tokens += 1
+            # Async scheduling: steps that sample are still in flight.
+            min_num_output_tokens += self._min_in_flight_output_tokens(request)
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
+
+    def _min_in_flight_output_tokens(self, request: Request) -> int:
+        """Min output tokens added by in-flight steps, even if all drafts are
+        rejected. At least one, for diffusion (no bonus token per step)."""
+        return max(
+            1, request.num_output_placeholder_steps * self.num_sampled_tokens_per_step
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -783,16 +794,16 @@ class Scheduler(SchedulerInterface):
 
             if (
                 request.num_output_placeholders > 0
-                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
-                # Since output placeholders are also included in the computed tokens
-                # count, we subtract (num_output_placeholders - 1) to remove any draft
-                # tokens, so that we can be sure no further steps are needed even if
-                # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
+                # Placeholders are included in num_computed_tokens; subtract them
+                # and add the tokens in-flight steps are sure to produce, so no
+                # further steps are needed even if all drafts are rejected.
+                and request.num_computed_tokens
+                + (1 + self._min_in_flight_output_tokens(request))
+                - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
-                # the previous step has reached request.max_tokens. We don't schedule
+                # the in-flight steps reach request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
@@ -1865,6 +1876,7 @@ class Scheduler(SchedulerInterface):
         )
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
+        request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
         if self.log_stats:
             self._num_preempted_reqs += 1
@@ -2339,6 +2351,11 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if kv_connector_output and kv_connector_output.mrope_position_deltas:
+            # Record before the loop below can finish (and free) a request.
+            for req_id, delta in kv_connector_output.mrope_position_deltas.items():
+                if (request := self.requests.get(req_id)) is not None:
+                    request.mrope_position_delta = delta
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2386,6 +2403,11 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            if (not output_is_stale and request.num_output_placeholder_steps > 0) and (
+                generated_token_ids or scheduled_spec_token_ids
+            ):
+                # Not a prefill chunk, so this step added placeholders.
+                request.num_output_placeholder_steps -= 1
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2863,6 +2885,7 @@ class Scheduler(SchedulerInterface):
         request.drop_stale_output = True
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
+        request.num_output_placeholder_steps = 0
 
         while request.streaming_queue:
             update = request.streaming_queue.popleft()
@@ -3089,6 +3112,9 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+            if self.ec_connector is not None:
+                self.ec_connector.on_new_request(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -3530,6 +3556,11 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+        if kv_xfer_params is not None and request.mrope_position_delta is not None:
+            kv_xfer_params = {
+                **kv_xfer_params,
+                MROPE_POSITION_DELTA_KEY: request.mrope_position_delta,
+            }
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:

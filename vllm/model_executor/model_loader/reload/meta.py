@@ -96,7 +96,9 @@ def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
 
 
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
-    if layer.__class__.__name__ in SKIP_MODULES:
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
@@ -120,7 +122,9 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Restore a layer to model format with tensors on the meta device."""
-    if layer.__class__.__name__ in SKIP_MODULES:
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return
 
     non_persistent = set(layer._non_persistent_buffers_set)
@@ -145,7 +149,9 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Materialize all meta tensors in a layer to actual tensors."""
-    if layer.__class__.__name__ in SKIP_MODULES:
+    if layer.__class__.__name__ in SKIP_MODULES or getattr(
+        layer, "_skip_layerwise_reload", False
+    ):
         return
 
     with torch.device("cpu") if info.stage_on_cpu else info.restore_device:
