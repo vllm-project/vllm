@@ -87,6 +87,16 @@ class TestPoolerMultiLabelClassify:
         out = pooler(x)
         assert torch.allclose(out, torch.zeros(1, 3), atol=1e-4)
 
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_low_precision_logits_produce_fp32_probabilities(self, dtype):
+        pooler = PoolerMultiLabelClassify()
+        x = torch.tensor([1.0, 8.0], dtype=dtype)
+        out = pooler(x)
+        assert out.dtype == torch.float32
+        assert torch.allclose(out, x.float().sigmoid(), atol=1e-6)
+        # BF16 rounds 0.99966... to exactly 1.0; FP32 must not.
+        assert out[1].item() < 1.0
+
 
 # ---------------------------------------------------------------------------
 # PoolerClassify
@@ -124,6 +134,22 @@ class TestPoolerClassify:
     def test_default_num_labels_is_none(self):
         pooler = PoolerClassify()
         assert pooler.num_labels is None
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_low_precision_logits_softmax_produce_fp32(self, dtype):
+        pooler = PoolerClassify(num_labels=2)
+        x = torch.tensor([[1.0, 8.0]], dtype=dtype)
+        out = pooler(x)
+        assert out.dtype == torch.float32
+        assert torch.allclose(out, x.float().softmax(dim=-1), atol=1e-6)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_low_precision_logits_sigmoid_produce_fp32(self, dtype):
+        pooler = PoolerClassify(num_labels=1)
+        x = torch.tensor([[8.0]], dtype=dtype)
+        out = pooler(x)
+        assert out.dtype == torch.float32
+        assert torch.allclose(out, x.float().sigmoid(), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
