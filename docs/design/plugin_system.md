@@ -161,7 +161,7 @@ Every plugin has three parts:
 
 Platforms using the common GPU graph manager can customize capture sizes without changing shape calculation, capture, or replay. Inherit the default methods to preserve the traditional shared grid. Override `get_cudagraph_capture_defaults(vllm_config)` to choose defaults for particular device architectures; return a `CUDAGraphCaptureDefaults` from `vllm.config.compilation` without modifying the config.
 
-- `legacy_max_tokens` defaults to 512 and bounds the initial shared grid.
+- `legacy_max_tokens` defaults to 512 and bounds the initial shared grid. Its existing spacing stays in the common resolver.
 - Leave both `max_prefill_tokens` and `max_decode_requests` unset to derive prefill and decode sizes from the shared grid. Set both to select independent default grids.
 - `max_decode_tokens` optionally limits each decode graph's total tokens, including speculative tokens. The scheduler's limits still apply.
 
@@ -171,7 +171,6 @@ For different spacing, override the relevant `Platform` method. The implementati
 
 | Method | Input and output units |
 | --- | --- |
-| `get_legacy_cudagraph_capture_grid(max_size, dense_head=False)` | Legacy size ladder, in tokens for the shared grid or requests for uniform decode coverage |
 | `get_prefill_cudagraph_capture_grid(max_tokens, dense_head=False)` | Prefill token counts |
 | `get_decode_cudagraph_capture_grid(max_requests)` | Uniform decode request counts; also used by single-token draft decodes |
 | `get_varlen_decode_cudagraph_capture_grid(max_tokens, dense_head=False)` | Adaptive verification token counts |

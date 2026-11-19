@@ -2597,12 +2597,9 @@ class VllmConfig:
                         # At most the platform default number of requests,
                         # mirroring the one-token-per-request decode ceiling.
                         max_reqs = min(max_reqs, default_max_graph_size)
-                        counts = validate_cudagraph_capture_grid(
-                            current_platform.get_legacy_cudagraph_capture_grid(
-                                max_reqs
-                            ),
-                            max_reqs,
-                        )
+                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
+                        counts += list(range(8, min(max_reqs + 1, 256), 8))
+                        counts += list(range(256, max_reqs + 1, 16))
                         return sorted(set(counts + [max_reqs]))
 
                     # Dynamic speculative decoding picks the draft width from
@@ -2643,13 +2640,25 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                cudagraph_capture_sizes = validate_cudagraph_capture_grid(
-                    current_platform.get_legacy_cudagraph_capture_grid(
-                        max_cudagraph_capture_size,
-                        self.performance_mode == "interactivity",
-                    ),
-                    max_cudagraph_capture_size,
-                )
+                if self.performance_mode == "interactivity":
+                    # Fine-grained CUDA graphs at small batch sizes
+                    # for minimal padding overhead
+                    interactivity_max = min(max_cudagraph_capture_size, 32)
+                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
+                else:
+                    cudagraph_capture_sizes = [
+                        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+                    ]
+                if max_cudagraph_capture_size >= 8:
+                    # Step size 8 for small batch sizes, up to 256(not included)
+                    cudagraph_capture_sizes += list(
+                        range(8, min(max_cudagraph_capture_size + 1, 256), 8)
+                    )
+                if max_cudagraph_capture_size >= 256:
+                    # Step size 16 for larger batch sizes
+                    cudagraph_capture_sizes += list(
+                        range(256, max_cudagraph_capture_size + 1, 16)
+                    )
                 # ensure max_num_tokens is captured if within max capture size
                 if (
                     max_num_tokens <= max_cudagraph_capture_size

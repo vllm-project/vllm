@@ -126,18 +126,6 @@ def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
     return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
 
 
-def legacy_cudagraph_capture_grid(max_size: int, dense_head: bool = False) -> list[int]:
-    """Legacy spacing, used for both shared tokens and uniform request counts."""
-    sizes = (
-        list(range(1, min(max_size, 32) + 1))
-        if dense_head
-        else [n for n in (1, 2, 4) if n <= max_size]
-    )
-    sizes += list(range(8, min(max_size + 1, 256), 8))
-    sizes += list(range(256, max_size + 1, 16))
-    return sorted(set(sizes))
-
-
 @dataclass(frozen=True)
 class CUDAGraphCaptureDefaults:
     """Default capture limits, separate from explicit compilation settings.

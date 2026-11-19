@@ -1507,15 +1507,6 @@ class Platform:
         return CUDAGraphCaptureDefaults()
 
     @classmethod
-    def get_legacy_cudagraph_capture_grid(
-        cls, max_size: int, dense_head: bool = False
-    ) -> list[int]:
-        """Return legacy sizes in the caller's token or request-count units."""
-        from vllm.config.compilation import legacy_cudagraph_capture_grid
-
-        return legacy_cudagraph_capture_grid(max_size, dense_head)
-
-    @classmethod
     def get_prefill_cudagraph_capture_grid(
         cls, max_tokens: int, dense_head: bool = False
     ) -> list[int]:
