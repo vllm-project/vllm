@@ -23,7 +23,7 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils imp
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
     TensorEntry,
 )
-from vllm.utils.extensible_tensor import uint8_tensor_from_ptr
+from vllm.platforms import current_platform
 from vllm.utils.vmm_driver import (
     MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
     VmmDriver,
@@ -32,7 +32,7 @@ from vllm.utils.vmm_driver import (
 
 
 class VmmAllocation:
-    """Own a mapping; `StorageRecord.owner` retains it while tensors use it."""
+    """Own a mapping; PyTorch's CUDA array interface retains its Python owner."""
 
     def __init__(
         self,
@@ -70,8 +70,20 @@ class VmmAllocation:
                 self.close()
             raise
 
+    @property
+    def __cuda_array_interface__(self) -> dict:
+        return {
+            "shape": (self.size,),
+            "typestr": "|u1",
+            "data": (self.ptr, False),
+            "version": 3,
+        }
+
     def tensor(self) -> torch.Tensor:
-        return uint8_tensor_from_ptr(self.ptr, self.size, self.device_index)
+        return torch.as_tensor(
+            self,
+            device=torch.device(current_platform.device_type, self.device_index),
+        )
 
     def close(self) -> None:
         if not self.mapped and not self.handle and not self.ptr:
