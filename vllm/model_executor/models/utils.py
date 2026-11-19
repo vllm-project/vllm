@@ -122,11 +122,13 @@ class WeightsMapper:
             key, _ = renaming.rename_source_key(key)
 
         for pattern, new_key in self.orig_to_new_regex.items():
-            if pattern.search(key):
+            # `regex` releases the GIL for every match on a str. With loader
+            # threads busy, getting it back costs far more than the match.
+            if pattern.search(key, concurrent=False):
                 if new_key is None:
                     return None
 
-                key = pattern.sub(new_key, key)
+                key = pattern.sub(new_key, key, concurrent=False)
 
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
