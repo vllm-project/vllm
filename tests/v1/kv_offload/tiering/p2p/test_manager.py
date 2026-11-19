@@ -446,10 +446,11 @@ class TestServeExternalRequests:
 
 
 class TestSubmitStore:
-    def test_no_decode_succeeds_immediately(self):
-        """Without a `remote_decoder` block, job succeeds immediately."""
+    @pytest.mark.parametrize("params", [{}, {"remote_decoder": None}])
+    def test_no_decode_succeeds_immediately(self, params):
+        """An absent or null `remote_decoder` permits a local store."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params={})
+        job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
@@ -3773,6 +3774,25 @@ class TestNonDictRoleParamsRejected:
         ctx = _req_context(kv_params=bad_params)
         assert ctx.get_state(P2PSourceInfo) is None
         assert ctx.get_state(P2PDestInfo) is None
+
+    @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
+    def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
+        source = _req_context(
+            kv_params={
+                "remote_prefiller": {
+                    "remote_host": "host",
+                    "remote_port": 8000,
+                    "kv_request_id": request_id,
+                }
+            }
+        )
+        assert source.get_state(P2PSourceInfo) is None
+
+        dest = _req_context(
+            kv_params={"remote_decoder": {"kv_request_id": request_id}}
+        ).get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
 
     def test_manager_survives_malformed_prefiller_role(self):
         """Full manager flow: malformed remote_prefiller does not crash
