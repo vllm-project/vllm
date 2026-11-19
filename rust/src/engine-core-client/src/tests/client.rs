@@ -41,7 +41,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
+use crate::protocol::stats::{KvConnectorStats, SchedulerStats, UmbpOperation};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -4191,8 +4191,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(matches!(
         mooncake_stats,
         KvConnectorStats::Mooncake(stats)
-            if stats.0.contains_key(&MooncakeOperation::LoadGet)
-                && stats.0.contains_key(&MooncakeOperation::LookupLease)
+            if stats.0.contains_key("load_get") && stats.0.contains_key("lookup_lease")
     ));
 
     let mooncake_transfer_stats: KvConnectorStats =
