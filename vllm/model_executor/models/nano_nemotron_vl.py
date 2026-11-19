@@ -213,19 +213,20 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         # Not accepted by NanoNemotronVLProcessor.__init__
         kwargs.pop("truncation", None)
 
+        # The image processor config supplies the video frame size that
+        # `mm_processor_kwargs` does not set.
         image_processor_config = self.ctx.get_hf_image_processor_config()
+        configured = self.ctx.get_merged_mm_kwargs(kwargs)
+        for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
+            if key in image_processor_config and key not in configured:
+                kwargs[key] = image_processor_config[key]
+
         return self.ctx.init_processor(
             NanoNemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             video_token=self.get_video_token(),
             video_pruning_rate=self.get_video_pruning_rate(),
-            video_target_num_patches=image_processor_config.get(
-                "video_target_num_patches"
-            ),
-            video_maintain_aspect_ratio=image_processor_config.get(
-                "video_maintain_aspect_ratio"
-            ),
             max_model_len=self.ctx.model_config.max_model_len,
             **kwargs,
         )
@@ -1527,13 +1528,16 @@ class NemotronH_Nano_VL_V2(
                 and pixel_values_flat_video.ndim == 5
             ):
                 # batched._reduce_data stacked same-shape videos into
-                # [num_videos, nf, 3, H, W]; unstack back to a list so the
-                # same-H,W cat path below handles it uniformly.
-                pixel_values_flat_video = list(pixel_values_flat_video)
+                # [num_videos, nf, 3, H, W]: join them without a copy.
+                pixel_values_flat_video = pixel_values_flat_video.flatten(0, 1)
 
             if not isinstance(pixel_values_flat_video, torch.Tensor):
                 assert isinstance(pixel_values_flat_video, (list, tuple))
-                pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
+                pixel_values_flat_video = (
+                    pixel_values_flat_video[0]
+                    if len(pixel_values_flat_video) == 1
+                    else torch.cat(pixel_values_flat_video, dim=0)
+                )
 
             assert isinstance(video_num_patches, torch.Tensor)
             expected_h = pixel_values_flat_video.shape[-2]
