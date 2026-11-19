@@ -438,6 +438,70 @@ def test_invalid_logits_use_fallback_and_do_not_train(vocab_size: int, invalid: 
     assert estimator.counts[0].item() == 3.0
 
 
+@pytest.mark.parametrize("tokens_per_req", [1, NUM_STEPS])
+@pytest.mark.parametrize("invalid_step", range(NUM_STEPS))
+def test_invalid_position_leaves_the_other_positions_in_the_fit(
+    tokens_per_req: int, invalid_step: int
+):
+    """One invalid draft position must be masked alone, not with its neighbors."""
+    device = current_platform.device_type
+    torch.manual_seed(0)
+    slot = torch.tensor([5], device=device, dtype=torch.int32)
+    temperature = torch.ones(MAX_NUM_REQS, device=device)
+    logits = torch.randn(NUM_STEPS, VOCAB_SIZE, device=device) * 4.0
+    corrupted = logits.clone()
+    corrupted[invalid_step, 0] = float("nan")
+
+    def predict_every_position(estimator, logits):
+        confidence = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
+        if tokens_per_req == NUM_STEPS:
+            steps = torch.arange(NUM_STEPS, device=device, dtype=torch.int32)
+            estimator.predict(
+                logits, slot.repeat(NUM_STEPS), steps, confidence, temperature
+            )
+        else:
+            for step in range(NUM_STEPS):
+                draft_step = torch.tensor(step, device=device, dtype=torch.int32)
+                estimator.predict(
+                    logits[step : step + 1], slot, draft_step, confidence, temperature
+                )
+        return confidence
+
+    estimator = _make_estimator(device)
+    healthy = _make_estimator(device)
+    confidence = predict_every_position(estimator, corrupted)
+    healthy_confidence = predict_every_position(healthy, logits)
+
+    expected_valid = torch.zeros_like(estimator.valid)
+    expected_valid[slot.long()] = True
+    expected_valid[slot.long(), invalid_step] = False
+    assert torch.equal(estimator.valid, expected_valid)
+    others = torch.arange(NUM_STEPS, device=device) != invalid_step
+    assert confidence[0, invalid_step].item() == 0.0
+    torch.testing.assert_close(
+        confidence[0, others], healthy_confidence[0, others], rtol=0, atol=0
+    )
+
+    # Accept all but the last draft, so every position is graded.
+    num_sampled = torch.full_like(slot, NUM_STEPS)
+    num_rejected = torch.ones_like(slot)
+    estimator.step(slot, num_sampled, num_rejected)
+    healthy.step(slot, num_sampled, num_rejected)
+
+    assert healthy.counts.tolist() == [1.0] * NUM_STEPS
+    assert estimator.counts.tolist() == [
+        0.0 if step == invalid_step else 1.0 for step in range(NUM_STEPS)
+    ]
+    assert not estimator.info[invalid_step].any()
+    assert not estimator.grad[invalid_step].any()
+    torch.testing.assert_close(
+        estimator.info[others], healthy.info[others], rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        estimator.grad[others], healthy.grad[others], rtol=0, atol=0
+    )
+
+
 @pytest.mark.parametrize("max_block", [0, 1, 2])
 def test_one_hot_logits_remain_valid_across_empty_blocks(max_block: int):
     """A zero complement is valid even beside empty or partial vocab blocks."""
