@@ -200,23 +200,6 @@ hardware_overrides:
       AITER_CUSTOM_AR_MAX_SIZE: "134217728"
 
 strategy_overrides:
-  single_node_tp:
-    hardware_overrides:
-      # gfx942: the MI325X launcher. AITER's Triton sparse MLA is gfx950-only
-      # and warns if left on. Prefix caching was off in that run. Greedy
-      # DSpark was measured on these flags. That server, started at 64k,
-      # profiled 1.95M KV tokens, so the shared 262144 context fits. The
-      # vision encoder is small next to TP8, so it runs data-parallel.
-      mi325x: &gfx942_tp8
-        extra_args:
-          - "--no-enable-prefix-caching"
-          - "--mm-encoder-tp-mode"
-          - "data"
-        extra_env:
-          VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "0"
-      # Same command. Not smoke-tested. 8×192 GB holds the ~128 GiB weights
-      # with less KV headroom; one 262144 sequence is estimated to still fit.
-      mi300x: *gfx942_tp8
   multi_node_tp_pp:
     env:
       # Each stage must own layer 35 (the KV-sharing source) and the indexer
@@ -787,8 +770,11 @@ notes:
       64k context and profiled 1,947,840 KV tokens with DSpark, enough for 7
       sequences of 262144, so the recipe keeps that context length. Long
       prompts at 262144 were not scored. Probabilistic drafting was not run.
-      MI300X is the same path and has not been smoke-tested. Prefix caching
-      was off. Shared-expert fusion, tuned AITER GEMM tables and the gfx942
+      MI300X is the same path and has not been smoke-tested. The measured
+      run had prefix caching off and `--mm-encoder-tp-mode data`; this
+      command uses the vLLM defaults for both. At startup vLLM warns that
+      `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA` is ignored on gfx942; that is
+      expected. Shared-expert fusion, tuned AITER GEMM tables and the gfx942
       specialized decode kernel are not part of this command.
   - title: "MI350 Series: TP8 with DSpark not yet validated"
     when:
@@ -942,12 +928,10 @@ guide: |
 
   On MI300 Series (gfx942) the FP8 checkpoint stays block-FP8. The MI325X run
   did not re-quantize the experts, and TP8 is required (~128 GiB resident per
-  GPU with the drafter; TP4 does not fit a 256 GB GPU). One 8-GPU node, prefix
-  caching off, vision encoder data-parallel, greedy DSpark (depth 3, the
-  drafter shipped in the checkpoint). Validated on 8× MI325X. Probabilistic
-  drafting, the Quark MXFP4 checkpoint and the gfx950 specialized decode are
-  not part of this path. MI300X uses the same command and has not been
-  smoke-tested.
+  GPU with the drafter; TP4 does not fit a 256 GB GPU). One 8-GPU node, greedy
+  DSpark (depth 3, the drafter shipped in the checkpoint). Validated on 8× MI325X. Probabilistic drafting, the Quark MXFP4
+  checkpoint and the gfx950 specialized decode are not part of this path.
+  MI300X uses the same command and has not been smoke-tested.
 
   On that MI325X node, GSM8K (1,319 questions, 5-shot) scored 96.7% flexible /
   96.4% strict with DSpark and 96.7% / 96.8% without it; the runs agree on
