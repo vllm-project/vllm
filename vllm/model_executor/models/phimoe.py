@@ -136,44 +136,6 @@ class PhiMoEConfig(PreTrainedConfig):
         )
 
 
-class mp(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        scores: torch.Tensor,
-        multiplier: torch.Tensor,
-        selected_experts: torch.Tensor,
-        masked_gates: torch.Tensor,
-        mask_for_one: torch.Tensor,
-    ):
-        ctx.save_for_backward(multiplier, selected_experts, masked_gates)
-        return multiplier * mask_for_one
-
-    @staticmethod
-    def backward(
-        ctx,
-        grad_at_output: torch.Tensor,
-    ):
-        multiplier, selected_experts, masked_gates = ctx.saved_tensors
-
-        grad_at_output = grad_at_output * multiplier
-
-        grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expanded.scatter_add_(
-            dim=-1,
-            index=selected_experts,
-            src=grad_at_output,
-        )
-
-        return (
-            grad_at_scores_expanded,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
 def sparsemixer(scores, jitter_eps=0.01):
     ################ first expert ################
 

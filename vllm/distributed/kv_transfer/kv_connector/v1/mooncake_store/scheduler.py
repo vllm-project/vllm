@@ -31,16 +31,17 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
+    is_mamba_align_group,
+    is_mamba_group,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    MambaSpec,
     get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -157,9 +158,9 @@ class MooncakeStoreScheduler:
             kv_cache_config, vllm_config
         )
         mamba_groups = {
-            group_id: group.kv_cache_spec
+            group_id: group
             for group_id, group in enumerate(store_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
+            if is_mamba_group(group)
         }
         self._boundary_state_group_ids = frozenset(mamba_groups)
         if (
@@ -179,9 +180,9 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(
-                spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
-            ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert all(map(is_mamba_align_group, mamba_groups.values())), (
+                "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
             )
@@ -334,6 +335,9 @@ class MooncakeStoreScheduler:
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
+            entry = self._unfinished_requests.get(req_id)
+            if entry is not None and entry[0].status != RequestStatus.PREEMPTED:
+                continue  # Already re-admitted; the state is the new attempt's.
             self.client.discard(req_id)
             self.load_specs.pop(req_id, None)
             self._request_trackers.pop(req_id, None)
@@ -537,7 +541,7 @@ class MooncakeStoreScheduler:
         pool = self._gpu_block_pool
         coord = self._store_coord
         assert coord is not None
-        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
+        block_sizes = [g.block_size for g in coord.kv_cache_groups]
         for req_meta in requests:
             if not req_meta.can_save:
                 continue
@@ -672,7 +676,7 @@ class MooncakeStoreScheduler:
             *_partial_tail_non_mamba_puts(
                 coord,
                 req_meta,
-                [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
+                [g.block_size for g in coord.kv_cache_groups],
             ),
             *mamba_puts,
         ]
