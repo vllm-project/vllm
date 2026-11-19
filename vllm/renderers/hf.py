@@ -64,7 +64,12 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -76,9 +81,10 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
+    from vllm.utils.session_prefix import PrefixContext
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1068,6 +1074,49 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Skip for mock configs
         if getattr(self.model_config, "enable_prompt_embeds", False):
             _ensure_prompt_embeds_placeholder_token(tokenizer)
+
+    @override
+    def _init_tokenizer_pool(self) -> None:
+        # Check the prepared tokenizer before the pool wraps its encoding methods.
+        config = self.config
+        self.session_token_cache = None
+        if (
+            config.model_config.session_token_cache_mb
+            and self.tokenizer is not None
+            and config.lora_config is None
+            and config.kv_transfer_config is None
+            and not config.model_config.is_encoder_decoder
+            and not config.model_config.enable_prompt_embeds
+        ):
+            from .session_prefix import SessionTokenCache
+
+            self.session_token_cache = SessionTokenCache(
+                self.tokenizer, config.model_config.session_token_cache_mb << 20
+            )
+            self._resources.callback(self.session_token_cache.store.clear, close=True)
+
+        super()._init_tokenizer_pool()
+
+    def session_prefix_context(
+        self, session_id: str | None, cache_salt: str | None
+    ) -> PrefixContext | None:
+        if self.session_token_cache is not None:
+            return self.session_token_cache.context(session_id, cache_salt)
+        return None
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> TokensPrompt:
+        cache = self.session_token_cache
+        if (
+            cache is not None
+            and not prompt.get("multi_modal_data")
+            and not prompt.get("multi_modal_uuids")
+        ):
+            ids = cache.encode(self.get_tokenizer(), prompt["prompt"], params)
+            if ids is not None:
+                return self._build_tokens_prompt(ids, prompt)
+        return super()._tokenize_prompt(prompt, params)
 
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.
