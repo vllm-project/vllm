@@ -1075,7 +1075,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".conv1d", ".k_conv1d", 1),
             (".conv1d", ".v_conv1d", 2),
         ]
-        if _is_moe(self.config):
+        if _is_moe(self.config) and self.use_mega_moe:
+            # MegaMoE only: otherwise expert tensors load per layer (below).
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
             # EPLB: the mapping enumerates physical experts, so it must cover
@@ -1101,7 +1102,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
-                routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
+                routed_experts_prefix="",
             )
         else:
             expert_params_mapping = []
