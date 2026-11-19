@@ -9,10 +9,11 @@
 --extra-index-url https://download.pytorch.org/whl/nightly/cu134
 
 # Use the same nightly pins for x86_64 and aarch64.
-# torch pulls triton==3.9.0+gitb7ddcf86 from PyTorch's index. Rubin images set
-# TRITON_PTXAS_BLACKWELL_PATH to the ptxas-blackwell (13.4) it bundles, and the
-# image build fails if Triton would assemble SM107 with ptxas 13.5.37, which
-# silently miscompiles some sm_107a code. Triton main bundles only 13.5.37.
+# torch pulls triton==3.9.0+gitb7ddcf86 from PyTorch's index. CUDA 13.5.0's
+# ptxas 13.5.37 silently miscompiles some sm_107a code; the Rubin section of
+# docs/getting_started/installation/gpu.cuda.inc.md shows how to keep Triton
+# on the ptxas-blackwell (13.4) this wheel bundles. Triton main bundles only
+# 13.5.37.
 # Before bumping torch, check cmake/nvidia-toolchain-version.json at the Triton
 # commit in torch's triton==X+git<sha> requirement.
 torch==2.16.0.dev20261116+cu135

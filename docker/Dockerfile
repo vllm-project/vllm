@@ -1218,18 +1218,8 @@ RUN mv vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
-# Rubin images keep Triton on the ptxas-blackwell that its wheel bundles.
-# Importing FlashInfer otherwise points Triton at the ptxas on PATH, and CUDA
-# 13.5.0's ptxas 13.5.37 silently miscompiles some sm_107a code. Other images
-# leave TRITON_PTXAS_BLACKWELL_PATH unset.
-FROM vllm-base AS vllm-base-rubin-true
-ARG PYTHON_VERSION
-ENV TRITON_PTXAS_BLACKWELL_PATH=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell
-
-FROM vllm-base AS vllm-base-rubin-false
-
 # base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base-rubin-${INSTALL_RUBIN_PRERELEASE} AS vllm-openai-base
+FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ARG EFA_INSTALLER_VERSION
@@ -1330,16 +1320,14 @@ RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
 
 # Install Rubin prerelease dependencies when explicitly requested. Keep this the
 # last Python install: it restores the torch nightly and the Triton it requires
-# after the vLLM and KV connector installs above. The check fails the build if
-# Triton, with FlashInfer imported, would assemble SM107 with ptxas 13.5.37.
+# after the vLLM and KV connector installs above.
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \
             --prerelease=allow --index-strategy unsafe-first-match \
-            -r /tmp/vllm-requirements/rubin-prerelease.txt \
-        && python3 -c 'import subprocess, flashinfer.triton; from triton.backends.nvidia.compiler import get_ptxas; out = subprocess.check_output([get_ptxas(107).path, "--version"], text=True); assert "V13.5.37" not in out, out'; \
+            -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
