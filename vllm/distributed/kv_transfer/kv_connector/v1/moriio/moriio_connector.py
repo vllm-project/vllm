@@ -421,7 +421,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             and self.connector_scheduler.mode == MoRIIOMode.READ
         ):
             attn_block_ids, mamba_block_groups = (
-                self.connector_scheduler.split_block_groups(block_ids)
+                self.connector_scheduler.split_block_groups(block_ids, request=request)
             )
             delay_free, params = self.connector_scheduler.request_finished(
                 request, attn_block_ids, mamba_block_groups
@@ -605,7 +605,6 @@ class MoRIIOConnectorScheduler:
         self._has_mamba = bool(self._mamba_group_ids)
         mamba_spec = None
         if self._has_mamba:
-            # READ drafters must share the target's attention groups (e.g. MTP).
             if not self._attn_group_ids:
                 raise MoRIIOError("MoRIIO hybrid transfer requires an attention group")
             mamba_specs = [
@@ -1120,7 +1119,9 @@ class MoRIIOConnectorScheduler:
                                 # the attention and recurrent-state suffixes
                                 # independently.
                                 attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
+                                    self.split_block_groups(
+                                        blocks.get_block_ids(), request=request
+                                    )
                                 )
                                 num_attn = len(attn_block_groups)
                                 if len(remote_block_ids) != num_attn + len(
@@ -1207,7 +1208,9 @@ class MoRIIOConnectorScheduler:
                                 # Attention can be a complete local hit, but the
                                 # recurrent state is never prefix-cacheable.
                                 attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
+                                    self.split_block_groups(
+                                        blocks.get_block_ids(), request=request
+                                    )
                                 )
                                 local_block_ids = [
                                     group if is_state else []
@@ -1569,7 +1572,10 @@ class MoRIIOConnectorScheduler:
         self.paths.clear()
 
     def split_block_groups(
-        self, block_ids: list[list[int]] | tuple[list[int], ...]
+        self,
+        block_ids: list[list[int]] | tuple[list[int], ...],
+        *,
+        request: "Request | None" = None,
     ) -> tuple[list[list[int]], list[list[int]]]:
         """Select transferable attention and Mamba block groups.
 
@@ -1582,7 +1588,25 @@ class MoRIIOConnectorScheduler:
         if not self._has_mamba:
             raise MoRIIOError("Mamba block groups requested for a non-hybrid model")
         # Also window-clips sliding-window attention groups.
-        transfer_block_ids = self.get_exchange_clipped_blocks(block_ids)
+        transfer_block_ids = list(self.get_exchange_clipped_blocks(block_ids))
+        if request is not None and self._is_hma_required and any(self.blocks_per_sw):
+            raw_blocks = self.kv_cache_config.select_transfer_block_ids(block_ids)
+            computed = request.num_prompt_tokens
+            if not self.is_producer:
+                computed = max(1, computed - 1)
+            for group_id in self._attn_group_ids:
+                group = self.kv_cache_config.transfer_groups[group_id]
+                if not issubclass(group.manager_cls, SlidingWindowManager):
+                    continue
+                # Bound the window by P's computed prefix, not D's allocated
+                # lookahead tail. Otherwise equal-length lists can be shifted.
+                block_size = resolve_dcp_kv_block_size(
+                    group,
+                    self.vllm_config.parallel_config.decode_context_parallel_size,
+                )
+                end = cdiv(computed, block_size)
+                start = max(0, computed - group.sliding_window_reach) // block_size
+                transfer_block_ids[group_id] = list(raw_blocks[group_id][start:end])
         attn = [list(transfer_block_ids[group_id]) for group_id in self._attn_group_ids]
         mamba_groups = [
             clip_ssm_state_blocks(

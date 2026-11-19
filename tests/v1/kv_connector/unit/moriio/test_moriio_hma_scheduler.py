@@ -21,6 +21,8 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -36,6 +38,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
     MambaManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -245,6 +248,97 @@ def _gate_vllm_config(
 # --------------------------------------------------------------------------
 # split_block_groups
 # --------------------------------------------------------------------------
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize("prompt", [8, 9, 11, 13, 16, 17])
+@pytest.mark.parametrize("extra_retained_tokens", [0, 3])
+def test_hybrid_read_draft_window_ignores_allocated_lookahead(
+    prompt, extra_retained_tokens
+):
+    """P and D must transfer the same logical SWA pages despite unequal tails."""
+    draft = KVCacheGroup.from_layers(
+        {
+            "draft": SlidingWindowManager.layer_config(
+                AttentionSpec(
+                    block_size=4,
+                    num_kv_heads=1,
+                    head_size=8,
+                    dtype=torch.float32,
+                ),
+                sliding_window=8,
+                extra_retained_tokens=extra_retained_tokens,
+            )
+        }
+    )
+    config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[_mamba_group(), draft, _attn_group()],
+    )
+    computed = prompt - 1
+    results = []
+    remote_params = None
+    for producer in (True, False):
+        vconfig = VllmConfig(
+            cache_config=CacheConfig(block_size=16, mamba_cache_mode="align"),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="MoRIIOConnector",
+                kv_role="kv_producer" if producer else "kv_consumer",
+                kv_connector_extra_config={
+                    "read_mode": True,
+                    "host_ip": "127.0.0.1",
+                    "handshake_port": 6001,
+                    "notify_port": 6002,
+                },
+            ),
+        )
+        connector = moriio_connector.MoRIIOConnector(
+            vconfig, KVConnectorRole.SCHEDULER, config
+        )
+        request = Request(
+            "test",
+            list(range(computed if producer else prompt)),
+            SamplingParams(max_tokens=1),
+            None,
+        )
+        if producer:
+            request.kv_transfer_params = {
+                "do_remote_decode": True,
+                "transfer_id": "test",
+            }
+        else:
+            assert remote_params is not None
+            request.kv_transfer_params = dict(remote_params)
+        # D's speculative allocation crosses additional block boundaries.
+        allocated = computed if producer else prompt + 7
+        draft_blocks = list(range(10, 10 + (allocated + 3) // 4))
+        try:
+            block_ids = ([50], draft_blocks, [90, 91])
+            if producer:
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                delay_free, remote_params = connector.request_finished_all_groups(
+                    request, block_ids
+                )
+                assert delay_free and remote_params is not None
+                results.append(remote_params["remote_block_ids"])
+            else:
+                connector.update_state_after_alloc(
+                    request,
+                    KVCacheBlocks(
+                        tuple([KVCacheBlock(i) for i in group] for group in block_ids)
+                    ),
+                    computed,
+                )
+                assert connector.connector_scheduler is not None
+                results.append(connector.connector_scheduler._reqs_need_recv["test"][1])
+        finally:
+            connector.shutdown()
+    start = max(0, computed - (7 + extra_retained_tokens)) // 4
+    end = (computed + 3) // 4
+    expected = [[*range(10 + start, 10 + end)], [90, 91], [50]]
+    assert results == [expected, expected]
+    assert config.transfer_group_ids == (0, 1, 2)
+
+
 def test_split_block_groups_separates_attention_and_mamba():
     sched = _FakeScheduler(_has_mamba=True, _attn_group_ids=[0], _mamba_group_ids=[1])
     block_ids = ([1, 2], [99])
