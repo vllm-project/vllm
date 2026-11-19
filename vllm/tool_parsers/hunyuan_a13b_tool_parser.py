@@ -191,7 +191,7 @@ class HunyuanA13BToolParser(ToolParser):
         if test_delta:
             return test_delta
 
-        name_matches = list(self.tool_name_reg.finditer(current_text))
+        name_matches, tool_spans = self._get_top_level_tools(current_text)
         tool_count = len(name_matches)
         if tool_count == 0:
             return None
@@ -205,12 +205,87 @@ class HunyuanA13BToolParser(ToolParser):
             return name_delta
 
         args_delta = self._handle_tool_args_streaming(
-            current_text, current_idx, tool_count, name_matches
+            current_text, current_idx, tool_count, tool_spans
         )
         if args_delta:
             return args_delta
 
         return None
+
+    def _get_top_level_tools(
+        self, current_text: str
+    ) -> tuple[list[re.Match[str]], list[tuple[int, int]]]:
+        start_idx = consume_space(0, current_text)
+        if current_text[start_idx:].startswith(self.bot_string):
+            start_idx = consume_space(start_idx + len(self.bot_string), current_text)
+        scan_start = (
+            start_idx + 1
+            if start_idx < len(current_text) and current_text[start_idx] == "["
+            else 0
+        )
+
+        in_string = False
+        escape = False
+        brace_depth = 0
+        obj_start: int | None = None
+        first_nested_brace: int | None = None
+        raw_objects: list[tuple[int, int, int]] = []
+
+        for i in range(scan_start, len(current_text)):
+            ch = current_text[i]
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if brace_depth == 0:
+                    obj_start = i
+                    first_nested_brace = None
+                elif brace_depth == 1 and first_nested_brace is None:
+                    first_nested_brace = i
+                brace_depth += 1
+            elif ch == "}":
+                if brace_depth > 0:
+                    brace_depth -= 1
+                    if brace_depth == 0 and obj_start is not None:
+                        end_pos = i + 1
+                        name_end = (
+                            first_nested_brace
+                            if first_nested_brace is not None
+                            else end_pos
+                        )
+                        raw_objects.append((obj_start, name_end, end_pos))
+                        obj_start = None
+                        first_nested_brace = None
+            elif ch == "]" and brace_depth == 0:
+                break
+
+        if brace_depth > 0 and obj_start is not None:
+            end_pos = len(current_text)
+            name_end = first_nested_brace if first_nested_brace is not None else end_pos
+            raw_objects.append((obj_start, name_end, end_pos))
+
+        name_matches: list[re.Match[str]] = []
+        tool_spans: list[tuple[int, int]] = []
+        for idx, (obj_start, name_end, _obj_end) in enumerate(raw_objects):
+            match = self.tool_name_reg.search(current_text, obj_start, name_end)
+            if match is not None:
+                name_matches.append(match)
+                next_start = (
+                    raw_objects[idx + 1][0]
+                    if idx + 1 < len(raw_objects)
+                    else len(current_text)
+                )
+                tool_spans.append((obj_start, next_start))
+
+        return name_matches, tool_spans
 
     def _try_parse_json_tools(self, current_text: str):
         try:
@@ -321,20 +396,15 @@ class HunyuanA13BToolParser(ToolParser):
         current_text: str,
         current_idx: int,
         tool_count: int,
-        name_matches: list | None = None,
+        tool_spans: list[tuple[int, int]] | None = None,
     ):
         if current_idx >= 0 and current_idx < tool_count:
-            if name_matches is None:
-                name_matches = list(self.tool_name_reg.finditer(current_text))
-            if current_idx >= len(name_matches):
+            if tool_spans is None:
+                _, tool_spans = self._get_top_level_tools(current_text)
+            if current_idx >= len(tool_spans):
                 return None
 
-            tool_start = name_matches[current_idx].start()
-            tool_end = (
-                name_matches[current_idx + 1].start()
-                if current_idx + 1 < len(name_matches)
-                else len(current_text)
-            )
+            tool_start, tool_end = tool_spans[current_idx]
             tool_text = current_text[tool_start:tool_end]
 
             empty_args_match = self.tool_empty_arg_reg.search(tool_text)
@@ -374,16 +444,6 @@ class HunyuanA13BToolParser(ToolParser):
             args_match = self.tool_non_empty_arg_reg.search(tool_text)
             if args_match is not None:
                 args_text = args_match.group(1)
-                is_last_tool = current_idx == tool_count - 1
-                if not is_last_tool:
-                    next_tool_pos = tool_text.find("},{", args_match.start())
-                    if next_tool_pos != -1:
-                        args_end_pos = next_tool_pos + 1
-                        args_text = (
-                            tool_text[args_match.start() : args_end_pos]
-                            .split('"arguments":')[1]
-                            .strip()
-                        )
                 sent_args = self.streaming_state["sent_tools"][current_idx][
                     "sent_arguments"
                 ]
