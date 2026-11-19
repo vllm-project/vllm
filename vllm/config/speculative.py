@@ -112,6 +112,7 @@ EagleModelTypes = Literal[
 SpeculativeMethod = Literal[
     "ngram",
     "draft_model",
+    "dfly",
     "suffix",
     EagleModelTypes,
     NgramGPUTypes,
@@ -1252,7 +1253,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "hy_v4":
+        if hf_config.model_type in ("hy_v4", "hy_v4_vl"):
             hf_config.model_type = "hy_v4_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
@@ -1277,6 +1278,11 @@ class SpeculativeConfig:
                     "architectures": ["InklingMTPModel"],
                 }
             )
+
+        if hf_config.model_type == "inkling2":
+            from vllm.models.inkling2.configs import Inkling2DSparkConfig
+
+            hf_config = Inkling2DSparkConfig.from_target(hf_config)
 
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
@@ -1499,10 +1505,12 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # DSpark drafts carry their own width (block size), so the default
-        # draft is resolved even without num_speculative_tokens.
+        # These drafts carry their own width, so resolve their default model
+        # even without num_speculative_tokens.
         if self.model is None and (
-            self.num_speculative_tokens is not None or self.use_dspark()
+            self.num_speculative_tokens is not None
+            or self.use_dspark()
+            or self.method == "dfly"
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)

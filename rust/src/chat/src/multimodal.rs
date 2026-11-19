@@ -1169,6 +1169,7 @@ impl TokenResolver for TokenizerResolver {
 mod tests {
     use std::sync::Arc;
 
+    use llm_multimodal::TokenId;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -1244,7 +1245,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
@@ -2283,5 +2284,307 @@ mod tests {
         let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
 
         assert_eq!(encoded, source);
+    }
+
+    // Structural token ids from the real HY4-VL checkpoint's `config.json`.
+    pub(super) const HY4_IMAGE_START_ID: u32 = 120118;
+    pub(super) const HY4_IMAGE_END_ID: u32 = 120119;
+    pub(super) const HY4_IMAGE_TOKEN_ID: u32 = 120120;
+    pub(super) const HY4_VIDEO_START_ID: u32 = 120122;
+    pub(super) const HY4_VIDEO_END_ID: u32 = 120123;
+    pub(super) const HY4_VIDEO_TOKEN_ID: u32 = 120124;
+
+    const HY4_IMAGE_START_TOKEN: &str = "<｜hy_image▁start:opensource｜>";
+    const HY4_IMAGE_PAD_TOKEN: &str = "<｜hy_image▁pad:opensource｜>";
+    const HY4_IMAGE_END_TOKEN: &str = "<｜hy_image▁end:opensource｜>";
+    const HY4_VIDEO_START_TOKEN: &str = "<｜hy_video▁start:opensource｜>";
+    const HY4_VIDEO_PAD_TOKEN: &str = "<｜hy_video▁pad:opensource｜>";
+    const HY4_VIDEO_END_TOKEN: &str = "<｜hy_video▁end:opensource｜>";
+    pub(super) const HY4_IMAGE_TOKEN: &str =
+        "<｜hy_image▁start:opensource｜><｜hy_image▁pad:opensource｜><｜hy_image▁end:opensource｜>";
+    pub(super) const HY4_VIDEO_TOKEN: &str =
+        "<｜hy_video▁start:opensource｜><｜hy_video▁pad:opensource｜><｜hy_video▁end:opensource｜>";
+
+    fn hy4_vl_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token(HY4_IMAGE_START_TOKEN, HY4_IMAGE_START_ID)
+            .with_regular_token(HY4_IMAGE_PAD_TOKEN, HY4_IMAGE_TOKEN_ID)
+            .with_regular_token(HY4_IMAGE_END_TOKEN, HY4_IMAGE_END_ID)
+            .with_regular_token(HY4_VIDEO_START_TOKEN, HY4_VIDEO_START_ID)
+            .with_regular_token(HY4_VIDEO_PAD_TOKEN, HY4_VIDEO_TOKEN_ID)
+            .with_regular_token(HY4_VIDEO_END_TOKEN, HY4_VIDEO_END_ID)
+    }
+
+    fn hy4_vl_info() -> MultimodalModelInfo {
+        // Structural ids spelled the way the real checkpoint's config.json
+        // carries them (they coincide with the spec's class defaults, so this
+        // also exercises the integer config-field resolution path).
+        let config = serde_json::json!({
+            "model_type": "hy_v4_vl",
+            "image_start_token_id": HY4_IMAGE_START_ID,
+            "image_end_token_id": HY4_IMAGE_END_ID,
+            "image_token_id": HY4_IMAGE_TOKEN_ID,
+            "video_start_token_id": HY4_VIDEO_START_ID,
+            "video_end_token_id": HY4_VIDEO_END_ID,
+            "video_token_id": HY4_VIDEO_TOKEN_ID,
+        });
+        test_info("hy_v4_vl", config, hy4_vl_tokenizer())
+    }
+
+    #[test]
+    fn hy4_vl_resolves_image_and_video_support_with_checkpoint_ids() {
+        let info = hy4_vl_info();
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some(HY4_IMAGE_TOKEN)
+        );
+        assert_eq!(
+            info.placeholder_token(Modality::Video),
+            Some(HY4_VIDEO_TOKEN)
+        );
+        let image = info.image.as_ref().expect("image support should resolve");
+        assert_eq!(
+            image.placeholder.marker_token_ids,
+            vec![HY4_IMAGE_START_ID, HY4_IMAGE_TOKEN_ID, HY4_IMAGE_END_ID]
+        );
+        assert_eq!(image.placeholder.embed_token_id, HY4_IMAGE_TOKEN_ID);
+        let video = info.video.as_ref().expect("video support should resolve");
+        assert_eq!(
+            video.placeholder.marker_token_ids,
+            vec![HY4_VIDEO_START_ID, HY4_VIDEO_TOKEN_ID, HY4_VIDEO_END_ID]
+        );
+        assert_eq!(video.placeholder.embed_token_id, HY4_VIDEO_TOKEN_ID);
+        // The HY4 engine reads its forward kwargs under the reference
+        // processor's names, with the grids kept on CPU.
+        assert_eq!(image.spec.primary_key(), "pixel_values");
+        assert_eq!(video.spec.primary_key(), "pixel_values_videos");
+        assert_eq!(
+            info.video_sampling_policy(),
+            Some((FrameSampling::EvenRounded, Some(2.0)))
+        );
+    }
+
+    #[tokio::test]
+    async fn hy4_vl_preprocessing_builds_engine_features() {
+        use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
+
+        let info = hy4_vl_info();
+        let media = MediaContentPart::ImageUrl {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        };
+        let mut tokens = vec![11; 100];
+        // The chat template frames its embed marker with structural tokens;
+        // expansion must consume the complete marker without duplicating them.
+        tokens.extend([HY4_IMAGE_START_ID, HY4_IMAGE_TOKEN_ID, HY4_IMAGE_END_ID]);
+
+        let features = info
+            .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+
+        // The 640x480 image is already a 32-multiple inside the 512^2..2048^2
+        // pixel budget, so smart_resize keeps it: the 30x40 patch grid merges
+        // to 15 rows x (20 + 1 newline) cols = 315 embed tokens wrapped in
+        // image_start/image_end.
+        assert_eq!(features.len(), 1);
+        let feature = &features[0];
+        assert_eq!(
+            (feature.mm_position.offset, feature.mm_position.length),
+            (100, 317)
+        );
+        assert_eq!(
+            feature.mm_position.is_embed.as_ref().expect("is_embed mask").shape,
+            [317]
+        );
+        assert_eq!(tokens.len(), 417);
+        assert_eq!(tokens[100], HY4_IMAGE_START_ID);
+        assert!(tokens[101..416].iter().all(|&token| token == HY4_IMAGE_TOKEN_ID));
+        assert_eq!(tokens[416], HY4_IMAGE_END_ID);
+
+        let data = feature.data.as_ref().unwrap();
+        // Normalized f32 patches flat over the image's 30x40 grid: the
+        // frontend rescales (1/255) and CLIP-normalizes in the processor
+        // because the engine runs with `mm_device_do_normalize=False` (an
+        // IdentityInputNorm pass-through).
+        let pixels = &data["pixel_values"];
+        assert!(matches!(&pixels.field, MmField::Flat(field) if !field.keep_on_cpu));
+        let Some(MmKwargValue::Tensor(pixel_values)) = pixels.data.as_ref() else {
+            panic!("pixel_values should be a tensor");
+        };
+        assert_eq!(pixel_values.dtype.as_str(), "float32");
+        assert_eq!(pixel_values.shape, [1200, 3 * 16 * 16]);
+        let fused = |byte: u8, mean: f64, std: f64| {
+            (f32::from(byte) - mean as f32 * 255.0) / (std as f32 * 255.0)
+        };
+        let stats = PreProcessorConfig::CLIP_MEAN.iter().zip(PreProcessorConfig::CLIP_STD);
+        let min = stats.clone().map(|(&m, s)| fused(0, m, s)).fold(f32::INFINITY, f32::min);
+        let max = stats.map(|(&m, s)| fused(255, m, s)).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            pixel_values
+                .data
+                .as_raw_view()
+                .unwrap()
+                .as_ref()
+                .chunks_exact(4)
+                .all(|bytes| (min..=max).contains(&f32::from_ne_bytes(bytes.try_into().unwrap())))
+        );
+        let grid = &data["image_grid_thw"];
+        assert!(matches!(&grid.field, MmField::Batched(field) if field.keep_on_cpu));
+        let Some(MmKwargValue::Tensor(grid_tensor)) = grid.data.as_ref() else {
+            panic!("image_grid_thw should be a tensor");
+        };
+        assert_eq!(grid_tensor.shape, [3]);
+        assert_eq!(
+            grid_tensor.data.as_raw_view().unwrap().as_ref(),
+            [1_i64, 30, 40].into_iter().flat_map(i64::to_ne_bytes).collect::<Vec<_>>()
+        );
+        // The flat primary's per-item slicing sizes ride along as a
+        // keep-on-CPU companion tensor the engine ignores.
+        let counts = &data["image_patch_counts"];
+        assert!(matches!(&counts.field, MmField::Batched(field) if field.keep_on_cpu));
+    }
+
+    /// Render a HY4-VL replacement compactly: stamp-text bytes (ids in the
+    /// tokenizer's byte range) as their string, runs of a repeated token as
+    /// `id xN`, structural ids bare.
+    fn hy4_signature(tokens: &[TokenId]) -> String {
+        let mut parts = Vec::new();
+        let mut text = String::new();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = tokens[index];
+            if (0..=255).contains(&token) {
+                text.push(char::from(token as u8));
+                index += 1;
+                continue;
+            }
+            if !text.is_empty() {
+                parts.push(format!("{text:?}"));
+                text.clear();
+            }
+            let mut end = index + 1;
+            while end < tokens.len() && tokens[end] == token {
+                end += 1;
+            }
+            if end - index > 1 {
+                parts.push(format!("{token} x{}", end - index));
+            } else {
+                parts.push(token.to_string());
+            }
+            index = end;
+        }
+        if !text.is_empty() {
+            parts.push(format!("{text:?}"));
+        }
+        parts.join(" ")
+    }
+
+    /// The connector's container decode needs a real video file, so the
+    /// in-process harness feeds `prepare_videos` a synthesized clip directly
+    /// (the same reach the muse_spark and GLM video tests use) and then runs
+    /// the shared prompt-expansion step, covering everything but the fetch.
+    #[tokio::test]
+    async fn hy4_vl_video_preprocessing_stamps_frames_and_builds_engine_features() {
+        use ::image::{DynamicImage, Rgb, RgbImage};
+        use llm_multimodal::VideoSource;
+        use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
+
+        let info = hy4_vl_info();
+        let frames =
+            vec![DynamicImage::ImageRgb8(RgbImage::from_pixel(512, 512, Rgb([120, 30, 200]))); 2];
+        let clip = Arc::new(VideoClip::new_with_sample_fps(
+            frames,
+            bytes::Bytes::from_static(b"video"),
+            VideoSource::InlineBytes,
+            "clip".to_string(),
+            2.0,
+        ));
+        let prepared =
+            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+
+        // 512x512 frames survive adaptive_resize; each frame's 32x32 patch
+        // grid merges to 16 x (16 + 1 newline) = 272 embed tokens, and the
+        // 2 fps clip stamps its frames at 0.0s and 0.5s.
+        let stamp = |text: &str| {
+            info.context
+                .tokenizer()
+                .encode(text, false)
+                .unwrap()
+                .into_iter()
+                .map(|id| id as TokenId)
+                .collect::<Vec<_>>()
+        };
+        let mut expected = vec![HY4_VIDEO_START_ID as TokenId];
+        for text in ["<0.0 seconds>", "<0.5 seconds>"] {
+            expected.extend(stamp(text));
+            expected.push(HY4_IMAGE_START_ID as TokenId);
+            expected.extend(std::iter::repeat_n(HY4_VIDEO_TOKEN_ID as TokenId, 272));
+            expected.push(HY4_IMAGE_END_ID as TokenId);
+        }
+        expected.push(HY4_VIDEO_END_ID as TokenId);
+        assert_eq!(prepared.replacements.len(), 1);
+        let replacement = &prepared.replacements[0];
+        assert_eq!(replacement.modality, Modality::Video);
+        assert_eq!(replacement.placeholder_token, HY4_VIDEO_TOKEN);
+        assert_eq!(replacement.tokens, expected);
+        expect_test::expect![[r#"120122 "<0.0 seconds>" 120118 120124 x272 120119 "<0.5 seconds>" 120118 120124 x272 120119 120123"#]]
+            .assert_eq(&hy4_signature(&replacement.tokens));
+
+        let mut prompt = vec![11; 100];
+        prompt.extend([HY4_VIDEO_START_ID, HY4_VIDEO_TOKEN_ID, HY4_VIDEO_END_ID]);
+        let mut ranges =
+            expand_prompt_token_ids(&mut prompt, std::slice::from_ref(&prepared)).unwrap();
+        let video_ranges = ranges.remove(&Modality::Video).unwrap_or_default();
+        assert_eq!(video_ranges.len(), 1);
+        assert_eq!(
+            (video_ranges[0].offset, video_ranges[0].length),
+            (100, expected.len())
+        );
+        assert_eq!(prompt.len(), 100 + expected.len());
+
+        assert_eq!(prepared.items.len(), 1);
+        let item = &prepared.items[0];
+        let pixels = &item.data["pixel_values_videos"];
+        assert!(matches!(&pixels.field, MmField::Flat(field) if !field.keep_on_cpu));
+        let Some(MmKwargValue::Tensor(pixel_values)) = pixels.data.as_ref() else {
+            panic!("pixel_values_videos should be a tensor");
+        };
+        assert_eq!(pixel_values.dtype.as_str(), "float32");
+        assert_eq!(pixel_values.shape, [2 * 32 * 32, 3 * 16 * 16]);
+
+        let grid = &item.data["video_grid_thw"];
+        assert!(matches!(&grid.field, MmField::Batched(field) if field.keep_on_cpu));
+        let Some(MmKwargValue::Tensor(grid_tensor)) = grid.data.as_ref() else {
+            panic!("video_grid_thw should be a tensor");
+        };
+        assert_eq!(grid_tensor.shape, [3]);
+        assert_eq!(
+            grid_tensor.data.as_raw_view().unwrap().as_ref(),
+            [2_i64, 32, 32].into_iter().flat_map(i64::to_ne_bytes).collect::<Vec<_>>()
+        );
+
+        // One f32 timestamp per merged frame, shipped flat and kept on CPU
+        // like the reference's `flat_from_sizes` field config.
+        let timestamps = &item.data["video_timestamps"];
+        assert!(matches!(&timestamps.field, MmField::Flat(field) if field.keep_on_cpu));
+        let Some(MmKwargValue::Tensor(timestamp_tensor)) = timestamps.data.as_ref() else {
+            panic!("video_timestamps should be a tensor");
+        };
+        assert_eq!(timestamp_tensor.shape, [2]);
+        assert_eq!(
+            timestamp_tensor.data.as_raw_view().unwrap().as_ref(),
+            [0.0_f32, 0.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>()
+        );
+
+        for key in ["video_patch_counts", "video_timestamp_counts"] {
+            assert!(
+                matches!(&item.data[key].field, MmField::Batched(field) if field.keep_on_cpu),
+                "{key}"
+            );
+        }
     }
 }
