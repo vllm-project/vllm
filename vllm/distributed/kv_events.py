@@ -402,6 +402,7 @@ class ZmqEventPublisher(EventPublisher):
         self._thread.start()
 
     def get_publisher_config(self) -> PublisherConfig:
+        assert self._publisher_config is not None
         return self._publisher_config
 
     def publish(self, events: EventBatch) -> None:
