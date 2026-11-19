@@ -99,6 +99,7 @@ from ..common.engram import (
     can_share_engram_tables,
     gather_engram_hashes,
 )
+from ..common.engram_replacement import per_token_comp_ids, skip_engram_weight
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -677,8 +678,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         self.engram_layout = EngramLayout.from_config(config)
         self.engram_dp_shared_memory = False
+        self.engram_per_token = False
         if self.engram_layout is not None:
             engram_config = vllm_config.engram_config
+            self.engram_per_token = (
+                engram_config is not None and engram_config.mode == "per_token"
+            )
             if engram_config is not None and engram_config.dp_shared_memory:
                 engram_config.dp_shared_memory = can_share_engram_tables(
                     self.engram_layout
@@ -872,6 +877,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     raise NotImplementedError(
                         "engram needs `lookback_token_ids` from the model runner"
                     )
+                # TODO: skip the n-gram hash when no Engram layer uses it; the
+                # per_token mode only needs the mask and the token map.
                 engram_hashes = self.engram_hash(
                     input_ids,
                     positions,
@@ -886,6 +893,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # see the Engram activations.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
             if engram_hashes is not None:
+                # Compressed token ids for the per_token replacement mode;
+                # dead positions (image spans, profile runs) map to id 0.
+                engram_comp_ids = (
+                    per_token_comp_ids(
+                        self.engram_hash.token_map, input_ids, engram_mask
+                    )
+                    if self.engram_per_token
+                    else None
+                )
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
                 gathered_hashes = gather_engram_hashes(
@@ -895,7 +911,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     engram = getattr(layer, "engram", None)
                     if engram is not None:
                         engram.prepare_embeddings(
-                            gathered_hashes[:, engram.layer_hash_index]
+                            gathered_hashes[:, engram.layer_hash_index],
+                            engram_comp_ids,
                         )
 
         full_num_tokens = positions.shape[0]
@@ -1194,6 +1211,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if name.startswith(("vision.", "aligner.", "image_")):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
+                continue
+            if skip_engram_weight(name, self.engram_per_token):
                 continue
             if pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = self._pad_shared_expert_weight(
