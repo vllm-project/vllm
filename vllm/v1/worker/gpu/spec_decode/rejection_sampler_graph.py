@@ -15,8 +15,10 @@ filled so that padded requests become no-ops inside the graph:
   ranges;
 - ``expanded_idx_mapping``/``idx_mapping`` point padded rows at state slot
   0 (valid memory, results discarded);
-- ``expanded_local_pos`` claims the bonus step, hitting the stats kernel's
-  existing bonus-row early return.
+- ``expanded_local_pos`` is zeroed past the live width. The stats kernel
+  skips a row when the next row starts a new request, so every padded row
+  and the live row that closes the range take that early return, just as
+  the masked lookahead does on the eager path.
 
 Output buffers are graph-static: consumers must complete their reads
 before the next replay overwrites them. Upstream consumes them through
@@ -40,7 +42,9 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 logger = init_logger(__name__)
 
 
-@triton.jit
+# n_reqs/n_logits vary per step; their ==1/%16 specialization keys would
+# recompile this graph-external launch on shape changes.
+@triton.jit(do_not_specialize=["n_reqs", "n_logits"])
 def _pack_rejection_sample_metadata_kernel(
     # [n_reqs + 1] -> [MAX_REQS + 1]
     cu_src_ptr,
@@ -72,7 +76,6 @@ def _pack_rejection_sample_metadata_kernel(
     MAX_REQS: tl.constexpr,
     MAX_LOGITS: tl.constexpr,
     BLOCK: tl.constexpr,
-    NUM_SPEC_STEPS: tl.constexpr,
 ):
     """Copy the small rejection-sampling inputs into the static buffers.
 
@@ -97,11 +100,10 @@ def _pack_rejection_sample_metadata_kernel(
         exp_idx_vals = tl.load(exp_idx_src_ptr + lanes, mask=lanes < n_logits, other=0)
         tl.store(exp_idx_dst_ptr + lanes, exp_idx_vals, mask=lanes < MAX_LOGITS)
     elif seg == 3:
-        # Padded logits rows claim the bonus step so the stats kernel skips
-        # them via its existing bonus-row early return.
-        elp_vals = tl.load(
-            elp_src_ptr + lanes, mask=lanes < n_logits, other=NUM_SPEC_STEPS
-        )
+        # A row is skipped by the stats kernel when the next row starts a new
+        # request. Zeroing the padded tail makes every padded row, and the
+        # live row that closes the range, take that early return.
+        elp_vals = tl.load(elp_src_ptr + lanes, mask=lanes < n_logits, other=0)
         tl.store(elp_dst_ptr + lanes, elp_vals, mask=lanes < MAX_LOGITS)
     elif seg == 4:
         pos_vals = tl.load(pos_src_ptr + lanes, mask=lanes < n_logits, other=0)
@@ -201,7 +203,6 @@ class RejectionSamplerGraph:
                 and seed.shape[0] == self._max_reqs
                 and (not has_draft or tuple(draft_values.shape) == self._draft_shape)
             )
-        # Not captured yet: check capture feasibility.
         return (
             target_logits.device.type == "cuda"
             and temperature.shape[0] == seed.shape[0]
@@ -248,7 +249,6 @@ class RejectionSamplerGraph:
             MAX_REQS=self._max_reqs,
             MAX_LOGITS=self._max_logits,
             BLOCK=self._pack_block,
-            NUM_SPEC_STEPS=self._num_speculative_steps,
         )
 
     def _capture(
@@ -302,9 +302,6 @@ class RejectionSamplerGraph:
                 (max_reqs, num_speculative_steps + 1), torch.int64
             )
             self._num_sampled_buf = zeros((max_reqs,), torch.int32)
-
-            # The captured implementation unwraps this into the static
-            # values tensor; row_mapping is None on the graph path.
             static_draft_cache = (
                 SimpleNamespace(values=self._draft_buf, row_mapping=None)
                 if has_draft
@@ -326,9 +323,6 @@ class RejectionSamplerGraph:
                 False,
                 False,
             )
-            # Warm up with the live batch: fills the static buffers and lets
-            # the kernels compile with their final launch keys before
-            # recording.
             self._fill_static_inputs(
                 target_logits,
                 draft_logits_cache.values if has_draft else None,
@@ -350,8 +344,6 @@ class RejectionSamplerGraph:
             torch.cuda.synchronize()
             self._graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self._graph):
-                # Recorded, not executed; the buffers keep the warm-up
-                # results, which the capturing step returns.
                 rejection_sample(
                     *static_args,
                     skip_masked_vocab_blocks=False,
@@ -375,8 +367,6 @@ class RejectionSamplerGraph:
             )
             self._disabled = True
             self._graph = None
-            # Release the static buffers: the capture failed permanently and
-            # nothing else references them.
             self._cu_buf = None
             self._idx_buf = None
             self._exp_idx_buf = None

@@ -190,8 +190,7 @@ class RejectionSampler:
         elif rejection_sample_method == "fly":
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
-        # Graph capture only applies to the plain probabilistic path; every
-        # other verification mode keeps the eager kernels.
+        # Graph capture only applies to the plain probabilistic path
         self._graph = (
             RejectionSamplerGraph(device)
             if (
@@ -287,6 +286,7 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
+        graph: RejectionSamplerGraph | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -316,7 +316,7 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
-            graph=self._graph,
+            graph=graph,
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
@@ -355,9 +355,14 @@ class RejectionSampler:
             # so the stale sums must not pick chunk boundaries; its budget cap
             # guarantees the compacted batch always lands here.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
+            graph = self._graph
         else:
             assert not self.enable_adaptive_verification
             request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
+            # Each chunk replays into the same static output buffers, so a
+            # later chunk would overwrite the earlier chunks' results before
+            # they are concatenated. Keep chunked verification eager.
+            graph = None
 
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
@@ -388,6 +393,7 @@ class RejectionSampler:
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+                graph,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,

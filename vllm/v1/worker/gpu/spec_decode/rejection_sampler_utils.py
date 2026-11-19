@@ -1202,8 +1202,7 @@ def rejection_sample(
             num_speculative_steps,
         )
     ):
-        # Only the plain probabilistic path reaches the graph; every other
-        # mode keeps the eager implementation below.
+        # Only the plain probabilistic path reaches the graph
         return graph.run(
             target_logits,
             draft_logits_cache,

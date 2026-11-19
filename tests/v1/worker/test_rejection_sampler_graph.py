@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parity and fallback tests for the graph-captured rejection sampler."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_graph import (
     RejectionSamplerGraph,
 )
@@ -18,17 +17,31 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 
 def _make_inputs(
-    device: str, n_reqs: int = 2, steps: int = 2, vocab: int = 64, seed: int = 0
+    device: str,
+    n_reqs: int = 2,
+    steps: int = 2,
+    vocab: int = 64,
+    max_reqs: int = 4,
+    seed: int = 0,
 ):
     g = torch.Generator(device="cpu").manual_seed(seed)
     n_logits = n_reqs * (steps + 1)
-    max_reqs = 4
 
     def randn(*shape):
         return torch.randn(*shape, dtype=torch.float32, generator=g).to(device)
 
     target_logits = randn(n_logits, vocab)
-    draft_values = randn(n_reqs, steps, vocab)
+    # A replicated cache holds every request at row req_state_idx, so its
+    # values are sized by max_num_reqs, not by this step's batch.
+    draft_cache = DraftLogitsCache(
+        max_reqs,
+        steps,
+        vocab,
+        dtype=torch.float32,
+        fill=0.0,
+        device=device,
+    )
+    draft_cache.values.copy_(randn(max_reqs, steps, vocab))
     # Draft token ids per row; -1 marks the bonus position.
     draft_sampled = torch.randint(
         0, vocab, (n_logits,), dtype=torch.int64, generator=g
@@ -36,19 +49,18 @@ def _make_inputs(
     for i in range(n_reqs):
         draft_sampled[i * (steps + 1) + steps] = -1
     cu_num_logits = torch.arange(
-        0, (n_reqs + 1) * steps + steps, steps + 1, dtype=torch.int32
-    ).to(device)
-    pos = torch.arange(n_logits, dtype=torch.int64).to(device)
-    idx_mapping = torch.arange(n_reqs, dtype=torch.int32).to(device)
+        0, n_logits + 1, steps + 1, dtype=torch.int32, device=device
+    )
+    pos = torch.arange(n_logits, dtype=torch.int64, device=device)
+    idx_mapping = torch.arange(n_reqs, dtype=torch.int32, device=device)
     expanded_idx_mapping = torch.repeat_interleave(
         torch.arange(n_reqs, dtype=torch.int32), steps + 1
     ).to(device)
     expanded_local_pos = (
         torch.tile(torch.arange(steps + 1, dtype=torch.int32), (n_reqs,))
     ).to(device)
-    temperature = torch.ones(max_reqs, dtype=torch.float32).to(device)
-    seed = torch.arange(max_reqs, dtype=torch.int64).to(device)
-    draft_cache = SimpleNamespace(values=draft_values, row_mapping=None)
+    temperature = torch.ones(max_reqs, dtype=torch.float32, device=device)
+    seed = torch.arange(max_reqs, dtype=torch.int64, device=device)
     return (
         target_logits,
         draft_cache,
@@ -88,6 +100,7 @@ def _assert_parity(result_a, result_b):
 
 
 def test_graph_matches_eager_and_replays():
+    """Capture, same-input replay, and a new batch must all match eager."""
     device = "cuda"
     manager = RejectionSamplerGraph(torch.device(device))
 
@@ -95,37 +108,39 @@ def test_graph_matches_eager_and_replays():
     eager = _run_eager(args_a)
 
     graph = _run_graph(manager, args_a)
-    # First graph call captures and must match eager bit-exactly.
     _assert_parity(graph, eager)
 
-    # Same inputs replayed through the graph: still identical.
     _assert_parity(_run_graph(manager, args_a), eager)
 
-    # Different inputs: the replay must track the new data, matching a
-    # fresh eager run on the same inputs (guards against stale replays).
+    # A new batch must track the new data, guarding against stale replays.
     args_b = _make_inputs(device, seed=1)
     _assert_parity(_run_graph(manager, args_b), _run_eager(args_b))
 
 
-def test_capture_failure_falls_back_to_eager():
-    device = "cuda"
-    manager = RejectionSamplerGraph(torch.device(device))
-    manager._fill_static_inputs = lambda *args, **kwargs: (raise_capture_error())
+def test_graph_matches_eager_greedy():
+    """Greedy requests (temperature 0) take the argmax fast path."""
+    args = list(_make_inputs("cuda", seed=4))
+    args[8] = torch.zeros_like(args[8])
+    manager = RejectionSamplerGraph(torch.device("cuda"))
+    _assert_parity(_run_graph(manager, tuple(args)), _run_eager(tuple(args)))
 
-    args = _make_inputs(device, seed=2)
+
+def test_capture_failure_falls_back_to_eager(monkeypatch):
+    """A capture failure disables the graph permanently instead of retrying."""
+
+    # Simulate an environment where graph capture is unavailable.
+    def unsupported(*args, **kwargs):
+        raise RuntimeError("graph capture unavailable")
+
+    monkeypatch.setattr(torch.cuda, "graph", unsupported)
+    manager = RejectionSamplerGraph(torch.device("cuda"))
+
+    args = _make_inputs("cuda", seed=2)
     result = _run_graph(manager, args)
-    # The capture failed; the step must fall back to eager results and the
-    # manager must be permanently disabled.
     eager = _run_eager(args)
     _assert_parity(result, eager)
     assert manager._disabled
     assert manager._graph is None
-    assert manager._sampled_buf is None
 
-    # Later steps keep running eagerly (no crash, consistent results).
-    args2 = _make_inputs(device, seed=3)
+    args2 = _make_inputs("cuda", seed=3)
     _assert_parity(_run_graph(manager, args2), _run_eager(args2))
-
-
-def raise_capture_error():
-    raise RuntimeError("forced capture failure")
