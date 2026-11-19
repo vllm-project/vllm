@@ -12,6 +12,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     layer_norm_fwd,
     layernorm_fn,
     rms_norm_ref,
+    rmsnorm_fn,
 )
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
@@ -578,51 +579,91 @@ def test_rmsnorm_gated_int64_row_offset() -> None:
     torch.testing.assert_close(out[rows], ref, atol=1e-2, rtol=1e-2)
 
 
+NUM_V_HEADS, HEAD_V_DIM = 48, 128
+Z_OFFSET = 640
+
+
+def _packed_gate(num_tokens: int, row_width: int) -> torch.Tensor:
+    """The gate slice of a packed in_proj row: head-contiguous, token-strided."""
+    packed = torch.randn(num_tokens, row_width, dtype=torch.bfloat16, device="cuda")
+    return packed[:, Z_OFFSET : Z_OFFSET + NUM_V_HEADS * HEAD_V_DIM]
+
+
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="strided-z gated norm is ROCm-only"
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 32, 33])
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 11, 32, 33, 130])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
-@pytest.mark.parametrize("norm_before_gate", [True, False])
-@pytest.mark.parametrize("contiguous_z", [False, True])
 @torch.inference_mode()
-def test_fla_rms_norm_gated_strided_z(
-    default_vllm_config,
-    num_tokens: int,
-    activation: str,
-    norm_before_gate: bool,
-    contiguous_z: bool,
+def test_rocm_gdn_gated_rms_norm_matches_rmsnorm_fn(
+    default_vllm_config, num_tokens: int, activation: str
 ):
-    """Z is a head-contiguous view into the packed GDN in_proj row; the custom
-    op must match the reference whether or not it takes the in-place path."""
-    from vllm.model_executor.layers.layernorm import RMSNormGated
+    """Reading z in place is bit-identical to rmsnorm_fn on a copy of z."""
+    import vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm  # noqa: F401
 
     set_random_seed(0)
-    num_heads, head_dim, eps = 48, 128, 1e-6
-    x = torch.randn(
-        num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device="cuda"
-    )
-    row = torch.randn(
-        num_tokens, num_heads * head_dim + 640, dtype=torch.bfloat16, device="cuda"
-    )
-    z = row[:, : num_heads * head_dim].view(num_tokens, num_heads, head_dim)
-    if contiguous_z:
-        z = z.contiguous()
-    weight = torch.randn(head_dim, dtype=torch.bfloat16, device="cuda")
+    width = NUM_V_HEADS * HEAD_V_DIM
+    x = torch.randn(num_tokens, width, dtype=torch.bfloat16, device="cuda")
+    z = _packed_gate(num_tokens, Z_OFFSET + width + 512)
+    assert num_tokens == 1 or z.stride(0) != width
+    weight = torch.randn(HEAD_V_DIM, dtype=torch.bfloat16, device="cuda")
+    if num_tokens >= 32:
+        # Large enough that the tile holds more than one row.
+        assert calc_rows_per_block(num_tokens * NUM_V_HEADS, x.device) > 1
 
-    out = torch.ops.vllm.fla_rms_norm_gated(
-        x, z, weight, eps, None, norm_before_gate, activation
+    out = torch.ops.vllm.rocm_gdn_gated_rms_norm(
+        x, z, weight, 1e-6, NUM_V_HEADS, HEAD_V_DIM, activation
     )
-    ref = RMSNormGated.forward_static(
-        x,
-        z,
+    ref = rmsnorm_fn(
+        x.view(num_tokens, NUM_V_HEADS, HEAD_V_DIM),
         weight,
-        eps,
-        x.dtype,
-        norm_before_gate=norm_before_gate,
+        None,
+        z=z.contiguous().view(num_tokens, NUM_V_HEADS, HEAD_V_DIM),
+        eps=1e-6,
+        norm_before_gate=True,
         activation=activation,
+    ).view(num_tokens, width)
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="strided-z gated norm is ROCm-only"
+)
+@torch.inference_mode()
+def test_rocm_gdn_gated_rms_norm_int64_row_offset(default_vllm_config) -> None:
+    """Z rows are ~16K elements apart, so int32 offsets wrap at 2^31 // 16K tokens."""
+    import vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm  # noqa: F401
+
+    width = NUM_V_HEADS * HEAD_V_DIM
+    row_width = 16384
+    num_tokens = 2**31 // row_width + 4
+    # packed z rows, x and the output, all bf16.
+    need = num_tokens * (row_width + 2 * width) * 2
+    free, _ = current_platform.mem_get_info()
+    if free < need + (1 << 30):
+        pytest.skip("not enough free device memory")
+
+    set_random_seed(0)
+    x = torch.randn(num_tokens, width, dtype=torch.bfloat16, device="cuda")
+    z = _packed_gate(num_tokens, row_width)
+    weight = torch.randn(HEAD_V_DIM, dtype=torch.bfloat16, device="cuda")
+
+    out = torch.ops.vllm.rocm_gdn_gated_rms_norm(
+        x, z, weight, 1e-6, NUM_V_HEADS, HEAD_V_DIM, "silu"
     )
-    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+
+    # First token, then the last ones, past the int32 boundary.
+    rows = torch.tensor([0, *range(num_tokens - 4, num_tokens)], device="cuda")
+    ref = rms_norm_ref(
+        x[rows].view(-1, NUM_V_HEADS, HEAD_V_DIM),
+        weight,
+        None,
+        z=z[rows].reshape(-1, NUM_V_HEADS, HEAD_V_DIM),
+        eps=1e-6,
+    )
+    torch.testing.assert_close(
+        out[rows].view(-1, NUM_V_HEADS, HEAD_V_DIM), ref, atol=1e-2, rtol=1e-2
+    )
 
 
 if __name__ == "__main__":

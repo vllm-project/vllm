@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     calc_rows_per_block,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
+
+_SUPPORTED_ACTIVATIONS = ("swish", "silu", "sigmoid")
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -25,7 +29,8 @@ def _fused_gdn_gated_rms_norm_kernel(
     ACTIVATION: tl.constexpr,
 ):
     """FLA-equivalent per-head gated RMS norm with token-strided z."""
-    row_start = tl.program_id(0) * ROWS_PER_BLOCK
+    # int64: rows * stride_z_tok wraps int32 at ~131K tokens (stride ~16K).
+    row_start = tl.program_id(0).to(tl.int64) * ROWS_PER_BLOCK
     head = tl.program_id(1)
 
     rows = row_start + tl.arange(0, ROWS_PER_BLOCK)
@@ -110,3 +115,114 @@ def fused_gdn_gated_rms_norm(
         ACTIVATION=activation,
         num_warps=min(max(block_n // 256, 1), 8),
     )
+
+
+def _rocm_gdn_gated_rms_norm(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    num_v_heads: int,
+    head_v_dim: int,
+    activation: str,
+) -> torch.Tensor:
+    out = torch.empty_like(x)
+    fused_gdn_gated_rms_norm(
+        x, z, weight, out, eps, num_v_heads, head_v_dim, activation
+    )
+    return out
+
+
+def _rocm_gdn_gated_rms_norm_fake(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    num_v_heads: int,
+    head_v_dim: int,
+    activation: str,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="rocm_gdn_gated_rms_norm",
+    op_func=_rocm_gdn_gated_rms_norm,
+    fake_impl=_rocm_gdn_gated_rms_norm_fake,
+)
+
+
+def rocm_fused_gdn_gated_rms_norm(
+    *,
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    out: torch.Tensor,
+    out_proj: LinearBase,
+    eps: float,
+    num_v_heads: int,
+    head_v_dim: int,
+    norm_before_gate: bool,
+    activation: str,
+) -> torch.Tensor:
+    """``fused_gdn_gated_rms_norm`` hook for ``QwenGatedDeltaNetAttention``.
+
+    ``z`` is the strided gate slice of the packed qkvz projection. Quantized
+    out_proj layers keep the ``fla_rms_norm_gated`` op so the compile-time
+    norm+quant fusion patterns still match.
+    """
+    del out
+    if not norm_before_gate:
+        raise ValueError("Qwen GDN gated norm always applies the norm before the gate")
+    if (
+        isinstance(out_proj.quant_method, UnquantizedLinearMethod)
+        and activation in _SUPPORTED_ACTIVATIONS
+    ):
+        return torch.ops.vllm.rocm_gdn_gated_rms_norm(
+            x, z, weight, eps, num_v_heads, head_v_dim, activation
+        )
+    normed = torch.ops.vllm.fla_rms_norm_gated(
+        x.view(-1, num_v_heads, head_v_dim),
+        z.reshape(-1, num_v_heads, head_v_dim),
+        weight,
+        eps,
+        None,
+        True,
+        activation,
+    )
+    return normed.flatten(-2)
+
+
+def warmup_fused_gdn_gated_rms_norm(
+    *,
+    max_num_tokens: int,
+    num_v_heads: int,
+    head_v_dim: int,
+    z_token_stride: int,
+    z_offset: int,
+    x_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    device: torch.device,
+    activation: str,
+) -> None:
+    """Compile the kernel for every ``ROWS_PER_BLOCK`` the runtime can pick.
+
+    ``z`` is laid out like the real gate slice: rows ``z_token_stride`` apart,
+    starting ``z_offset`` elements into the packed row.
+    """
+    width = num_v_heads * head_v_dim
+    weight = torch.ones(head_v_dim, dtype=weight_dtype, device=device)
+    seen: set[int] = set()
+    for num_tokens in range(1, max_num_tokens + 1):
+        rows_per_block = calc_rows_per_block(num_tokens * num_v_heads, device)
+        if rows_per_block in seen:
+            continue
+        seen.add(rows_per_block)
+        x = torch.zeros(num_tokens, width, dtype=x_dtype, device=device)
+        packed = torch.zeros(num_tokens, z_token_stride, dtype=x_dtype, device=device)
+        z = packed[:, z_offset : z_offset + width]
+        fused_gdn_gated_rms_norm(
+            x, z, weight, torch.empty_like(x), 1e-6, num_v_heads, head_v_dim, activation
+        )
+        if rows_per_block >= 4:
+            break

@@ -60,6 +60,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -145,12 +146,20 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         )
 
         if self.layer_type == "linear_attention":
+            fused_gdn_gated_rms_norm = None
+            if current_platform.is_rocm():
+                from vllm.models.qwen3_5.amd.ops.fused_gdn_gated_norm import (
+                    rocm_fused_gdn_gated_rms_norm,
+                )
+
+                fused_gdn_gated_rms_norm = rocm_fused_gdn_gated_rms_norm
             self.linear_attn = QwenGatedDeltaNetAttention(
                 config=config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                fused_gdn_gated_rms_norm=fused_gdn_gated_rms_norm,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
