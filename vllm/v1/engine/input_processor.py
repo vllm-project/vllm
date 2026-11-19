@@ -421,10 +421,23 @@ class InputProcessor:
                 tok_params,
             )
 
-        current_platform.validate_request(engine_input, params)
-
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        try:
+            current_platform.validate_request(engine_input, params)
+            self._validate_model_inputs(encoder_input, decoder_input)
+        except Exception:
+            # Rendering recorded the multimodal items as sent to the engine,
+            # which a rejected request never does: resend them next time.
+            self.renderer.queue_mm_cache_invalidations(
+                [
+                    mm_hash
+                    for singleton in (encoder_input, decoder_input)
+                    if singleton is not None and singleton["type"] == "multimodal"
+                    for mm_hashes in singleton["mm_hashes"].values()
+                    for mm_hash in mm_hashes
+                ]
+            )
+            raise
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":

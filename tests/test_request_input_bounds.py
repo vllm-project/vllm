@@ -139,6 +139,33 @@ def test_mm_items_must_fit_encoder_cache_together_without_chunked_prefill(
         processor._validate_model_input(prompt, prompt_type="decoder")
 
 
+def test_rejected_mm_request_invalidates_sender_cache(monkeypatch):
+    """Rendering records a request's multimodal items as sent to the engine, so
+    a request rejected after rendering must have them sent again next time."""
+    config = EngineArgs(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=2048,
+        enable_chunked_prefill=False,
+        encoder_cache_size=1200,
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        processor.renderer, "queue_mm_cache_invalidations", invalidated.extend
+    )
+    prompt = mm_input(
+        prompt_token_ids=[0] * 1800,
+        mm_kwargs={},
+        mm_hashes={"image": ["a", "b", "c"]},
+        mm_placeholders={
+            "image": [PlaceholderRange(offset=o, length=576) for o in (0, 600, 1200)]
+        },
+    )
+    with pytest.raises(VLLMValidationError):
+        processor.process_inputs("rejected", prompt, SamplingParams(), ("generate",))
+    assert invalidated == ["a", "b", "c"]
+
+
 @pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
 def test_routed_experts_offset_validated_before_engine_submission(offset):
     """Reject invalid offsets even when routed-expert output is disabled."""
