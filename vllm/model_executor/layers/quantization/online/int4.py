@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 _UINT4_MAX = 15
@@ -189,6 +190,12 @@ class Int4PerGroup32OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts]"
 
     def __init__(self, *, moe: FusedMoEConfig):
+        # The CUDA WNA16 backends have not been validated with this method yet.
+        if not current_platform.is_rocm():
+            raise NotImplementedError(
+                "Online int4_per_group_32 MoE quantization is currently only "
+                "supported on ROCm."
+            )
         super().__init__(moe)
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=moe,

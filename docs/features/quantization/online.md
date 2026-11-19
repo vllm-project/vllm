@@ -210,11 +210,12 @@ checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
 per model or consider MXFP8 for dense and attention linears.
 
 The MoE weight `int4_per_group_32` quantizes routed experts to symmetric int4
-with one scale per 32 input channels, keeping BF16 activations. It runs on the
-WNA16 MoE kernels: AITER's FlyDSL a16wi4 kernels on gfx942 (MI300X/MI325X,
-with `VLLM_ROCM_USE_AITER=1`), otherwise e.g. Marlin or Triton. It halves the
-expert weight bytes of an FP8 checkpoint, and serves MXFP4 experts on gfx942,
-which has no MXFP4 MoE kernels:
+with one scale per 32 input channels, keeping BF16 activations. It is supported
+on ROCm only, where it runs on the WNA16 MoE kernels: AITER's FlyDSL a16wi4
+kernels on gfx942 (MI300X/MI325X, with `VLLM_ROCM_USE_AITER=1`), otherwise
+Triton. Padded layers other than SiTU fall back from AITER to Triton. It halves
+the expert weight bytes of an FP8 checkpoint, and serves MXFP4 experts on
+gfx942, which has no MXFP4 MoE kernels:
 
 ```bash
 VLLM_ROCM_USE_AITER=1 vllm serve mistralai/Mistral-Large-4-1T-A52B \

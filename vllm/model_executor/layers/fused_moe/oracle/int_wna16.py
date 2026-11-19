@@ -19,6 +19,7 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -206,6 +207,17 @@ def _zen_cpu_num_bits(
     return None
 
 
+def _aiter_intermediate_pad(moe_config: FusedMoEConfig) -> int:
+    """The intermediate pad rocm_aiter_fused_experts passes to AITER."""
+    if moe_config.intermediate_pad is not None:
+        return moe_config.intermediate_pad
+    assert moe_config.intermediate_size_per_partition_unpadded is not None
+    return (
+        moe_config.intermediate_size_per_partition
+        - moe_config.intermediate_size_per_partition_unpadded
+    )
+
+
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
@@ -251,6 +263,14 @@ def _backend_incompatibility_reason(
                 "the hidden size and intermediate size per partition must be "
                 "multiples of 128"
             )
+        # rocm_aiter_fused_experts handles W4A16 pads only for MXFP4, so a
+        # padded non-SiTU int4 layer would get a doubled pad at TP1 and miss
+        # the ROCm/aiter#6598 workaround.
+        if moe_config.activation != MoEActivation.SITU and (
+            _aiter_intermediate_pad(moe_config)
+            or moe_config.hidden_dim != moe_config.hidden_dim_unpadded
+        ):
+            return "padded layers are only supported with SiTU"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
