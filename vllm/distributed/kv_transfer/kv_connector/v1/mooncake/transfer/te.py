@@ -45,6 +45,8 @@ class TransferEngineBackend(TransferBackend):
         self._rpc_port = self._engine.get_rpc_port()
         array_write = getattr(self._engine, "batch_transfer_sync_write_arrays", None)
         self._array_write = array_write if callable(array_write) else None
+        array_read = getattr(self._engine, "batch_transfer_sync_read_arrays", None)
+        self._array_read = array_read if callable(array_read) else None
         if self._array_write is None:
             logger.info(
                 "Mooncake Transfer Engine does not expose a callable "
@@ -128,6 +130,8 @@ class TransferEngineBackend(TransferBackend):
 
         if op is TransferOp.WRITE and self._array_write is not None:
             ret_value = self._array_write(peer, local_addrs, remote_addrs, lengths)
+        elif op is TransferOp.READ and self._array_read is not None:
+            ret_value = self._array_read(peer, local_addrs, remote_addrs, lengths)
         else:
             src_ptrs = local_addrs.tolist()
             dst_ptrs = remote_addrs.tolist()

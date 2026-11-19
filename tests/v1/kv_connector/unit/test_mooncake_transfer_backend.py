@@ -174,6 +174,32 @@ def test_transfer_reads_when_op_is_read(use_arrays):
         assert result == [TransferEvent(TransferState.FAILED, error)]
 
 
+@pytest.mark.parametrize("status", [0, 7])
+def test_read_passes_original_array_columns(status):
+    local = np.array([0xFF00000000200000], dtype=np.uint64)
+    remote = np.array([0x4000], dtype=np.uint64)
+    lengths = np.array([256], dtype=np.uint64)
+
+    class ReadArrayEngine(FakeEngine):
+        def batch_transfer_sync_read_arrays(self, peer, src, dst, sizes):
+            assert peer == "peer"
+            assert src is local and dst is remote and sizes is lengths
+            self.calls.append(("read_arrays",))
+            return status
+
+    engine = ReadArrayEngine()
+    result = make_backend(engine).transfer_sync_arrays(
+        "peer", TransferOp.READ, local, remote, lengths
+    )
+    assert engine.calls[-1] == ("read_arrays",)
+    if status == 0:
+        assert result == BatchTransferResult(1, TransferState.COMPLETED)
+    else:
+        assert result == BatchTransferResult(
+            1, TransferState.FAILED, "Mooncake transfer engine returned 7"
+        )
+
+
 @pytest.mark.parametrize("use_arrays", [False, True], ids=["ranges", "arrays"])
 def test_transfer_returns_nothing_for_an_empty_request(use_arrays):
     engine = FakeEngine()
