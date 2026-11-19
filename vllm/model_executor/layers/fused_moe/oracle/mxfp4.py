@@ -546,6 +546,7 @@ def _serves_requested_activation(
 
     # AITER's interleaved BF16/MXFP8 activation switch is gated to gfx950:
     # https://github.com/ROCm/aiter/blob/a0c4b69c146d94e393984bbe553b704e8c89a5e4/aiter/fused_moe.py#L1128-L1132
+    # The layer pins it through `quant_dtype_a` (`_aiter_mxfp4_activation`).
     return requested_activation_key is None or (
         requested_activation_key == kMxfp8Dynamic and on_gfx950()
     )
@@ -559,6 +560,29 @@ def _user_moe_activation_override() -> QuantKey | None:
 def _user_moe_activation_override_is_set() -> bool:
     """Whether the user set the MoE activation, explicit `null` included."""
     return user_activation_override("moe", get_current_vllm_config_or_none())[1]
+
+
+def _aiter_mxfp4_activation(
+    requested_activation_key: QuantKey | None, explicit_null: bool
+) -> torch.dtype | None:
+    """`quant_dtype_a` honouring the request on interleaved AITER MXFP4 MoE.
+
+    AITER otherwise computes with BF16 below `AITER_BF16_FP8_MOE_BOUND` tokens
+    and MXFP8 at or above it (gfx950 only).
+    """
+    if not current_platform.is_rocm():
+        return None
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950() or not rocm_aiter_ops.fused_moe_supports_quant_dtype_a():
+        return None
+    if requested_activation_key == kMxfp8Dynamic:
+        return current_platform.fp8_dtype()
+    if explicit_null or envs.VLLM_STRICT_QUANT_SCHEME:
+        # Strict mode forbids adding activation quantization to the request.
+        return torch.bfloat16
+    return None
 
 
 def _resolve_activation_key(
@@ -767,6 +791,10 @@ def select_mxfp4_moe_backend(
 
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
+    config.aiter_mxfp4_activation = _aiter_mxfp4_activation(
+        requested_activation_key,
+        requested_activation_key is None and _user_moe_activation_override_is_set(),
+    )
 
     activation_format = config.activation_format
 
@@ -873,6 +901,9 @@ def select_deepseek_v4_mxfp4_moe_backend(
     activation_format = config.activation_format
     requested_activation_key, requested = user_activation_override(
         "moe", get_current_vllm_config_or_none()
+    )
+    config.aiter_mxfp4_activation = _aiter_mxfp4_activation(
+        requested_activation_key, requested and requested_activation_key is None
     )
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
@@ -1450,10 +1481,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # gpt-oss never forced the bound: without an activation request, keep
-        # AITER's default (BF16 below 256 tokens, MXFP8 at or above).
-        rocm_aiter_ops.set_bf16_fp8_moe_bound(default_bound=None)
-
+        # Without an activation request, gpt-oss keeps AITER's default (BF16
+        # below 256 tokens, MXFP8 at or above): `aiter_mxfp4_activation` is None.
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
@@ -1953,10 +1982,17 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        if not use_separated_a4w4:
-            rocm_aiter_ops.set_bf16_fp8_moe_bound()
+        moe_config = getattr(layer, "moe_config", None)
+        if (
+            not use_separated_a4w4
+            and moe_config is not None
+            and moe_config.aiter_mxfp4_activation is None
+        ):
+            # Without an activation request, this path historically forced MXFP8
+            # activations (`AITER_BF16_FP8_MOE_BOUND=0`) on gfx950.
+            moe_config.aiter_mxfp4_activation = _aiter_mxfp4_activation(
+                kMxfp8Dynamic, False
+            )
 
         # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
         # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned

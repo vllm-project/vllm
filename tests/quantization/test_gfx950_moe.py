@@ -5,9 +5,6 @@
 These tests run on real hardware — no mocks. Skipped on non-GFX950 platforms.
 """
 
-import os
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -168,34 +165,6 @@ def test_w4a4_falls_back_without_aiter(
     )
     assert backend == Mxfp4MoeBackend.EMULATION
     assert experts_cls is not None
-
-
-@pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")
-@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="Requires supported AITER")
-@pytest.mark.parametrize("bound", [None, "2147483647"], ids=["unset", "bf16"])
-def test_situv2_moe_does_not_override_other_layers_activation_bound(
-    bound, default_vllm_config, enable_rocm_aiter
-):
-    """SiTUv2 uses its own activation switches and must not reset the shared bound."""
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-
-    config = _make_w4a4_moe_config()
-    config.activation = MoEActivation.SITU
-    config.activation_situ_linear_beta = 25.0
-    try:
-        with patch.dict(os.environ, {"VLLM_ROCM_USE_AITER_MOE_SITUV2": "a8w4"}):
-            if bound is None:
-                os.environ.pop("AITER_BF16_FP8_MOE_BOUND", None)
-            else:
-                os.environ["AITER_BF16_FP8_MOE_BOUND"] = bound
-            rocm_aiter_ops.refresh_env_variables()
-            method = Mxfp4MoEMethod(config)
-            assert method.is_k3_situ_aiter
-            assert method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            assert os.environ.get("AITER_BF16_FP8_MOE_BOUND") == bound
-    finally:
-        rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")

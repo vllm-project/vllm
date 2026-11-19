@@ -219,15 +219,10 @@ DEVICE = current_platform.device_type
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 
 
-@pytest.fixture(autouse=True)
-def _isolate_aiter_bf16_fp8_moe_bound(monkeypatch):
-    """Unset the process-wide bound and restore its original value afterwards."""
-    monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
-    monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_BOUND", None)
-    monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_INSTANCE_ID", None)
-    monkeypatch.setattr(rocm_aiter_ops, "_BF16_FP8_MOE_EXPLICIT_NULL", False)
-    yield
-    os.environ.pop("AITER_BF16_FP8_MOE_BOUND", None)
+def _aiter_q_dtype_a(layer) -> torch.dtype | None:
+    """`q_dtype_a` the layer's AITER MXFP4 experts pass to AITER `fused_moe`."""
+    experts = layer.quant_method.moe_kernel.fused_experts
+    return experts._extra_fused_moe_kwargs().get("q_dtype_a")
 
 
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
@@ -372,7 +367,6 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
             )
         else:
             assert computed_key == activation_quant_key
-        assert "AITER_BF16_FP8_MOE_BOUND" not in os.environ
 
 
 @pytest.fixture
@@ -437,7 +431,7 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
     workspace_init,
     monkeypatch,
 ) -> None:
-    """The resolved online activation controls the bound or the SiTU/DSv4 layout."""
+    """The resolved online activation controls the AITER activation or layout."""
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
     prefix = "model.layers.0.mlp.experts"
     spec = {"weight": "mxfp4", "activation": activation}
@@ -463,7 +457,6 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
             (ValueError, NotImplementedError), match="does not support|cannot honour"
         ):
             build_layer()
-        assert "AITER_BF16_FP8_MOE_BOUND" not in os.environ
         return
     layer = build_layer()
 
@@ -471,7 +464,6 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
     assert layer.quant_method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
     activation_keys = {"mxfp8": kMxfp8Dynamic, "mxfp4": kMxfp4Dynamic, None: None}
     assert layer.quant_method.activation_quant_key == activation_keys[activation]
-    assert "AITER_BF16_FP8_MOE_BOUND" not in os.environ
     layer.to_empty(device=current_platform.device_type)
     torch.manual_seed(0)
     layer.w13_weight.data.normal_()
@@ -491,11 +483,10 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
         )
     layer.quant_method.process_weights_after_loading(layer)
     if layout == "interleaved":
-        assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
-            "0" if activation == "mxfp8" else rocm_aiter_ops._ALWAYS_BF16_BOUND
+        assert _aiter_q_dtype_a(layer) == (
+            current_platform.fp8_dtype() if activation == "mxfp8" else torch.bfloat16
         )
     else:
-        assert "AITER_BF16_FP8_MOE_BOUND" not in os.environ
         tensors = (
             layer.w13_weight,
             layer.w2_weight,
@@ -509,17 +500,9 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
 @pytest.mark.skipif(
     not current_platform.is_rocm() or not on_gfx950(), reason="Requires ROCm gfx950"
 )
-@pytest.mark.parametrize(
-    "first, strict",
-    [("mxfp8", "1"), (None, "1"), ("mxfp8", "0"), (None, "0")],
-    ids=[
-        "strict-mxfp8-then-null-raises",
-        "strict-null-then-mxfp8-raises",
-        "mxfp8-then-explicit-null-wins",
-        "explicit-null-then-mxfp8-wins",
-    ],
-)
-def test_online_mxfp4_aiter_mixed_targets_activation_conflict(
+@pytest.mark.parametrize("strict", ["0", "1"])
+@pytest.mark.parametrize("first", ["mxfp8", None])
+def test_online_mxfp4_aiter_mixed_targets_activation_per_layer(
     first,
     strict,
     default_vllm_config,
@@ -527,7 +510,7 @@ def test_online_mxfp4_aiter_mixed_targets_activation_conflict(
     workspace_init,
     monkeypatch,
 ):
-    """Strict mode rejects conflicting `targets`; explicit null wins otherwise."""
+    """Layers with different `targets` activations each run their own."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
@@ -543,7 +526,8 @@ def test_online_mxfp4_aiter_mixed_targets_activation_conflict(
         }
     )
     quant_config = OnlineQuantizationConfig(args)
-    for i, prefix in enumerate(prefixes):
+    layers = []
+    for prefix in prefixes:
         layer = FusedMoEFactory(
             num_experts=4,
             top_k=2,
@@ -556,14 +540,12 @@ def test_online_mxfp4_aiter_mixed_targets_activation_conflict(
         layer.to_empty(device=current_platform.device_type)
         layer.w13_weight.data.zero_()
         layer.w2_weight.data.zero_()
-        if i == 1 and strict == "1":
-            with pytest.raises(ValueError, match="conflicting BF16 and MXFP8"):
-                layer.quant_method.process_weights_after_loading(layer)
-        else:
-            layer.quant_method.process_weights_after_loading(layer)
-    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
-        "0" if strict == "1" and first == "mxfp8" else rocm_aiter_ops._ALWAYS_BF16_BOUND
-    )
+        layer.quant_method.process_weights_after_loading(layer)
+        layers.append(layer)
+    dtypes = {"mxfp8": current_platform.fp8_dtype(), None: torch.bfloat16}
+    assert [_aiter_q_dtype_a(layer) for layer in layers] == [
+        dtypes[activation] for activation in activations
+    ]
 
 
 def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:

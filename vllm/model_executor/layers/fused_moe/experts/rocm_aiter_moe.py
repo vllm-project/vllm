@@ -348,11 +348,18 @@ def mxfp4_w4a16_extra_kwargs(
             "bias1": quant_config.w1_bias,
             "bias2": quant_config.w2_bias,
         }
-    return {
+    kwargs = {
         "gate_mode_override": GateMode.INTERLEAVE.value,
         "bias1": quant_config.w1_bias,
         "bias2": quant_config.w2_bias,
     }
+    # SiTUv2 selects its activation dtype from AITER_SITUV2_* instead.
+    if (
+        moe_config.aiter_mxfp4_activation is not None
+        and moe_config.activation != MoEActivation.SITU
+    ):
+        kwargs["q_dtype_a"] = moe_config.aiter_mxfp4_activation
+    return kwargs
 
 
 def rocm_aiter_fused_experts(
