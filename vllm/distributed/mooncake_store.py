@@ -17,7 +17,7 @@ DEFAULT_TENANT_ID = "default"
 MooncakeMode = Literal["embedded", "standalone-store"]
 
 
-@dataclass
+@dataclass(slots=True)
 class MooncakeStoreConfig:
     """Configuration for MooncakeDistributedStore.
 

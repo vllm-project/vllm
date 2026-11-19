@@ -417,6 +417,21 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
 class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     model_cls = MiniMaxM3DSparkModel
 
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        extra = vllm_config.additional_config
+        if (
+            current_platform.is_cuda()
+            and isinstance(extra, dict)
+            and extra.get("decode_backend") == "latency_specialized"
+        ):
+            # The MiniMax-M3 specialized decode's drafter kernels.
+            from vllm.models.minimax_m3.nvidia.specialized_decode.drafter import (
+                attach_drafter,
+            )
+
+            attach_drafter(self, vllm_config)
+
     @staticmethod
     def _rename_checkpoint_weights(
         weights: Iterable[tuple[str, torch.Tensor]],
