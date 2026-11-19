@@ -390,6 +390,32 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _reject_unsupported_quantized_sliding_mla(
+    attn_backend: type[AttentionBackend],
+    kv_cache_dtype: CacheDType | str,
+    sliding_window: int | None,
+) -> None:
+    """Reject packed quantized KV on sliding-window MLA unless the backend opts in.
+
+    The check uses the canonical cache dtype. `fp8` / `fp8_e4m3` are
+    already rewritten to `fp8_ds_mla` for FLASHMLA_SPARSE. `nvfp4_ds_mla`
+    is never allowed here.
+    """
+    if sliding_window is None or kv_cache_dtype not in (
+        "fp8_ds_mla",
+        "nvfp4_ds_mla",
+    ):
+        return
+    if (
+        kv_cache_dtype == "fp8_ds_mla"
+        and attn_backend.supports_fp8_ds_mla_sliding_window()
+    ):
+        return
+    raise ValueError(
+        f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
+    )
+
+
 def _get_kv_b_proj_input_dtype(
     kv_b_proj: ColumnParallelLinear, use_fp8_prefill: bool
 ) -> torch.dtype | None:
@@ -520,13 +546,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
-        if sliding_window is not None and kv_cache_dtype in (
-            "fp8_ds_mla",
-            "nvfp4_ds_mla",
-        ):
-            raise ValueError(
-                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
-            )
         dtype = torch.get_default_dtype()
         self.act_dtype = dtype
         if attn_backend is not None:
@@ -558,6 +577,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
                 self.attn_backend.get_name(),
             )
+
+        _reject_unsupported_quantized_sliding_mla(
+            self.attn_backend, kv_cache_dtype, sliding_window
+        )
 
         if (
             self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
