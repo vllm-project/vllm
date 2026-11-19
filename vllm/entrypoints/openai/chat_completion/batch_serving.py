@@ -306,7 +306,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         tokenizer,
                         None,
                         chat_template_kwargs=parser_chat_template_kwargs(
-                            single_request.response_format,
+                            single_request.extract_structured_outputs(),
                             self._effective_chat_template_kwargs(single_request),
                         ),
                     )

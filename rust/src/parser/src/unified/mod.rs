@@ -246,9 +246,9 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Note that the request constrains the answer to JSON (`response_format`
-    /// `json_schema` or `json_object`), before output deltas arrive.
-    fn set_json_answer(&mut self) {}
+    /// Note that the request constrains the answer with structured outputs,
+    /// before output deltas arrive.
+    fn set_constrained_answer(&mut self) {}
 
     /// Return the tool strict level applied when the operator leaves
     /// `--tool-strict-level` unset.

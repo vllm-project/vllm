@@ -609,11 +609,11 @@ ATEM tool-call extraction. Framing special tokens are preserved for parsing and
 removed from surfaced content.
 A tool call written inside the `to=user` answer is extracted as a tool call.
 
-With a JSON `response_format` (`json_schema` or `json_object`, or `text.format`
-on `/v1/responses`), structured output constrains only the `to=user` answer: a
-turn that ends in a tool call is not constrained, so tools and a schema can be
-used in the same request. `to=commentary` messages are returned as reasoning so
-`content` holds only the answer.
+With structured outputs (`response_format`, `structured_outputs`, or
+`text.format` on `/v1/responses`), the constraint applies only to the `to=user`
+answer: a turn that ends in a tool call is not constrained, so tools and a
+schema can be used in the same request. `to=commentary` messages are returned
+as reasoning so `content` holds only the answer.
 
 The Rust frontend also provides a Muse unified parser under `muse` and
 `musespark`, and selects it automatically for Muse Spark model names.

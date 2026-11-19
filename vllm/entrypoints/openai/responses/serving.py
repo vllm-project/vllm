@@ -228,7 +228,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=parser_chat_template_kwargs(
-                request.chat_response_format(), chat_template_kwargs
+                request.extract_structured_outputs(), chat_template_kwargs
             ),
             model_config=self.model_config,
         )
@@ -494,7 +494,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             ):
                 reasoning_parser_kwargs = {
                     "chat_template_kwargs": parser_chat_template_kwargs(
-                        request.chat_response_format(), chat_template_kwargs
+                        request.extract_structured_outputs(), chat_template_kwargs
                     ),
                 }
                 if (

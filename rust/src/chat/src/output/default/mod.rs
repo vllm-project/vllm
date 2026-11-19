@@ -9,7 +9,6 @@ use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
-use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputConstraint;
 use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
@@ -134,13 +133,8 @@ impl DefaultChatOutputProcessor {
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = Some(false);
         }
-        if request.sampling_params.structured_outputs.as_ref().is_some_and(|params| {
-            matches!(
-                params.constraint,
-                StructuredOutputConstraint::Json(_) | StructuredOutputConstraint::JsonObject
-            )
-        }) {
-            parser.set_json_answer();
+        if request.sampling_params.structured_outputs.is_some() {
+            parser.set_constrained_answer();
         }
         let tool_strict_level =
             tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
@@ -485,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn muse_commentary_is_reasoning_only_under_a_json_answer() {
+    async fn muse_commentary_is_reasoning_only_under_structured_outputs() {
         let tokenizer = Arc::new(
             TestTokenizer::new()
                 .with_special_token("<|start|>", 200022)
@@ -535,6 +529,8 @@ mod tests {
         for structured_outputs in [
             StructuredOutputsParams::json(schema),
             StructuredOutputsParams::json_object(),
+            StructuredOutputsParams::regex(r"\{.*\}"),
+            StructuredOutputsParams::choice(vec![r#"{"a": 1}"#.to_string()]),
         ] {
             assert_eq!(
                 run(Some(structured_outputs)).await,

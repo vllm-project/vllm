@@ -222,7 +222,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=parser_chat_template_kwargs(
-                request.response_format, chat_template_kwargs
+                request.extract_structured_outputs(), chat_template_kwargs
             ),
             model_config=self.model_config,
         )
@@ -257,7 +257,7 @@ class OpenAIServingChat(GenerateBaseServing):
         if parser is not None and parser.reasoning_parser is not None:
             reasoning_parser_kwargs = {
                 "chat_template_kwargs": parser_chat_template_kwargs(
-                    request.response_format,
+                    request.extract_structured_outputs(),
                     self._engine_chat_template_kwargs(chat_template_kwargs),
                 ),
             }

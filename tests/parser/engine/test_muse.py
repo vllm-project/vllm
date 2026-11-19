@@ -18,6 +18,7 @@ from tests.parser.engine.replay_harness import (
     replay_streaming,
 )
 from vllm.entrypoints.generate.base.protocol import parser_chat_template_kwargs
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.engine.registered_adapters import (
     MuseParserToolAdapter,
 )
@@ -248,35 +249,46 @@ def test_streaming_without_tool_parser(tokenizer, chunk_size):
     assert (output.reasoning, output.content) == ("Plan.", "AB")
 
 
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"response_format": JSON_FORMAT},
+        {"response_format": {"type": "json_object"}},
+        {"structured_outputs": {"regex": r"\d+\."}},
+        {"structured_outputs": {"choice": ["391."]}},
+    ],
+)
 @pytest.mark.parametrize("chunk_size", [None, 1, 3])
-def test_commentary_is_reasoning_under_json_response_format(tokenizer, chunk_size):
-    # With structured output, `content` is the constrained answer alone.
+def test_commentary_is_reasoning_under_structured_outputs(
+    tokenizer, constraint, chunk_size
+):
+    # With structured outputs, `content` is the constrained answer alone.
     text = CASES["commentary_answer"][0]
-    kwargs = {"chat_template_kwargs": {"response_format": JSON_FORMAT}}
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "test"}], **constraint
+    )
+    kwargs = parser_chat_template_kwargs(request.extract_structured_outputs(), None)
+    parser = MuseParser(tokenizer, chat_template_kwargs=kwargs)
     if chunk_size is None:
-        reasoning, content = MuseParser(tokenizer, **kwargs).extract_reasoning(
-            text, _test_request()
-        )
+        reasoning, content = parser.extract_reasoning(text, request)
     else:
         output = collect_output(
             replay_streaming(
-                MuseParser(tokenizer, **kwargs),
-                _tokens(text),
-                chunk_size=chunk_size,
-                finished_on_last=True,
+                parser, _tokens(text), chunk_size=chunk_size, finished_on_last=True
             )
         )
         reasoning, content = output.reasoning, output.content
     assert (reasoning, content) == ("Plan.Working. ", "391.")
 
 
-@pytest.mark.parametrize("client_value", ["json", {}, {"type": "json_object"}])
-def test_client_response_format_kwarg_does_not_reach_the_parser(
-    tokenizer, client_value
-):
-    # Clients control `chat_template_kwargs`; only the validated request field
-    # may select commentary routing.
-    kwargs = parser_chat_template_kwargs(None, {"response_format": client_value})
+@pytest.mark.parametrize(
+    "client_kwargs",
+    [{"has_structured_outputs": True}, {"response_format": {"type": "json_object"}}],
+)
+def test_client_chat_template_kwargs_do_not_route_commentary(tokenizer, client_kwargs):
+    # Clients control `chat_template_kwargs`; only the request's validated
+    # constraint may select commentary routing.
+    kwargs = parser_chat_template_kwargs(None, client_kwargs)
     reasoning, content = MuseParser(
         tokenizer, chat_template_kwargs=kwargs
     ).extract_reasoning(CASES["commentary_answer"][0], _test_request())

@@ -22,8 +22,8 @@ while the same text in reasoning stays reasoning. Reasoning ends at the answer
 or at a tool message. For structured output (`is_reasoning_end*`) only the
 answer counts: the grammar constrains the `to=user` body, and a turn that ends
 in a tool call stays unconstrained. With
-a JSON `response_format`, `content` is that answer alone and commentary is
-returned as reasoning. The model may write `to=NAME<|message|>` right after a
+structured outputs, `content` is that answer alone and commentary is returned
+as reasoning. The model may write `to=NAME<|message|>` right after a
 body without `<|eom|>`, so a trailing `to=NAME` in a body is held back.
 """
 
@@ -289,15 +289,11 @@ class MuseParser(ParserEngine):
         **kwargs,
     ) -> None:
         kwargs.setdefault("parser_engine_config", muse_config())
-        response_format = (kwargs.get("chat_template_kwargs") or {}).get(
-            "response_format"
-        )
         super().__init__(tokenizer, tools, **kwargs)
         assert isinstance(self._engine, MuseStreamingParserEngine)
         self._engine.commentary_is_reasoning = (
-            response_format is not None
-            and response_format["type"] in ("json_schema", "json_object")
-        )
+            kwargs.get("chat_template_kwargs") or {}
+        ).get("has_structured_outputs", False)
         self._has_reasoning = True
         self._reasoning_ended = False
         self._arg_converter = self._convert_args

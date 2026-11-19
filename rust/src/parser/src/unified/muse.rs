@@ -22,8 +22,8 @@
 //! and any other recipient names a tool whose body is one ATEM block with one
 //! or more `<atem:invoke>` calls. Muse Glimmer may also write an ATEM block
 //! inside its `to=user` answer; that is a tool call too, while the same text
-//! in reasoning or commentary stays text. With a JSON `response_format`
-//! ([`UnifiedParser::set_json_answer`]), `commentary` bodies are returned as
+//! in reasoning or commentary stays text. With structured outputs
+//! ([`UnifiedParser::set_constrained_answer`]), `commentary` bodies are returned as
 //! reasoning so the visible text is the constrained answer alone. Parameters admitting strings retain their
 //! raw text; other values are JSON-decoded when possible and kept as raw
 //! strings otherwise. Each invoke's arguments are reassembled as a compact
@@ -144,7 +144,7 @@ pub struct MuseUnifiedParser {
     parameters: HashMap<String, Value>,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
-    /// Route `commentary` bodies to reasoning (JSON `response_format`).
+    /// Route `commentary` bodies to reasoning (structured outputs).
     commentary_is_reasoning: bool,
 }
 
@@ -247,7 +247,7 @@ impl UnifiedParser for MuseUnifiedParser {
         true
     }
 
-    fn set_json_answer(&mut self) {
+    fn set_constrained_answer(&mut self) {
         self.commentary_is_reasoning = true;
     }
 
@@ -984,27 +984,27 @@ mod tests {
         }
     }
 
-    /// A parser for a request whose `response_format` constrains the answer to JSON.
-    fn json_answer_parser() -> MuseUnifiedParser {
+    /// A parser for a request whose structured outputs constrain the answer.
+    fn constrained_answer_parser() -> MuseUnifiedParser {
         let mut parser = test_parser();
-        parser.set_json_answer();
+        parser.set_constrained_answer();
         parser
     }
 
     #[test]
-    fn muse_commentary_is_reasoning_under_a_json_answer() {
+    fn muse_commentary_is_reasoning_under_a_constrained_answer() {
         let text = format!(
             " to=self{MESSAGE}plan{EOM}{commentary}\
              {START}assistant to=user{MESSAGE}{{\"result\": 4}}{EOT}",
             commentary = segment("commentary", "working"),
         );
 
-        let output = json_answer_parser().parse_complete(&text).unwrap();
+        let output = constrained_answer_parser().parse_complete(&text).unwrap();
         assert_eq!(output.reasoning_text(), "planworking");
         assert_eq!(output.normal_text(), r#"{"result": 4}"#);
-        assert_streaming_matches_batch_with(&text, json_answer_parser);
+        assert_streaming_matches_batch_with(&text, constrained_answer_parser);
 
-        // Without a JSON answer the update stays visible.
+        // Without a constrained answer the update stays visible.
         let output = test_parser().parse_complete(&text).unwrap();
         assert_eq!(output.normal_text(), r#"working{"result": 4}"#);
     }
