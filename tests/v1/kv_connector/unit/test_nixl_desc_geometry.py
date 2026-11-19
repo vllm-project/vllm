@@ -26,6 +26,7 @@ import torch
 from tests.v1.kv_connector.unit.utils import (
     KVCacheGroupSpec,
     make_kv_cache_group_from_specs,
+    remote_stage,
 )
 from vllm.config import ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -245,8 +246,12 @@ def test_interleaved_mla_layers_of_a_group_move_one_descriptor_per_block(
     assert metadata.block_strides == [stride] * num_layers
     metadata.engine_id = "remote"
     worker.add_remote_agent(metadata)
-    local = worker.nixl_wrapper.dlists[worker._local_descs["remote"].handle]
-    remote = worker.nixl_wrapper.dlists[worker.dst_xfer_side_handles["remote"][0]]
+    local = worker.nixl_wrapper.dlists[
+        remote_stage(worker, "remote").local_descs.handle
+    ]
+    remote = worker.nixl_wrapper.dlists[
+        remote_stage(worker, "remote").xfer_side_handles[0]
+    ]
     if one_group:
         expected = [[raw.data_ptr() + b * stride, stride, 0] for b in range(4)]
     else:
@@ -284,8 +289,12 @@ def test_peers_placing_layers_differently_in_a_block_pair_by_layer():
     )
     metadata.engine_id = "remote"
     consumer.add_remote_agent(metadata)
-    local = consumer.nixl_wrapper.dlists[consumer._local_descs["remote"].handle]
-    remote = consumer.nixl_wrapper.dlists[consumer.dst_xfer_side_handles["remote"][0]]
+    local = consumer.nixl_wrapper.dlists[
+        remote_stage(consumer, "remote").local_descs.handle
+    ]
+    remote = consumer.nixl_wrapper.dlists[
+        remote_stage(consumer, "remote").xfer_side_handles[0]
+    ]
     assert local.tolist() == [
         [d_raw.data_ptr() + offset + b * 192, num_bytes, 0]
         for offset, num_bytes in ((64, 128), (0, 64))
@@ -350,18 +359,21 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
         )
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
         # L0 is another stage's.
-        assert producer._dst_pairs[consumer.engine_id].remote == [1, 2, 3]
+        assert remote_stage(producer, consumer.engine_id).pairs.remote == [1, 2, 3]
         local_ids, remote_ids = producer._compute_desc_ids(
-            consumer.engine_id, rank, [[1], [2], [3]], [[3], [1], [2]]
+            remote_stage(producer, consumer.engine_id),
+            rank,
+            [[1], [2], [3]],
+            [[3], [1], [2]],
         )
-        local_handle = producer._local_descs[consumer.engine_id].handle
+        local_handle = remote_stage(producer, consumer.engine_id).local_descs.handle
         local_descs = producer.nixl_wrapper.dlists[local_handle]
         assert local_descs[local_ids].tolist() == [
             [p_raw.data_ptr() + 192, 128, 0],
             [p_raw.data_ptr() + 2 * 192, 64, 0],
             [p_raw.data_ptr() + 128 + 3 * 192, 64, 0],
         ]
-        handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
+        handle = remote_stage(producer, consumer.engine_id).xfer_side_handles[rank]
         remote_descs = producer.nixl_wrapper.dlists[handle]
         assert len(remote_descs) == 3 * d_num_blocks
         assert remote_descs[remote_ids].tolist() == [
@@ -473,10 +485,7 @@ def _register_overlaid_mla_worker(
     worker.nixl_wrapper = _RecordingNixl()
     worker._registered_descs = []
     worker.dst_num_blocks = {}
-    worker.dst_region_num_blocks = {}
-    worker.dst_region_group_ids = {}
-    worker._dst_pairs = {}
-    worker.dst_region_mem_types = {}
+    worker._remote_stages = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker.kv_cache_layout = "LBNHC"
     worker.host_buffer_kv_cache_layout = "LBNHC"
@@ -549,7 +558,7 @@ def test_overlaid_transfer_groups_are_regions_of_the_same_blocks(push_pp):
     ]
     local_descs = _region_blocks(worker)
     assert local_descs[:, 0].tolist() == expected_addrs * 2
-    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks] * 2
+    assert worker.region_num_blocks == [num_blocks] * 2
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -558,10 +567,6 @@ def test_overlaid_transfer_groups_are_regions_of_the_same_blocks(push_pp):
     assert metadata.region_group_ids == [0, 1]
     assert metadata.region_num_blocks == [num_blocks] * 2
     assert metadata.region_members == [["layer.0"], ["layer.1"]]
-    assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [
-        [0],
-        [2],
-    ]
 
 
 def _region_blocks(worker) -> np.ndarray:

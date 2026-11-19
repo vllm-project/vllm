@@ -60,6 +60,7 @@ from .utils import (
     expand_strided_descs,
     make_nixl_push_scheduler,
     region_pairs_by_index,
+    remote_stage,
 )
 
 # ----------------------------------------------------------------- #
@@ -371,9 +372,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
-        w._byte_ranges = {}
-        w._local_desc_lists, w._local_descs = {}, {}
-        w._desc_starts = defaultdict(dict)
+        w._remote_stages = {}
+        w._local_desc_lists = {}
         w._physical_blocks_per_group = [1]
         w._remote_physical_blocks_per_group = {}
         w._remote_block_splits = {}
@@ -384,6 +384,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pcp_dcp_sharded = False
         w.world_size = 1
         w.pp_size = 1
+        w.dcp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._failed_remote_engines = set()
@@ -391,10 +392,6 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
-        w.dst_region_num_blocks = {}
-        w.dst_region_group_ids = {}
-        w._dst_pairs = {}
-        w.dst_region_mem_types = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
@@ -794,7 +791,6 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w._handshake_lock = threading.RLock()
     # _cleanup_remote_engine touches these when reaping an engine.
     w.nixl_wrapper = MagicMock()
-    w.dst_xfer_side_handles = {}
     w.kv_caches_base_addr = {}
     w.dst_num_blocks = {}
     w.source_ranks = {}
@@ -1059,7 +1055,9 @@ class TestPushWriterNotifs:
         w.transfer_topo.block_size_ratio.return_value = 1
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=([0], [0]))
-        w._local_descs = defaultdict(lambda: MagicMock(handle=1))
+        stage = remote_stage(w, w.engine_id)
+        stage.local_descs = MagicMock(handle=1)
+        stage.xfer_side_handles = {0: 2}
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1074,7 +1072,7 @@ class TestPushWriterNotifs:
             dst_engine_id=w.engine_id,
             request_id=request_id,
             remote_request_id="decode-request",
-            remote_xfer_side_handle=2,
+            stage=stage,
         )
         assert handle == (101 if release_fails else None)
         w._sending_transfers[request_id] = [102]
@@ -1491,7 +1489,7 @@ class TestPushPipelineParallel:
         with pytest.raises(_StopAfterSlice):
             w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
 
-        pairs = w._dst_pairs["p-engine"]
+        pairs = remote_stage(w, "p-engine").pairs
         assert (pairs.remote, pairs.local) == ([2, 3], [0, 1])
 
 
@@ -1519,8 +1517,9 @@ class TestPushWriterMlaReplication:
         # D rank (see test_tp_mapping).
         w.source_ranks = {engine_id: [tuple(d_ranks)]}
         w._remote_physical_blocks_per_group = {engine_id: [1]}
-        w._dst_pairs[engine_id] = region_pairs_by_index(1)
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        stage = remote_stage(w, engine_id)
+        stage.pairs = region_pairs_by_index(1)
+        stage.xfer_side_handles = {r: 1000 + r for r in d_ranks}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
@@ -1612,13 +1611,14 @@ class TestPushPrefixCaching:
         w.transfer_topo.block_size_ratio.return_value = 1
         w.source_ranks = {engine_id: [(0,)]}
         w._remote_physical_blocks_per_group = {engine_id: [1]}
-        w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
-        w._dst_pairs = {engine_id: region_pairs_by_index(1)}
-        w.dst_xfer_side_handles = {engine_id: {0: 5000}}
+        stage = remote_stage(w, engine_id)
+        stage.region_group_ids = [0]
+        stage.pairs = region_pairs_by_index(1)
+        stage.xfer_side_handles = {0: 5000}
         # One whole-block desc per block on both sides, so desc ids are the
         # block ids.
-        w._desc_starts = {engine_id: {0: np.array([[0, 0, 0, 0]])}}
-        w._local_descs = {engine_id: MagicMock(handle=2000)}
+        stage.desc_starts = {0: np.array([[0, 0, 0, 0]])}
+        stage.local_descs = MagicMock(handle=2000)
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
         # computation and count assertions all run for real.
@@ -1665,7 +1665,7 @@ class TestPushPrefixCaching:
     def test_push_requires_each_layer_in_the_same_cache_group(self, groups_match):
         """A layer in another cache group on D is refused."""
         w, engine_id = self._worker_driving_xfer()
-        w._dst_pairs[engine_id].groups_match = groups_match
+        remote_stage(w, engine_id).pairs.groups_match = groups_match
         reg = _registration_data("req-groups", local_block_ids=([500, 501],))
 
         if not groups_match:
@@ -1730,15 +1730,15 @@ def _prep_whole_blocks(worker, metadata, pairs, base_addresses) -> list[np.ndarr
     and return them expanded to one row per block."""
     engine_id = metadata.engine_id
     num_remote = len(metadata.kv_caches_base_addr)
-    worker._dst_pairs[engine_id] = pairs
-    worker._byte_ranges[engine_id] = [
+    stage = remote_stage(worker, engine_id)
+    stage.pairs = pairs
+    stage.byte_ranges = [
         {0: [(0, 0, worker.block_len_per_layer[local])]} for local in pairs.local
     ]
-    worker.dst_region_num_blocks[engine_id] = metadata.region_num_blocks or (
+    stage.region_num_blocks = metadata.region_num_blocks or (
         [metadata.num_blocks] * num_remote
     )
-    worker.dst_region_mem_types[engine_id] = ["VRAM"] * num_remote
-    worker.dst_xfer_side_handles = defaultdict(dict)
+    worker.nixl_memory_type = "VRAM"
     worker.kv_caches_base_addr = {worker.engine_id: {worker.tp_rank: base_addresses}}
     worker.block_stride_per_layer = getattr(
         worker, "block_stride_per_layer", list(worker.block_len_per_layer)
@@ -1754,7 +1754,7 @@ def _prep_whole_blocks(worker, metadata, pairs, base_addresses) -> list[np.ndarr
 
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.prep_xfer_dlist.side_effect = prep_xfer_dlist
-    worker._prep_descs(metadata, 0, "remote-agent", 1)
+    worker._prep_descs(metadata, 0, "remote-agent", 1, stage)
     return lists
 
 
@@ -1842,7 +1842,7 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
         worker, consumer, pairs, [0x1000, 0x2000, 0x3000]
     )
     local_ids, remote_ids = worker._compute_desc_ids(
-        consumer.engine_id, 0, [[1, 2], [3]], [[0, 1], [2]]
+        remote_stage(worker, consumer.engine_id), 0, [[1, 2], [3]], [[0, 1], [2]]
     )
     assert len(local_descs) == sum(worker.region_num_blocks)
     assert len(remote_descs) == sum(consumer.region_num_blocks[1:])

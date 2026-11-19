@@ -617,9 +617,12 @@ class AttentionSpec(KVCacheSpec):
     # NOTE: KV-head placement across TP belongs to a GQA spec subclass; it
     # moves there (or goes away) with the spec split of RFC #42449 (#61452).
     def slice_for_tp_transfer(self, cache: torch.Tensor) -> dict[str, torch.Tensor]:
-        """`cache` is this rank's `[B, H, N, C]` (or head-slot) layer view. A
+        """`cache` itself: its dim 1, the KV heads, is what TP shards.
+
+        `cache` is this rank's `[B, H, N, C]` (or head-slot) layer view. A
         cache whose dim 1 is not its KV heads (custom `num_head_slots`) is not
-        cut: its view gets a dim 1 of one."""
+        cut: its view gets a dim 1 of one.
+        """
         if cache.shape[1] != self.num_kv_heads:
             cache = cache.unsqueeze(1)
         return {"": cache}

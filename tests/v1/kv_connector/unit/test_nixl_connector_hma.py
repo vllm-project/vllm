@@ -45,20 +45,18 @@ from .utils import (
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
+    remote_stage,
 )
 
 
 def _whole_block_descs(worker, ranks=(0,)) -> None:
     """Move every paired block whole with `ranks`, region `i`'s blocks at
     desc ids `100 * i` onward on both sides."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-        _RemoteStage,
-    )
-
-    pairs = worker._dst_pairs["P"]
+    stage = remote_stage(worker, "P")
+    pairs = stage.pairs
     block_len = worker.block_len_per_layer[0]
-    byte_ranges = [{r: [(0, 0, block_len)] for r in ranks}] * len(pairs.local)
-    desc_starts = {
+    stage.byte_ranges = [{r: [(0, 0, block_len)] for r in ranks}] * len(pairs.local)
+    stage.desc_starts = {
         r: np.array(
             [
                 (group, local, 100 * local, 100 * remote)
@@ -67,30 +65,9 @@ def _whole_block_descs(worker, ranks=(0,)) -> None:
         )
         for r in ranks
     }
-    worker._byte_ranges = {"P": byte_ranges}
-    worker._desc_starts = {"P": desc_starts}
-    handles = getattr(worker, "dst_xfer_side_handles", {}).get("P") or {
-        r: 1000 + r for r in ranks
-    }
-    worker.dst_xfer_side_handles = {"P": dict(handles)}
-    worker._remote_stages = {
-        "P": {
-            0: _RemoteStage(
-                pp_rank=0,
-                pairs=pairs,
-                layers=[],
-                region_num_blocks=worker.dst_region_num_blocks.get(
-                    "P", [100] * len(pairs.local)
-                ),
-                region_group_ids=worker.dst_region_group_ids.get(
-                    "P", list(pairs.group)
-                ),
-                xfer_side_handles=dict(handles),
-                byte_ranges=byte_ranges,
-                desc_starts=desc_starts,
-            )
-        }
-    }
+    stage.xfer_side_handles = stage.xfer_side_handles or {r: 1000 + r for r in ranks}
+    stage.region_num_blocks = stage.region_num_blocks or [100] * len(pairs.local)
+    stage.region_group_ids = stage.region_group_ids or list(pairs.group)
 
 
 @pytest.fixture
@@ -131,10 +108,9 @@ def region_pull_worker():
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
     worker._dcp_replicated_groups = set()
     worker.region_group_ids = [0, 1]
-    worker.dst_region_group_ids = {"P": [0, 0]}
-    worker._dst_pairs = {
-        "P": region_pairs_by_index(2, groups=[0, 1], groups_match=False)
-    }
+    stage = remote_stage(worker, "P")
+    stage.region_group_ids = [0, 0]
+    stage.pairs = region_pairs_by_index(2, groups=[0, 1], groups_match=False)
     worker.num_regions = 2
     worker.block_len_per_layer = [1024, 1024]
     worker.transfer_topo = MagicMock()
@@ -148,10 +124,10 @@ def region_pull_worker():
     )
     worker.source_ranks = {"P": [(0,), (0,)]}
     worker._mixed_mem_types = True
-    worker._local_descs = {"P": _LocalDescs(1, {}, dram_handle=2)}
+    stage.local_descs = _LocalDescs(1, {}, dram_handle=2)
     worker.dst_num_blocks = {"P": 100, "D": 100}
-    worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
-    worker.dst_xfer_side_handles = {"P": {0: 3}}
+    stage.region_num_blocks = [100, 100]
+    stage.xfer_side_handles = {0: 3}
     # The MLA regions move whole blocks.
     _whole_block_descs(worker)
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
@@ -243,15 +219,12 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     worker = region_pull_worker
     worker.region_group_ids = list(region_groups)
     worker.num_regions = len(region_groups)
-    worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
-    worker._dst_pairs = {
-        "P": region_pairs_by_index(
-            worker.num_regions, groups=region_groups, groups_match=False
-        )
-    }
-    worker.dst_region_num_blocks = {
-        engine: [100] * worker.num_regions for engine in ("P", "D")
-    }
+    stage = remote_stage(worker, "P")
+    stage.region_group_ids = [0] * worker.num_regions
+    stage.pairs = region_pairs_by_index(
+        worker.num_regions, groups=region_groups, groups_match=False
+    )
+    stage.region_num_blocks = [100] * worker.num_regions
     worker.block_len_per_layer = [1024] * worker.num_regions
     worker.dcp_rank = 0
     remote = worker.transfer_topo.get_engine_info.return_value
@@ -260,7 +233,7 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     worker._remote_physical_blocks_per_group = {"P": [1]}
     ranks = tuple(range(8))
     worker.source_ranks["P"] = [ranks, ranks]
-    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    remote_stage(worker, "P").xfer_side_handles = {r: 1000 + r for r in ranks}
     _whole_block_descs(worker, ranks)
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # Two regions with different prefix hits, plus one padding page each.
@@ -355,15 +328,16 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
     worker.tp_rank = tp_rank
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
     worker._dcp_replicated_groups = {1}
-    worker.dst_region_group_ids = {"P": [0, 1]}
-    worker._dst_pairs = {"P": region_pairs_by_index(2, groups=[0, 1])}
+    stage = remote_stage(worker, "P")
+    stage.region_group_ids = [0, 1]
+    stage.pairs = region_pairs_by_index(2, groups=[0, 1])
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 4
     remote.remote_physical_blocks_per_logical = 1
     worker._remote_physical_blocks_per_group = {"P": [1, 1]}
     ranks = tuple(range(4))
     worker.source_ranks["P"] = [ranks, ranks]
-    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    remote_stage(worker, "P").xfer_side_handles = {r: 1000 + r for r in ranks}
     _whole_block_descs(worker, ranks)
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
@@ -633,7 +607,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         ),
     ],
 )
-def test_apply_dcp_prefix_caching_matches_global_logical_positions(
+def test_pair_blocks_matches_global_dcp_positions(
     local_ids,
     remote_ids,
     remote_rank,
@@ -644,24 +618,28 @@ def test_apply_dcp_prefix_caching_matches_global_logical_positions(
     expected_local,
     expected_remote,
 ):
-    """_apply_dcp_prefix_caching must operate on logical block IDs (DCP
-    interleaves at logical-block granularity) and always return equal-length
-    local/remote slices, so a later, unconditional _apply_prefix_caching
-    trim is a guaranteed no-op rather than double-processing the read."""
+    """With DCP, blocks pair by their position in the request, past the
+    blocks the local prefix cache holds."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.dcp_size, worker.dcp_rank = local_dcp_size, local_dcp_rank
+    worker._physical_blocks_per_group = [1]
+    worker._remote_physical_blocks_per_group = {"remote": [1]}
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.transfer_topo.get_engine_info.return_value.remote_dcp_size = remote_dcp_size
 
-    actual_local, actual_remote = worker._apply_dcp_prefix_caching(
+    actual_local, actual_remote, _ = worker._pair_blocks(
+        "remote",
+        remote_rank,
+        0,
         local_ids,
+        0,
         remote_ids,
-        remote_rank=remote_rank,
-        local_dcp_size=local_dcp_size,
-        local_dcp_rank=local_dcp_rank,
-        remote_dcp_size=remote_dcp_size,
-        local_num_computed_blocks=local_num_computed_blocks,
+        num_computed_blocks=local_num_computed_blocks,
     )
 
     assert actual_local == expected_local
@@ -803,12 +781,11 @@ def test_read_blocks_for_req_expands_remote_ids(
         ]
     }
     worker.region_group_ids = list(range(len(resolved_types)))
-    worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
-    worker._dst_pairs = {
-        remote_engine_id: region_pairs_by_index(
-            len(resolved_types), groups=worker.region_group_ids
-        )
-    }
+    stage = remote_stage(worker, remote_engine_id)
+    stage.region_group_ids = list(worker.region_group_ids)
+    stage.pairs = region_pairs_by_index(
+        len(resolved_types), groups=worker.region_group_ids
+    )
 
     worker.transfer_topo = MagicMock()
     # tp_ratio not exercised (no source ranks, so no reads run),
@@ -1257,37 +1234,6 @@ def _bind_worker_method(worker, name):
 
     method = getattr(NixlConnectorWorker, name)
     setattr(worker, name, method.__get__(worker, NixlConnectorWorker))
-
-
-@pytest.mark.cpu_test
-def test_map_block_ids_for_block_size_ratio_hybrid():
-    """Attention groups expand to remote granularity and clip to the remote
-    coverage; mamba state blocks pass through 1:1."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-    from vllm.v1.kv_cache_interface import MambaSpec
-
-    worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (AttentionSpec, MambaSpec)
-    _bind_worker_method(worker, "get_mapped_blocks")
-    _bind_worker_method(worker, "_map_block_ids_for_block_size_ratio")
-
-    local, remote = worker._map_block_ids_for_block_size_ratio(
-        [[1, 2, 3], [7]],
-        [list(range(30, 40)), [42]],
-        4,
-    )
-    # [1, 2, 3] expand to sub-blocks [4..15], clipped to the 10 remote blocks.
-    assert local == [list(range(4, 14)), [7]]
-    assert remote == [list(range(30, 40)), [42]]
-
-    # Attention-only full prefix hit: empty local list is preserved.
-    worker._group_spec_types = (AttentionSpec,)
-    local, remote = worker._map_block_ids_for_block_size_ratio([[]], [[30, 31]], 4)
-    assert local == []
 
 
 @pytest.mark.cpu_test

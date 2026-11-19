@@ -20,8 +20,10 @@ import torch
 from tests.v1.kv_connector.unit.utils import (
     region_pairs_by_index,
     remote_layer_spec,
+    remote_stage,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineTransferInfo,
     TransferTopology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -30,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ComponentSpec,
@@ -115,8 +118,6 @@ def _worker(
     worker._group_spec_types = tuple(
         type(spec) for spec in worker._layer_specs.values()
     )
-    worker._dst_pairs = {}
-    worker._byte_ranges = {}
     worker.source_ranks = {}
     worker._remote_block_splits = {}
     worker.kv_cache_layout = "LBHNC"
@@ -170,16 +171,15 @@ def _map(
     """Map `worker` to a remote at `remote_tp_size` holding the same
     layers, as the handshake does, and return the ranks it reads from."""
     num_layers = len(worker.region_members)
-    pairs = region_pairs_by_index(num_layers, range(num_layers))
-    worker._dst_pairs[_ENGINE] = pairs
-    ranges = worker._tp_byte_ranges(
+    stage = remote_stage(worker, _ENGINE)
+    stage.pairs = pairs = region_pairs_by_index(num_layers, range(num_layers))
+    stage.byte_ranges = ranges = worker._tp_byte_ranges(
         _remote_meta(worker, remote_tp_size, 4 // block_size_ratio),
         list(zip(pairs.local, pairs.group, pairs.remote)),
         remote_tp_size,
         remote_dcp_size,
         receiving=worker._TRANSFER_MODE == "pull",
     )
-    worker._byte_ranges[_ENGINE] = ranges
     # One cache group per layer.
     worker.source_ranks[_ENGINE] = [tuple(sorted(r)) for r in ranges]
     return tuple(sorted(set().union(*ranges)))
@@ -220,7 +220,7 @@ def test_gqa_draft_under_mla_target_reads_its_heads(
     worker = _worker(tp_rank, tp_size, layers)
     (source,) = _map(worker, remote_tp_size)
     mla_ranges, draft_ranges = (
-        ranges[source] for ranges in worker._byte_ranges[_ENGINE]
+        ranges[source] for ranges in remote_stage(worker, _ENGINE).byte_ranges
     )
 
     head_bytes = worker.block_len_per_layer[1]
@@ -248,6 +248,23 @@ def test_mla_dcp_source_ranks(
 ):
     worker = _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size)
     assert _map(worker, remote_tp_size, remote_dcp_size) == expected_ranks
+
+
+def test_push_to_another_dcp_size_is_refused():
+    """A push pairs the two ranks' blocks of a request in order, which is
+    wrong unless both sides share the blocks out alike."""
+    worker = _worker(0, 2, _MLA, dcp_size=2)
+    worker._TRANSFER_MODE = "push"
+    with pytest.raises(NotImplementedError, match="another DCP size"):
+        _map(worker, remote_tp_size=2, remote_dcp_size=1)
+
+
+def test_push_to_a_remote_too_small_for_our_dcp_size_is_refused():
+    """A push handshakes as if the remote had its DCP size; a remote whose TP
+    size that DCP size does not divide is refused before any rank is picked."""
+    topo = _worker(0, 4, _MLA, dcp_size=4).transfer_topo
+    with pytest.raises(NotImplementedError, match="cannot have DCP size 4"):
+        topo.handshake_target_ranks(remote_tp_size=2, remote_dcp_size=4)
 
 
 @pytest.mark.parametrize(
@@ -278,6 +295,99 @@ def test_dcp_consumer_count_matches_readers(
             assert consumers == len(readers)
 
 
+# The DCP groups of (4, 2), (8, 2) and (8, 4) are smaller than the TP size.
+_TP_AND_DCP_SIZES = [
+    (1, 1),
+    (2, 1),
+    (2, 2),
+    (4, 1),
+    (4, 2),
+    (4, 4),
+    (8, 1),
+    (8, 2),
+    (8, 4),
+    (8, 8),
+]
+
+
+@pytest.mark.parametrize("tp_size,dcp_size", _TP_AND_DCP_SIZES)
+@pytest.mark.parametrize("remote_tp_size,remote_dcp_size", _TP_AND_DCP_SIZES)
+def test_every_remote_rank_hears_from_the_ranks_it_waits_for(
+    tp_size, dcp_size, remote_tp_size, remote_dcp_size
+):
+    """A producer rank frees a request's blocks once every consumer rank
+    that handshook with it has notified it: every remote rank must be some
+    local rank's target, and wait for exactly the ranks targeting it."""
+    workers = [
+        _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size) for tp_rank in range(tp_size)
+    ]
+    targets = [
+        w.transfer_topo.handshake_target_ranks(remote_tp_size, remote_dcp_size)
+        for w in workers
+    ]
+    assert set().union(*targets) == set(range(remote_tp_size))
+    for worker, ranks in zip(workers, targets):
+        # A rank reads only from ranks it handshook with.
+        assert set(_map(worker, remote_tp_size, remote_dcp_size)) <= set(ranks)
+        for remote_rank in ranks:
+            assert worker.transfer_topo.dcp_consumer_count(
+                remote_tp_size, remote_dcp_size
+            ) == sum(remote_rank in other for other in targets)
+
+
+@pytest.mark.parametrize("tp_size,dcp_size", _TP_AND_DCP_SIZES)
+@pytest.mark.parametrize("remote_tp_size,remote_dcp_size", _TP_AND_DCP_SIZES)
+@pytest.mark.parametrize("num_blocks,num_computed_blocks", [(1, 0), (7, 0), (12, 2)])
+def test_pull_reads_each_block_once_from_a_rank_holding_it(
+    tp_size, dcp_size, remote_tp_size, remote_dcp_size, num_blocks, num_computed_blocks
+):
+    """Whatever the TP and DCP sizes of the two sides, every rank reads each
+    block it lacks of a request exactly once, from a remote rank that holds
+    the block at the same position in the request."""
+    # Block ids are a rank's index into its own blocks of the request: a DCP
+    # rank holds every `dcp_size`-th block from its `dcp_rank`-th.
+    num_remote_ids = cdiv(num_blocks, remote_dcp_size)
+    for tp_rank in range(tp_size):
+        worker = _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size)
+        worker.dcp_size, worker.dcp_rank = dcp_size, tp_rank % dcp_size
+        worker._remote_physical_blocks_per_group = {_ENGINE: [1]}
+        worker.transfer_topo.register_remote_engine(
+            _ENGINE,
+            EngineTransferInfo(
+                remote_tp_size=remote_tp_size,
+                remote_block_len=worker.block_len_per_layer[0],
+                remote_block_size=4,
+                remote_physical_blocks_per_logical=1,
+                remote_dcp_size=remote_dcp_size,
+            ),
+        )
+        local_ids = range(num_computed_blocks, cdiv(num_blocks, dcp_size))
+        dcp_active = dcp_size > 1 or remote_dcp_size > 1
+
+        read: Counter[int] = Counter()
+        for remote_rank in _map(worker, remote_tp_size, remote_dcp_size):
+            local, remote, _ = worker._pair_blocks(
+                _ENGINE,
+                remote_rank,
+                0,
+                list(local_ids),
+                0,
+                list(range(num_remote_ids)),
+                # Without DCP the pull counts back from the last token.
+                num_computed_blocks=num_computed_blocks if dcp_active else None,
+            )
+            positions = [worker.dcp_rank + i * dcp_size for i in local]
+            assert positions == [
+                remote_rank % remote_dcp_size + i * remote_dcp_size for i in remote
+            ]
+            read.update(positions)
+
+        lacked = [worker.dcp_rank + i * dcp_size for i in local_ids]
+        assert all(count == 1 for count in read.values())
+        # Blocks allocated past the last token may be left behind.
+        assert {p for p in lacked if p < num_blocks} <= set(read) <= set(lacked)
+
+
 # ======================================================================
 # Descriptor list tests
 # ======================================================================
@@ -304,14 +414,13 @@ def _prep(worker: NixlConnectorWorker, remote_tp_size: int) -> _DescLists:
     }
     worker._mixed_mem_types = False
     worker.region_mem_types = ["VRAM"] * num_layers
-    worker._local_desc_lists, worker._local_descs = {}, {}
-    worker._desc_starts = defaultdict(dict)
-    worker.dst_xfer_side_handles = defaultdict(dict)
-    worker.dst_region_num_blocks = {_ENGINE: [8] * num_layers}
-    worker.dst_region_mem_types = {_ENGINE: ["VRAM"] * num_layers}
+    worker._local_desc_lists = {}
+    worker.nixl_memory_type = "VRAM"
+    stage = remote_stage(worker, _ENGINE)
+    stage.region_num_blocks = [8] * num_layers
     meta = _remote_meta(worker, remote_tp_size)
     for rank in range(remote_tp_size):
-        worker._prep_descs(meta, rank, "remote-agent", 1)
+        worker._prep_descs(meta, rank, "remote-agent", 1, stage)
     return worker.nixl_wrapper
 
 
@@ -327,7 +436,9 @@ def test_head_slices_are_strided_descs_of_one_local_list():
     local, remote_0, remote_1 = lists
     assert local == [[0x1000, half, 0, block, 8], [0x1000 + half, half, 0, block, 8]]
     assert remote_0 == remote_1 == [[0x10_000, half, 0, half, 8]]
-    local_ids, remote_ids = worker._compute_desc_ids(_ENGINE, 1, [[3, 5]], [[2, 4]])
+    local_ids, remote_ids = worker._compute_desc_ids(
+        remote_stage(worker, _ENGINE), 1, [[3, 5]], [[2, 4]]
+    )
     assert local_ids.tolist() == [8 + 3, 8 + 5]
     assert remote_ids.tolist() == [2, 4]
 
@@ -348,7 +459,9 @@ def test_mamba_state_is_one_more_region_of_chunked_pages():
         [0x2000, 200, 0, 400, 8],
         [0x2000 + 200, 200, 0, 400, 8],
     ]
-    local_ids, remote_ids = worker._compute_desc_ids(_ENGINE, 1, [[], [6]], [[], [3]])
+    local_ids, remote_ids = worker._compute_desc_ids(
+        remote_stage(worker, _ENGINE), 1, [[], [6]], [[], [3]]
+    )
     assert local_ids.tolist() == [16 + 6]
     assert remote_ids.tolist() == [3]
 
@@ -362,7 +475,7 @@ def test_push_writes_replicated_latent_to_every_rank_holding_it():
 
     assert _map(worker, 2) == (0, 1)
     assert worker.source_ranks[_ENGINE] == [(0, 1), (0, 1)]
-    latent_ranges, state_ranges = worker._byte_ranges[_ENGINE]
+    latent_ranges, state_ranges = remote_stage(worker, _ENGINE).byte_ranges
     latent = worker.block_len_per_layer[0]
     assert latent_ranges == {0: [(0, 0, latent)], 1: [(0, 0, latent)]}
     assert state_ranges == {0: [(0, 0, 200)], 1: [(200, 0, 200)]}
@@ -400,7 +513,7 @@ def test_shards_one_remote_rank_holds_together_move_as_one_range():
     worker = _worker(0, 2, {"model.layers.0.self_attn": 12})
     assert _map(worker, 3) == (0, 1)
     shard = worker.block_len_per_layer[0] // 3
-    assert worker._byte_ranges[_ENGINE] == [
+    assert remote_stage(worker, _ENGINE).byte_ranges == [
         {0: [(0, 0, 2 * shard)], 1: [(2 * shard, 0, shard)]}
     ]
 
@@ -410,7 +523,7 @@ def test_smaller_remote_blocks_are_read_by_head():
     worker = _worker(0, 1, _GQA)
     assert _map(worker, 2, block_size_ratio=2) == (0, 1)
     shard = worker.block_len_per_layer[0] // 4
-    assert worker._byte_ranges[_ENGINE] == [
+    assert remote_stage(worker, _ENGINE).byte_ranges == [
         {0: [(0, 0, shard)], 1: [(shard, 0, shard)]}
     ]
 
@@ -431,7 +544,7 @@ def test_padded_state_page_moves_without_its_padding():
     mamba = replace(_sharded_state_spec(), page_size_padded=1024)
     worker = _worker(0, 1, {"mamba": mamba})
     assert _map(worker, 1) == (0,)
-    assert worker._byte_ranges[_ENGINE] == [{0: [(0, 0, 400)]}]
+    assert remote_stage(worker, _ENGINE).byte_ranges == [{0: [(0, 0, 400)]}]
 
 
 @pytest.mark.parametrize(

@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
+    _RemoteStage,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
@@ -475,6 +476,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["decode_host"],
             registration_data["decode_port"],
             registration_data["decode_tp_size"],
+            # A push needs the remote's DCP size to be ours.
+            dcp_size=self.dcp_size,
         )
         if fut is not None:
 
@@ -552,7 +555,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         meta.remote.block_ids = self._logical_to_kernel_block_ids(
             meta.remote.block_ids, self._remote_physical_blocks_per_group[engine_id]
         )
-        if not self._dst_pairs[engine_id].groups_match:
+        stage = self._single_remote_stage(engine_id)
+        if not stage.pairs.groups_match:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -586,7 +590,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 request_id=req_id,
                 dst_engine_id=engine_id,
                 remote_request_id=meta.remote.request_id,
-                remote_xfer_side_handle=self.dst_xfer_side_handles[engine_id][rank],
+                stage=stage,
             )
             if handle is not None:
                 handles.append(handle)
@@ -605,7 +609,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
-        remote_xfer_side_handle: int,
+        stage: _RemoteStage,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -618,16 +622,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
-        )
-        if block_size_ratio > 1:
-            local_block_ids, remote_block_ids = (
-                self._map_block_ids_for_block_size_ratio(
-                    local_block_ids, remote_block_ids, block_size_ratio
-                )
-            )
-
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
         if len(local_block_ids) == 0:
@@ -658,17 +652,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
 
         local_block_descs_ids, remote_block_descs_ids = self._compute_desc_ids(
-            dst_engine_id, remote_rank, local_block_ids, remote_block_ids
+            stage, remote_rank, local_block_ids, remote_block_ids
         )
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        assert stage.local_descs is not None
 
         handle = None
         try:
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "WRITE",
-                self._local_descs[dst_engine_id].handle,
+                stage.local_descs.handle,
                 local_block_descs_ids,
-                remote_xfer_side_handle,
+                stage.xfer_side_handles[remote_rank],
                 remote_block_descs_ids,
                 notif_msg=notif_id,
             )

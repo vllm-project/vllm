@@ -97,6 +97,7 @@ from .utils import (
     make_kv_cache_config,
     maybe_update_block_size,
     region_pairs_by_index,
+    remote_stage,
 )
 
 
@@ -624,9 +625,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.region_mem_types = [self.nixl_memory_type]
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [0x1000]
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
-        self.dst_region_group_ids[self.engine_id] = self.region_group_ids
-        self.dst_region_mem_types[self.engine_id] = self.region_mem_types
         self._set_region_layers([["layer0"]])
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
@@ -692,7 +690,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 def _remote_dlist(worker, rank: int) -> np.ndarray:
     """The remote engine's desc list prepared for `rank`, one row per block."""
     engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
-    handle = worker.dst_xfer_side_handles[engine_id][rank]
+    handle = remote_stage(worker, engine_id).xfer_side_handles[rank]
     return expand_strided_descs(worker.nixl_wrapper.dlists[handle])
 
 
@@ -870,9 +868,9 @@ class TestNixlHandshake:
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
         # simulate handshake
-        worker.dst_xfer_side_handles = {
-            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
-        }
+        remote_stage(
+            worker, FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+        ).xfer_side_handles = {0: 1}
         worker.kv_cache_layout = "LBHNC"
         num_xfers = 4
         while True:
@@ -1040,12 +1038,12 @@ class TestNixlHandshake:
             assert remote_info.remote_tp_size == remote_tp_size
             assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
             # One local desc list holds a head slice of the block per source.
-            local = worker._local_descs[remote_engine_id].handle
+            local = remote_stage(worker, remote_engine_id).local_descs.handle
             assert len(worker.nixl_wrapper.dlists[local]) == tp_ratio
-            assert remote_engine_id in worker.dst_xfer_side_handles
-            assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
-            )
+            assert remote_engine_id in worker._remote_stages
+            assert set(
+                remote_stage(worker, remote_engine_id).xfer_side_handles.keys()
+            ) == set(range(tp_ratio))
 
         remote_agents, _ = worker._nixl_handshake(
             host="localhost",
@@ -1470,9 +1468,7 @@ class TestNixlHandshake:
             )
             _advertise_one_layer_per_region(worker, meta)
             worker.add_remote_agent(meta, remote_tp_size=1)
-            assert (
-                FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker.dst_xfer_side_handles
-            )
+            assert FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker._remote_stages
             # Gate rejects an MLA region wrongly scaled by tp_ratio.
             worker2 = FakeNixlConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
@@ -1668,7 +1664,7 @@ class TestNixlHandshake:
         )
         worker.add_remote_agent(meta, remote_tp_size=8)
 
-        mla_ranges, draft_ranges = worker._byte_ranges[meta.engine_id]
+        mla_ranges, draft_ranges = remote_stage(worker, meta.engine_id).byte_ranges
         assert mla_ranges == {0: [(0, 0, mla_len)]}
         head = draft_len // 8
         assert draft_ranges == {rank: [(rank * head, 0, head)] for rank in range(8)}
@@ -1877,7 +1873,7 @@ class TestNixlHandshake:
         _advertise_one_layer_per_region(worker, meta)
 
         worker.add_remote_agent(meta, remote_tp_size=remote_tp)
-        (ranges_by_rank,) = worker._byte_ranges[meta.engine_id]
+        (ranges_by_rank,) = remote_stage(worker, meta.engine_id).byte_ranges
         assert ranges_by_rank and all(
             len(ranges) == ranges_per_block for ranges in ranges_by_rank.values()
         )
@@ -2472,14 +2468,12 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker.nixl_memory_type = "VRAM"
     # Both regions move whole 10-byte blocks with remote rank 0.
     worker._group_spec_types = (AttentionSpec,)
-    worker._dst_pairs = {"P": region_pairs_by_index(2)}
-    worker._byte_ranges = {"P": [{0: [(0, 0, 10)]}] * 2}
+    stage = remote_stage(worker, "P")
+    stage.pairs = region_pairs_by_index(2)
+    stage.byte_ranges = [{0: [(0, 0, 10)]}] * 2
+    stage.region_num_blocks = [2, 2]
     worker._remote_block_splits = {}
-    worker._local_desc_lists, worker._local_descs = {}, {}
-    worker._desc_starts = defaultdict(dict)
-    worker.dst_region_num_blocks = {"P": [2, 2]}
-    worker.dst_region_mem_types = {"P": ["VRAM", "VRAM"]}
-    worker.dst_xfer_side_handles = defaultdict(dict)
+    worker._local_desc_lists = {}
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22, 33]
     remote = SimpleNamespace(
@@ -2487,12 +2481,13 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
         kv_caches_base_addr=[500, 600],
         block_lens=[10, 10],
         block_strides=[10, 10],
+        region_mem_types=["VRAM", "VRAM"],
         device_id=0,
     )
 
-    worker._prep_descs(remote, 0, "P-agent", 1)
+    worker._prep_descs(remote, 0, "P-agent", 1, stage)
 
-    descs = worker._local_descs["P"]
+    descs = stage.local_descs
     assert (descs.handle, descs.dram_handle) == (22, 11)
     # DRAM runs are re-homed to device 0; the per-descriptor maps consumed by
     # the mixed READ path still cover every block.
@@ -3076,7 +3071,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
             ("a",): _LocalDescs(455, {}),
             ("b",): _LocalDescs(456, {}, dram_handle=457),
         }
-        worker.dst_xfer_side_handles = {"engine1": {0: 789}}
+        remote_stage(worker, "engine1").xfer_side_handles = {0: 789}
         worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         # _cleanup_remote_engine (called by shutdown) also clears these:
         worker.kv_caches_base_addr["engine1"] = {0: [0xABC]}
@@ -3203,7 +3198,7 @@ def _setup_worker_with_remote_engine(
 
     engine_id = "remote-engine-1"
     worker._remote_agents[engine_id] = {(0, 0): "agent_0", (0, 1): "agent_1"}
-    worker.dst_xfer_side_handles[engine_id] = {0: 100, 1: 200}
+    remote_stage(worker, engine_id).xfer_side_handles = {0: 100, 1: 200}
     worker.kv_caches_base_addr[engine_id] = {0: [0xABC]}
     worker.dst_num_blocks[engine_id] = 50
     worker.source_ranks[engine_id] = MagicMock()
@@ -3233,7 +3228,7 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
         worker._evict_stale_engines()
 
         assert engine_id not in worker._remote_agents
-        assert engine_id not in worker.dst_xfer_side_handles
+        assert engine_id not in worker._remote_stages
         assert engine_id not in worker.kv_caches_base_addr
         assert engine_id not in worker.dst_num_blocks
         assert engine_id not in worker.source_ranks
@@ -3279,7 +3274,7 @@ def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_
         worker._evict_stale_engines()
 
         assert engine_id in worker._remote_agents
-        assert engine_id in worker.dst_xfer_side_handles
+        assert engine_id in worker._remote_stages
         mock_rel.assert_not_called()
         mock_rem.assert_not_called()
 
@@ -3351,7 +3346,7 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
 
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
-    assert engine_id in worker.dst_xfer_side_handles
+    assert engine_id in worker._remote_stages
 
 
 @pytest.mark.cpu_test
@@ -3421,7 +3416,7 @@ class TestPeerReplacement:
 
     def test_cleans_old_peer_after_confirmed_handshake(self):
         self._connect("healthy", host="other-host")
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = remote_stage(self.worker, "old").xfer_side_handles[0]
         self.worker.start_load_kv(self._request())
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_not_called()
@@ -3566,7 +3561,7 @@ class TestPeerReplacement:
     def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
         self, handshake_fails
     ):
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = remote_stage(self.worker, "old").xfer_side_handles[0]
         self._fail_old_peer()
         self.worker.get_transfer_results()
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
@@ -3588,7 +3583,7 @@ class TestPeerReplacement:
             return
 
         self._connect("old")
-        fresh_handle = self.worker.dst_xfer_side_handles["old"][0]
+        fresh_handle = remote_stage(self.worker, "old").xfer_side_handles[0]
         assert fresh_handle != old_handle
         assert self.worker._engine_by_address == {("localhost", 1234): "old"}
         self.transport.check_xfer_state.return_value = "DONE"
@@ -3611,7 +3606,7 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.side_effect = lambda h: (
             "ERR" if h == 10 else "PROC"
         )
-        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        old_handle = remote_stage(self.worker, "old").xfer_side_handles[0]
 
         result = self.worker.get_transfer_results()
         assert not result.finished_recving and not result.failed_recving
@@ -5000,7 +4995,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         # per-rank state the handshake would normally fill in. The real
         # `_nixl_handshake` is unnecessary here — we only need
         # `transfer_topo` to know `remote_tp_size`, and `_remote_agents`
-        # / `dst_xfer_side_handles` to be keyed by remote rank.
+        # / the stage's `xfer_side_handles` to be keyed by remote rank.
         remote_engine_id = "remote_engine"
         worker.transfer_topo.register_remote_engine(
             remote_engine_id=remote_engine_id,
@@ -5013,8 +5008,8 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         worker._remote_agents[remote_engine_id] = {
             (0, rank): f"agent_p{rank}" for rank in range(prefill_tp_size)
         }
-        worker.dst_xfer_side_handles = {
-            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+        remote_stage(worker, remote_engine_id).xfer_side_handles = {
+            rank: 100 + rank for rank in range(prefill_tp_size)
         }
         # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
         assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size

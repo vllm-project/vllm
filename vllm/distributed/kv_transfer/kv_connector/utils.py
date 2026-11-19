@@ -5,11 +5,12 @@
 import math
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy as np
 import torch
 
 from vllm.config import (
@@ -22,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
@@ -488,21 +490,27 @@ def view_end(view: torch.Tensor) -> int:
     return view.storage_offset() + extent + 1
 
 
+# Dims of a `KVCacheSpec.slice_for_tp_transfer` view: its blocks, what TP
+# shards (a rank holds a run of it, or a copy of all of it) and its states.
+_VIEW_DIM_B, _VIEW_DIM_TP, _VIEW_DIM_N = 0, 1, 2
+
+
 def view_block_size_ratio(
     views: dict[str, torch.Tensor], other_views: dict[str, torch.Tensor]
 ) -> int:
     """How many blocks of the other side a block of ours holds, from the
-    tokens (dim 2) of both sides' `KVCacheSpec.slice_for_tp_transfer` views
-    of a layer."""
+    states of both sides' `KVCacheSpec.slice_for_tp_transfer` views of a
+    layer."""
     for name, view in views.items():
         if name in other_views:
-            tokens = other_views[name].shape[2]
-            if view.shape[2] % tokens:
+            num_states = other_views[name].shape[_VIEW_DIM_N]
+            if view.shape[_VIEW_DIM_N] % num_states:
                 raise NotImplementedError(
-                    f"A block of {name!r} holds {view.shape[2]} tokens here, "
-                    f"which is not a multiple of the other side's {tokens}."
+                    f"A block of {name!r} holds {view.shape[_VIEW_DIM_N]} states "
+                    f"here, which is not a multiple of the other side's "
+                    f"{num_states}."
                 )
-            return view.shape[2] // tokens
+            return view.shape[_VIEW_DIM_N] // num_states
     return 1
 
 
@@ -538,60 +546,100 @@ def pair_shards(
     """Pair a TP rank's `KVCacheSpec.slice_for_tp_transfer` views with those of
     the ranks of another TP size: other rank -> `(shard, other shard)` pairs.
 
-    Dim 1 of each view is cut into equal shards, so that the ranks of either
-    side hold the least common multiple of the two TP sizes between them. It
-    is not cut finer than its length: with fewer entries than shards, each
-    entry is one shard.
+    Both sides cut what TP shards of a view into shards of one length, the
+    longest that fits both, so equal TP sizes leave the views whole. Side by
+    side in rank order, the shards of a side are the whole layer:
 
-    A receiving shard reads the sending shard at the same position
-    `index / count` of its component. The counts differ when one side holds
-    copies of what the other holds once (replicated KV heads, a state every
-    rank holds whole): a receiver then reads one copy, and a sender writes
-    every copy.
+        TP 2   | rank 0          | rank 1          |   two shards to a rank
+        TP 4   | rank 0 | rank 1 | rank 2 | rank 3 |   one shard to a rank
+
+    A receiving shard takes the sending shard at the same position. A side
+    with more shards holds copies (heads replicated across ranks, a state
+    every rank holds whole), one single-entry shard to a rank: a receiver
+    takes one copy, and a sender gives to every copy.
     """
-    num_shards = math.lcm(tp_size, other_tp_size)
-
-    def cut(view: torch.Tensor, size: int) -> tuple[torch.Tensor, ...]:
-        count = num_shards // size
-        if view.shape[1] % count:
-            count = view.shape[1]
-        return view.unflatten(1, (count, -1)).unbind(1)
-
-    pairs = defaultdict(list)
+    pairs: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = defaultdict(list)
     for name, view in views.items():
         if name not in other_views:
             raise NotImplementedError(
                 f"The other rank has no {name!r}: the two do not shard this "
                 "layer the same way."
             )
-        ours, theirs = cut(view, tp_size), cut(other_views[name], other_tp_size)
-        count, other_count = tp_size * len(ours), other_tp_size * len(theirs)
-        readers, sources = (count, other_count) if receiving else (other_count, count)
-        for reader in range(readers):
-            source = reader * sources // readers
-            index, other_index = (reader, source) if receiving else (source, reader)
-            rank, i = divmod(index, len(ours))
-            other_rank, j = divmod(other_index, len(theirs))
-            if rank != tp_rank:
-                continue
-            if ours[i].shape != theirs[j].shape:
-                raise NotImplementedError(
-                    f"Shard {index} of {count} of {name!r} is "
-                    f"{tuple(ours[i].shape)} here but shard {other_index} of "
-                    f"{other_count} is {tuple(theirs[j].shape)} on the other "
-                    "rank: the two do not shard this layer the same way."
-                )
-            pairs[other_rank].append((ours[i], theirs[j]))
+        other_view = other_views[name]
+        length = math.gcd(view.shape[_VIEW_DIM_TP], other_view.shape[_VIEW_DIM_TP])
+        shards = view.split(length, dim=_VIEW_DIM_TP)
+        other_shards = other_view.split(length, dim=_VIEW_DIM_TP)
+        num_shards = tp_size * len(shards)
+        other_num_shards = other_tp_size * len(other_shards)
+        copies = shards if num_shards > other_num_shards else other_shards
+        if shards[0].shape != other_shards[0].shape or (
+            num_shards != other_num_shards and (length, len(copies)) != (1, 1)
+        ):
+            raise NotImplementedError(
+                f"{name!r} is {num_shards} shards of {tuple(shards[0].shape)} here "
+                f"but {other_num_shards} of {tuple(other_shards[0].shape)} on the "
+                "other side: the two do not shard this layer the same way."
+            )
+        # The position of every shard of each side: [rank, shard of the rank].
+        ours = np.arange(num_shards).reshape(tp_size, len(shards))
+        theirs = np.arange(other_num_shards).reshape(other_tp_size, len(other_shards))
+        # Count the receiver's shards the way the sender counts its own.
+        if receiving:
+            ours = ours * other_num_shards // num_shards
+        else:
+            theirs = theirs * num_shards // other_num_shards
+        for other_rank in range(other_tp_size):
+            _, mine, others = np.intersect1d(
+                ours[tp_rank], theirs[other_rank], return_indices=True
+            )
+            for i, j in zip(mine, others):
+                pairs[other_rank].append((shards[i], other_shards[j]))
     return pairs
+
+
+def expand_block_ids(block_ids: Sequence[int] | np.ndarray, num: int) -> np.ndarray:
+    """The ids of the `num` smaller blocks each block spans, e.g. `[1, 3]`
+    at 2 to a block is `[2, 3, 6, 7]`."""
+    ids = np.asarray(block_ids, dtype=np.int64)
+    return (ids[:, None] * num + np.arange(num)).reshape(-1)
+
+
+def transfer_block_positions(
+    num_transfer_blocks: int,
+    transfer_blocks_per_block: int,
+    *,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    num_computed_blocks: int = 0,
+) -> np.ndarray:
+    """Where in a request the transfer blocks of a rank sit, in the order of
+    its block ids.
+
+    A DCP rank holds every `dcp_size`-th block of a request from its
+    `dcp_rank`-th, every block without DCP; its ids start after the
+    `num_computed_blocks` of them already in its prefix cache. A block is
+    `transfer_blocks_per_block` transfer blocks. With DCP 2 and two transfer
+    blocks to a block, rank 1 holds:
+
+        block of the request    |  0  |  1  |  2  |  3  |  4  |  5  |
+        block of rank 1               |  0  |     |  1  |     |  2  |
+        position                      | 2 3 |     | 6 7 |     |10 11|
+    """
+    num_blocks = cdiv(num_transfer_blocks, transfer_blocks_per_block)
+    block = dcp_rank + (num_computed_blocks + np.arange(num_blocks)) * dcp_size
+    return expand_block_ids(block, transfer_blocks_per_block)[:num_transfer_blocks]
 
 
 def contiguous_byte_ranges(
     pairs: Iterable[tuple[torch.Tensor, torch.Tensor]],
 ) -> list[tuple[int, int, int]]:
-    """The `(offset, other_offset, num_bytes)` byte ranges of `pair_shards`
-    pairs that are contiguous on both sides. The two views of a pair have
-    the same shape but may be stored in different orders; offsets are in
-    bytes from the start of each view's storage."""
+    """Split pairs of same-shape views into byte ranges contiguous in both.
+
+    `pairs` are the views `pair_shards` pairs up from each side's
+    `KVCacheSpec.slice_for_tp_transfer`, which may differ in physical layout.
+    Returns `(src_offset, dst_offset, num_bytes)` per range, with offsets in
+    bytes from the start of each view's storage.
+    """
     ranges = []
     for src, dst in pairs:
         if src.shape != dst.shape or src.element_size() != dst.element_size():
@@ -824,69 +872,73 @@ class TransferTopology:
         """Whether the local engine's KV cache is replicated."""
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
-    def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
-        """Remote ranks whose DCP slice overlaps mine (MLA, `remote_dcp_size > 1`).
-
-        Shared by `handshake_target_ranks` (who to query metadata from) and
-        `compute_tp_mapping` (who to actually read from) — for MLA the two
-        questions have the identical answer, since DCP sharding is the only
-        thing keeping a remote rank from being interchangeable with any other.
-        """
-        local_dcp_size = self.dcp_size
-        local_dcp_rank = self.dcp_rank
-        if local_dcp_size <= remote_dcp_size:
-            # Keep every remote rank whose slice sits inside mine. When
-            # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
-            # every remote rank, since no single one holds the whole sequence.
-            return [
-                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
-            ]
-        # Local finer-grained: exactly one remote rank covers my whole slice
-        return [local_dcp_rank % remote_dcp_size]
-
     def handshake_target_ranks(
         self, remote_tp_size: int, remote_dcp_size: int = 1
     ) -> list[int]:
-        """Pre-registration: compute which remote TP ranks to handshake with.
+        """The remote TP ranks this rank handshakes with: those holding some
+        of what it holds. Pure math on the TP and DCP sizes of the two
+        sides; the remote engine need not be registered yet.
 
-        Pure math based on local/remote TP (and DCP, when the remote shards
-        its KV cache) sizes — does not require the remote engine to be
-        registered yet.
+        DCP: a DCP rank holds every `dcp_size`-th block of a request from
+        its `dcp_rank`-th, so two ranks hold blocks in common when their
+        DCP ranks agree modulo `shared`, the greatest common divisor of the
+        DCP sizes.
 
-        DCP support is scoped to `dcp_size in (1, tp_size)` on each side
-        and DCP sizes that divide one another: neither side ever has a
-        partially-duplicated, partially-sharded KV cache. When the
-        remote is not sharded (`remote_dcp_size == 1`) this reduces
-        exactly to the DTP>=PTP case, since a sharded local side
-        already has `tp_size == dcp_size`.
+        TP: the ranks of a DCP group hold the same shards of a layer, so
+        along what TP shards the remote counts as its DCP groups (as its
+        ranks, without DCP). Our ranks holding blocks in common with a
+        remote rank are every `shared`-th of ours, and each talks to the
+        groups at its place among those, so that every remote rank hears
+        from one. With two such ranks and four remote groups:
+
+            every `shared`-th of ours  | 0                 | 1                 |
+            remote DCP groups          | group 0 | group 1 | group 2 | group 3 |
         """
-        if remote_dcp_size > 1:
-            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+        if remote_tp_size % remote_dcp_size:
+            raise NotImplementedError(
+                f"A remote of tensor parallel size {remote_tp_size} cannot have "
+                f"DCP size {remote_dcp_size}."
+            )
+        num_dcp_groups = remote_tp_size // remote_dcp_size
+        shared = math.gcd(self.dcp_size, remote_dcp_size)
+        place, num_places = self.tp_rank // shared, self.tp_size // shared
+        assert num_places % num_dcp_groups == 0 or num_dcp_groups % num_places == 0, (
+            f"Local tensor parallel size {self.tp_size} and remote tensor "
+            f"parallel size {remote_tp_size} are not divisible by one another."
+        )
+        dcp_groups = range(
+            place * num_dcp_groups // num_places,
+            cdiv((place + 1) * num_dcp_groups, num_places),
+        )
+        return [
+            rank
+            for dcp_group in dcp_groups
+            for rank in range(
+                dcp_group * remote_dcp_size, (dcp_group + 1) * remote_dcp_size
+            )
+            if self.shares_blocks(rank, remote_dcp_size)
+        ]
 
-        tp_ratio = self.tp_ratio(remote_tp_size)
-        if tp_ratio > 0:
-            return [self.tp_rank // tp_ratio]
-        abs_ratio = -tp_ratio
-        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+    def shares_blocks(self, remote_rank: int, remote_dcp_size: int) -> bool:
+        """Whether a remote rank holds blocks of a request that this rank
+        holds too."""
+        shared = math.gcd(self.dcp_size, remote_dcp_size)
+        return (remote_rank % remote_dcp_size - self.dcp_rank) % shared == 0
 
     def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
         """How many local ranks (in aggregate) read from a given remote rank.
 
         Used by the producer side to know how many reader notifications to
-        wait for before freeing a request's blocks. Reuses `tp_ratio`
-        whenever the remote isn't sharded — a sharded local side already
-        has `tp_size == dcp_size`, so the existing TP-ratio formula is
-        already correct there unmodified.
+        wait for before freeing a request's blocks.
         """
-        if remote_dcp_size > 1:
-            if self.dcp_size == 1:
-                # Replicated locally: every local rank reads every shard.
-                return self.tp_size
-            # Both sharded, different degrees.
-            return max(1, self.dcp_size // remote_dcp_size)
-        # Remote replicated: `tp_ratio` local ranks share each remote rank
-        # when local_tp >= remote_tp, else each remote rank has one reader.
-        return max(1, self.tp_ratio(remote_tp_size))
+        remote_rank = self.handshake_target_ranks(remote_tp_size, remote_dcp_size)[0]
+        return sum(
+            remote_rank
+            in replace(self, tp_rank=tp_rank).handshake_target_ranks(
+                remote_tp_size, remote_dcp_size
+            )
+            for tp_rank in range(self.tp_size)
+        )
 
     def target_remote_ranks(
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0
@@ -896,12 +948,7 @@ class TransferTopology:
         multiple remote ranks.
         """
         info = self._engines[(remote_engine_id, remote_pp_rank)]
-        tp_ratio = self.tp_ratio(info.remote_tp_size)
-        if tp_ratio > 0:
-            return [self.tp_rank // tp_ratio]
-        # remote TP > local TP: read from |tp_ratio| remote workers
-        abs_ratio = -tp_ratio
-        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+        return self.handshake_target_ranks(info.remote_tp_size)
 
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""

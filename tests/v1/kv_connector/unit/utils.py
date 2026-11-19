@@ -73,6 +73,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
+        _RemoteStage,
     )
 
 EOS_TOKEN_ID = 50256
@@ -836,6 +837,27 @@ def region_pairs_by_index(
         local=regions,
         group=list(groups) if groups is not None else [0] * num_regions,
         groups_match=groups_match,
+    )
+
+
+def remote_stage(worker: Any, engine_id: str, pp_rank: int = 0) -> "_RemoteStage":
+    """The stage of a remote engine in `worker`, added empty if missing, for
+    fixtures to fill in what a handshake would."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RemoteStage,
+    )
+
+    if not isinstance(getattr(worker, "_remote_stages", None), dict):
+        worker._remote_stages = {}
+    return worker._remote_stages.setdefault(engine_id, {}).setdefault(
+        pp_rank,
+        _RemoteStage(
+            pp_rank=pp_rank,
+            pairs=region_pairs_by_index(0),
+            layers=[],
+            region_num_blocks=[],
+            region_group_ids=[],
+        ),
     )
 
 
