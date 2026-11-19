@@ -85,7 +85,8 @@ class AfmoeMoE(nn.Module):
         # Router gate
         router_dtype = (
             torch.bfloat16
-            if quant_config is None and torch.get_default_dtype() == torch.bfloat16
+            if torch.get_default_dtype() == torch.bfloat16
+            and (quant_config is None or quant_config.get_name() == "modelopt_fp4")
             else torch.float32
         )
         self.gate = GateLinear(
