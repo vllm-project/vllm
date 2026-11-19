@@ -92,6 +92,31 @@ MXFP4_D uint32_t mxfp4_4nib_to_e4m3_perm(uint32_t x16) {
   return mag | ((z & 0x08080808u) << 4);
 }
 
+// E5M2 (bf8) weight operand with the E8M0 scale folded into the table: the
+// eight E2M1 magnitudes scaled by 2^shift are exactly representable in E5M2
+// while -13 <= shift <= 13 (all exponents stay normal), so one add shifts the
+// whole 8-byte table (+4 per byte = +1 exponent step); code 0 is forced to 0.
+// The caller takes shift = e8m0 - base[n] with a per-column base = max-13,
+// and multiplies by 2^(base-127) once in the epilogue (FlyDSL's fold).
+MXFP4_D void mxfp4_e5m2_tables(int shift, uint32_t& lo, uint32_t& hi) {
+  const uint32_t off = (uint32_t)shift * 0x04040404u;
+  lo = (0x3E3C3838u + off) & 0xFFFFFF00u;  // codes 0..3: 0, .5, 1, 1.5
+  hi = 0x46444240u + off;                  // codes 4..7: 2, 3, 4, 6
+}
+
+MXFP4_D uint32_t mxfp4_4nib_perm(uint32_t x16, uint32_t lut_hi,
+                                 uint32_t lut_lo) {
+  const uint32_t z = mxfp4_spread_nibbles(x16);
+  const uint32_t mag = __builtin_amdgcn_perm(lut_hi, lut_lo, z & 0x07070707u);
+  return mag | ((z & 0x08080808u) << 4);
+}
+
+MXFP4_D void dequant_mxfp4_8_e5m2(uint32_t qa, uint32_t lut_lo, uint32_t lut_hi,
+                                  uint32_t& lo, uint32_t& hi) {
+  lo = mxfp4_4nib_perm(qa & 0xFFFFu, lut_hi, lut_lo);
+  hi = mxfp4_4nib_perm(qa >> 16, lut_hi, lut_lo);
+}
+
 MXFP4_D uint32_t mxfp4_8nib_to_e4m3x4(uint32_t qa, int lo) {
   return mxfp4_4nib_to_e4m3_perm(lo ? (qa & 0xFFFFu) : (qa >> 16));
 }
