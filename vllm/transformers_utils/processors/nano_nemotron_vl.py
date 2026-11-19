@@ -1310,7 +1310,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
         # Videos of different sizes can't be stacked: bypass BatchFeature.
-        videos = {
+        video_pixels = {
             key: combined_inputs.pop(key)
             for key in ("pixel_values_raw_video", "pixel_values_flat_video")
             if key in combined_inputs
@@ -1326,7 +1326,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             # allow images to be exempt from the BatchFeature validation:
             # We will .stack() them in _parse_and_validate_image_input
             batch.update(image_inputs)
-        batch.update(videos)
+        batch.update(video_pixels)
         if ragged_frames_indices:
             assert isinstance(frames_indices, list)
             batch["frames_indices"] = [
