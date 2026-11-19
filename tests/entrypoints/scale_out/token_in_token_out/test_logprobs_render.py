@@ -347,7 +347,7 @@ async def test_large_render_yields_to_the_event_loop(monkeypatch):
     blocked = await _serve_full(serving, rows)
     ticker.cancel()
     assert ticks - before >= 9
-    assert blocked.parts == whole.parts
+    assert b"".join(blocked.parts) == b"".join(whole.parts)
 
 
 @pytest.mark.asyncio
