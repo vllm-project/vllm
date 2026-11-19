@@ -441,6 +441,7 @@ def test_layer_takes_mha_for_mha_routes(route, uses_mha):
         (2049, {}, _MASKED),
         (2048, {"force_mqa": True}, _MQA),
         (2048, {"hisparse": True}, _MQA),
+        (2048, {"pcp": True}, _MQA),
         (2048, {"pcp": True, "dcp": 2}, _MQA),
         (2048, {"dcp": 2}, _DENSE),
         (8192, {}, _MASKED),

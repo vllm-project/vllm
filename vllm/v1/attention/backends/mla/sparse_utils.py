@@ -30,6 +30,7 @@ class SparseMLAPrefillRoute(Enum):
     """How a sparse MLA step runs its prefill tokens.
 
     - DENSE_MHA: every prefill fits in the top-k, so MHA over all keys.
+      PCP prefills never take this route.
     - MASKED_MHA: MHA with the top-k as a per-query key mask.
     - SPARSE_MQA: the prefill tokens run in forward_mqa, like the decodes.
 

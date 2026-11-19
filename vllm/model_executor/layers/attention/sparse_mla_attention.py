@@ -618,8 +618,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         ):
             return SparseMLAPrefillRoute.SPARSE_MQA
         if prefill_max_seq_len <= self.topk_tokens:
-            # Dense MHA cannot be used under PCP+DCP.
-            if self.use_pcp and self.dcp_world_size > 1:
+            # PCP splits a request into non-contiguous chunk segments and the
+            # dense-MHA path mis-computes the segments after the first for
+            # short prefills (observed at 8-40 token prompts). PCP prefills
+            # within the top-k budget take the exact sparse path instead;
+            # above it the routes below apply.
+            if self.use_pcp:
                 return SparseMLAPrefillRoute.SPARSE_MQA
             return SparseMLAPrefillRoute.DENSE_MHA
         if (
