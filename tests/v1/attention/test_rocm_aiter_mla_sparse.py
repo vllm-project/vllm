@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -53,3 +54,50 @@ def test_rocm_fp8_mqa_logits_disables_clean_logits(monkeypatch):
 
     assert result is expected
     assert captured["clean_logits"] is False
+
+
+def test_rocm_fp8_mqa_logits_uses_aiter_dispatch_on_cdna4(monkeypatch):
+    captured = {}
+    expected = torch.empty((1, 1))
+
+    def fake_mqa_logits(*args, clean_logits):
+        captured["args"] = args
+        captured["clean_logits"] = clean_logits
+        return expected
+
+    def unexpected_module():
+        raise AssertionError("CDNA4 must not probe the Triton module")
+
+    fake_aiter_module = ModuleType("aiter.mqa_logits")
+    fake_aiter_module.mqa_logits = fake_mqa_logits
+    monkeypatch.setitem(sys.modules, "aiter.mqa_logits", fake_aiter_module)
+    monkeypatch.setattr(sparse_mod, "_ON_GFX942", False)
+    monkeypatch.setattr(sparse_mod, "get_cdna_version", lambda: 4)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(sparse_mod, "mqa_logits_module", unexpected_module)
+
+    q = torch.empty((1, 1, 1))
+    k_fp8 = torch.empty((1, 1))
+    scale = torch.empty((1,))
+    weights = torch.empty((1, 1))
+    cu_seqlen_ks = torch.zeros((1,), dtype=torch.int32)
+    cu_seqlen_ke = torch.ones((1,), dtype=torch.int32)
+
+    result = sparse_mod.rocm_fp8_mqa_logits(
+        q,
+        (k_fp8, scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+    )
+
+    assert result is expected
+    assert captured["clean_logits"] is False
+    assert all(
+        got is want
+        for got, want in zip(
+            captured["args"],
+            (q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke),
+            strict=True,
+        )
+    )
