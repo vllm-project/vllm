@@ -7,6 +7,8 @@ Adapted from the SGLang HY V4 implementation:
 https://github.com/sgl-project/sglang/pull/36805
 """
 
+from functools import cache
+
 import torch
 
 from vllm import envs
@@ -40,6 +42,12 @@ def _split_k_block_k(num_tokens: int) -> int:
         if limit is None or num_tokens < limit:
             return block_k
     return _SPLIT_K_BLOCK_K[-1][1]
+
+
+@cache
+@torch.compiler.assume_constant_result
+def _is_h100(device_index: int) -> bool:
+    return "H100" in current_platform.get_device_name(device_index)
 
 
 def triton_ihc_supported(x: torch.Tensor) -> bool:
@@ -423,14 +431,28 @@ def triton_ihc_pre(
             torch.empty((0, hc_mult), dtype=torch.float32, device=x.device),
         )
 
+    tune_3072 = (
+        hc_mult == 4
+        and hidden_size == 3072
+        and num_tokens <= 4096
+        and _is_h100(x.device.index)
+    )
+    block_d = _BLOCK_D
+    stage2_warps = 4
+    if tune_3072 and num_tokens < 128:
+        block_d, stage2_warps = 256, 1
+    elif tune_3072 and 2048 <= num_tokens <= 4096:
+        block_d = 2048
+
     output = torch.empty((num_tokens, hidden_size), dtype=x.dtype, device=x.device)
     post = torch.empty((num_tokens, hc_mult), dtype=torch.float32, device=x.device)
     hc_pow2 = triton.next_power_of_2(hc_mult)
     two_hc = 2 * hc_mult
     x_flat = x.reshape(num_tokens, k_total)
 
-    if num_tokens < _MBLOCK_MIN_TOKENS:
-        block_k = _split_k_block_k(num_tokens)
+    mblock_min_tokens = 256 if tune_3072 else _MBLOCK_MIN_TOKENS
+    if num_tokens < mblock_min_tokens:
+        block_k = 512 if tune_3072 else _split_k_block_k(num_tokens)
         num_splits = triton.cdiv(k_total, block_k)
         partial_stride = 1 + two_hc
         partial = torch.empty(
@@ -450,7 +472,7 @@ def triton_ihc_pre(
             num_warps=1,
             enable_fp_fusion=False,
         )
-        _ihc_pre_stage2_split_k[(num_tokens, triton.cdiv(hidden_size, _BLOCK_D))](
+        _ihc_pre_stage2_split_k[(num_tokens, triton.cdiv(hidden_size, block_d))](
             x,
             partial,
             scale,
@@ -465,23 +487,30 @@ def triton_ihc_pre(
             NUM_SPLITS=num_splits,
             PARTIAL_STRIDE=partial_stride,
             BLOCK_S=triton.next_power_of_2(num_splits),
-            BLOCK_D=_BLOCK_D,
+            BLOCK_D=block_d,
             MAGNITUDE=magnitude,
             NORM_EPS=norm_eps,
             HC_EPS=hc_eps,
-            num_warps=4,
+            num_warps=stage2_warps,
             enable_fp_fusion=False,
         )
         return output, post
 
     # split K only when the token-blocks alone cannot fill the GPU; it also
     # shortens each program's serial K chain, which lowering BLOCK_M would not
-    grid_m = triton.cdiv(num_tokens, _BLOCK_M)
+    block_m = 8 if tune_3072 else _BLOCK_M
+    block_k = 128 if tune_3072 else _BLOCK_K
+    grid_m = triton.cdiv(num_tokens, block_m)
     nsplit = 1
     while (
-        grid_m * nsplit * 2 <= _MIN_PROGRAMS and k_total % (nsplit * 2 * _BLOCK_K) == 0
+        grid_m * nsplit * 2 <= _MIN_PROGRAMS and k_total % (nsplit * 2 * block_k) == 0
     ):
         nsplit *= 2
+
+    if tune_3072 and 512 <= num_tokens < 2048:
+        nsplit *= 2
+    elif tune_3072 and 2048 <= num_tokens <= 4096:
+        nsplit *= 3
 
     sumsq = torch.empty(nsplit * num_tokens, dtype=torch.float32, device=x.device)
     mix = torch.empty(
@@ -496,14 +525,14 @@ def triton_ihc_pre(
         X_STRIDE=k_total,
         K_CHUNK=k_total // nsplit,
         TWO_HC=two_hc,
-        BLOCK_M=_BLOCK_M,
-        BLOCK_K=_BLOCK_K,
+        BLOCK_M=block_m,
+        BLOCK_K=block_k,
         NSPLIT=nsplit,
         NUM_STAGES=_PRE_NUM_STAGES,
         num_warps=_PRE_STAGE1_WARPS,
         enable_fp_fusion=False,
     )
-    _ihc_pre_stage2[(num_tokens, triton.cdiv(hidden_size, _BLOCK_D))](
+    _ihc_pre_stage2[(num_tokens, triton.cdiv(hidden_size, block_d))](
         x,
         mix,
         sumsq,
@@ -519,7 +548,7 @@ def triton_ihc_pre(
         TWO_HC=two_hc,
         NSPLIT=nsplit,
         BLOCK_S=triton.next_power_of_2(nsplit),
-        BLOCK_D=_BLOCK_D,
+        BLOCK_D=block_d,
         MAGNITUDE=magnitude,
         NORM_EPS=norm_eps,
         HC_EPS=hc_eps,
