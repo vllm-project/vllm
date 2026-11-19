@@ -15,7 +15,6 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.model_executor.model_loader.reload import lifecycle
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
@@ -31,7 +30,6 @@ class _RecordingEngine:
         self.finished = False
         self.closed = False
         self.reset_count = 0
-        self.model = nn.Module()
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
@@ -312,9 +310,6 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     engine = _RecordingEngine(raise_on_finish=True)
     worker = _make_worker(engine)
     Worker.start_weight_update(worker)
-    # what start_reload set; a failed direct finish must clear it
-    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
-    engine.model._direct_reload_begun = True
 
     with pytest.raises(ValueError, match="boom"):
         Worker.finish_weight_update(worker)
@@ -324,33 +319,6 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     direct = mode == "direct"
     assert worker._weight_update_active is not direct
     assert engine.reset_count == int(direct)
-    assert lifecycle.weight_update_active() is not direct
-    assert hasattr(engine.model, "_direct_reload_begun") is not direct
-
-
-@pytest.mark.parametrize("failing", ["engine", "kv_cache_loan"])
-def test_failed_start_aborts_direct_reload(failing, monkeypatch):
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    engine = _RecordingEngine()
-    worker = _make_worker(engine)
-
-    def start_reload() -> None:
-        monkeypatch.setattr(lifecycle, "_weight_update_active", True)
-        engine.model._direct_reload_begun = True
-        if failing == "engine":
-            raise ValueError("boom")
-
-    def fail_loan(*args, **kwargs):
-        raise ValueError("boom")
-
-    monkeypatch.setattr(engine, "start_weight_update", start_reload)
-    if failing == "kv_cache_loan":
-        monkeypatch.setattr(gpu_worker, "kv_cache_lent_for_weight_update", fail_loan)
-    with pytest.raises(ValueError, match="boom"):
-        Worker.start_weight_update(worker)
-
-    assert not lifecycle.weight_update_active()
-    assert not hasattr(engine.model, "_direct_reload_begun")
 
 
 def test_missing_engine_raises():

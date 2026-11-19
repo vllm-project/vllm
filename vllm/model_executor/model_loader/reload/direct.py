@@ -39,7 +39,6 @@ from vllm.model_executor.utils import (
 logger = init_logger(__name__)
 
 __all__ = [
-    "abort_direct_reload",
     "begin_direct_reload",
     "direct_reload_active",
     "direct_reload_enabled",
@@ -303,11 +302,6 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
-
-
-def abort_direct_reload(model: torch.nn.Module) -> None:
-    """Forget a begun reload, so a new one can begin without its finish."""
-    model.__dict__.pop("_direct_reload_begun", None)
 
 
 @torch.no_grad()
