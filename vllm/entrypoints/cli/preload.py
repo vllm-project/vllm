@@ -37,6 +37,7 @@ from multiprocessing.process import BaseProcess
 from fastapi import FastAPI
 from fastapi.responses import Response
 
+from vllm.config.quantization import ONLINE_QUANT_SHORTHAND_NAMES
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
@@ -308,6 +309,16 @@ class PreloadSubcommand(CLISubcommand):
                 f"--load-format {load_format} is not accepted here: the "
                 "weight cache daemon loads from disk by default, and "
                 "--weight-cache-seed switches it to peer_cache internally"
+            )
+        model_config = vllm_config.model_config
+        if vllm_config.weight_transfer_config is not None and (
+            model_config.quantization in ONLINE_QUANT_SHORTHAND_NAMES
+            or model_config.quantization_config is not None
+        ):
+            # direct reload would quantize through checkpoint methods, which
+            # engines loading from the cache do not use
+            raise ValueError(
+                "--weight-transfer-config with online quantization is not accepted here"
             )
         # Config-only so it can fail before any model loading; the quant
         # method check needs the created model and runs in

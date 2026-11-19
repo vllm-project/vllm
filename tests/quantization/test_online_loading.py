@@ -105,12 +105,6 @@ def test_quantizer_gets_contiguous_tensor():
     assert layer.weight_scale.item() == 23
 
 
-def test_layer_writing_outside_its_loaders_keeps_the_online_method():
-    # e.g. gpt-oss experts: quantizing on load would miss those writes
-    layer = SimpleNamespace(writes_outside_weight_loaders=True)
-    assert loading.checkpoint_method(layer, spec=None, default=None) is None
-
-
 @override_parallel_groups(SingleRankGroup())
 def test_model_writing_outside_its_loaders_keeps_the_online_method(
     default_vllm_config,

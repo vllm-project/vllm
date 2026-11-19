@@ -335,28 +335,16 @@ def test_missing_engine_raises():
         Worker.start_weight_update(worker)
 
 
-@pytest.mark.parametrize(
-    "case,refused_before_init",
-    [("nccl", True), ("sparse_nccl", None), ("m2n", False), ("draft", True)],
-)
-def test_init_engine_refuses_an_unsupported_model(
-    monkeypatch, case, refused_before_init
-):
-    # refused before a trainer sends anything, or once init shows the engine
-    # reloads (an M2N plan with `load_weights` fallbacks); an engine that
-    # never reloads through `start_reload` is not refused
+@pytest.mark.parametrize("case", ["nccl", "sparse_nccl", "draft"])
+def test_init_engine_refuses_an_unsupported_model(monkeypatch, case):
+    # refused before a trainer sends anything, unless the engine does not
+    # reload every update through `start_reload`
     engine = _RecordingEngine()
-    engine.reloads_through_start_reload = case != "sparse_nccl" and case != "m2n"
-    seen: list[VllmConfig] = []
-
-    def init_transfer_engine(info):
-        seen.append(get_current_vllm_config())
-        if case == "m2n":
-            engine.reloads_through_start_reload = True
-
+    engine.reloads_through_start_reload = case != "sparse_nccl"
+    initialized: list[dict] = []
     monkeypatch.setattr(engine, "parse_init_info", lambda info: info, raising=False)
     monkeypatch.setattr(
-        engine, "init_transfer_engine", init_transfer_engine, raising=False
+        engine, "init_transfer_engine", initialized.append, raising=False
     )
     worker = _make_worker(engine)
     refused = nn.Module()
@@ -368,10 +356,10 @@ def test_init_engine_refuses_an_unsupported_model(
         monkeypatch.setattr(worker, "supports_draft_weight_updates", lambda: True)
     else:
         monkeypatch.setattr(worker.model_runner, "get_model", lambda: refused)
-    if refused_before_init is None:
+    if case == "sparse_nccl":
         Worker.init_weight_transfer_engine(worker, {})
+        assert initialized == [{}]
     else:
         with pytest.raises(RuntimeError, match="humming"):
             Worker.init_weight_transfer_engine(worker, {})
-    assert len(seen) == int(not refused_before_init)
-    assert all(c is worker.vllm_config for c in seen)
+        assert not initialized

@@ -85,8 +85,8 @@ engine = WeightTransferTrainerFactory.trainer_init(
     init_info=NCCLTrainerInitInfo(
         master_address=master_address,
         master_port=master_port,
-        world_size=world_size,  # trainer + all inference workers
-        rank=0,  # this trainer rank; rank 0 is the sender
+        world_size=world_size,   # trainer + all inference workers
+        rank=0,                  # this trainer rank; rank 0 is the sender
         packed=True,
     ),
     client=HTTPVLLMWeightSyncClient("http://localhost:8000"),

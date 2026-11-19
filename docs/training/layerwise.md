@@ -121,10 +121,7 @@ You can plug into this lifecycle directly by calling the `initialize_layerwise_r
 
 ```python
 from vllm import LLM
-from vllm.model_executor.model_loader.reload import (
-    initialize_layerwise_reload,
-    finalize_layerwise_processing,
-)
+from vllm.model_executor.model_loader.reload import initialize_layerwise_reload, finalize_layerwise_processing
 
 llm = LLM("Qwen/Qwen3-0.6B")
 

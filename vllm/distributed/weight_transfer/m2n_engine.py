@@ -223,6 +223,8 @@ class M2NWeightTransferEngine(
     # The destination plan is resolved against the model this engine was built
     # for, so it cannot be retargeted at a draft model mid-flight.
     supports_draft_weight_update = False
+    # only `load_weights` fallbacks reload; the update refuses those
+    reloads_through_start_reload = False
 
     def __init__(
         self,
@@ -439,11 +441,6 @@ class M2NWeightTransferEngine(
         self._uses_load_weights = any(
             not destination.direct for destination in self._parameter_destinations
         )
-
-    @property
-    def reloads_through_start_reload(self) -> bool:
-        # known once init prepared the plan: only `load_weights` fallbacks reload
-        return self._uses_load_weights
 
     def start_weight_update(self) -> None:
         """Begin reloading, but only if some parameter needs it.

@@ -63,16 +63,6 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
-def test_direct_reload_is_compile_factor(monkeypatch: pytest.MonkeyPatch):
-    # Direct reload swaps online methods for checkpoint methods.
-    from vllm.config import VllmConfig, WeightTransferConfig
-
-    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
-    plain = VllmConfig().compile_factors()
-    updates = VllmConfig(weight_transfer_config=WeightTransferConfig())
-    assert updates.compile_factors() != plain
-
-
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)

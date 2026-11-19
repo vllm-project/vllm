@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import direct_reload_active, mark_loaded, reloads_directly
+from .direct import mark_loaded, reloads_directly
 from .geometry import (
     Box,
     Fallback,
@@ -109,7 +109,7 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
 
     """
     check_plannable(model)
-    if not direct_reload_active(model):
+    if "_direct_reload_begun" not in model.__dict__:
         raise RuntimeError(
             "load plan: call plan_loads between start_reload and finish_reload; "
             "the plan takes its layout from what the direct reload restored"

@@ -55,6 +55,7 @@ from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
+from .quantization import ONLINE_QUANT_SHORTHAND_NAMES
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
@@ -68,7 +69,7 @@ from .utils import (
 )
 from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig, warn_watermarking_override
-from .weight_transfer import WeightTransferConfig, uses_direct_reload
+from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
@@ -582,9 +583,22 @@ class VllmConfig:
             "ec_transfer": get_factors(self.ec_transfer_config),
             "aux_output": get_factors(self.aux_output_config),
         }
-        if uses_direct_reload(self.weight_transfer_config):
+        model_config = self.model_config
+        if (
+            self.weight_transfer_config is not None
+            and model_config is not None
+            and (
+                model_config.quantization in ONLINE_QUANT_SHORTHAND_NAMES
+                or model_config.quantization_config is not None
+            )
+        ):
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_applies,
+            )
+
             # direct reload swaps online methods for checkpoint methods
-            factors["direct_reload"] = True
+            if direct_reload_applies(self):
+                factors["direct_reload"] = True
         if include_version:
             from vllm import __version__
 

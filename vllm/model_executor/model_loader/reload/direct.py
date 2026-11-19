@@ -27,21 +27,17 @@ from fnmatch import fnmatchcase
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config_or_none
-from vllm.config.weight_transfer import uses_direct_reload
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.utils import (
-    is_weights_pre_processed,
-    storage_view,
-)
+from vllm.model_executor.utils import storage_view
 
 logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
     "check_direct_reload",
-    "direct_reload_active",
     "direct_reload_applies",
     "direct_reload_enabled",
     "direct_reload_refusals",
@@ -72,16 +68,22 @@ _LOADER_ATTRS = (
 
 
 def direct_reload_enabled(vllm_config: VllmConfig | None = None) -> bool:
-    """Whether weight updates reload in place, for `vllm_config` (default: the
-    current config); see `uses_direct_reload`."""
+    """Whether `vllm_config` (default: the current one) selects direct reload:
+    runtime weight updates on a backend other than sharded_rdt, and
+    `VLLM_RELOAD_MODE=direct`."""
     if vllm_config is None:
         vllm_config = get_current_vllm_config_or_none()
-    return uses_direct_reload(getattr(vllm_config, "weight_transfer_config", None))
+    transfer = getattr(vllm_config, "weight_transfer_config", None)
+    return (
+        transfer is not None
+        and transfer.backend != "sharded_rdt"
+        and envs.VLLM_RELOAD_MODE == "direct"
+    )
 
 
 def direct_reload_applies(vllm_config: VllmConfig | None = None) -> bool:
-    """Whether cold start prepares the model for direct reload: it is enabled
-    and the configuration does not refuse it."""
+    """Whether direct reload is enabled and the configuration does not refuse
+    it, which quant-method selection must know before loading."""
     if vllm_config is None:
         vllm_config = get_current_vllm_config_or_none()
     return direct_reload_enabled(vllm_config) and not _config_refusals(vllm_config)
@@ -90,11 +92,6 @@ def direct_reload_applies(vllm_config: VllmConfig | None = None) -> bool:
 def reloads_directly(model: torch.nn.Module) -> bool:
     """Whether `model`'s updates reload directly, as fixed at its cold start."""
     return model.__dict__.get("_reloads_directly", False)
-
-
-def direct_reload_active(model: torch.nn.Module) -> bool:
-    """Whether `model` is between `begin_direct_reload` and its finish."""
-    return getattr(model, "_direct_reload_begun", False)
 
 
 def _layout(t: torch.Tensor) -> tuple:
@@ -192,8 +189,14 @@ def _config_refusals(vllm_config: VllmConfig | None) -> list[str]:
         # CPU/UVA offload gives parameters new storage on every post-load
         # processing; prefetch offload shares one buffer between layers
         reasons.append("weight offloading")
-    load_config = getattr(vllm_config, "load_config", None)
-    if getattr(load_config, "load_format", None) == "ipc_cache":
+    load_configs = (
+        getattr(vllm_config, "load_config", None),
+        getattr(vllm_config.speculative_config, "draft_load_config", None),
+    )
+    if any(
+        getattr(c, "load_format", None) in ("ipc_cache", "peer_cache")
+        for c in load_configs
+    ):
         # the weight cache's runtime-layout weights have no checkpoint layout
         reasons.append("pre-processed weights")
     model_config = vllm_config.model_config
@@ -242,8 +245,6 @@ def _refusals(model: torch.nn.Module) -> list[str]:
     reasons = _config_refusals(get_current_vllm_config_or_none())
     if (module_reason := _module_refusal(model)) is not None:
         reasons.append(module_reason)
-    if is_weights_pre_processed() and "pre-processed weights" not in reasons:
-        reasons.append("pre-processed weights")
     return reasons
 
 

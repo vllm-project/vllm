@@ -33,7 +33,6 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.reload.direct import direct_reload_applies
 from vllm.model_executor.model_loader.utils import (
     _load_device,
     build_model_from_processed_weights,
@@ -345,8 +344,6 @@ class IpcModelLoader(BaseModelLoader):
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
             kernel_config=kernel_config,
-            # as quant-method selection decides it, under the current config
-            direct_reload=direct_reload_applies(),
         )
         # Recorded before model construction so that a later standalone
         # load_weights reload keys on the same pre-construction values the

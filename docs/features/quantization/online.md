@@ -29,7 +29,7 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
 llm = LLM(
     "Qwen/Qwen3.5-35B-A3B",
     quantization="mxfp4",
-    quantization_config={"linear": {"activation": None, "weight": None}},
+    quantization_config={"linear": {"activation": None, "weight": None}}
 )
 ```
 

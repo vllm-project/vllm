@@ -41,7 +41,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.model_loader.reload.direct import direct_reload_active
+from vllm.model_executor.model_loader.reload.direct import reloads_directly
 from vllm.model_executor.model_loader.weight_checksum import _tensors
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
@@ -199,7 +199,7 @@ def _stream_reload(worker, folder: str) -> dict:
     torch.accelerator.reset_peak_memory_stats()
 
     worker.start_weight_update()
-    mode = "direct" if direct_reload_active(model) else "layerwise"
+    mode = "direct" if reloads_directly(model) else "layerwise"
     with set_current_vllm_config(worker.vllm_config):
         while batch := [
             (n, t.to(worker.device)) for n, t in itertools.islice(weights, BATCH_SIZE)

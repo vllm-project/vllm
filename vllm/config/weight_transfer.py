@@ -15,16 +15,3 @@ class WeightTransferConfig:
     """The backend to use for weight transfer. Validated against the
     `WeightTransferEngineFactory` registry at engine creation time.
     """
-
-
-def uses_direct_reload(weight_transfer_config: WeightTransferConfig | None) -> bool:
-    """Whether weight updates reload in place: with runtime weight updates
-    enabled, unless `VLLM_RELOAD_MODE=layerwise` or the backend is sharded_rdt."""
-    import vllm.envs as envs
-
-    transfer = weight_transfer_config
-    return (
-        transfer is not None
-        and transfer.backend != "sharded_rdt"
-        and envs.VLLM_RELOAD_MODE == "direct"
-    )

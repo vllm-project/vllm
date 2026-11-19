@@ -692,61 +692,37 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**(fields | overrides))
 
 
-_TORCHAO = {"model_config": SimpleNamespace(quantization="torchao")}
+_OFFLOAD = SimpleNamespace(
+    offload_backend="auto",
+    prefetch=SimpleNamespace(offload_group_size=0),
+    uva=SimpleNamespace(cpu_offload_gb=1),
+)
 
 
 @pytest.mark.parametrize(
-    "mode,overrides,match",
+    "overrides,match",
     [
-        ("direct", _TORCHAO, "torchao"),
-        ("layerwise", _TORCHAO, "layerwise"),
-        # without weight updates, reloads are layerwise
-        ("direct", _TORCHAO | {"weight_transfer_config": None}, "layerwise"),
-        # post-load processing reruns on the cold-start modules
-        ("direct", {"lora_config": object()}, None),
+        ({"model_config": SimpleNamespace(quantization="torchao")}, "torchao"),
+        ({"offload_config": _OFFLOAD}, "weight offloading"),
         (
-            "direct",
-            {
-                "offload_config": SimpleNamespace(
-                    offload_backend="auto",
-                    prefetch=SimpleNamespace(offload_group_size=0),
-                    uva=SimpleNamespace(cpu_offload_gb=1),
-                )
-            },
-            "weight offloading",
-        ),
-        (
-            "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
         ),
-        ("direct", {}, "pre-processed"),
+        ({"load_config": SimpleNamespace(load_format="ipc_cache")}, "pre-processed"),
+        # without weight updates, reloads are layerwise
+        ({"weight_transfer_config": None}, None),
     ],
-    ids=[
-        "torchao",
-        "layerwise",
-        "no-updates",
-        "lora",
-        "offload",
-        "draft-lm-head",
-        "pre-processed",
-    ],
+    ids=["torchao", "offload", "draft-lm-head", "pre-processed", "no-updates"],
 )
-def test_config_refusals(monkeypatch, mode, overrides, match):
+def test_config_refusals(monkeypatch, overrides, match):
     # recorded at cold start, raised when an update starts
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-    pre_processed = match == "pre-processed"
-    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: pre_processed)
     model = _cold_start(_checkpoint())
-    if match == "layerwise":
+    if match is None:
         assert not direct_reload_enabled()
         assert not hasattr(model, "_direct_reload_refusals")
-        return
-    if match is None:
-        assert hasattr(model, "_ckpt_param_names")
-        assert not model._direct_reload_refusals
         return
     assert not hasattr(model, "_ckpt_param_names")
     with pytest.raises(RuntimeError, match=match) as err:
@@ -755,7 +731,6 @@ def test_config_refusals(monkeypatch, mode, overrides, match):
     # a draft sharing its tensors (e.g. the lm_head) is refused too, though
     # they are shared in after its cold start
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", _config)
-    monkeypatch.setattr(direct, "is_weights_pre_processed", lambda: False)
     with _DEVICE:
         draft = _ToyModel()
     record_checkpoint_layout(draft)

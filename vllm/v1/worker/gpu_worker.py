@@ -1720,10 +1720,7 @@ class Worker(WorkerBase):
         self._check_direct_reload()
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-        # an engine may know whether it reloads only once initialized (M2N)
-        self._check_direct_reload()
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_direct_reload(self) -> None:
         """Raise on every rank if direct reload refuses an updatable model on

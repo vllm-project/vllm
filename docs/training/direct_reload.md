@@ -48,30 +48,17 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-These configurations serve as usual, but setting up a weight transfer engine
-or starting a weight update (`reload_weights`, `start_weight_update`) raises
-an error. Use `VLLM_RELOAD_MODE=layerwise` to update them. Their layers keep
-their online quantization at cold start, as in layerwise mode.
+These configurations serve as usual, but a weight update raises an error; use
+`VLLM_RELOAD_MODE=layerwise` to update them:
 
-- Online quantization not in the table above: `mxfp4` and `mxfp4_hadamard32`
-  linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
-  lm_head, activation overrides, `hadamard_size`, and re-quantization of
-  checkpoint-quantized layers.
-- Online quantization of layers a model loads without their weight loaders:
-  gpt-oss experts, Step3 attention `qkv_proj`, K2 Horizon value experts, and
-  the Nemotron-Parse `sum_proj`.
-- `fp8_per_block` linear layers whose tensor-parallel shards are not
-  multiples of 128, and MoE experts whose shards are neither multiples of 128
-  nor can refine the scale blocks (to a block of at least 32 dividing both
-  the shard and the hidden size).
+- Online quantization not in the table above, or of layers loaded outside
+  their weight loaders (e.g. gpt-oss experts).
+- `fp8_per_block` layers whose tensor-parallel shards do not fit its blocks.
 - The NCCL weight transfer load plan (`use_load_plan`) with online
   quantization.
 - `torchao` quantization, Humming kernels, weight offloading, and
   `draft_lm_head_quantization`.
-- Weights loaded pre-processed from the weight cache (`--load-format
-  ipc_cache`).
+- Weights loaded pre-processed from the weight cache.
 - A draft model sharing tensors with a refused target model.
 
-With pipeline parallelism, a configuration refused on any stage is refused on
-all of them when the weight transfer engine is set up. LoRA adapters are
-supported.
+LoRA adapters are supported.

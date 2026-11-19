@@ -132,9 +132,6 @@ def build_weight_cache_key(
     engine worker) stamped on `parallel_config.rank`, and the DP placement
     follows the engine's per-worker view.
     """
-    from vllm.model_executor.model_loader.reload.direct import (
-        direct_reload_applies,
-    )
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
     )
@@ -158,7 +155,6 @@ def build_weight_cache_key(
         enable_expert_parallel=parallel_config.enable_expert_parallel,
         expert_placement_strategy=parallel_config.expert_placement_strategy,
         kernel_config=vllm_config.kernel_config,
-        direct_reload=direct_reload_applies(vllm_config),
     )
 
 
