@@ -3,6 +3,7 @@
 """Checkpoint name mapping and weight loading for the ROCm Muse Spark model."""
 
 import importlib
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -346,3 +347,29 @@ def test_online_quantization_of_bf16_checkpoints_only_targets_experts(
             amd_model._reject_online_quantized_linears(model)
     else:
         amd_model._reject_online_quantized_linears(model)
+
+
+@pytest.mark.parametrize(
+    "cdna, default_gemm",
+    [(2, False), (3, True), (4, True), (5, False)],
+    ids=["cdna2", "cdna3", "cdna4", "cdna5"],
+)
+def test_pooler_gemm_dispatch_follows_the_cdna_version(
+    monkeypatch, dist_init, cdna, default_gemm
+) -> None:
+    """Fails if the pooler or unpooler leaves the default unquantized GEMM
+    dispatch on CDNA3 and CDNA4, or leaves PyTorch linear on any other CDNA."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.platforms.rocm",
+        SimpleNamespace(get_cdna_version=lambda: cdna),
+    )
+    layer = amd_model._pooling_projection(16, 8, "pooler")
+    expected = (
+        UnquantizedLinearMethod
+        if default_gemm
+        else amd_model.MuseSparkTorchLinearMethod
+    )
+    assert type(layer.quant_method) is expected
