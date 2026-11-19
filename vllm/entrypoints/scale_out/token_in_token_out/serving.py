@@ -438,7 +438,10 @@ class ServingTokens(GenerateBaseServing):
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
         # every generation that omits the field.
-        if not request.is_sampling_param_provided("max_tokens"):
+        if (
+            not request.is_sampling_param_provided("max_tokens")
+            or sampling_params.max_tokens is None
+        ):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
@@ -446,6 +449,13 @@ class ServingTokens(GenerateBaseServing):
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
+            if sampling_params.min_tokens > sampling_params.max_tokens:
+                return self.create_error_response(
+                    f"min_tokens must be less than or equal to "
+                    f"max_tokens={sampling_params.max_tokens}, got "
+                    f"{sampling_params.min_tokens}.",
+                    param="min_tokens",
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
