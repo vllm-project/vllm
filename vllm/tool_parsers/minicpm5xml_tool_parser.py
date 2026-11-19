@@ -134,7 +134,7 @@ def _parse_arguments(json_value: str) -> tuple[Any, bool]:
 
 
 def _decode_padded(value: str) -> Any:
-    """Parse a non-string value, ignoring padding; keep the text if unparseable."""
+    """Parse a non-string value, ignoring padding; keep the text if unparsable."""
     parsed_val, ok = _parse_arguments(value.strip())
     return parsed_val if ok else value
 

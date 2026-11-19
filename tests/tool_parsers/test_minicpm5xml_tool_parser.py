@@ -845,8 +845,10 @@ class TestParameterWhitespace:
         )
         chunks = [
             '<function name="set_flag">',
-            f'<param name="note">{note}</param>'
-            '<param name="enabled">\n  True\n</param>',
+            (
+                f'<param name="note">{note}</param>'
+                '<param name="enabled">\n  True\n</param>'
+            ),
             "</function>\n",
         ]
 
