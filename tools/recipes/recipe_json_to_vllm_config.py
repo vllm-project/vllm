@@ -52,6 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from recipe_validation_status import RecipeSkipError, write_validation_result
+
 try:
     import yaml
 except ImportError as exc:
@@ -136,6 +138,10 @@ def parse_args() -> argparse.Namespace:
         "--config-out",
         default="config.yml",
         help="Output vLLM YAML config (default: config.yml)",
+    )
+    p.add_argument(
+        "--validation-result-out",
+        help="Write machine-readable READY/SKIP/ERROR JSON for validation automation.",
     )
     p.add_argument(
         "--env-out",
@@ -760,9 +766,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
     # Current Recipes API's single-node rendering exposes `argv`.
     if isinstance(recipe.get("argv"), list):
         if deploy_type not in (None, "single_node"):
-            raise ValueError(
+            raise RecipeSkipError(
+                "UNSUPPORTED_DEPLOYMENT",
                 f"Recipe deploy_type={deploy_type!r} is not a single-node deployment. "
-                "A single config.yml would not fully represent this deployment."
+                "A single config.yml would not fully represent this deployment.",
+                deploy_type=deploy_type,
             )
         return recipe["argv"]
 
@@ -780,9 +788,11 @@ def recipe_argv(recipe: dict[str, Any]) -> list[Any]:
         if k in recipe
     ]
     if multi_process_fields:
-        raise ValueError(
+        raise RecipeSkipError(
+            "UNSUPPORTED_DEPLOYMENT",
             "This recipe is a multi-process deployment and cannot be represented "
-            "by one config.yml. Found fields: " + ", ".join(multi_process_fields)
+            "by one config.yml. Found fields: " + ", ".join(multi_process_fields),
+            fields=multi_process_fields,
         )
 
     raise ValueError("Recipe JSON does not contain an `argv` field")
@@ -1076,10 +1086,27 @@ def main() -> int:
                     print(f"  {key}: {value}")
             for note in tuning.notes:
                 print(f"  tuning: {note}")
+    except RecipeSkipError as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "SKIP",
+            reason_code=exc.reason_code,
+            reason=str(exc),
+            **exc.details,
+        )
+        print(f"SKIP [{exc.reason_code}]: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
+        write_validation_result(
+            args.validation_result_out,
+            "ERROR",
+            reason_code="CONVERSION_ERROR",
+            reason=str(exc),
+        )
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    write_validation_result(args.validation_result_out, "READY")
     print(f"Wrote {args.config_out}")
     print(f"Wrote {args.env_out}")
     if sweep_files:

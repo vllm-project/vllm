@@ -20,6 +20,7 @@ from typing import Any
 
 from hardware_detection import HardwareInfo
 from model_constraints import load_head_constraints, suggest_tensor_parallel_size
+from recipe_validation_status import RecipeSkipError
 from xpu_hardware_detection import XPUHardwareInfo
 
 from vllm.config.scheduler import SchedulerConfig
@@ -358,11 +359,15 @@ def _validate_xpu_tensor_parallel_size(
             raise ValueError(f"Invalid {name} value in recipe: {value!r}")
     required_devices = tp * pp * dp
     if required_devices > hardware.gpu_count:
-        raise ValueError(
+        raise RecipeSkipError(
+            "INSUFFICIENT_XPU_DEVICES",
             f"B70 recipe requires at least {required_devices} visible XPU "
             f"devices (TP={tp}, PP={pp}, DP={dp}); detected "
             f"{hardware.gpu_count}. Refusing to change TP without a model "
-            "memory-fit estimate."
+            "memory-fit estimate.",
+            required_devices=required_devices,
+            available_devices=hardware.gpu_count,
+            parallelism={"tp": tp, "pp": pp, "dp": dp},
         )
     result.notes.append(
         f"XPU devices={hardware.gpu_count}; retained recipe TP={tp}, PP={pp}, "
