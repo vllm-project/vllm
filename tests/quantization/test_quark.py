@@ -3237,6 +3237,11 @@ def test_quark_static_int8_moe_compilation(
             assert isinstance(method, QuarkW8A8Int8MoEMethod)
             assert method.activation_quant_key == kInt8StaticTensorSym
             assert method.moe_kernel is not None
+            # Guards that quark_moe.py forwards `activation_key` to the experts.
+            fused_experts = method.moe_kernel.impl.fused_experts
+            assert getattr(fused_experts, "activation_key", None) == (
+                kInt8StaticTensorSym
+            )
             assert experts.w13_input_scale.item() == 0.03125
             assert experts.w2_input_scale.item() == 0.015625
             assert isinstance(
