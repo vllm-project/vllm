@@ -40,7 +40,7 @@ use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+    MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -161,29 +161,6 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
         (vec![b'i' as u32], None),
         (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
     ]
-}
-
-fn ec_proto_struct(mm_hashes: &[&str]) -> prost_types::Struct {
-    let ec_items: Vec<_> = mm_hashes
-        .iter()
-        .map(|mm_hash| {
-            serde_json::json!({
-                "image_grid_thw": [[1, 16, 16]],
-                "mm_hash": mm_hash,
-            })
-        })
-        .collect();
-    json_to_proto_struct(&serde_json::json!({ "ec_items": ec_items }))
-        .expect("valid EC proto struct")
-}
-
-fn decode_kv_proto_struct() -> prost_types::Struct {
-    json_to_proto_struct(&serde_json::json!({
-        "do_remote_prefill": true,
-        "pp_size": 1,
-        "remote_block_ids": [[7]],
-    }))
-    .expect("valid KV proto struct")
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -404,24 +381,43 @@ async fn setup_grpc_service_with_backend<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
-    setup_grpc_service_with_engine_script(
+    setup_grpc_service_with_ready(
         engine_id,
         default_ready_response(),
+        output_specs,
         backend,
-        None,
-        move |dealer, push| {
-            boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request = decode_add_request(&add);
-                check_request(&request);
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
-            })
-        },
+        check_request,
     )
+    .await
+}
+
+async fn setup_grpc_service_with_ready<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
+    setup_grpc_service_with_engine_script(engine_id, ready, backend, None, move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request = decode_add_request(&add);
+            check_request(&request);
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, output_specs),
+            )
+            .await;
+        })
+    })
     .await
 }
 
@@ -937,77 +933,56 @@ async fn generate_without_output_text_skips_detokenization() {
     }
 }
 
+/// Generate with unary or streaming RPC, returning the first frame's prompt
+/// info.
+async fn generate_prompt_info(
+    client: &mut InferenceClient<Channel>,
+    request: pb::GenerateRequest,
+    stream: bool,
+) -> Result<pb::PromptInfo, tonic::Status> {
+    let prompt_info = if stream {
+        let mut responses = client.generate_stream(request).await?.into_inner();
+        let first = responses.message().await?.expect("first stream frame");
+        while responses.message().await?.is_some() {}
+        first.prompt_info
+    } else {
+        client.generate(request).await?.into_inner().prompt_info
+    };
+    Ok(prompt_info.expect("prompt info in the first frame"))
+}
+
+/// An encoder instance returns the media features it submitted with only
+/// their CPU kwargs; sent back with the expanded prompt, they reach an EC or
+/// KV consumer engine as the same features without the encoder inputs, while
+/// transfer params pass through untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn unary_generate_prepares_multimodal_input_for_engine_core() {
-    let (inference_service, control_service, engine_health, engine_task) =
-        setup_grpc_service_with_backend(
-            b"engine-grpc-multimodal",
-            default_stream_output_specs(),
-            multimodal_backend(),
-            |request| {
-                let token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
-                let features = request.mm_features.as_ref().expect("multimodal features");
-                assert_eq!(features.len(), 2);
-
-                for (feature, identifier) in features.iter().zip(["uuid:image-1", "uuid:image-2"]) {
-                    assert_eq!(feature.modality.as_str(), "image");
-                    assert_eq!(feature.identifier, identifier);
-                    assert!(feature.mm_position.length > 1);
-                    assert_eq!(
-                        feature
-                            .data
-                            .as_ref()
-                            .expect("multimodal feature data")
-                            .keys()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>(),
-                        vec!["image_grid_thw"]
-                    );
-                }
-                assert_eq!(features[0].mm_position.offset, 1);
-                let xargs = request
-                    .sampling_params
-                    .as_ref()
-                    .and_then(|params| params.extra_args.as_ref())
-                    .expect("KV transfer args");
-                let kv_transfer_params =
-                    xargs.get("kv_transfer_params").expect("KV transfer params");
-                assert_eq!(kv_transfer_params["pp_size"].as_i64(), Some(1));
-                assert_eq!(
-                    kv_transfer_params["remote_block_ids"][0][0].as_i64(),
-                    Some(7)
-                );
-                assert!(!xargs.contains_key("ec_transfer_params"));
-                assert_eq!(
-                    token_ids.len(),
-                    features.iter().map(|feature| feature.mm_position.length).sum::<usize>() + 3
-                );
-                assert_eq!(token_ids[0], 11);
-                assert_eq!(token_ids.last(), Some(&13));
-                for feature in features {
-                    assert!(
-                        token_ids[feature.mm_position.offset
-                            ..feature.mm_position.offset + feature.mm_position.length]
-                            .iter()
-                            .all(|token_id| *token_id == QWEN_IMAGE_TOKEN_ID)
-                    );
-                }
-            },
+async fn prompt_media_round_trips_to_an_ec_or_kv_consumer() {
+    for stream in [false, true] {
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_backend(
+                b"engine-grpc-epd-encoder",
+                default_stream_output_specs(),
+                multimodal_backend(),
+                move |request| {
+                    let token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
+                    let features = request.mm_features.clone().expect("multimodal features");
+                    submitted_tx.send((token_ids, features)).unwrap();
+                },
+            )
+            .await;
+        let (channel, encoder_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
-    let (channel, server_task) = start_grpc_test_server(
-        inference_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    let mut client = InferenceClient::new(channel);
+        let mut encoder = InferenceClient::new(channel);
 
-    client
-        .generate(pb::GenerateRequest {
-            request_id: "test-multimodal".to_string(),
+        let raw_request = pb::GenerateRequest {
+            request_id: "test-epd-encode".to_string(),
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
                 ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12, QWEN_IMAGE_TOKEN_ID, 13],
@@ -1023,9 +998,9 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                     uuid: uuid.to_string(),
                 })
                 .collect(),
-            kv: Some(pb::KvCacheParameters {
-                kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["uuid:image-2", "uuid:image-1"])),
+            response: Some(pb::ResponseOptions {
+                prompt_token_ids: true,
+                prompt_media: true,
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -1033,12 +1008,121 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 ..Default::default()
             }),
             ..Default::default()
-        })
-        .await
-        .expect("multimodal generate");
+        };
+        let prompt_info = generate_prompt_info(&mut encoder, raw_request, stream)
+            .await
+            .expect("encoder generate");
+        let (token_ids, features) = submitted_rx.await.expect("encoder engine request");
+        engine_task.await.expect("mock engine task");
 
-    engine_task.await.expect("mock engine task");
-    server_task.abort();
+        assert_eq!(prompt_info.token_ids, token_ids);
+        let returned: Vec<_> = prompt_info
+            .media
+            .iter()
+            .map(|item| {
+                let Some(pb::media_item::Source::Features(feature)) = &item.source else {
+                    panic!("prompt media must be preprocessed features");
+                };
+                let kwargs = crate::mm_wire::decode_kwargs(feature.kwargs.as_deref().unwrap())
+                    .expect("msgpack kwargs");
+                assert_eq!(kwargs.keys().collect::<Vec<_>>(), ["image_grid_thw"]);
+                assert_eq!(item.modality(), pb::Modality::Image);
+                (
+                    feature.identifier.clone(),
+                    feature.mm_hash.clone(),
+                    feature.offset as usize,
+                    feature.length as usize,
+                    kwargs,
+                )
+            })
+            .collect();
+        let submitted: Vec<_> = features
+            .iter()
+            .map(|feature| {
+                (
+                    feature.identifier.clone(),
+                    feature.mm_hash.clone(),
+                    feature.mm_position.offset,
+                    feature.mm_position.length,
+                    feature.cpu_subset().data.unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(returned, submitted);
+        assert_eq!(
+            features.iter().map(|feature| feature.identifier.as_str()).collect::<Vec<_>>(),
+            ["uuid:image-1", "uuid:image-2"]
+        );
+
+        let kv_transfer_params = serde_json::json!({
+            "do_remote_prefill": true,
+            "remote_block_ids": [[7]],
+        });
+        let ec_transfer_params = serde_json::json!({
+            "ec_items": [{"mm_hash": "uuid:image-1", "image_grid_thw": [[1, 2, 2]]}],
+        });
+        let consumer_request = pb::GenerateRequest {
+            request_id: "test-epd-consume".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: prompt_info.token_ids,
+            })),
+            media: prompt_info.media,
+            kv: Some(pb::KvCacheParameters {
+                kv_transfer_params: json_to_proto_struct(&kv_transfer_params),
+                ec_transfer_params: json_to_proto_struct(&ec_transfer_params),
+                ..Default::default()
+            }),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // The encoder's engine is no EC or KV consumer.
+        let status = generate_prompt_info(&mut encoder, consumer_request.clone(), stream)
+            .await
+            .expect_err("pixel-less features need an EC or KV consumer");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        encoder_task.abort();
+
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = true;
+        let expected_features: Vec<_> = features.iter().map(MmFeatureSpec::cpu_subset).collect();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_ready(
+                b"engine-grpc-epd-consumer",
+                ready,
+                default_stream_output_specs(),
+                multimodal_backend(),
+                move |request| {
+                    assert_eq!(decode_prompt_token_ids(request), Some(token_ids));
+                    assert_eq!(request.mm_features, Some(expected_features));
+                    let xargs = request
+                        .sampling_params
+                        .as_ref()
+                        .and_then(|params| params.extra_args.as_ref())
+                        .expect("transfer params");
+                    assert_eq!(xargs["kv_transfer_params"], kv_transfer_params);
+                    assert_eq!(xargs["ec_transfer_params"], ec_transfer_params);
+                },
+            )
+            .await;
+        let (channel, consumer_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut consumer = InferenceClient::new(channel);
+        generate_prompt_info(&mut consumer, consumer_request, stream)
+            .await
+            .expect("consumer generate");
+        engine_task.await.expect("mock engine task");
+        consumer_task.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1180,6 +1264,75 @@ fn preprocessed_grpc_request(media: Vec<pb::MediaItem>) -> pb::GenerateRequest {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// A feature without the model's encoder input (`pixel_values` here) needs an
+/// engine that takes the encoder output from an EC or KV transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_accepts_features_without_encoder_input_only_on_ec_or_kv_consumers() {
+    let kwargs = BTreeMap::from([(
+        "image_grid_thw".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(
+                WireTensor::from_u32(vec![3], vec![1, 2, 2]).unwrap(),
+            )),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+        },
+    )]);
+    let mut request = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Image,
+        "image-a",
+        1,
+        2,
+    )]);
+    let Some(pb::media_item::Source::Features(feature)) = &mut request.media[0].source else {
+        unreachable!("preprocessed media");
+    };
+    feature.kwargs = Some(rmp_serde::to_vec_named(&kwargs).expect("encode kwargs"));
+
+    for allow_missing_mm_embeddings in [false, true] {
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = allow_missing_mm_embeddings;
+        let expected_kwargs = kwargs.clone();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_ready(
+                b"engine-grpc-missing-encoder-input",
+                ready,
+                default_stream_output_specs(),
+                multimodal_backend(),
+                move |request| {
+                    let features = request.mm_features.as_ref().expect("multimodal features");
+                    assert_eq!(features[0].data.as_ref(), Some(&expected_kwargs));
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut client = InferenceClient::new(channel);
+
+        if allow_missing_mm_embeddings {
+            client.generate(request.clone()).await.expect("EC or KV consumer generate");
+            engine_task.await.expect("mock engine task");
+        } else {
+            let unary = client.generate(request.clone()).await.expect_err("unary");
+            let stream = client.generate_stream(request.clone()).await.expect_err("stream");
+            for status in [unary, stream] {
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert_eq!(
+                    status.message(),
+                    "`image` features without encoder inputs require an engine that consumes \
+                     encoder outputs from an EC or KV transfer"
+                );
+            }
+        }
+        server_task.abort();
     }
 }
 

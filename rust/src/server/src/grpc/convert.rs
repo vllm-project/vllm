@@ -350,10 +350,12 @@ pub(super) fn structured_output_to_proto(params: &StructuredOutputsParams) -> pb
 // ========================================================================================
 
 /// Convert a `DecodedTextEvent::Start` into the prompt info portion of a gRPC
-/// response.
+/// response. `media` holds the prompt's media with only the CPU kwargs, built
+/// when `opts.prompt_media` is set.
 pub fn to_prompt_info(
     prompt_token_ids: &[u32],
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
+    media: Vec<pb::MediaItem>,
     opts: &ResponseOpts,
 ) -> pb::PromptInfo {
     let token_ids = if opts.prompt_token_ids {
@@ -373,6 +375,7 @@ pub fn to_prompt_info(
         logprobs,
         ranks,
         candidate_tokens,
+        media,
     }
 }
 
@@ -587,6 +590,7 @@ fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
 pub struct ResponseOpts {
     pub prompt_token_ids: bool,
     pub prompt_logprobs: bool,
+    pub prompt_media: bool,
     pub output_text: bool,
     pub output_token_ids: bool,
     pub output_logprobs: bool,
@@ -598,6 +602,7 @@ impl ResponseOpts {
             Some(r) => Self {
                 prompt_token_ids: r.prompt_token_ids,
                 prompt_logprobs: r.prompt_logprobs,
+                prompt_media: r.prompt_media,
                 output_text: r.output_text.unwrap_or(true),
                 output_token_ids: r.output_token_ids,
                 output_logprobs: r.output_logprobs,

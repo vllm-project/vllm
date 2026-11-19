@@ -127,6 +127,25 @@ pub enum MmKwargValue {
 }
 
 impl MmFeatureSpec {
+    /// Clone this feature keeping only the kwargs fields marked `keep_on_cpu`,
+    /// possibly none. These are the fields the engine still reads when it
+    /// takes the encoder output from an EC or KV transfer instead of running
+    /// the encoder, such as the grid sizes M-RoPE positions are built from.
+    pub fn cpu_subset(&self) -> Self {
+        Self {
+            data: self.data.as_ref().map(|data| {
+                data.iter()
+                    .filter(|(_, elem)| elem.field.keep_on_cpu())
+                    .map(|(key, elem)| (key.clone(), elem.clone()))
+                    .collect()
+            }),
+            modality: self.modality,
+            identifier: self.identifier.clone(),
+            mm_position: self.mm_position.clone(),
+            mm_hash: self.mm_hash.clone(),
+        }
+    }
+
     /// Extract large tensor buffers from this feature in serialized field order.
     pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
         if let Some(data) = &mut self.data {
@@ -202,6 +221,17 @@ pub enum MmField {
     Batched(MmBatchedField),
     Flat(MmFlatField),
     Shared(MmSharedField),
+}
+
+impl MmField {
+    /// Whether the field is excluded from being moved to the accelerator.
+    pub fn keep_on_cpu(&self) -> bool {
+        match self {
+            Self::Batched(field) => field.keep_on_cpu,
+            Self::Flat(field) => field.keep_on_cpu,
+            Self::Shared(field) => field.keep_on_cpu,
+        }
+    }
 }
 
 /// Info: `MultiModalFieldConfig.batched`.
@@ -357,6 +387,44 @@ mod tests {
         assert!(kwargs.iter().any(|(key, _)| key.as_str() == Some("slices")));
         assert!(kwargs.iter().any(|(key, _)| key.as_str() == Some("dim")));
         assert!(kwargs.iter().any(|(key, _)| key.as_str() == Some("keep_on_cpu")));
+    }
+
+    #[test]
+    fn cpu_subset_keeps_only_keep_on_cpu_fields() {
+        let elem = |value, keep_on_cpu| MmFieldElem {
+            data: Some(MmKwargValue::Int(value)),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu }),
+        };
+        let feature = MmFeatureSpec {
+            data: Some(BTreeMap::from([
+                ("pixel_values".to_owned(), elem(1, false)),
+                ("image_grid_thw".to_owned(), elem(2, true)),
+            ])),
+            modality: MmModality::Image,
+            identifier: "uuid:image".to_owned(),
+            mm_position: PlaceholderRange {
+                offset: 3,
+                length: 4,
+                is_embed: None,
+            },
+            mm_hash: Some("uuid:image".to_owned()),
+        };
+
+        let subset = feature.cpu_subset();
+        assert_eq!(
+            subset,
+            MmFeatureSpec {
+                data: Some(BTreeMap::from([(
+                    "image_grid_thw".to_owned(),
+                    elem(2, true)
+                )])),
+                ..feature.clone()
+            }
+        );
+        // No CPU field leaves an empty map, which is not a cache-only `None`.
+        let mut gpu_only = feature;
+        gpu_only.data.as_mut().unwrap().remove("image_grid_thw");
+        assert_eq!(gpu_only.cpu_subset().data, Some(BTreeMap::new()));
     }
 
     #[test]

@@ -33,67 +33,11 @@ pub struct InferenceServiceImpl {
 
 struct PreparedGrpcRequest {
     text_request: TextRequest,
+    /// `PromptInfo.media`, taken before the features move into the engine
+    /// request.
+    prompt_media: Vec<pb::MediaItem>,
     request_span: Span,
     started_at: Instant,
-}
-
-/// Keep producer metadata for matching EC items; leave unmatched inputs intact.
-fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
-    let is_decode_kv_consumer = text_request
-        .sampling_params
-        .vllm_xargs
-        .as_ref()
-        .and_then(|args| args.get("kv_transfer_params"))
-        .and_then(|params| params.get("do_remote_prefill"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let ec_items = text_request
-        .sampling_params
-        .vllm_xargs
-        .as_ref()
-        .and_then(|args| args.get("ec_transfer_params"))
-        .and_then(|params| params.get("ec_items"))
-        .and_then(serde_json::Value::as_array)
-        .cloned();
-
-    // Decode uses EC metadata only to prepare the prompt; EngineCore consumes KV.
-    if is_decode_kv_consumer && let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
-        args.remove("ec_transfer_params");
-    }
-
-    let Some(ec_items) = ec_items else {
-        return;
-    };
-    let Some(features) = text_request.mm_features.as_mut() else {
-        return;
-    };
-    let ec_items_by_hash: std::collections::HashMap<_, _> = ec_items
-        .iter()
-        .filter_map(serde_json::Value::as_object)
-        .filter_map(|item| {
-            item.get("mm_hash")
-                .and_then(serde_json::Value::as_str)
-                .map(|mm_hash| (mm_hash, item))
-        })
-        .collect();
-
-    for feature in features.iter_mut() {
-        let Some(item) = ec_items_by_hash.get(feature.identifier.as_str()) else {
-            continue;
-        };
-        let Some(data) = feature.data.as_mut() else {
-            continue;
-        };
-        let metadata_keys: Vec<_> = data
-            .keys()
-            .filter(|key| key.as_str() != "mm_hash" && item.contains_key(key.as_str()))
-            .cloned()
-            .collect();
-        if metadata_keys.is_empty() {
-            continue;
-        }
-        data.retain(|key, _| metadata_keys.contains(key));
-    }
 }
 
 impl InferenceServiceImpl {
@@ -104,6 +48,7 @@ impl InferenceServiceImpl {
     async fn prepare_request(
         &self,
         mut proto_request: pb::GenerateRequest,
+        response_opts: &ResponseOpts,
         data_parallel_rank: Option<u32>,
         stream: bool,
         rpc: &'static str,
@@ -172,15 +117,20 @@ impl InferenceServiceImpl {
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
-            apply_encoder_cache_placeholders(&mut text_request);
-
-            Ok(text_request)
+            let prompt_media = match &text_request.mm_features {
+                Some(features) if response_opts.prompt_media => features
+                    .iter()
+                    .map(|feature| super::media::feature_to_proto(feature.cpu_subset(), true))
+                    .collect::<Result<_, _>>()?,
+                _ => Vec::new(),
+            };
+            Ok((text_request, prompt_media))
         }
         .instrument(request_span.clone())
         .await;
 
-        let text_request = match result {
-            Ok(text_request) => text_request,
+        let (text_request, prompt_media) = match result {
+            Ok(prepared) => prepared,
             Err(status) => {
                 warn!(
                     parent: &request_span,
@@ -195,6 +145,7 @@ impl InferenceServiceImpl {
 
         Ok(PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
         })
@@ -230,9 +181,18 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
-        } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
+        } = self
+            .prepare_request(
+                proto_req,
+                &response_opts,
+                data_parallel_rank,
+                false,
+                "Generate",
+            )
+            .await?;
 
         let stream = self
             .state
@@ -252,6 +212,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
             collected.prompt_logprobs.as_ref(),
+            prompt_media,
             &response_opts,
         );
 
@@ -296,10 +257,17 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
         } = self
-            .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
+            .prepare_request(
+                proto_req,
+                &response_opts,
+                data_parallel_rank,
+                true,
+                "GenerateStream",
+            )
             .await?;
 
         let stream = self
@@ -311,9 +279,14 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
-        let response_stream =
-            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
-                .instrument(request_span);
+        let response_stream = generate_stream_responses(
+            stream,
+            response_opts,
+            prompt_media,
+            request_span.clone(),
+            started_at,
+        )
+        .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
 }
@@ -326,6 +299,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
 async fn generate_stream_responses(
     stream: impl TextOutputStream,
     response_opts: ResponseOpts,
+    mut prompt_media: Vec<pb::MediaItem>,
     request_span: Span,
     started_at: Instant,
     mut y: TryYielder<pb::GenerateResponse, Status>,
@@ -345,6 +319,7 @@ async fn generate_stream_responses(
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
                     prompt_logprobs.as_ref(),
+                    std::mem::take(&mut prompt_media),
                     &response_opts,
                 );
                 Ok(pb::GenerateResponse {
@@ -453,6 +428,7 @@ mod tests {
         let masks: Vec<_> = generate_stream_responses(
             events,
             ResponseOpts::default(),
+            Vec::new(),
             Span::none(),
             Instant::now(),
         )

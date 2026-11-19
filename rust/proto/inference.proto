@@ -176,6 +176,9 @@ message ResponseOptions {
   optional CandidateTokens output_candidates = 7;
   // Defaults to the model's generation config, else true, when omitted.
   optional bool skip_special_tokens = 8;
+  // Return `PromptInfo.media`: the prompt's media features with only the CPU
+  // kwargs, for reuse by an EC or KV consumer. Full kwargs are not returned.
+  bool prompt_media = 9;
 }
 
 message KVCacheParameters {
@@ -232,6 +235,12 @@ message PromptInfo {
   repeated float logprobs = 3;  // If requested
   repeated uint32 ranks = 4;  // If logprobs were requested
   repeated CandidateTokenInfo candidate_tokens = 5;
+  // If requested: the prompt's media items, ordered by placeholder offset.
+  // Each has a `features` source with ranges in the expanded prompt (see
+  // `token_ids`) and `kwargs` always set to only the keep_on_cpu fields,
+  // possibly an empty map. Send them as `media`, with the prompt token IDs,
+  // to an EC or KV consumer.
+  repeated MediaItem media = 6;
 }
 
 // Finish info, returned in the final response
@@ -304,7 +313,9 @@ message MediaItem {
 // Engine-ready multimodal features produced by a version-compatible frontend.
 // `kwargs` is the MessagePack wire representation of one MmKwargsItem.
 message PreprocessedMediaFeatures {
-  // Required inline payload. Cache-only references are not accepted.
+  // Required inline payload. Cache-only references are not accepted. A
+  // payload without the encoder input, such as the keep_on_cpu fields in
+  // `PromptInfo.media` or an empty map, needs an EC or KV consumer engine.
   optional bytes kwargs = 1;
   string identifier = 2;
   uint64 offset = 3;

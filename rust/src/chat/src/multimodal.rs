@@ -921,6 +921,20 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Whether `feature` lacks this model's encoder input for its modality,
+    /// such as `pixel_values`: a pixel-less feature that carries only the
+    /// fields the engine reads besides the encoder, so the encoder output must
+    /// come from an EC or KV transfer.
+    pub(crate) fn lacks_encoder_input(&self, feature: &MmFeatureSpec) -> bool {
+        let spec = match feature.modality {
+            MmModality::Image => self.image.as_ref().map(|support| &support.spec),
+            MmModality::Video => self.video.as_ref().map(|support| &support.spec),
+            MmModality::Audio => self.audio.as_ref().map(|support| &support.spec),
+        };
+        spec.zip(feature.data.as_ref())
+            .is_some_and(|(spec, data)| !data.contains_key(spec.primary_key()))
+    }
+
     /// Prepare raw media placed after already-expanded `features` and append
     /// its features.
     ///
@@ -1674,6 +1688,26 @@ mod tests {
         ));
     }
 
+    /// Nemotron-H Omni keeps no image field on the CPU, so the CPU subset of
+    /// its image feature is an empty kwargs map, accepted again as a
+    /// preprocessed feature without encoder input.
+    #[tokio::test]
+    async fn features_without_cpu_fields_round_trip_as_empty_kwargs() {
+        let info = nemotron_omni_info();
+        let mut tokens = vec![11; 100];
+        tokens.push(1018);
+        let features = info
+            .prepare_multimodal(vec![png_640x480()], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+        let subset: MmFeatures = features.iter().map(MmFeatureSpec::cpu_subset).collect();
+        assert_eq!(subset[0].data, Some(MmKwargsItem::new()));
+
+        let prepared = info.prepare_preprocessed(subset.clone(), tokens.len()).unwrap();
+        assert_eq!(prepared, subset);
+        assert!(info.lacks_encoder_input(&prepared[0]));
+    }
+
     /// A 640x480 image, which keeps a 30x40 patch grid (300 tokens inside
     /// `<img>`) on Nemotron-H Omni when the token budget allows.
     fn png_640x480() -> MediaContentPart {
@@ -2155,6 +2189,54 @@ mod tests {
             Some("<|media_pad|>")
         );
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    /// The encoder input key comes from the model spec, not from a key name
+    /// guess: DeepSeek-V4.1 images read `patches`, Qwen3-VL images
+    /// `pixel_values`.
+    #[test]
+    fn lacks_encoder_input_checks_the_model_declared_key() {
+        use vllm_engine_core_client::protocol::multimodal::{
+            MmBatchedField, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+        };
+
+        let feature = |keys: &[&str]| MmFeatureSpec {
+            data: Some(
+                keys.iter()
+                    .map(|key| {
+                        let elem = MmFieldElem {
+                            data: Some(MmKwargValue::Int(1)),
+                            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+                        };
+                        (key.to_string(), elem)
+                    })
+                    .collect(),
+            ),
+            modality: MmModality::Image,
+            identifier: "image".to_owned(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 1,
+                is_embed: None,
+            },
+            mm_hash: None,
+        };
+        let qwen3_vl = qwen3_vl_info();
+        let deepseek_v41 = deepseek_v41_info();
+        let cases = [
+            (&qwen3_vl, &["pixel_values", "image_grid_thw"][..], false),
+            (&qwen3_vl, &["image_grid_thw"], true),
+            (&qwen3_vl, &[], true),
+            (&deepseek_v41, &["patches"], false),
+            (&deepseek_v41, &["pixel_values"], true),
+        ];
+        for (info, keys, expected) in cases {
+            assert_eq!(
+                info.lacks_encoder_input(&feature(keys)),
+                expected,
+                "{keys:?}"
+            );
+        }
     }
 
     #[test]
