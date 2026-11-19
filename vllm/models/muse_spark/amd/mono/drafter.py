@@ -35,13 +35,15 @@ from .decoder import (
     HEALTH_POLL_INTERVAL,
     NUM_CUS,
     SLIDING_WINDOW,
-    WORLD_SIZE,
     MonoDims,
     _FusedAttention,
     kv_cache_refusal,
     register_health_check,
 )
 from .peer import PeerBuffer
+
+# The draft launch runs at TP = EP 8 only (the target's decoder also covers 4).
+WORLD_SIZE = 8
 
 logger = init_logger(__name__)
 
@@ -347,7 +349,7 @@ class DSparkDrafter:
             if md is None:
                 return "attn-metadata"
             _, _, kv_cache, slots = get_attention_context(name)
-            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
+            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, kv_fp8=False)
             if reason is not None:
                 return reason
             # uniform causal decodes of QUERY_ROWS rows (host counts of the metadata)

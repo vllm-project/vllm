@@ -50,7 +50,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels.kernels_common import LOG2E
-from flydsl.expr import gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64
 
 from . import k5
@@ -65,6 +65,7 @@ from .dev import (
     bf16_round,
     bf_hi,
     bf_lo,
+    bpermute,
     butterfly,
     fresh,
     hw_exp2,
@@ -88,7 +89,7 @@ from .k3 import _lay, dn_loads, fp4_mma, mx_chunk, sel_peer, task_ring
 DM = 4096
 INTER = 4096
 E = 256
-W = 8  # ranks in the TP = EP group
+W = 8  # ranks in the TP = EP group of the module-level defaults (builds take key.W)
 EL = E // W  # local experts
 TOPK = 8
 POST_EPS = 1e-8
@@ -101,12 +102,17 @@ REGION = {"a": 31, "z": 32, "ss": 33, "rs": 34}
 @dataclass(frozen=True, slots=True)
 class BuildM:
     S: int = 32  # rows (32 / 64 / 96 / 128)
+    W: int = 8  # ranks in the TP = EP group (8, or 4 at S <= 64)
+    buddy: int = 0  # replicas a layer of rank r + 1's experts (EP buddy); 0 = off
 
 
-def build_vllm(S, W=8):
-    """The HM build vLLM launches for S rows of a TP = EP = 8 group."""
-    assert S in (32, 64, 96, 128) and W == 8, (S, W)
-    return BuildM(S=S)
+def build_vllm(S, W=8, buddy=0):
+    """The HM build vLLM launches for S rows of a TP = EP = W group; buddy: K
+    replicas a layer of rank r + 1's experts (per-step placement), 0 = off."""
+    assert S in (32, 64, 96, 128) and W in (4, 8), (S, W)
+    assert W == 8 or S <= 64, (S, W)
+    assert 0 <= buddy <= 7, buddy
+    return BuildM(S=S, W=W, buddy=int(buddy))
 
 
 def scratch_layout(S):
@@ -130,22 +136,30 @@ def build(key: BuildM):
     _KEYSTR = repr(key)
     S = key.S
     assert S in (32, 64, 96, 128), S
+    W = key.W  # shadows the module-level defaults for every closure below
+    EL = E // W
     CPR = BLOCKS // W  # 16-column blocks a rank owns in the EP reduce-scatter
     P = TOPK * S
     assert EL % WAVES == 0
-    VMAX = EL + P // 16
+    BUDDY = key.buddy
+    # exec slots: own EL, then the replicas (rounded to whole waves for the slot loop)
+    XEL = EL + (-(-BUDDY // WAVES) * WAVES if BUDDY else 0)
+    VMAX = XEL + P // 16
+    BTB = 8  # plan search: y_{W-1} in 0..7 x 8 max-load values (exact for buddy <= 7)
     lay, _ = scratch_layout(S)
     play, _ = k5.peer_layout(S, W)  # HM addresses moep / mf of the token-owner layout
     PF_GU, PF_DN = 1, 2  # gate_up / down tasks in flight
     UNR = S != 96  # down task loop as a ring (unroll 3, fixed slots)
     W13_BYTES = EL * 2 * INTER * (DM // 2)
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
+    W2_BYTES = EL * DM * (INTER // 2)
+    W2S_BYTES = EL * DM * (INTER // 32)
     tag_par = lambda tag: tag & 1
 
     @fx.struct
     class RouteM:
-        nu: fx.Array[fx.Int32, EL, 16]
-        vstart: fx.Array[fx.Int32, EL, 16]
+        nu: fx.Array[fx.Int32, XEL, 16]
+        vstart: fx.Array[fx.Int32, XEL, 16]
         unused: fx.Array[fx.Int32, 3 * 256, 16]  # keeps the tuned LDS offsets
         ve_u: fx.Array[fx.Int32, VMAX, 16]
         ve_n: fx.Array[fx.Int32, VMAX, 16]
@@ -159,7 +173,13 @@ def build(key: BuildM):
 
     @fx.struct
     class MSetup:
-        lists: fx.Array[fx.Int32, EL * S, 16]
+        lists: fx.Array[fx.Int32, XEL * S, 16]
+
+    if BUDDY:
+
+        @fx.struct
+        class RouteB:  # global expert -> exec slot (before the plan: used flags)
+            emap: fx.Array[fx.Int32, E, 16]
 
     @fx.struct
     class MGu:
@@ -177,13 +197,88 @@ def build(key: BuildM):
         g_: MGu
         d_: MDn
 
-    name = f"muse_k5m_s{S}"
+    name = f"muse_k5m_s{S}_w{W}"
 
     # ------------------------------------------------------------ tables
     @traced
-    def setup(ids, rank, tid, lane, wave, rt, lists, nrows):
+    def buddy_plan(ids, eptab, rank, tid, lane, wave, rt, nrows):
+        """Writes this step's exec slot of every global expert to emap. eptab[e] = the
+        replica slot of expert e on its owner's left neighbour (-1: none), the same
+        table on every rank. Rank r runs y_r of rank r + 1's used and replicated
+        experts (the highest-indexed ones); y minimises the max per-rank count
+        (wave 0: 64 lanes = 8 max-load values from max(lo, max - 8) x 8 values of
+        y_{W-1}; none improves: y = 0). A function of ids and eptab only: identical
+        on every CTA and rank."""
+        LPR = 64 // W  # lanes a rank (4 experts a lane)
+        if tid < E:
+            fx.ptr_store(fx.Int32(0), rt["emap"] + tid)
+        gpu.barrier()
+        for q in range_constexpr((P + THREADS - 1) // THREADS):
+            p = tid + THREADS * q
+            if (p < P) & ((p // TOPK) < nrows):
+                gid = fx.min(fx.max(ld_i32(ids, p), 0), E - 1)
+                fx.ptr_store(fx.Int32(1), rt["emap"] + gid)
+        gpu.barrier()
+        if wave == 0:
+            f = [fx.ptr_load(rt["emap"] + (4 * lane + k)) for k in range(4)]
+            sl = [ld_i32(eptab, 4 * lane + k) for k in range(4)]
+            gk = [
+                ((f[k] != 0) & (sl[k] >= 0)).select(fx.Int32(1), fx.Int32(0))
+                for k in range(4)
+            ]
+            inc_u = wave_incl_scan(f[0] + f[1] + f[2] + f[3], lane)
+            inc_g = wave_incl_scan(gk[0] + gk[1] + gk[2] + gk[3], lane)
+            after = bpermute(inc_g, lane | (LPR - 1)) - inc_g
+            n = [readlane(inc_u, LPR - 1)]
+            m = [readlane(inc_g, LPR - 1)]
+            for r in range_constexpr(1, W):
+                end, start = LPR * r + LPR - 1, LPR * r - 1
+                n.append(readlane(inc_u, end) - readlane(inc_u, start))
+                m.append(readlane(inc_g, end) - readlane(inc_g, start))
+            tot, mx = n[0], n[0]
+            for r in range_constexpr(1, W):
+                tot = tot + n[r]
+                mx = fx.max(mx, n[r])
+            lo = (tot + (W - 1)) // W
+            m0 = fx.max(lo, mx - (64 // BTB))
+            mm = m0 + lane // BTB
+            t_ = lane % BTB
+            ok = (t_ <= m[0]) & (mm < mx)
+            yv = t_
+            for r in range_constexpr(W - 2, -1, -1):
+                yv = fx.max(n[r + 1] + yv - mm, 0)
+                ok = ok & (yv <= m[r + 1])
+            ok = ok & ((n[0] - t_ + yv) <= mm)
+            won = ballot(ok)
+            has = won != fx.Int64(0)
+            win = popcount(won ^ (won - fx.Int64(1))) - 1
+            ms_ = has.select(m0 + win // BTB, mx)
+            ys = [has.select(win % BTB, fx.Int32(0))]
+            for r in range_constexpr(W - 2, -1, -1):
+                ys.insert(0, fx.max(n[r + 1] + ys[0] - ms_, 0))
+            o = lane // LPR
+            mv = fx.Int32(0)
+            for r in range_constexpr(W):
+                mv = (o == r).select(ys[(r - 1) % W], mv)
+            own = o == rank
+            rgt = o == ((rank + 1) % W)
+            hi_ = after
+            for k in range_constexpr(3, -1, -1):
+                e = 4 * lane + k
+                used = f[k] != 0
+                mvd = (gk[k] != 0) & (hi_ < mv)
+                a = mvd.select(fx.Int32(-1), used.select(e - EL * rank, fx.Int32(-1)))
+                b = mvd.select(EL + sl[k], fx.Int32(-1))
+                fx.ptr_store(own.select(a, rgt.select(b, fx.Int32(-1))), rt["emap"] + e)
+                hi_ = hi_ + gk[k]
+        gpu.barrier()
+
+    @traced
+    def setup(ids, rank, tid, lane, wave, rt, lists, nrows, eptab=None):
         tid = fresh(tid)
         NC = P // 64
+        if const_expr(BUDDY):
+            buddy_plan(ids, eptab, rank, tid, lane, wave, rt, nrows)
         for q in range_constexpr((P + THREADS - 1) // THREADS):
             p = tid + THREADS * q
             if p < P:
@@ -192,10 +287,14 @@ def build(key: BuildM):
         ev = []
         for c in range_constexpr(NC):
             real = ((c * 64 + lane) // TOPK) < nrows  # padded rows route nowhere
-            e = ld_i32(ids, c * 64 + lane) - rank * EL
-            ev.append(((e >= 0) & (e < EL) & real).select(e, fx.Int32(-1)))
+            if const_expr(BUDDY):
+                gid = fx.min(fx.max(ld_i32(ids, c * 64 + lane), 0), E - 1)
+                ev.append(real.select(fx.ptr_load(rt["emap"] + gid), fx.Int32(-1)))
+            else:
+                e = ld_i32(ids, c * 64 + lane) - rank * EL
+                ev.append(((e >= 0) & (e < EL) & real).select(e, fx.Int32(-1)))
         # wave w: slots w, w + 8, ..: pick lists in pick (= token) order
-        for uu in range_constexpr(EL // WAVES):
+        for uu in range_constexpr(XEL // WAVES):
             u = wave + WAVES * uu
             cnt = fx.Int32(0)
             for c in range_constexpr(NC):
@@ -211,15 +310,15 @@ def build(key: BuildM):
         # wave 0, lane u (+ 64 hh): groups of 16 -> virtual experts (slot order)
         if wave == 0:
             vcarry = fx.Int32(0)
-            for hh in range_constexpr((EL + 63) // 64):
+            for hh in range_constexpr((XEL + 63) // 64):
                 u = lane + 64 * hh
-                n = (u < EL).select(
-                    fx.ptr_load(rt["nu"] + fx.min(u, EL - 1)), fx.Int32(0)
+                n = (u < XEL).select(
+                    fx.ptr_load(rt["nu"] + fx.min(u, XEL - 1)), fx.Int32(0)
                 )
                 ng = (n + 15) // 16
                 incl = wave_incl_scan(ng, lane) + vcarry
                 st = incl - ng
-                if u < EL:
+                if u < XEL:
                     fx.ptr_store(st, rt["vstart"] + u)
                 for gg in range_constexpr(S // 16):
                     if gg < ng:
@@ -232,11 +331,11 @@ def build(key: BuildM):
                 fx.ptr_store(vcarry, rt["nve"] + 0)
         gpu.barrier()
         # pinfo[pick] = virtual expert * 32 + slot
-        for q in range_constexpr((EL * S + THREADS - 1) // THREADS):
+        for q in range_constexpr((XEL * S + THREADS - 1) // THREADS):
             x = tid + THREADS * q
-            u = fx.min(x // S, EL - 1)
+            u = fx.min(x // S, XEL - 1)
             i = x % S
-            if (x < EL * S) & (i < fx.ptr_load(rt["nu"] + u)):
+            if (x < XEL * S) & (i < fx.ptr_load(rt["nu"] + u)):
                 p = fx.ptr_load(lists + (u * S + i))
                 v = fx.ptr_load(rt["vstart"] + u) + i // 16
                 fx.ptr_store(v * 32 + i % 16, rt["pinfo"] + p)
@@ -268,7 +367,7 @@ def build(key: BuildM):
         gpu.barrier()
 
     # ------------------------------------------------------------ gate_up
-    def gu_loads(w13, w13s, rt, task, lane, wave, ok):
+    def gu_loads(w13, w13s, rt, task, lane, wave, ok, rep=None):
         """Task (v, j): waves 0-3 the 16 gate rows 16j .., waves 4-7 the up rows; wave w the
         K chunks 4 (w % 4) + i (256 K each): 2 x dwordx4 + 1 scale dword a chunk."""
         r = lane % 16
@@ -277,6 +376,11 @@ def build(key: BuildM):
         v = task >> 8
         j = task & 255
         e = uniform(fx.ptr_load(rt["ve_u"] + fx.min(v, VMAX - 1)))
+        if const_expr(rep is not None):
+            isr = e >= EL
+            w13 = isr.select(rep[0], w13)
+            w13s = isr.select(rep[1], w13s)
+            e = isr.select(e - EL, e)
         rg = wave // 4
         ops = []
         for i in range_constexpr(4):
@@ -517,7 +621,7 @@ def build(key: BuildM):
             )
 
     # The kernel and its launcher. tl (a timeline buffer) and w13r .. eptab (expert replicas) are
-    # part of the launch signature the decoder passes; this build does not read them.
+    # part of the launch signature the decoder passes; buddy builds read w13r .. eptab.
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def hm(
@@ -558,6 +662,9 @@ def build(key: BuildM):
         alloc = fx.SharedAllocator()
         rl = alloc.allocate(RouteM).peek()
         ml = alloc.allocate(MLds)
+        rbud = None
+        if const_expr(BUDDY):
+            rbud = alloc.allocate(RouteB).peek()
         ms, mg, md = ml.s_.peek(), ml.g_.peek(), ml.d_.peek()
         rt = {
             "nu": rl.nu.ptr,
@@ -571,16 +678,22 @@ def build(key: BuildM):
             "ssacc": rl.ssacc.ptr,
             "rsl": rl.rsl.ptr,
         }
-        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
-        setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows)
+        rep13 = rep2 = bud = None
+        if const_expr(BUDDY):
+            rt["emap"] = rbud.emap.ptr
+            rep13 = (w13r, w13sr)
+            rep2 = (w2r, w2sr, EL)
+            bud = eptab
+        setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows, bud)
         V = uniform(fx.ptr_load(rt["nve"] + 0))
         t0 = bid * V
         t1 = t0 + V
         v0 = t0 >> 8
         v1 = (fx.max(t1, 1) - 1) >> 8
-        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1)
+        gu_ld = lambda t: gu_loads(w13, w13s, rt, t, lane, wave, t < t1, rep13)
         q = [gu_ld(t0 + d) for d in range(PF_GU)]
         own_picks(rt, ms.lists.ptr, v0, v1, tid)
         # gate_up over virtual expert v0, then (if the range crosses) v1
@@ -596,7 +709,18 @@ def build(key: BuildM):
         task_ring(gu_ld, gu_c, q, task, it, t1, False, 1)
         # down: same tasks
         dn_ld = lambda t: dn_loads(
-            w2, w2s, w_post, rt["ve_u"], t, lane, wave, t < t1, VMAX
+            w2,
+            w2s,
+            w_post,
+            rt["ve_u"],
+            t,
+            lane,
+            wave,
+            t < t1,
+            VMAX,
+            W2_BYTES,
+            W2S_BYTES,
+            rep2,
         )
         dq = [dn_ld(t0 + d) for d in range(PF_DN)]
         gpu.barrier()

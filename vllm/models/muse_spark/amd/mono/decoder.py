@@ -36,7 +36,10 @@ LAST_LAYER = 60
 ROWS_PER_REQUEST = 8
 K3_ROWS = (8, 16)
 K5_ROWS = (32, 64, 96, 128)
-WORLD_SIZE = 8
+# TP = EP sizes the builds cover: K3 and the 32 / 64-row HA + HM + HB at both,
+# the larger HA + HM + HB builds and the fused attention at 8.
+WORLD_SIZES = (4, 8)
+MAX_ROWS = {4: 64, 8: K5_ROWS[-1]}
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
@@ -44,6 +47,8 @@ HEALTH_POLL_INTERVAL = 64
 # Other builds and layer 1 run vLLM's attention op.
 FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
 SLIDING_WINDOW = (2047, 0)
+BF16_KV_DTYPES = ("auto", "bfloat16")
+FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 # Other launches' health checks (the DSpark drafter's), run by poll_health.
 _HEALTH_CHECKS: dict[int, Callable[[], None]] = {}
 
@@ -160,6 +165,8 @@ class LayerWeights:
     w_in: torch.Tensor
     w_qkvg: torch.Tensor
     next_rope: bool
+    # EP buddy: K of rank r + 1's experts (w13 w13s w2 w2s) and eptab, int32[256]
+    buddy: tuple[torch.Tensor, ...] | None = None
 
     def __post_init__(self) -> None:
         def ptrs(names: str) -> tuple[int, ...]:
@@ -173,6 +180,47 @@ class LayerWeights:
         self.hm = ptrs("w13 w13s w2 w2s w_post")
         self.hb = ptrs("w_pp w_pff alpha beta w_in w_qkvg")
         self.replicas = ptrs("w13 w13s w2 w2s w13")
+        self.hm_replicas = self.replicas
+        if self.buddy is not None:
+            self.hm_replicas = tuple(t.data_ptr() for t in self.buddy)
+
+
+def buddy_exchange(
+    weights: dict[int, LayerWeights],
+    group: Any,
+    table: dict[int, list[list[int]]],
+    prev: dict[int, LayerWeights] | None = None,
+) -> None:
+    """Gives every layer's weights rank r + 1's `table` experts and the eptab
+    (global expert -> replica slot on the owner's left neighbour, or -1).
+
+    Collective over the TP group (send to r - 1, receive from r + 1); a refresh
+    receives into `prev`'s replicas.
+    """
+    import torch.distributed as dist
+
+    w, me = group.world_size, group.rank_in_group
+    src, dst = group.ranks[(me + 1) % w], group.ranks[(me - 1) % w]
+    for i, lw in weights.items():
+        rows, local = table[i], lw.w13.shape[0]
+        idx = torch.tensor([e - me * local for e in rows[me]], device=lw.w13.device)
+        own = [t.index_select(0, idx) for t in (lw.w13, lw.w13s, lw.w2, lw.w2s)]
+        old = prev[i].buddy if prev is not None and i in prev else None
+        if old is not None and [t.shape for t in old[:4]] == [t.shape for t in own]:
+            rep = list(old[:4])
+        else:
+            rep = [torch.empty_like(t) for t in own]
+        ops = [dist.P2POp(dist.isend, t, dst, group.device_group) for t in own]
+        ops += [dist.P2POp(dist.irecv, t, src, group.device_group) for t in rep]
+        for req in dist.batch_isend_irecv(ops):
+            req.wait()
+        eptab = torch.full((local * w,), -1, dtype=torch.int32)
+        for experts in rows:
+            for j, e in enumerate(experts):
+                eptab[e] = j
+        lw.buddy = (*rep, eptab.to(lw.w13.device))
+        lw.__post_init__()
+    torch.accelerator.synchronize()
 
 
 def effective_norm_weight(norm: nn.Module) -> torch.Tensor:
@@ -242,8 +290,8 @@ def deployment_refusals(
     """Parallel layout and server features the monokernel does not support."""
     reasons = []
     parallel = vllm_config.parallel_config
-    if tp_size != WORLD_SIZE:
-        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZE})")
+    if tp_size not in WORLD_SIZES:
+        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZES})")
     for name in (
         "pipeline_parallel_size",
         "data_parallel_size",
@@ -281,8 +329,8 @@ def deployment_refusals(
     cache = vllm_config.cache_config
     if getattr(cache, "kv_offloading_size", None):
         reasons.append("KV offloading on")
-    if cache.cache_dtype not in ("auto", "bfloat16"):
-        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16)")
+    if cache.cache_dtype not in BF16_KV_DTYPES + FP8_KV_DTYPES:
+        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16, fp8_e4m3)")
     if vllm_config.model_config.dtype != torch.bfloat16:
         reasons.append(f"model dtype {vllm_config.model_config.dtype}")
     return reasons
@@ -333,6 +381,10 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
             bad(f"layer {i}: RoPE cache {_shape(rope.cos_sin_cache)}")
         if not layer.self_attn.pre_qkv_proj_norm.has_weight:
             bad(f"layer {i}: weightless pre_qkv_proj_norm")
+        for name in ("_k_scale", "_v_scale"):
+            scale = getattr(attn.attn, name, None)
+            if scale is None or scale.dtype != torch.float32 or scale.numel() != 1:
+                bad(f"layer {i}: {name} {_shape(scale)}")
         if i > LAST_LAYER:
             continue
         check_bf16(i, "o_proj", attn.o_proj.weight, (h, dims.q_rows))
@@ -380,11 +432,13 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
     return reasons
 
 
-def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
-    """K3 writes bf16 LBHNC pages: `[block][kv head][16 tokens][K | V]`."""
+def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int, kv_fp8: bool) -> str | None:
+    """K3 writes LBHNC pages `[block][kv head][16 tokens][K | V]`: bf16, or
+    e4m3 (uint8 storage) with `kv_fp8`."""
     if kv_cache.numel() == 0:
         return "kv:unbound"
-    if kv_cache.dtype != torch.bfloat16:
+    dtypes = (torch.uint8, torch.float8_e4m3fn) if kv_fp8 else (torch.bfloat16,)
+    if kv_cache.dtype not in dtypes:
         return f"kv:{kv_cache.dtype}"
     want_shape = (kv_heads, KV_BLOCK_SIZE, 2 * 64)
     if tuple(kv_cache.shape[1:]) != want_shape:
@@ -408,13 +462,14 @@ def attention_type(layer: nn.Module) -> str | None:
 
 
 def fused_attention_layers(
-    layers: Sequence[nn.Module], max_model_len: int, max_keys: int
+    layers: Sequence[nn.Module], max_model_len: int, max_keys: int, world_size: int = 8
 ) -> dict[int, str]:
     """Layers whose attention the launches can fuse: `{i: type}`.
 
-    Empty when a request may hold more keys than a build stages block ids for.
+    Empty when a request may hold more keys than a build stages block ids for,
+    and at TP 4 (the fragment is built for 2 kv heads a rank).
     """
-    if max_model_len > max_keys:
+    if max_model_len > max_keys or world_size != 8:
         return {}
     fused = {}
     for i in range(FIRST_LAYER + 1, LAST_LAYER + 1):
@@ -515,7 +570,7 @@ class _FusedAttention:
         """The descriptor table of this step; `q_of(i)` = layer i's q."""
         rows = {}
         for i in self.layers:
-            md, _, kv_cache, _ = get_attention_context(
+            md, attn, kv_cache, _ = get_attention_context(
                 layers[i].self_attn.attn.layer_name
             )
             rows[i] = self.af.vllm_desc(
@@ -527,6 +582,8 @@ class _FusedAttention:
                 self.part,
                 num_reqs,
                 self.scales[i],
+                attn._k_scale,
+                attn._v_scale,
             )
         key = tuple((i, *w) for i, w in rows.items())
         table = self.tables.get(key)
@@ -580,12 +637,17 @@ class _Bucket:
         self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
         self.fa: _FusedAttention | None = None
 
+    def _peer_slots(self) -> list[int]:
+        """The launch signatures take 8 peer slots; a smaller group leaves 0s."""
+        peers = self.peers.pointers
+        return [*peers, *([0] * (8 - len(peers)))]
+
     def _common(self) -> tuple[int, ...]:
         return (
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
         )
 
     def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
@@ -606,7 +668,13 @@ class _Bucket:
             _, _, kv_cache, slots = get_attention_context(nxt.attn.layer_name)
             rope = nxt.rotary_emb
             cos_sin = rope.cos_sin_cache if rope is not None else self.no_rope
-            ptrs = (slots.data_ptr(), cos_sin.data_ptr(), positions.data_ptr())
+            ptrs = (
+                slots.data_ptr(),
+                cos_sin.data_ptr(),
+                positions.data_ptr(),
+                nxt.attn._k_scale.data_ptr(),
+                nxt.attn._v_scale.data_ptr(),
+            )
             # The kernels take the block stride (elements) in the V slot.
             kv = (kv_cache.data_ptr(), kv_cache.stride(0), *ptrs)
             stream, q, g = self.layer(mono, i, kind, attn_o, g, stream, kv, aux_layers)
@@ -631,19 +699,22 @@ class _K3Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[tuple[bool, str]] = (),
+        kv_fp8: bool = False,
     ) -> None:
         w = dims.world_size
         super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
-        self.launchers = {
-            next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
-            for next_rope in (True, False)
-        }
+
+        def build(next_rope: bool, attn: str = ""):
+            return k3.build(
+                k3.build_vllm(
+                    S=rows, W=w, next_rope=next_rope, attn=attn, kv_fp8=kv_fp8
+                )
+            )
+
+        self.launchers = {next_rope: build(next_rope) for next_rope in (True, False)}
         self.fa = fa
         self.fused_launchers = {
-            (next_rope, kind): k3.build(
-                k3.build_vllm(S=rows, W=w, next_rope=next_rope, attn=kind)
-            )
-            for next_rope, kind in fused_kinds
+            (next_rope, kind): build(next_rope, kind) for next_rope, kind in fused_kinds
         }
         self.scratch = torch.zeros(
             k3.scratch_layout(rows, w)[1] // 4 + 64, dtype=torch.int32, device=device
@@ -710,9 +781,11 @@ class _K5Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[str] = (),
+        kv_fp8: bool = False,
+        buddy: int = 0,
     ) -> None:
         w = dims.world_size
-        key = k5.build_vllm(S=rows, W=w, next_rope=True)
+        key = k5.build_vllm(S=rows, W=w, next_rope=True, kv_fp8=kv_fp8)
         super().__init__(k5, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group)
         self.bnd = key.bnd
         self.launch_a, launch_b = k5.build(key)
@@ -720,10 +793,10 @@ class _K5Bucket(_Bucket):
             True: launch_b,
             False: k5.build(dataclasses.replace(key, next_rope=False))[1],
         }
-        self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
+        self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w, buddy=buddy))
         self.fa = fa
         self.fused_launch_a = {
-            kind: k5.build(k5.build_vllm(S=rows, W=w, next_rope=True, attn=kind))[0]
+            kind: k5.build(dataclasses.replace(key, attn=kind))[0]
             for kind in fused_kinds
         }
         i32, f32, bf16 = torch.int32, torch.float32, torch.bfloat16
@@ -784,11 +857,11 @@ class _K5Bucket(_Bucket):
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline_m.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
             i,
             mono.rank,
             nrows,
-            *a.replicas,
+            *a.hm_replicas,
             stream=cur,
         )
         gather = int(i == LAST_LAYER or i + 1 in aux_layers or self.bnd == 1)
@@ -815,14 +888,15 @@ class _K5Bucket(_Bucket):
         return self.sfull[:nrows], q_out[:nrows], g_out[:nrows]
 
 
-def built_buckets(max_num_seqs: int) -> list[int]:
-    """The builds a server with `max_num_seqs` requests can use."""
-    max_rows = min(max_num_seqs, K5_ROWS[-1] // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
+def built_buckets(max_num_seqs: int, world_size: int = 8) -> list[int]:
+    """The builds a server with `max_num_seqs` requests can use (TP 4: <= 64 rows)."""
+    top = MAX_ROWS[world_size]
+    max_rows = min(max_num_seqs, top // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
     return sorted(
         {
             b
             for rows in range(ROWS_PER_REQUEST, max_rows + 1, ROWS_PER_REQUEST)
-            if (b := bucket_of(rows)) is not None
+            if (b := bucket_of(rows)) is not None and b <= top
         }
     )
 
@@ -840,9 +914,17 @@ class MuseSparkMono:
         dims: MonoDims,
         buckets: Sequence[int],
         fused_attention: dict[int, str],
+        kv_fp8: bool = False,
+        buddy_group: Any = None,
+        buddy_table: dict[int, list[list[int]]] | None = None,
     ) -> None:
         self.rank = rank
         self.dims = dims
+        self.kv_fp8 = kv_fp8
+        # EP buddy: the TP GroupCoordinator for the replica exchange
+        self.buddy_group = buddy_group
+        self.buddy_table = buddy_table
+        self.buddy = 0 if buddy_table is None else len(buddy_table[FIRST_LAYER][0])
         self.refresh_weights(model)
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
@@ -859,7 +941,7 @@ class MuseSparkMono:
                     {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
-                    kernels.k3, b, dims, device, group, fa, k3_kinds
+                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8
                 )
             else:
                 self.buckets[b] = _K5Bucket(
@@ -871,6 +953,8 @@ class MuseSparkMono:
                     group,
                     fa,
                     sorted(set(layers.values())),
+                    kv_fp8,
+                    self.buddy,
                 )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
@@ -884,10 +968,22 @@ class MuseSparkMono:
 
     def refresh_weights(self, model: nn.Module) -> None:
         """Re-take the views, e.g. after a weight reload replaced parameters."""
+        prev = getattr(self, "weights", None)
         self.weights = {
             i: collect_layer_weights(model.layers, i, self.rank, self.dims)
             for i in range(FIRST_LAYER, LAST_LAYER + 1)
         }
+        if self.buddy_table is not None:
+            before = torch.accelerator.memory_allocated()
+            buddy_exchange(self.weights, self.buddy_group, self.buddy_table, prev)
+            logger.info(
+                "Muse Spark monokernel EP buddy: rank %d holds %d of rank %d's "
+                "experts a layer (+%.2f GiB)",
+                self.rank,
+                self.buddy,
+                (self.rank + 1) % self.dims.world_size,
+                (torch.accelerator.memory_allocated() - before) / 2**30,
+            )
 
     def _step_refusal(
         self, model: nn.Module, positions: torch.Tensor, x: Any
@@ -908,7 +1004,7 @@ class MuseSparkMono:
             return "positions"
         for name in names[1:]:
             _, _, kv_cache, slots = get_attention_context(name)
-            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
+            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, self.kv_fp8)
             if reason is not None:
                 return reason
             if (

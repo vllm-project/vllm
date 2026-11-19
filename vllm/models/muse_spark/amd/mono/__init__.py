@@ -10,12 +10,14 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+import vllm.envs as envs
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .decoder import (
     FIRST_LAYER,
+    FP8_KV_DTYPES,
     LAST_LAYER,
     NUM_CUS,
     MonoDims,
@@ -28,6 +30,7 @@ from .decoder import (
     fused_attention_layers,
     layer_refusals,
 )
+from .ep_buddy import load_table
 
 logger = init_logger(__name__)
 
@@ -81,6 +84,18 @@ def static_refusals(lm: nn.Module, tp_rank: int, tp_size: int) -> list[str]:
     )
 
 
+def _buddy_table(world_size: int) -> dict[int, list[list[int]]] | None:
+    """The EP buddy's expert table (`VLLM_MUSE_MONO_EP_BUDDY`), or None when off."""
+    if not envs.VLLM_MUSE_MONO_EP_BUDDY:
+        return None
+    if world_size != 4:
+        raise ValueError(f"VLLM_MUSE_MONO_EP_BUDDY needs TP 4, got TP {world_size}")
+    k = envs.VLLM_MUSE_MONO_EP_BUDDY_K
+    if not 1 <= k <= 7:
+        raise ValueError(f"VLLM_MUSE_MONO_EP_BUDDY_K must be 1-7, got {k}")
+    return load_table(envs.VLLM_MUSE_MONO_EP_BUDDY_TABLE, k, world_size)
+
+
 def maybe_attach_mono(lm: nn.Module) -> None:
     """Attach the monokernel to `lm.model` after the weights are final.
 
@@ -110,17 +125,18 @@ def maybe_attach_mono(lm: nn.Module) -> None:
             + ("; ".join(reasons) or "a peer rank refused the deployment")
         )
     assert kernels is not None
-    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs)
+    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs, world_size)
     max_model_len = lm.vllm_config.model_config.max_model_len
     fused = fused_attention_layers(
-        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS
+        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS, world_size
     )
     if not fused:
         logger.info(
             "Muse Spark monokernel: verify attention unfused (max_model_len %d, "
-            "fused builds cover %d)",
+            "fused builds cover %d at TP 8; TP %d)",
             max_model_len,
             kernels.attn_frag.VLLM_MAX_KEYS,
+            world_size,
         )
     model.mono = MuseSparkMono(
         model,
@@ -131,15 +147,19 @@ def maybe_attach_mono(lm: nn.Module) -> None:
         dims=MonoDims.from_config(text_config, world_size),
         buckets=buckets,
         fused_attention=fused,
+        kv_fp8=lm.vllm_config.cache_config.cache_dtype in FP8_KV_DTYPES,
+        buddy_group=group,
+        buddy_table=_buddy_table(world_size),
     )
     logger.info(
         "Muse Spark monokernel attached: layers %d-%d of verify steps with "
         "up to %d rows run as FlyDSL launches (builds S=%s; MoE activations "
-        "in bf16)",
+        "in bf16; %s KV cache)",
         FIRST_LAYER,
         LAST_LAYER,
         buckets[-1],
         ",".join(map(str, buckets)),
+        "fp8 e4m3" if model.mono.kv_fp8 else "bf16",
     )
 
 
