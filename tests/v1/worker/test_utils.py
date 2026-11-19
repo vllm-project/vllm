@@ -40,6 +40,7 @@ from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
+    KVCacheTensor,
     MambaSpec,
 )
 from vllm.v1.worker.replayssm_utils import (
@@ -1534,6 +1535,72 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     new_pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     assert new_pool is not pool
     hisparse_runtime_module.drop_hisparse_host_pool(worker.vllm_config)
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+def test_gdn_runtime_states_alias_planned_pages(layout):
+    from tests.v1.attention.utils import CheckpointingMambaLayer
+    from vllm.config import DeviceConfig, VllmConfig
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.worker.gpu.attn_utils import init_kv_cache
+    from vllm.v1.worker.utils import AttentionGroup
+
+    spec = MambaSpec(
+        block_size=16,
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        shapes=((3, 2), (2, 2, 2)),
+        dtypes=(torch.bfloat16, torch.float32),
+        state_alignment=16,
+        page_size_padded=64,
+    )
+    num_blocks = 3
+    page_size = spec.page_size_bytes
+    layer_stride, block_stride = (
+        (num_blocks * page_size, page_size)
+        if layout.is_layer_compact
+        else (page_size, 2 * page_size)
+    )
+    tensor = KVCacheTensor(
+        size=16 + 2 * num_blocks * page_size,
+        layers=["a", "b"],
+        offset=16,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    raw = torch.zeros(tensor.size, dtype=torch.int8)
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.cache_config.kv_cache_layout = layout.name
+    layer = CheckpointingMambaLayer(None)
+    kv_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[new_kv_cache_group(tensor.layers, spec)],
+    )
+    caches = init_kv_cache(
+        {"b": layer},
+        kv_config,
+        raw.device,
+        [],
+        config,
+        attn_groups=[AttentionGroup(GDNAttentionBackend, ["b"], spec, 0)],
+        allocate=lambda _: raw,
+    )
+    assert caches["b"].data_ptr() == raw.data_ptr() + tensor.offset + layer_stride
+    conv, recurrent = layer.kv_cache
+
+    expected = torch.zeros_like(raw)
+    for state, shape, dtype, offset in zip(
+        (conv, recurrent), spec.shapes, spec.dtypes, (0, 16), strict=True
+    ):
+        assert state.shape == (num_blocks, *shape)
+        assert state.dtype == dtype
+        for block in range(num_blocks):
+            state[block].fill_(block + 1)
+            start = tensor.offset + layer_stride + block * block_stride + offset
+            payload = torch.full(shape, block + 1, dtype=dtype).view(torch.int8)
+            expected[start : start + payload.numel()] = payload.flatten()
+    assert torch.equal(raw, expected)
 
 
 class _TestReplaySSMMixer(MambaMixer2):

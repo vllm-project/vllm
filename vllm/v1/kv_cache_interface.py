@@ -588,6 +588,23 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
 
+def create_mamba_state_views(
+    cache: torch.Tensor,
+    spec: MambaSpec,
+    shapes: tuple[tuple[int, ...], ...],
+) -> tuple[torch.Tensor, ...]:
+    """Split each planned byte page into aligned, typed runtime components."""
+    pages = cache.squeeze(dim=(1, 2))
+    states = []
+    offset = 0
+    for shape, dtype in zip(shapes, spec.dtypes, strict=True):
+        size = prod(shape[1:])
+        component = pages.narrow(1, offset, size)
+        states.append(component.view(shape).view(dtype))
+        offset += round_up(size, spec.state_alignment)
+    return tuple(states)
+
+
 def get_reusable_prefix_length(
     num_tokens: int,
     num_hash_lookahead_tokens: int,

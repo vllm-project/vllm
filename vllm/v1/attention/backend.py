@@ -70,6 +70,21 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: "KVCacheSpec",
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> tuple[tuple[int, ...], ...] | None:
+        """Shapes of page components, with blocks first and bytes on the last axis.
+
+        Components are packed in order within each page. None delegates to
+        the layer's existing cache binding.
+        """
+        return None
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,

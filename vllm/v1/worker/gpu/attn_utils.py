@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
+    create_mamba_state_views,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -442,10 +443,27 @@ def bind_kv_caches(
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
+    attn_groups = tuple(attn_groups)
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
+    for group in attn_groups:
+        spec = group.kv_cache_spec
+        if not isinstance(spec, MambaSpec):
+            continue
+        layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+        for name in group.layer_names:
+            if name not in bindable_caches:
+                continue
+            cache = bindable_caches[name]
+            shapes = group.backend.get_runtime_shapes(
+                spec, cache.shape[0], layout, group.kernel_block_size
+            )
+            if shapes is not None:
+                states = create_mamba_state_views(cache, spec, shapes)
+                forward_context[name].bind_kv_cache(states)
+                del bindable_caches[name]
     bind_kv_cache_to_layers(bindable_caches, forward_context)
     return kv_caches
 
