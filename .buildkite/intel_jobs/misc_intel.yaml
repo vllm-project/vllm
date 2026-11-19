@@ -51,7 +51,6 @@ steps:
 #   source_file_dependencies:
 #     - vllm/
 #     - tests/v1/core
-#     - tests/v1/executor
 #     - tests/v1/kv_offload
 #     - tests/v1/worker
 #     - tests/v1/kv_connector/unit
@@ -64,7 +63,6 @@ steps:
 #       'pip install -r requirements/kv_connectors.txt &&
 #       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
 #       cd tests &&
-#       pytest -v -s v1/executor &&
 #       VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit
 #       --ignore=v1/ec_connector/unit/test_ec_cpu_connector.py'
 
@@ -86,7 +84,6 @@ steps:
 #   source_file_dependencies:
 #     - vllm/
 #     - tests/v1/core
-#     - tests/v1/executor
 #     - tests/v1/kv_offload
 #     - tests/v1/worker
 #     - tests/v1/kv_connector/unit
@@ -414,3 +411,54 @@ steps:
       'cd tests &&
       pytest -v -s compile/passes/test_qk_norm_rope_fusion.py &&
       pytest -v -s compile/test_compile_ranges.py'
+
+- label: ":intel: (BMG) V1 Executor + Worker"
+  key: v1-executor-worker-intel
+  timeout_in_minutes: 60
+  optional: true
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/config/
+    - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
+    - vllm/engine/
+    - vllm/entrypoints/pooling/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/outputs.py
+    - vllm/platforms/
+    - vllm/pooling_params.py
+    - vllm/profiler/
+    - vllm/sampling_params.py
+    - vllm/tokenizers/
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/executor
+    - tests/v1/streaming_input
+    - tests/v1/worker
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      cd tests &&
+      pytest -v -s v1/executor &&
+      pytest -v -s v1/worker
+      --ignore=v1/worker/test_mrope_prompt_embeds.py
+      --deselect=tests/v1/worker/test_gpu_worker.py::test_startup_heap_frozen_before_weight_loading
+      --deselect=tests/v1/worker/test_worker_memory_snapshot.py::test_init_distributed_is_called_before_memory_snapshot
+      --deselect=tests/v1/worker/test_gpu_model_runner_v2.py::test_speculator_request_hooks &&
+      pytest -v -s v1/streaming_input
+      --ignore=v1/streaming_input/test_gpu_model_runner_v2_streaming.py'
