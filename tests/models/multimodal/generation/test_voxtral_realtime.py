@@ -201,11 +201,11 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypa
     [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
 )
 @pytest.mark.parametrize(
-    "frontend_graphs", [False, pytest.param(True, marks=pytest.mark.core_model)]
+    "audio_graphs", [False, pytest.param(True, marks=pytest.mark.core_model)]
 )
 @create_new_process_for_each_test(method="spawn")
 def test_voxtral_realtime_cudagraph(
-    audio_assets, tokenizer, vllm_runner, monkeypatch, cudagraph_mode, frontend_graphs
+    audio_assets, tokenizer, vllm_runner, monkeypatch, cudagraph_mode, audio_graphs
 ):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -214,39 +214,47 @@ def test_voxtral_realtime_cudagraph(
     vllm_kwargs["enforce_eager"] = False
     vllm_kwargs["compilation_config"] = {
         "cudagraph_mode": cudagraph_mode,
-        "cudagraph_mm_encoder": frontend_graphs,
+        "cudagraph_mm_encoder": audio_graphs,
         # max_num_seqs is 4, so this is the only decode size worth capturing.
         "cudagraph_capture_sizes": [4],
     }
-    if frontend_graphs and cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+    if audio_graphs and cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
         # The manager keeps its model minimum when an automatic cap is smaller.
         vllm_kwargs["compilation_config"]["encoder_cudagraph_max_token_budget"] = 1
 
     with vllm_runner(**vllm_kwargs) as vllm_model:
-        if frontend_graphs:
-            vllm_model.llm.collective_rpc(_check_frontend_graph_replay)
+        if audio_graphs:
+            vllm_model.llm.collective_rpc(_check_audio_graph_replay)
         inputs, sampling_params = _build_inputs(audio_assets, tokenizer)
 
         outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
         _assert_expected_text(outputs)
 
 
+def _audio_graph_manager(worker):
+    return worker.model_runner.model_state.encoder_runner.cudagraph_manager
+
+
 @torch.inference_mode()
-def _check_frontend_graph_replay(worker):
+def _check_audio_graph_replay(worker):
     """Mixed lengths and later replays must preserve each item's embeddings."""
-    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    manager = _audio_graph_manager(worker)
     assert manager is not None and manager.is_captured()
     model = manager.model
-    axes = model.get_encoder_cudagraph_config().capture_axes
-    short, startup = axes[1]
-    assert manager.get_cumulative_stats()["num_budgets"] == len(axes[0]) * len(axes[1])
+    batch_sizes, captured_lengths = model.get_encoder_cudagraph_config().capture_axes
+    assert manager.get_cumulative_stats()["num_budgets"] == len(batch_sizes) * len(
+        captured_lengths
+    )
+    # Uncaptured lengths with the same output token counts run eagerly.
+    lengths = [*captured_lengths, *(n + 160 for n in captured_lengths)]
     torch.manual_seed(0)
     for dtype in (torch.float32, torch.bfloat16):
-        # Include uncaptured lengths with the same output token counts.
-        lengths = (short, startup, short + 160, startup + 160)
         audios = [
-            (torch.randn(lengths[i % 4], device="cuda") * (0.01 + i * 0.005)).to(dtype)
-            for i in range(manager.max_batch_size * 4 + 1)
+            (
+                torch.randn(lengths[i % len(lengths)], device="cuda")
+                * (0.01 + i * 0.005)
+            ).to(dtype)
+            for i in range(manager.max_batch_size * len(lengths) + 1)
         ]
         expected = model.embed_multimodal(audio_arrays=audios)
         before = manager.get_cumulative_stats()
@@ -255,16 +263,15 @@ def _check_frontend_graph_replay(worker):
         assert after["graph_hits"] > before["graph_hits"]
         assert after["graph_misses"] > before["graph_misses"]
         assert len(actual) == len(expected)
-        for i, (output, reference) in enumerate(zip(actual, expected)):
+        for audio, output, reference in zip(audios, actual, expected):
             assert output.shape == reference.shape
-            assert torch.isfinite(output).all()
-            if i % 4 >= 2:
-                assert torch.equal(output, reference)
-            else:
+            if audio.numel() in captured_lengths:
                 relative_error = (
                     output.float() - reference.float()
                 ).norm() / reference.float().norm()
                 assert relative_error <= 1e-3
+            else:
+                assert torch.equal(output, reference)
         saved = [output.clone() for output in actual]
         manager.execute({"audio_arrays": list(reversed(audios))})
         assert manager.get_cumulative_stats()["num_budgets"] == before["num_budgets"]
@@ -273,13 +280,13 @@ def _check_frontend_graph_replay(worker):
 
 
 @pytest.mark.parametrize(
-    ("async_engine", "frontend_graphs"),
+    ("async_engine", "audio_graphs"),
     [
         pytest.param({}, False, id="eager"),
         pytest.param(
             {
                 "enforce_eager": False,
-                "worker_extension_cls": f"{__name__}.FrontendGraphTestWorker",
+                "worker_extension_cls": f"{__name__}.AudioGraphTestWorker",
                 "compilation_config": {
                     "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
                     "cudagraph_mm_encoder": True,
@@ -287,12 +294,12 @@ def _check_frontend_graph_replay(worker):
                 },
             },
             True,
-            id="frontend_graphs",
+            id="audio_graphs",
             marks=[
                 pytest.mark.core_model,
                 pytest.mark.skipif(
                     not current_platform.is_cuda(),
-                    reason="Frontend graphs require CUDA",
+                    reason="Audio graphs require CUDA",
                 ),
             ],
         ),
@@ -301,7 +308,7 @@ def _check_frontend_graph_replay(worker):
 )
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(
-    audio_assets, tokenizer, async_engine, frontend_graphs
+    audio_assets, tokenizer, async_engine, audio_graphs
 ):
     # Lazy import to avoid CUDA-reinitialization error
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
@@ -360,16 +367,16 @@ async def test_voxtral_realtime_generator(
             f"  got:      {got!r}\n"
             f"  expected: {expected!r}"
         )
-    if frontend_graphs:
-        stats = await async_engine.collective_rpc("frontend_graph_stats")
+    if audio_graphs:
+        stats = await async_engine.collective_rpc("audio_graph_stats")
         assert all(rank is not None and rank["graph_hits"] > 0 for rank in stats)
 
 
-class FrontendGraphTestWorker:
+class AudioGraphTestWorker:
     model_runner: "GPUModelRunner"
 
-    def frontend_graph_stats(self):
-        manager = self.model_runner.model_state.encoder_runner.cudagraph_manager
+    def audio_graph_stats(self):
+        manager = _audio_graph_manager(self)
         return None if manager is None else manager.get_cumulative_stats()
 
 

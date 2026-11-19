@@ -609,7 +609,7 @@ class CompilationConfig:
     cudagraph_mm_encoder: bool = False
     """Enable CUDA graph capture for supported multimodal encoders.
     Vision models capture the encoder forward for each token budget level.
-    Voxtral Realtime captures its log-mel and convolution frontend; its
+    Voxtral Realtime captures its log-mel extraction and convolutions; its
     transformer encoder remains in the normal model graphs. Off by default."""
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)

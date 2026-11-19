@@ -823,7 +823,7 @@ WebSocket endpoint.
 !!! note
     `VoxtralRealtimeGeneration` requires `mistral-common[audio]` to be installed, and must be served with `--tokenizer-mode mistral`.
 
-    Optional [Voxtral Realtime audio frontend CUDA graphs](../design/cuda_graphs_multimodal.md#voxtral-realtime-audio-frontend) can reduce GPU frontend launch overhead.
+    Optional [Voxtral Realtime audio embedding CUDA graphs](../design/cuda_graphs_multimodal.md#voxtral-realtime-audio-embedding) can reduce the launch overhead of its log-mel and convolution kernels.
 
     `Qwen3ASRRealtimeGeneration` is not auto-detected from `config.json`.
     You must pass `--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'`
