@@ -3,12 +3,12 @@
 """Flash coarse-only gated IndexPool with bounded paged FP8 scoring."""
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm import envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -22,14 +22,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 
 from .indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
-from .indexpool_ops import (
-    expand_groups,
-    fwht_quantize,
-    gated_pool,
-    rotate_indexer,
-    select_groups,
-    write_pool,
-)
+from .indexpool_ops import pool_quantize_write, quantize_query, select_expand_groups
 from .indexpool_prepare import prepare_groups, write_tails
 
 
@@ -43,7 +36,8 @@ class FlashCompressedIndexer(nn.Module):
         self.num_heads = config.compressed_indexer_num_attention_heads
         if not 1 <= self.num_heads <= 64:
             raise ValueError("IndexPool requires 1..64 scoring heads")
-        self.rope_dim = config.qk_rope_head_dim
+        if config.qk_rope_head_dim != 64:
+            raise ValueError("IndexPool kernels require a 64-dim rotary tail")
         self.rope_parameters = config.rope_parameters
         self.eps = config.rms_norm_eps
         self.topk_indices_buffer = topk_indices_buffer
@@ -65,7 +59,7 @@ class FlashCompressedIndexer(nn.Module):
                     prefix=f"{prefix}.{name}",
                 ),
             )
-        self.token_key_norm = nn.RMSNorm(128, eps=self.eps)
+        self.token_key_norm = RMSNorm(128, eps=self.eps)
         self.key_value_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
         self.key_gate_projection = nn.Linear(128, 128, bias=False, dtype=torch.float32)
         self.key_norm = nn.RMSNorm(128, eps=self.eps, dtype=torch.float32)
@@ -126,41 +120,30 @@ class FlashCompressedIndexer(nn.Module):
             self.ratio,
         )
         if raw.shape[0]:
-            values = self.key_value_projection(raw.float())
-            gates = self.key_gate_projection(raw.float())
-            pooled = gated_pool(
-                values, gates, self.intra_group_ape, self.key_norm.weight, self.eps
-            ).bfloat16()
-            quant, scales = fwht_quantize(
-                rotate_indexer(
-                    pooled, group_positions, self.rope_dim, self.rope_parameters
-                )
-            )
-            if mqa_logits_use_mx_scales():
-                scales = (scales.view(torch.int32) >> 23) * 0x01010101
-            write_pool(
-                cache, km.block_table, group_owner, groups, group_live, quant, scales
+            pool_quantize_write(
+                self.key_value_projection(raw.float()),
+                self.key_gate_projection(raw.float()),
+                self.intra_group_ape,
+                self.key_norm.weight,
+                self.eps,
+                group_positions,
+                self.rope_parameters,
+                cache,
+                km.block_table,
+                group_owner,
+                groups,
+                group_live,
+                mqa_logits_use_mx_scales(),
             )
         write_tails(
             keys, positions, tail, tm.block_table, km.query_start_loc, km.seq_lens
         )
-        query = self.query_projection(q_c)[0][:tokens].reshape(
-            tokens, self.num_heads, 128
-        )
-        query = rotate_indexer(
-            query, positions[..., :tokens], self.rope_dim, self.rope_parameters
-        )
-        quant_q, scales_q = fwht_quantize(query.reshape(-1, 128).bfloat16())
-        heads = 32 if self.num_heads <= 32 else 64
-        quant_q = F.pad(
-            quant_q.view(torch.uint8).reshape(tokens, self.num_heads, 128),
-            (0, 0, 0, heads - self.num_heads),
-        ).view(torch.float8_e4m3fn)
-        weights = self.head_weight_projection(hidden_states)[0][:tokens].float()
-        weights = weights * (self.num_heads**-0.5 * 128**-0.5)
-        weights = F.pad(
-            weights * scales_q.reshape(tokens, self.num_heads),
-            (0, heads - self.num_heads),
+        quant_q, weights = quantize_query(
+            self.query_projection(q_c)[0][:tokens].view(tokens, self.num_heads, 128),
+            self.head_weight_projection(hidden_states)[0][:tokens],
+            positions[..., :tokens],
+            self.rope_parameters,
+            32 if self.num_heads <= 32 else 64,
         )
         quant_q = quant_q[:, None]
         mx_scales, weights = mqa_logits_mx_inputs(quant_q, None, weights, torch.float32)
@@ -198,13 +181,13 @@ class FlashCompressedIndexer(nn.Module):
                 max_model_len=width,
                 indices=indices,
             )
-            recalled = select_groups(logits, bounds, self.group_budget)
-            output[begin:end].copy_(
-                expand_groups(
-                    recalled,
-                    logical[begin:end],
-                    self.ratio,
-                    active=live[begin:end],
-                )
+            select_expand_groups(
+                logits,
+                bounds,
+                self.group_budget,
+                logical[begin:end],
+                live[begin:end],
+                self.ratio,
+                output[begin:end],
             )
         return output
