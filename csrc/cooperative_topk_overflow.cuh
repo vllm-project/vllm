@@ -345,6 +345,7 @@ __device__ bool emit_staged_candidates(
   // per-CTA counts within 16 bits.
   const auto offsets = candidate_offsets<CS>(staged_above + smem->counter_gt,
                                              min(smem->counter_eq, remaining));
+  hist4096::trap_on_output_overflow(offsets.total_above + remaining, TopK);
   for (uint32_t i = tx; i < staged_above; i += hist4096::kBlockSize) {
     row_output[offsets.above + i] = stage[i] + my_start;
   }
@@ -368,12 +369,15 @@ __device__ bool emit_staged_candidates(
       }
     }
   }
+  hist4096::trap_on_output_overflow(
+      offsets.above + staged_above + smem->counter_gt, TopK);
   return true;
 }
 
 // Write every score above the exact pivot and the first `remaining` equal to
 // it.
-template <uint32_t CS, bool UseResident, typename SmemType, typename InT>
+template <uint32_t TopK, uint32_t CS, bool UseResident, typename SmemType,
+          typename InT>
 __device__ void emit_exact_candidates(const InT* __restrict__ row_input,
                                       int32_t* __restrict__ row_output,
                                       uint32_t my_start, uint32_t my_len,
@@ -395,6 +399,8 @@ __device__ void emit_exact_candidates(const InT* __restrict__ row_input,
   const uint32_t local_above = smem->counter_gt;
   const uint32_t local_equal = min(smem->counter_eq, remaining);
   const auto offsets = candidate_offsets<CS>(local_above, local_equal);
+  hist4096::trap_on_output_overflow(offsets.above + local_above, TopK);
+  hist4096::trap_on_output_overflow(offsets.total_above + remaining, TopK);
   for (uint32_t i = tx; i < local_above; i += hist4096::kBlockSize) {
     row_output[offsets.above + i] = s_topk[i] + my_start;
   }
@@ -443,9 +449,9 @@ __device__ __noinline__ bool unbounded_round0_single_key(
   if (keys.lo != keys.hi) {
     return false;
   }
-  emit_exact_candidates<CS, UseResident>(row_input, row_output, my_start,
-                                         my_len, keys.lo, TopK - coarse_above,
-                                         smem, s_topk);
+  emit_exact_candidates<TopK, CS, UseResident>(
+      row_input, row_output, my_start, my_len, keys.lo, TopK - coarse_above,
+      smem, s_topk);
   return true;
 }
 
@@ -564,7 +570,7 @@ __device__ __noinline__ void exact_topk_rescan_cluster(
     return;
   }
 
-  emit_exact_candidates<CS, UseResident>(
+  emit_exact_candidates<TopK, CS, UseResident>(
       row_input, row_output, my_start, my_len, pivot, remaining, smem, s_topk);
 }
 

@@ -487,6 +487,7 @@ __device__ void large_topk(const InT* __restrict__ row_input,
 
   const uint32_t prefix_above = s_prefix_packed & kAboveMask;
   const uint32_t prefix_equal = s_prefix_packed >> kAboveBits;
+  hist4096::trap_on_output_overflow(prefix_above + la, TopK);
 
   // Write to global output
   for (uint32_t i = tx; i < la; i += hist4096::kBlockSize) {

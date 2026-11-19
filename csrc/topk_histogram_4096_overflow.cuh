@@ -237,6 +237,7 @@ __device__ void exact_topk_rescan(const InT* __restrict__ scores,
   } else {
     scan_scores<BlockSize, VecSize>(scores, length, collect);
   }
+  trap_on_output_overflow(smem->output_counter, TopK);
   __syncthreads();
 }
 
@@ -447,6 +448,7 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
       }
     }
   }
+  trap_on_output_overflow(smem->output_counter, TopK);
   __syncthreads();
   return true;
 }
