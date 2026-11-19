@@ -73,7 +73,6 @@ from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
     rebuild_mm_placeholders,
-    validate_qwen_image_features,
 )
 from .protocol import (
     GenerateDerenderChoice,
@@ -385,9 +384,14 @@ class ServingTokens(GenerateBaseServing):
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
 
-            if "image" in mm_kwargs:
-                renderer = self.online_renderer.renderer
-                processor = renderer.mm_processor
+            renderer = self.online_renderer.renderer
+            processor = renderer.mm_processor
+            if processor is None and any(mm_kwargs.values()):
+                return self.create_error_response(
+                    "This server does not accept preprocessed multimodal features",
+                    param="features",
+                )
+            if processor is not None:
                 allow_shm_handles = isinstance(
                     renderer.mm_processor_cache, ShmObjectStoreSenderCache
                 )
@@ -396,23 +400,25 @@ class ServingTokens(GenerateBaseServing):
                     if request.ec_transfer_params
                     else None
                 )
-                items = mm_kwargs["image"]
+                allow_metadata_only = bool(ec_config and ec_config.is_ec_consumer)
+                kwargs_data = features.kwargs_data or {}
                 try:
-                    payloads = (features.kwargs_data or {}).get("image")
-                    if processor is not None and payloads is not None:
-                        for payload, item in zip(payloads, items, strict=True):
-                            if payload is None or item is None:
+                    for modality, items in mm_kwargs.items():
+                        payloads = kwargs_data.get(modality)
+                        for i, (item, placeholder) in enumerate(
+                            zip(items, mm_placeholders[modality], strict=True)
+                        ):
+                            if item is None:
                                 continue
                             if allow_shm_handles and "address" in item:
                                 continue
-                            processor.validate_mm_field_layout("image", item)
-                    validate_qwen_image_features(
-                        features,
-                        items,
-                        self.model_config.hf_config,
-                        allow_ec_metadata=bool(ec_config and ec_config.is_ec_consumer),
-                        allow_shm_handles=allow_shm_handles,
-                    )
+                            processor.validate_preprocessed_item(
+                                modality,
+                                item,
+                                placeholder_length=placeholder.length,
+                                metadata_only=payloads is None or payloads[i] is None,
+                                allow_metadata_only=allow_metadata_only,
+                            )
                 except ValueError as exc:
                     return self.create_error_response(exc, param="features")
 

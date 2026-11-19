@@ -155,8 +155,8 @@ exposes placeholder-metadata or `keep_on_cpu` fields (for example
 `mm_metadata` entry is a base64-encoded `MultiModalKwargsItem` containing
 only those fields, not encoder inputs such as `pixel_values`.
 
-The Python generate endpoint checks the batching layout of inline image fields
-against the active model's processor before sending them to the engine.
+The Python generate endpoint delegates validation of preprocessed features to
+the active model's multimodal processor before sending them to the engine.
 Forward the field layouts as returned by render.
 
 The arrays in `mm_hashes`, `mm_placeholders`, `kwargs_data`, and
@@ -256,9 +256,9 @@ print(prefill_response["choices"][0]["token_ids"])
 Single-process clients can keep passing the full render response to
 `/inference/v1/generate` unchanged. If both payloads contain the same field,
 `mm_metadata` supplies the effective value. For Qwen2-VL and Qwen2.5-VL images,
-the Python frontend rejects malformed decoded tensors or grid and placeholder
-mismatches with HTTP 400 before submitting the request to the engine. Image grids must
-describe exactly one frame. Across all models and modalities, decoded fields
+the processor rejects malformed decoded tensors or grid and placeholder
+mismatches with HTTP 400 before engine submission. Image grids must describe
+exactly one frame. Across all models and modalities, decoded fields
 named `self` in either `kwargs_data` or `mm_metadata` are reserved and rejected
 with HTTP 400.
 

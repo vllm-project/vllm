@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import (
+    PreTrainedConfig,
     Qwen2_5_VLConfig,
     Qwen2VLConfig,
     SmolVLMConfig,
@@ -26,7 +27,6 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
     rebuild_mm_placeholders,
-    validate_qwen_image_features,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -50,22 +50,28 @@ from vllm.multimodal.inputs import (
 )
 
 
-def test_validate_transport_layout_uses_model_processor(tmp_path):
-    SmolVLMConfig(architectures=["SmolVLMForConditionalGeneration"]).save_pretrained(
-        tmp_path
-    )
+def _build_processor(tmp_path, config: PreTrainedConfig):
+    config.save_pretrained(tmp_path)
     tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
         unk_token="[UNK]",
     )
-    config = ModelConfig(str(tmp_path), dtype="float32", max_model_len=512)
-    processor = MULTIMODAL_REGISTRY.create_processor(config, tokenizer=tokenizer)
+    model_config = ModelConfig(str(tmp_path), dtype="float32", max_model_len=512)
+    return MULTIMODAL_REGISTRY.create_processor(model_config, tokenizer=tokenizer)
+
+
+def test_validate_transport_layout_uses_model_processor(tmp_path):
+    processor = _build_processor(
+        tmp_path,
+        SmolVLMConfig(architectures=["SmolVLMForConditionalGeneration"]),
+    )
     embeds = torch.zeros(2, 3)
 
     item = MultiModalKwargsItem(
         {"image_embeds": MultiModalFieldElem(embeds, MultiModalBatchedField())}
     )
-    processor.validate_mm_field_layout("image", item)
+    options = dict(placeholder_length=2, metadata_only=False, allow_metadata_only=False)
+    processor.validate_preprocessed_item("image", item, **options)
 
     item = MultiModalKwargsItem(
         {
@@ -75,14 +81,29 @@ def test_validate_transport_layout_uses_model_processor(tmp_path):
         }
     )
     with pytest.raises(ValueError, match="Invalid batching layout.*image_embeds"):
-        processor.validate_mm_field_layout("image", item)
+        processor.validate_preprocessed_item("image", item, **options)
 
 
-@pytest.mark.parametrize("config_cls", [Qwen2VLConfig, Qwen2_5_VLConfig])
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param((Qwen2VLConfig, "Qwen2VLForConditionalGeneration"), id="qwen2-vl"),
+        pytest.param(
+            (Qwen2_5_VLConfig, "Qwen2_5_VLForConditionalGeneration"), id="qwen2.5-vl"
+        ),
+    ],
+)
+def qwen_feature_processor(request, tmp_path_factory):
+    config_cls, architecture = request.param
+    config = config_cls(architectures=[architecture])
+    return _build_processor(tmp_path_factory.mktemp(architecture), config), config
+
+
 @pytest.mark.parametrize(
     "variant",
     [
         "valid",
+        "embeds",
         "grid-override",
         "patch-count",
         "empty",
@@ -92,7 +113,8 @@ def test_validate_transport_layout_uses_model_processor(tmp_path):
         "missing-ec",
     ],
 )
-def test_validate_decoded_qwen_image_features(config_cls, variant):
+def test_validate_decoded_qwen_image_features(qwen_feature_processor, variant):
+    processor, config = qwen_feature_processor
     grid = MultiModalBatchedField(keep_on_cpu=True)
     pixels = MultiModalFlatField(slices=[slice(0, 256)])
     image = MultiModalKwargsItem(
@@ -104,6 +126,12 @@ def test_validate_decoded_qwen_image_features(config_cls, variant):
     metadata = MultiModalKwargsItem({"image_grid_thw": image["image_grid_thw"]})
     if variant in ("grid-override", "patch-count"):
         metadata["image_grid_thw"] = MultiModalFieldElem(torch.tensor([1, 2, 2]), grid)
+    elif variant == "embeds":
+        image.pop("pixel_values")
+        image["image_embeds"] = MultiModalFieldElem(
+            torch.zeros(64, config.get_text_config().hidden_size),
+            MultiModalFlatField(slices=[slice(0, 64)]),
+        )
     elif variant == "empty":
         image = MultiModalKwargsItem({})
     elif variant == "rank":
@@ -138,14 +166,38 @@ def test_validate_decoded_qwen_image_features(config_cls, variant):
         kwargs_data={"image": [payload]},
         mm_metadata={"image": [encode_mm_kwargs_item(metadata)]},
     )
-    items = mm_kwargs_from_features(features)["image"]
-    config = config_cls()
-    options = dict(allow_ec_metadata=variant == "ec-metadata", allow_shm_handles=False)
-    if variant in ("valid", "ec-metadata"):
-        validate_qwen_image_features(features, items, config, **options)
+    (item,) = mm_kwargs_from_features(features)["image"]
+    assert item is not None
+    options = dict(
+        placeholder_length=features.mm_placeholders["image"][0].length,
+        metadata_only=payload is None,
+        allow_metadata_only=variant == "ec-metadata",
+    )
+    if variant in ("valid", "embeds", "ec-metadata"):
+        processor.validate_preprocessed_item("image", item, **options)
     else:
         with pytest.raises(ValueError, match="image|pixel_values"):
-            validate_qwen_image_features(features, items, config, **options)
+            processor.validate_preprocessed_item("image", item, **options)
+
+
+def test_qwen_derived_processor_keeps_its_own_feature_rules(tmp_path):
+    processor = _build_processor(
+        tmp_path, Qwen2VLConfig(architectures=["JinaVLForRanking"])
+    )
+    item = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(
+                torch.tensor([1, 2, 2]), MultiModalBatchedField(keep_on_cpu=True)
+            )
+        }
+    )
+    processor.validate_preprocessed_item(
+        "image",
+        item,
+        placeholder_length=1,
+        metadata_only=True,
+        allow_metadata_only=False,
+    )
 
 
 @pytest.mark.parametrize("modality", ["image", "video", "audio"])

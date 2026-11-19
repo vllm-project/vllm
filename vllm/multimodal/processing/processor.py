@@ -1195,6 +1195,23 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     f"Invalid batching dimension for {modality} field {key!r}"
                 )
 
+    def validate_preprocessed_item(
+        self,
+        modality: str,
+        item: MultiModalKwargsItem,
+        *,
+        placeholder_length: int,
+        metadata_only: bool,
+        allow_metadata_only: bool,
+    ) -> None:
+        """Raise `ValueError` for invalid preprocessed input before admission.
+
+        `metadata_only` describes the submitted item. `allow_metadata_only`
+        indicates that an encoder-cache consumer can supply its embeddings.
+        """
+        if modality == "image" and not metadata_only:
+            self.validate_mm_field_layout(modality, item)
+
     @abstractmethod
     def _get_prompt_updates(
         self,

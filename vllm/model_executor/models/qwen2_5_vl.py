@@ -111,8 +111,8 @@ from .interfaces import (
 )
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
+    Qwen2VLFeatureProcessor,
     Qwen2VLMultiModalDataParser,
-    Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
 )
 from .utils import (
@@ -1167,7 +1167,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         )
 
 
-class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
+class Qwen2_5_VLMultiModalProcessor(Qwen2VLFeatureProcessor):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
