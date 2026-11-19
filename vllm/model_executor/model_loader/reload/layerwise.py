@@ -9,6 +9,7 @@ from weakref import WeakKeyDictionary, WeakSet
 import torch
 
 from vllm.config import ModelConfig
+from vllm.config.quantization import layer_target_spec_scope
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -380,7 +381,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
             if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
             else nullcontext()
         )
-        with timing_context:
+        with timing_context, layer_target_spec_scope(layer):
             quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
@@ -442,7 +443,7 @@ def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> N
             if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
             else nullcontext()
         )
-        with timing_context:
+        with timing_context, layer_target_spec_scope(layer):
             quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would

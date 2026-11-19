@@ -39,6 +39,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExpert
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    aiter_mxfp4_q_dtype_a,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -767,6 +770,10 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
 _FP8 = current_platform.fp8_dtype()
 _MXFP8_MOE = {"moe": {"weight": "mxfp4", "activation": "mxfp8"}}
 _NULL_MOE = {"moe": {"weight": "mxfp4", "activation": None}}
+_UNSET_MOE = {"moe": "mxfp4"}
+_TARGETS = {"targets": {"re:.*experts": "mxfp4"}}
+_SILU = MoEActivation.SILU
+_SWIGLUOAI = MoEActivation.SWIGLUOAI
 
 
 def _aiter_on_gfx950() -> bool:
@@ -781,166 +788,75 @@ def _aiter_on_gfx950() -> bool:
     not _aiter_on_gfx950(), reason="Requires supported ROCm AITER on gfx950"
 )
 @pytest.mark.parametrize(
-    "select",
-    [
-        mxfp4_oracle.select_mxfp4_moe_backend,
-        mxfp4_oracle.select_deepseek_v4_mxfp4_moe_backend,
-    ],
-    ids=["mxfp4", "deepseek-v4"],
-)
-@pytest.mark.parametrize(
-    "config, layer_spec, strict, expected",
+    "config, layer_spec, strict, model_type, activation, expected",
     [
         # From `quantization_config.moe`: MXFP8 -> fp8, null -> bf16.
-        pytest.param(_MXFP8_MOE, None, "0", _FP8, id="config-mxfp8"),
-        pytest.param(_NULL_MOE, None, "0", torch.bfloat16, id="config-null"),
-        # Without a request, the conversion path picks the default, unless strict
-        # mode forbids adding activation quantization.
-        pytest.param({"moe": "mxfp4"}, None, "0", None, id="config-unset"),
+        pytest.param(_MXFP8_MOE, None, "0", None, _SILU, _FP8, id="mxfp8"),
+        pytest.param(_NULL_MOE, None, "0", None, _SILU, torch.bfloat16, id="null"),
+        pytest.param(_MXFP8_MOE, None, "1", None, _SILU, _FP8, id="mxfp8-strict"),
+        # Without a request, main's activations: MXFP8, except AITER's choice for
+        # gpt-oss checkpoint weights, unless strict mode forbids adding activation
+        # quantization.
+        pytest.param(_UNSET_MOE, None, "0", None, _SILU, _FP8, id="unset"),
+        pytest.param({}, None, "0", "gpt_oss", _SWIGLUOAI, None, id="unset-gpt-oss"),
         pytest.param(
-            {"moe": "mxfp4"}, None, "1", torch.bfloat16, id="config-unset-strict"
+            _UNSET_MOE,
+            None,
+            "0",
+            "gpt_oss",
+            _SWIGLUOAI,
+            _FP8,
+            id="unset-online-gpt-oss",
         ),
-        pytest.param(_MXFP8_MOE, None, "1", _FP8, id="config-mxfp8-strict"),
+        pytest.param(
+            {}, None, "1", "gpt_oss", _SWIGLUOAI, torch.bfloat16, id="unset-strict"
+        ),
         # The layer's `targets` spec wins over the global `quantization_config.moe`,
         # which a `targets` config leaves unset.
         pytest.param(
-            {"targets": {"re:.*experts": "mxfp4"}},
+            _TARGETS,
             QuantSpec(weight=kMxfp4Static, activation=kMxfp8Dynamic),
             "0",
+            None,
+            _SILU,
             _FP8,
             id="layer-mxfp8",
         ),
         pytest.param(
-            {"targets": {"re:.*experts": "mxfp4"}},
-            QuantSpec(weight=kMxfp4Static, activation=None),
+            {},
+            QuantSpec(activation=None),
             "0",
+            "gpt_oss",
+            _SWIGLUOAI,
             torch.bfloat16,
-            id="layer-null",
+            id="layer-null-gpt-oss",
         ),
+        # SiTUv2 selects its dtype from AITER_SITUV2_*.
+        pytest.param(_NULL_MOE, None, "0", None, MoEActivation.SITU, None, id="situ"),
     ],
 )
 @pytest.mark.skip_global_cleanup
-def test_aiter_mxfp4_activation_follows_the_layer_request(
-    select, config, layer_spec, strict, expected, default_vllm_config, monkeypatch
+def test_aiter_mxfp4_q_dtype_a_follows_the_layer_request(
+    config,
+    layer_spec,
+    strict,
+    model_type,
+    activation,
+    expected,
+    default_vllm_config,
+    monkeypatch,
 ) -> None:
-    """Backend selection records the layer's activation request as the
-    `quant_dtype_a` interleaved AITER MXFP4 MoE runs with."""
+    """Interleaved AITER MXFP4 MoE runs with the layer's requested activation."""
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.model_config.quantization_config = quant_config_args(**config)
+    if model_type is not None:
+        monkeypatch.setattr(
+            default_vllm_config.model_config.hf_config, "model_type", model_type
+        )
     monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-    rocm_aiter_ops.refresh_env_variables()
-    try:
-        moe_config = make_dummy_moe_config()
-        moe_config.moe_backend = "aiter"
-        with layer_target_spec_scope(layer_spec):
-            select(moe_config)
-    finally:
-        monkeypatch.undo()
-        rocm_aiter_ops.refresh_env_variables()
-    assert moe_config.aiter_mxfp4_activation == expected
-
-
-@pytest.mark.skipif(
-    not _aiter_on_gfx950(), reason="Requires supported ROCm AITER on gfx950"
-)
-@pytest.mark.parametrize(
-    "convert, kwargs, selected, expected",
-    [
-        # A recorded request is kept.
-        pytest.param(
-            mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
-            {},
-            torch.bfloat16,
-            torch.bfloat16,
-            id="general-request",
-        ),
-        pytest.param(
-            mxfp4_oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
-            {},
-            torch.bfloat16,
-            torch.bfloat16,
-            id="gpt-oss-request",
-        ),
-        # Without a request, each path keeps main's behaviour: the general path
-        # forces MXFP8, gpt-oss keeps AITER's token-count default.
-        pytest.param(
-            mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
-            {},
-            None,
-            _FP8,
-            id="general-unset",
-        ),
-        pytest.param(
-            mxfp4_oracle.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
-            {},
-            None,
-            None,
-            id="gpt-oss-unset",
-        ),
-        # The separated A4W4 layout passes its own MXFP4 dtype.
-        pytest.param(
-            mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format,
-            {"use_separated_a4w4": True},
-            None,
-            None,
-            id="separated-a4w4",
-        ),
-    ],
-)
-def test_aiter_weight_conversion_applies_the_path_default_activation(
-    convert, kwargs, selected, expected
-):
-    """Without a request, the AITER BF16 weight conversion applies its path's
-    historical activation."""
-    layer = torch.nn.Module()
-    layer.moe_config = make_dummy_moe_config()
-    layer.moe_config.aiter_mxfp4_activation = selected
-    with torch.device(current_platform.device_type):
-        w13 = torch.zeros(4, 512, 128, dtype=torch.uint8)
-        w2 = torch.zeros(4, 256, 128, dtype=torch.uint8)
-        w13_scale = torch.full((4, 512, 8), 127, dtype=torch.uint8)
-        w2_scale = torch.full((4, 256, 8), 127, dtype=torch.uint8)
-    convert(
-        mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        layer=layer,
-        w13_weight=w13,
-        w2_weight=w2,
-        w13_weight_scale=w13_scale,
-        w2_weight_scale=w2_scale,
-        **kwargs,
-    )
-    assert layer.moe_config.aiter_mxfp4_activation == expected
-
-
-@pytest.mark.parametrize(
-    "activation, dsv4, expected",
-    [
-        pytest.param(MoEActivation.SILU, False, torch.bfloat16, id="interleaved"),
-        # SiTUv2 selects its dtype from AITER_SITUV2_*.
-        pytest.param(MoEActivation.SITU, False, None, id="situ"),
-        # DeepSeek V4.1 A4W4 keeps its MXFP4 activations.
-        pytest.param(MoEActivation.SILU, True, "fp4x2", id="dsv4-a4w4"),
-    ],
-)
-def test_aiter_mxfp4_kwargs_pass_the_layer_activation(activation, dsv4, expected):
-    """Interleaved AITER MXFP4 MoE passes the layer's activation to AITER."""
-    pytest.importorskip("aiter")
-    from aiter import dtypes
-
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        mxfp4_w4a16_extra_kwargs,
-    )
-
     moe_config = make_dummy_moe_config(activation=activation)
-    moe_config.use_mxfp4_w4a4_dsv4 = dsv4
-    moe_config.aiter_mxfp4_activation = torch.bfloat16
-    quant_config = SimpleNamespace(use_mxfp4_w4a16=True, w1_bias=None, w2_bias=None)
-    kwargs = mxfp4_w4a16_extra_kwargs(quant_config, moe_config)
-    if expected == "fp4x2":
-        expected = dtypes.fp4x2
-    assert kwargs.get("q_dtype_a") == expected
+    with layer_target_spec_scope(layer_spec):
+        assert aiter_mxfp4_q_dtype_a(moe_config) == expected
 
 
 # layout -> (activation keys it executes, on gfx950, SiTUv2 mode, DSv4 A4W4)

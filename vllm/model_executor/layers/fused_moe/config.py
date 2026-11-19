@@ -1415,9 +1415,6 @@ class FusedMoEConfig:
     # for any other model type. Resolved here, not in the forward path,
     # because get_current_vllm_config() isn't set there.
     use_mxfp4_w4a4_dsv4: bool = False
-    # Activation dtype that interleaved AITER MXFP4 MoE passes as `quant_dtype_a`,
-    # or None for AITER's token-count default. Set by the MXFP4 MoE oracle.
-    aiter_mxfp4_activation: torch.dtype | None = None
 
     def __post_init__(self):
         from vllm._aiter_ops import rocm_aiter_ops

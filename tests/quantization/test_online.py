@@ -34,6 +34,7 @@ from vllm.config.quantization import (
     QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
+    layer_target_spec_scope,
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
@@ -57,6 +58,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterMxfp4Experts,
+)
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import RequantizationSourceExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -81,6 +85,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
+    layer_target_spec,
     resolve_quant_method,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -438,6 +443,8 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
     args = quant_config_args(
         **({"moe": spec} if source == "moe" else {"targets": {prefix: spec}})
     )
+    # As `--quantization-config` does.
+    default_vllm_config.model_config.quantization_config = args
 
     def build_layer():
         with torch.device(current_platform.device_type):
@@ -481,7 +488,9 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
             activation=layer.moe_config.activation,
             use_separated_a4w4=layer.moe_config.use_mxfp4_w4a4_dsv4,
         )
-    layer.quant_method.process_weights_after_loading(layer)
+    # As the model loader does.
+    with layer_target_spec_scope(layer):
+        layer.quant_method.process_weights_after_loading(layer)
     if layout == "interleaved":
         assert _aiter_q_dtype_a(layer) == (
             current_platform.fp8_dtype() if activation == "mxfp8" else torch.bfloat16
@@ -500,52 +509,82 @@ def test_online_mxfp4_aiter_layer_honours_or_rejects_activation(
 @pytest.mark.skipif(
     not current_platform.is_rocm() or not on_gfx950(), reason="Requires ROCm gfx950"
 )
-@pytest.mark.parametrize("strict", ["0", "1"])
-@pytest.mark.parametrize("first", ["mxfp8", None])
+@pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
 def test_online_mxfp4_aiter_mixed_targets_activation_per_layer(
-    first,
-    strict,
-    default_vllm_config,
-    dist_init,
-    workspace_init,
-    monkeypatch,
+    reverse, default_vllm_config, dist_init, workspace_init, monkeypatch
 ):
-    """Layers with different `targets` activations each run their own."""
+    """Layers with different `targets` activations, built in either order, each
+    compute with their own: they match AITER's env-bound result for that dtype."""
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", strict)
     rocm_aiter_ops.refresh_env_variables()
-    default_vllm_config.model_config = ModelConfig(dtype=torch.bfloat16)
-    default_vllm_config.kernel_config = KernelConfig(moe_backend="aiter")
-    activations = [first, None if first == "mxfp8" else "mxfp8"]
-    prefixes = [f"model.layers.{i}.mlp.experts" for i in range(2)]
+    E, H = 8, 1024  # A shape AITER runs with both BF16 and MXFP8 activations.
+    activations = {0: None, 1: "mxfp8"}
     args = quant_config_args(
         targets={
-            prefix: {"weight": "mxfp4", "activation": activation}
-            for prefix, activation in zip(prefixes, activations)
+            f"model.layers.{i}.mlp.experts": {"weight": "mxfp4", "activation": act}
+            for i, act in activations.items()
         }
     )
-    quant_config = OnlineQuantizationConfig(args)
-    layers = []
-    for prefix in prefixes:
-        layer = FusedMoEFactory(
-            num_experts=4,
-            top_k=2,
-            hidden_size=256,
-            intermediate_size=256,
-            params_dtype=torch.bfloat16,
-            quant_config=quant_config,
-            prefix=prefix,
-        ).routed_experts
-        layer.to_empty(device=current_platform.device_type)
-        layer.w13_weight.data.zero_()
-        layer.w2_weight.data.zero_()
-        layer.quant_method.process_weights_after_loading(layer)
-        layers.append(layer)
-    dtypes = {"mxfp8": current_platform.fp8_dtype(), None: torch.bfloat16}
-    assert [_aiter_q_dtype_a(layer) for layer in layers] == [
-        dtypes[activation] for activation in activations
-    ]
+    default_vllm_config.model_config = ModelConfig(dtype=torch.bfloat16)
+    default_vllm_config.model_config.quantization_config = args
+    default_vllm_config.kernel_config = KernelConfig(moe_backend="aiter")
+    layers = {}
+    for i in sorted(activations, reverse=reverse):
+        with torch.device(DEVICE):
+            layer = FusedMoEFactory(
+                num_experts=E,
+                top_k=2,
+                hidden_size=H,
+                intermediate_size=H,
+                params_dtype=torch.bfloat16,
+                quant_config=OnlineQuantizationConfig(args),
+                prefix=f"model.layers.{i}.mlp.experts",
+            ).routed_experts
+        layer.to_empty(device=DEVICE)
+        torch.manual_seed(0)  # Same weights: outputs differ by activation only.
+        layer.w13_weight.data.normal_(std=H**-0.5)
+        layer.w2_weight.data.normal_(std=H**-0.5)
+        with layer_target_spec_scope(layer):  # As the model loader does.
+            layer.quant_method.process_weights_after_loading(layer)
+        layers[i] = layer
+    x = torch.randn(1, H, dtype=torch.bfloat16, device=DEVICE) * H**-0.5
+    topk_weights = torch.full((1, 2), 0.5, device=DEVICE)
+    topk_ids = torch.tensor([[0, 1]], dtype=torch.int32, device=DEVICE)
+
+    def run(layer):
+        return layer.forward_modular(x, topk_weights, topk_ids).float()
+
+    def rel(a, b):
+        return ((a - b).norm() / a.norm()).item()
+
+    out = {i: run(layer) for i, layer in layers.items()}
+    # BF16 vs MXFP8 is ~4e-2 here; the same dtype in both layers is ~5e-3.
+    gap = rel(out[0], out[1])
+    assert gap > 1e-2, "both layers computed with the same activation dtype"
+    # References: AITER's own BF16 / MXFP8 choice from the bound, no `q_dtype_a`.
+    for i, bound in ((0, str(2**31 - 1)), (1, "0")):
+        monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", bound)
+        kernel = layers[i].quant_method.moe_kernel
+        assert kernel is not None
+        assert isinstance(kernel.fused_experts, AiterMxfp4Experts)
+        kernel.fused_experts.q_dtype_a = None
+        reference = run(layers[i])
+        # MXFP8 is bitwise identical; BF16 may pick another tile config.
+        assert (
+            torch.equal(out[i], reference) if i else rel(out[i], reference) < 0.25 * gap
+        )
+
+
+def test_layer_target_spec_skips_layers_that_cannot_be_targets() -> None:
+    """A broad `targets` pattern also matching e.g. attention does not raise when
+    the model loader looks up each layer's spec."""
+    layer = torch.nn.Module()
+    layer.quant_config = OnlineQuantizationConfig(
+        quant_config_args(targets={"*self_attn*": "mxfp8"})
+    )
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    assert layer_target_spec(layer) is None
 
 
 def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
