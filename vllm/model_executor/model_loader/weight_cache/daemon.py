@@ -312,7 +312,13 @@ class WeightCacheDaemon:
         tensors, kinds, aliases = collect_tensors(self.model)
         manifest, source_storages = build_manifest(tensors, kinds)
         attrs = export_model_attrs(self.model)
+        from vllm.compilation.wrapper import remove_bytecode_hooks
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        remove_bytecode_hooks(self.model)
         self.model = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+        _ROPE_DICT.clear()
         del tensors, kinds
         gc.collect()
         torch.accelerator.empty_cache()

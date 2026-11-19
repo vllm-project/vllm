@@ -1528,6 +1528,39 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
         theirs.close()
 
 
+def test_daemon_capture_releases_registered_model_layers():
+    """Global layer registries must not retain the daemon's original model."""
+    import weakref
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+        record_bytes,
+    )
+
+    config = VllmConfig(model_config=ModelConfig(model=QWEN_CASE.model))
+    server = WeightCacheDaemon(config, 0, 0, "tcp://127.0.0.1:0")
+    model = torch.nn.Module()
+    model.register_parameter("weight", torch.nn.Parameter(torch.arange(4.0)))
+    server.model = model
+    config.compilation_config.static_forward_context["model"] = model
+    model_ref = weakref.ref(model)
+
+    server.capture_state()
+    del model
+    gc.collect()
+
+    assert model_ref() is None
+    assert not config.compilation_config.static_forward_context
+    assert server.state is not None
+    assert torch.equal(
+        record_bytes(
+            server.state.storages[0], server.state.manifest["storages"][0]["nbytes"]
+        ).view(torch.float32),
+        torch.arange(4.0),
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @create_new_process_for_each_test("spawn")
 def test_daemon_releases_cublas_workspaces():
