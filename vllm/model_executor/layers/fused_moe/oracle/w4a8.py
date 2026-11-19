@@ -87,7 +87,7 @@ def select_w4a8_moe_backend(
                 activation_format,
             )
             if supported:
-                logger.info_once("Using %s W4A8 MoE backend.", backend.value)
+                logger.debug_once("Using %s W4A8 MoE backend.", backend.value)
                 return backend, kernel_cls
             reasons.append(f"{kernel_cls.__name__}: {reason}")
 
