@@ -342,6 +342,14 @@ __global__ void __launch_bounds__(32 * KW)
 // into registers one group ahead. No load is predicated: out-of-range
 // columns/rows are clamped to valid addresses and discarded at the store, so
 // every load stays in flight (no execz regions).
+// Format A/B (gfx1201, gpt-oss-20b, one process alternating the two kernels
+// under a constant clock probe): an unfolded E4M3 variant of this kernel
+// (fp8_fp8 WMMA, per-group partial accumulator scaled by the (group, column)
+// E8M0 scale from a small LDS arena) reached 80.8 / 69.7 TF/s gate_up / down
+// at M=2048 and 16.4 / 17.3 at M=256 against 108.6 / 93.8 and 22.5 / 24.8 for
+// the fold, identical error vs the bf16 reference; 248 vs 180 VGPRs (no
+// spills), VALU/WMMA 3.30 vs 0.84 (the 8 scale FMAs per WMMA pair),
+// ds_load/WMMA 0.31 vs 0.25. The fold stays.
 // grid = (token blocks, ceil(N/BN)), block = 256.
 // ---------------------------------------------------------------------------
 template <typename T, int BN>
