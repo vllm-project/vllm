@@ -76,6 +76,10 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
 const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
+/// A UTF-8 character has at most 3 bytes before its last, and every token
+/// other than a skipped special token holds at least one byte.
+const MAX_PARTIAL_CHAR_TOKENS: usize = 3;
+
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
     /// Decide whether `token_id` can be anchored at its own first byte inside
     /// `new_chunk`, separately from the older tokens still pending.
@@ -161,10 +165,36 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
         }
         let (decoded, context_ids) = self.decode_prompt_context(&self.ids)?;
         self.ids = context_ids;
+        self.prefix_index = self.ids.len();
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
-            self.prefix_index = self.ids.len();
+            return Ok(());
         }
+        // The prompt ends partway through a character. Keep that character's
+        // tokens in the context so it decodes whole once completed (byte
+        // fallback decodes a byte run only as a whole), and keep the prompt
+        // text before it out of the output. A byte-level BPE token can hold
+        // text and partial bytes together, so trimming may give the longer
+        // prefix.
+        let mut prefix = decoded.trim_end_matches('\u{FFFD}').to_owned();
+        let mut end = self.ids.len();
+        let mut steps = 0;
+        while end > 0 && steps < MAX_PARTIAL_CHAR_TOKENS {
+            end -= 1;
+            if self.skip_special_tokens && self.tokenizer.is_special_id(self.ids[end]) {
+                continue;
+            }
+            steps += 1;
+            let text = self.tokenizer.decode(&self.ids[..end], self.skip_special_tokens)?;
+            if !text.ends_with('\u{FFFD}') {
+                self.prefix_index = end;
+                if text.len() > prefix.len() {
+                    prefix = text;
+                }
+                break;
+            }
+        }
+        self.prefix = prefix;
         Ok(())
     }
 }
