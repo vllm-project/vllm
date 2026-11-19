@@ -1618,6 +1618,26 @@ mod tests {
         ));
     }
 
+    /// Nemotron-H Omni keeps no image field on the CPU, so the CPU subset of
+    /// its image feature is an empty kwargs map, accepted again as a
+    /// preprocessed feature without encoder input.
+    #[tokio::test]
+    async fn features_without_cpu_fields_round_trip_as_empty_kwargs() {
+        let info = nemotron_omni_info();
+        let mut tokens = vec![11; 100];
+        tokens.push(1018);
+        let features = info
+            .prepare_multimodal(vec![png_640x480()], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+        let subset: MmFeatures = features.iter().map(MmFeatureSpec::cpu_subset).collect();
+        assert_eq!(subset[0].data, Some(MmKwargsItem::new()));
+
+        let prepared = info.prepare_preprocessed(subset.clone(), tokens.len()).unwrap();
+        assert_eq!(prepared, subset);
+        assert!(info.lacks_encoder_input(&prepared[0]));
+    }
+
     /// A 640x480 image, which keeps a 30x40 patch grid (300 tokens inside
     /// `<img>`) on Nemotron-H Omni when the token budget allows.
     fn png_640x480() -> MediaContentPart {

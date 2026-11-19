@@ -33,6 +33,9 @@ pub struct InferenceServiceImpl {
 
 struct PreparedGrpcRequest {
     text_request: TextRequest,
+    /// `PromptInfo.media`, taken before the features move into the engine
+    /// request.
+    prompt_media: Vec<pb::MediaItem>,
     request_span: Span,
     started_at: Instant,
 }
@@ -45,6 +48,7 @@ impl InferenceServiceImpl {
     async fn prepare_request(
         &self,
         mut proto_request: pb::GenerateRequest,
+        response_opts: &ResponseOpts,
         data_parallel_rank: Option<u32>,
         stream: bool,
         rpc: &'static str,
@@ -113,13 +117,20 @@ impl InferenceServiceImpl {
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
-            Ok(text_request)
+            let prompt_media = match &text_request.mm_features {
+                Some(features) if response_opts.prompt_media => features
+                    .iter()
+                    .map(|feature| super::media::feature_to_proto(feature.cpu_subset(), true))
+                    .collect::<Result<_, _>>()?,
+                _ => Vec::new(),
+            };
+            Ok((text_request, prompt_media))
         }
         .instrument(request_span.clone())
         .await;
 
-        let text_request = match result {
-            Ok(text_request) => text_request,
+        let (text_request, prompt_media) = match result {
+            Ok(prepared) => prepared,
             Err(status) => {
                 warn!(
                     parent: &request_span,
@@ -134,6 +145,7 @@ impl InferenceServiceImpl {
 
         Ok(PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
         })
@@ -169,9 +181,18 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
-        } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
+        } = self
+            .prepare_request(
+                proto_req,
+                &response_opts,
+                data_parallel_rank,
+                false,
+                "Generate",
+            )
+            .await?;
 
         let stream = self
             .state
@@ -191,6 +212,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
             collected.prompt_logprobs.as_ref(),
+            prompt_media,
             &response_opts,
         );
 
@@ -235,10 +257,17 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            prompt_media,
             request_span,
             started_at,
         } = self
-            .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
+            .prepare_request(
+                proto_req,
+                &response_opts,
+                data_parallel_rank,
+                true,
+                "GenerateStream",
+            )
             .await?;
 
         let stream = self
@@ -250,9 +279,14 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
-        let response_stream =
-            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
-                .instrument(request_span);
+        let response_stream = generate_stream_responses(
+            stream,
+            response_opts,
+            prompt_media,
+            request_span.clone(),
+            started_at,
+        )
+        .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
 }
@@ -265,6 +299,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
 async fn generate_stream_responses(
     stream: impl TextOutputStream,
     response_opts: ResponseOpts,
+    mut prompt_media: Vec<pb::MediaItem>,
     request_span: Span,
     started_at: Instant,
     mut y: TryYielder<pb::GenerateResponse, Status>,
@@ -284,6 +319,7 @@ async fn generate_stream_responses(
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
                     prompt_logprobs.as_ref(),
+                    std::mem::take(&mut prompt_media),
                     &response_opts,
                 );
                 Ok(pb::GenerateResponse {
@@ -392,6 +428,7 @@ mod tests {
         let masks: Vec<_> = generate_stream_responses(
             events,
             ResponseOpts::default(),
+            Vec::new(),
             Span::none(),
             Instant::now(),
         )
