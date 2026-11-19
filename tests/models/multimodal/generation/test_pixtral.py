@@ -10,6 +10,8 @@ import torch
 from vllm import SamplingParams
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.model_executor.models.pixtral import (
+    VisionEncoderArgs,
+    VisionTransformer,
     _apply_rotary_emb_vit_complex,
     _apply_rotary_emb_vit_real,
     _make_merge_indices,
@@ -74,6 +76,31 @@ FIXTURE_LOGPROBS_CHAT = {
 }
 
 OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
+
+
+@pytest.mark.usefixtures("dist_init", "default_vllm_config")
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("height,width", [(1040, 1040), (1040, 16), (16, 1040)])
+def test_vision_encoder_rejects_images_outside_rope_table(height, width, batch_size):
+    """Reject bad geometry before allocating patch embeddings or indexing RoPE."""
+    encoder = VisionTransformer(
+        VisionEncoderArgs(
+            hidden_size=32,
+            num_channels=3,
+            image_size=1024,
+            patch_size=16,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            rope_theta=10000,
+            image_token_id=10,
+        )
+    )
+    with pytest.raises(ValueError, match="Pixtral image dimensions"):
+        encoder(
+            [torch.zeros(3, 16, 16)] * (batch_size - 1)
+            + [torch.zeros(3, height, width)]
+        )
 
 
 @pytest.mark.parametrize(
