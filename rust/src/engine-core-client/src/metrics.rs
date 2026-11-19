@@ -532,8 +532,8 @@ fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats)
             let labels = MooncakeOperationLabels {
                 model_name: handles.labels.model_name.clone(),
                 engine: handles.labels.engine,
-                operation: operation.as_str().to_string(),
-                status: record.status.as_str().to_string(),
+                operation: operation.clone(),
+                status: record.status.clone(),
             };
             handles
                 .mooncake_operation_time_seconds
@@ -561,7 +561,7 @@ fn record_umbp_stats(handles: &SchedulerStatsHandles, stats: &UmbpStats) {
         let labels = UmbpOperationLabels {
             model_name: handles.labels.model_name.clone(),
             engine: handles.labels.engine,
-            operation: operation.as_str(),
+            operation: operation.clone(),
         };
         handles
             .umbp_transfer_submitted_total
@@ -710,9 +710,9 @@ mod tests {
 
     use crate::metrics::LoraInfoExporter;
     use crate::protocol::stats::{
-        KvConnectorStats, KvFetchReqsByStage, MooncakeOperation, MooncakeRecord, MooncakeStats,
-        MooncakeStatus, MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
-        SimpleCpuOffloadData, SimpleCpuOffloadStats,
+        KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
+        MultiConnectorStats, NixlStats, SchedulerStats, SimpleCpuOffloadData,
+        SimpleCpuOffloadStats,
     };
 
     fn names(values: &[&str]) -> BTreeSet<String> {
@@ -784,12 +784,12 @@ mod tests {
 
     fn mooncake_stats() -> MooncakeStats {
         MooncakeStats(BTreeMap::from([(
-            MooncakeOperation::LoadGet,
+            "load_get".to_owned(),
             vec![MooncakeRecord {
                 duration_seconds: 0.05,
                 num_keys: 3,
                 num_bytes: 1024,
-                status: MooncakeStatus::Ok,
+                status: "ok".to_owned(),
                 num_failed_keys: 0,
             }],
         )]))
