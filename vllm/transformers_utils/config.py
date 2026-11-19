@@ -198,6 +198,7 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
 # still carry an `auto_map`, which would take precedence over Transformers'
 # implementation under `trust_remote_code`
 _UPSTREAMED_ARCHITECTURES: set[str] = {
+    "ExaoneForCausalLM",
     "InternLM3ForCausalLM",
     "IQuestCoderForCausalLM",
 }

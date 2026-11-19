@@ -281,7 +281,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
-        "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
+        "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+        extras={"3.0": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"},
+        min_transformers_version="5.24.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50966"
+        },
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
