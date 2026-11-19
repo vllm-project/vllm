@@ -48,6 +48,14 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 ```
 
+!!! note
+    `--cpu-offload-gb` does not offload the weights that online quantization
+    creates: they stay in GPU memory. Only layers that are not quantized online
+    are offloaded. When `--cpu-offload-gb` offloads the MoE experts
+    (`--cpu-offload-params` empty or matching them), `nvfp4_per_token` stages
+    the full-precision experts on the CPU and moves them to the GPU one expert
+    at a time to quantize them.
+
 ## Supported Schemes
 
 | Scheme | Weight recipe | Activation recipe | Notes |
@@ -195,6 +203,13 @@ vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
 ```
 
 adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
+
+Similarly, the Quark MXFP4 checkpoint of Muse Spark Open keeps the routed experts of layers 0 and 61 in BF16. On ROCm, this rounds them to OCP MXFP4 at load, so every MoE layer runs the same AITER W4A4 experts (an opt-in numerics change):
+
+```bash
+vllm serve amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4 \
+  --quantization-config '{"targets":{"*layers.0.feed_forward.experts*":"mxfp4","*layers.61.feed_forward.experts*":"mxfp4"}}'
+```
 
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
