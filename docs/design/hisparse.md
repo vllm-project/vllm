@@ -203,9 +203,11 @@ token-sharded prefill. Each TP rank prefills its token shard with all heads;
 `supports_shardq_with_hisparse`. HiSparse stages host rows against the full-batch
 chunks, and `shardq_num_decodes` keeps the full-batch decode offsets aligned.
 When all attention layers use ShardQ, `DeepseekV32Model` enables the existing
-model-level sequence-parallel path automatically. DCP and PCP are not supported.
-Mixed speculative-verification steps whose HiSparse decode boundary disagrees
-with the ShardQ boundary skip ShardQ for that step.
+model-level sequence-parallel path automatically. The HY V4 sink-aware
+implementation keeps ordinary ShardQ support but does not enable this HiSparse
+combination. DCP and PCP are not supported. Mixed speculative-verification
+steps whose HiSparse decode boundary disagrees with the ShardQ boundary skip
+ShardQ for that step.
 
 ## Spill transaction
 

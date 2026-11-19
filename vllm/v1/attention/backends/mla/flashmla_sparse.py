@@ -104,6 +104,26 @@ def use_fp8_mixed_batch(
     )
 
 
+def _padded_prefill_query_heads(
+    prefill_query_heads: int,
+    num_heads: int,
+    use_hisparse_shardq: bool,
+    tensor_parallel_size: int,
+    prefill_padding: int,
+) -> int:
+    """Width of the padded prefill workspaces.
+
+    Only a HiSparse ShardQ step needs every TP rank's heads; without HiSparse
+    ShardQ uses the mixed-batch path and the separate prefill buffers stay at
+    the local head width.
+    """
+    shardq_query_heads = num_heads * tensor_parallel_size if use_hisparse_shardq else 0
+    return round_up(
+        max(prefill_query_heads, shardq_query_heads),
+        prefill_padding,
+    )
+
+
 # Under DCP each rank owns ~1/dcp of the top-k slots. From this many tokens on,
 # compacting them to the row front and bounding the kernel with `topk_length`
 # saves more than the per-call tile-scheduler rebuild it requires (the shared
@@ -374,6 +394,11 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
 
         decode: Decode | None = None
         prefill: Prefill | None = None
+
+        # True only for this rank's local ShardQ prefill kernel call. It
+        # selects padded_out as the output workspace; it is not a global
+        # ShardQ switch.
+        is_shardq_local: bool = False
 
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
@@ -781,6 +806,7 @@ class FlashMLASparseMetadataBuilder(
                 workspace_starts=prefill.workspace_starts,
                 chunks=chunks,
             ),
+            is_shardq_local=True,
         )
 
     def build(
@@ -951,15 +977,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # PCP+DCP all-gathers the query heads before the prefill kernel.
                 prefill_query_heads *= parallel_config.tensor_parallel_size
             # ShardQ exchanges a token shard so every rank's heads run in the
-            # prefill kernel; the padded output workspace must fit them.
-            padded_query_heads = max(
-                prefill_query_heads,
-                num_heads * parallel_config.tensor_parallel_size
-                if self.use_shardq
-                else 0,
+            # prefill kernel; the padded output workspace must fit them. Only
+            # HiSparse needs these wider buffers: without it ShardQ uses the
+            # mixed-batch path for local head counts below the BF16 threshold.
+            use_hisparse_shardq = (
+                self.use_shardq
+                and vllm_config.attention_config.hisparse_config is not None
             )
-            padded_prefill_query_heads = round_up(
-                padded_query_heads, self.prefill_padding
+            padded_prefill_query_heads = _padded_prefill_query_heads(
+                prefill_query_heads,
+                num_heads,
+                use_hisparse_shardq,
+                parallel_config.tensor_parallel_size,
+                self.prefill_padding,
             )
             self.workspace_specs.extend(
                 (shape, torch.bfloat16)
@@ -1320,14 +1350,15 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             _, prefill_bf16_workspace, *_, padded_out, compact_out = (
                 current_workspace_manager().get_simultaneous(*self.workspace_specs)
             )
-            if q.shape[1] == self.num_heads:
-                attn_out = compact_out[:num_mqa_tokens]
-            else:
+            if fp8_metadata.is_shardq_local:
                 # ShardQ's local-token call runs with every rank's heads. The
                 # padded workspace may be wider than the actual head count, so
                 # expose only the real heads to the copy and unshard paths.
                 assert q.shape[1] <= padded_out.shape[1]
                 attn_out = padded_out[:num_mqa_tokens, : q.shape[1]]
+            else:
+                assert q.shape[1] <= compact_out.shape[1]
+                attn_out = compact_out[:num_mqa_tokens, : q.shape[1]]
 
             if num_decode_tokens > 0:
                 attn_out[:num_decode_tokens] = _fp8_decode(
@@ -1651,25 +1682,33 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             // self.prefill_padding
             * self.prefill_padding
         )
-        if self._should_use_bf16_small_head_kernel(num_tokens, actual_num_heads):
+        use_small_head_kernel = self._should_use_bf16_small_head_kernel(
+            num_tokens, actual_num_heads
+        )
+        kernel_num_heads = (
+            actual_num_heads if use_small_head_kernel else padded_num_heads
+        )
+        if use_small_head_kernel:
             q = q[:, :actual_num_heads]
-            if out is not None:
-                out = out[:, :actual_num_heads]
         elif q.shape[1] < padded_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for BF16 sparse prefill kernel"
             )
             if out is None:
-                q_padded = q.new_empty((q.shape[0], padded_num_heads, q.shape[2]))
+                q_padded = q.new_empty((num_tokens, padded_num_heads, q.shape[2]))
             else:
-                *_, q_padded, _, _ = current_workspace_manager().get_simultaneous(
+                *_, q_workspace, _, _ = current_workspace_manager().get_simultaneous(
                     *self.workspace_specs
                 )
-                q_padded = q_padded[:num_tokens]
-                q_padded[:, actual_num_heads:].zero_()
-            q_padded[:, :actual_num_heads, :] = q
+                q_padded = q_workspace[:num_tokens, :padded_num_heads]
+            q_padded[:, actual_num_heads:padded_num_heads].zero_()
+            q_padded[:, :actual_num_heads].copy_(q[:, :actual_num_heads])
             q = q_padded
+
+        q = q[:, :kernel_num_heads]
+        if out is not None:
+            out = out[:, :kernel_num_heads]
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
         output, _, lse = flash_mla_sparse_fwd(

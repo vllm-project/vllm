@@ -27,6 +27,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.cp_common import DirectCPWorkspace, direct_cp_enabled
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -115,26 +116,26 @@ def build_shardq_split(
     common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
 ) -> ShardQSplit | None:
     """This step's `zigzag_split` over the TP group of the tokens after the
-    decodes (requests of at most 1 + num_speculative_tokens tokens). None when
+    decodes (requests the sparse-MLA builder classifies as decodes). None when
     too few tokens follow the decodes, none of their requests is longer than
     the top-k, a rank would own no tokens, or the decode boundary does not
     match the sparse-MLA metadata's.
     """
-    spec_config = vllm_config.speculative_config
-    num_spec = spec_config.num_speculative_tokens if spec_config else 0
+    decode_threshold = max_decode_query_len(vllm_config)
     num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-        split_decodes_and_prefills(common_attn_metadata, decode_threshold=1 + num_spec)
+        split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=decode_threshold
+        )
     )
     if vllm_config.attention_config.hisparse_config is not None:
-        # The sparse-MLA builder forces decode_threshold=1 and uniform decode
-        # lengths under HiSparse, so a speculative-verification token in a
-        # mixed batch is a prefill there. The indexer writes the token-sharded
-        # top-k layout from this split and the separate prefill path asserts
-        # both boundaries agree; skip ShardQ for this step rather than let them
-        # diverge.
+        # The sparse-MLA builder classifies decodes with the same threshold and
+        # requires uniform decode lengths under HiSparse. The indexer writes
+        # the token-sharded top-k layout from this split and the separate
+        # prefill path asserts both boundaries agree; skip ShardQ for this step
+        # rather than let them diverge.
         hs_num_decodes, _, hs_num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
-            decode_threshold=1,
+            decode_threshold=decode_threshold,
             require_uniform=True,
         )
         if (hs_num_decodes, hs_num_decode_tokens) != (

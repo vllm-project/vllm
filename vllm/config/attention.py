@@ -153,12 +153,13 @@ class AttentionConfig:
     HiSparse host-backed KV is supported only with the quantized DS-MLA cache
     formats and only with DCP and PCP disabled; when all attention layers use
     ShardQ the existing model-level sequence-parallel path is enabled
-    automatically. PCP is not supported. A mixed step's decode tokens stay
-    sharded by head (on the DCP path under DCP); steps whose HiSparse decode
-    boundary disagrees with the ShardQ speculative-verification boundary skip
-    ShardQ for that step. On ROCm, DeepSeek-V4.1 shards only its indexer
-    prefill this way and all-gathers the top-k back; its attention stays
-    sharded by head."""
+    automatically. The HY V4 sink-aware implementation keeps ordinary ShardQ
+    support but does not enable the HiSparse combination. PCP is not
+    supported. A mixed step's decode tokens stay sharded by head (on the DCP
+    path under DCP); steps whose HiSparse decode boundary disagrees with the
+    ShardQ speculative-verification boundary skip ShardQ for that step. On
+    ROCm, DeepSeek-V4.1 shards only its indexer prefill this way and all-gathers
+    the top-k back; its attention stays sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
