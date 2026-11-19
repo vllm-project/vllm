@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which MiniMax-M3.1 DSpark draft steps run on the drafter kernels
-(`VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1`).
+"""Which MiniMax-M3.1 DSpark draft steps run on the drafter kernels (on by default
+where `_config_refusal` and the runner's own checks allow them).
 
 A draft step of 1..MAX_REQS requests (7 query rows each) runs its 5 layers and
-final norm in launches of up to 8 requests; other steps run the stock layers.
+final norm in one launch (1..8 requests on the narrow or wide kernel, larger
+steps on the wide-R kernel); other steps run the stock layers.
 Every condition is decided from TP-replicated state: the kernels exchange
 partials in-kernel, so ranks that disagreed would wait on each other.
 """

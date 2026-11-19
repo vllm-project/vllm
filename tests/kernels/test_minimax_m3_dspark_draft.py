@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax-M3.1 DSpark draft fusions against the unfused ops they replace.
 
-- The context-KV CUDA kernel
-  (vllm/models/minimax_m3/common/ops/dspark_context_kv.py) against flashinfer
-  gemma_rmsnorm per layer, vllm._custom_ops.rotary_embedding (partial NeoX) and
-  vllm._custom_ops.reshape_and_cache_flash into FlashAttention-layout caches
-  [num_blocks, nkv, block_size, 2 * hd] viewed as
+- The context-KV kernel (vllm/models/minimax_m3/common/ops/dspark_context_kv.py;
+  CUDA, or the Triton launch on ROCm gfx950) against gemma_rmsnorm per layer
+  (flashinfer's, or MiniMax's ROCm one), vllm._custom_ops.rotary_embedding
+  (partial NeoX) and the cache write (reshape_and_cache_flash, or on ROCm
+  TRITON_ATTN's triton_reshape_and_cache_flash) into FlashAttention-layout
+  caches [num_blocks, nkv, block_size, 2 * hd] viewed as
   kv_cache.transpose(1, 2).split(hd, dim=-1).
 - The draft attention's fused q/k Gemma norm + RoPE against DFlash's q-norm,
   k-norm and RoPE.
@@ -24,8 +25,6 @@ from vllm.models.minimax_m3.common.ops.dspark_context_kv import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-flashinfer_norm = pytest.importorskip("flashinfer.norm")
-
 HEAD_DIM = 128
 ROTARY_DIM = 64
 BLOCK_SIZE = 16
@@ -34,6 +33,22 @@ EPS = 1e-6
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
 )
+
+
+def _gemma_rmsnorm(x, w, eps):
+    if current_platform.is_rocm():
+        from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import gemma_rmsnorm
+
+        return gemma_rmsnorm(x, w, eps)
+    return pytest.importorskip("flashinfer.norm").gemma_rmsnorm(x, w, eps)
+
+
+def _skip_without_writer():
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            pytest.skip("the ROCm context-KV launch is for gfx950 (OCP fp8)")
 
 
 def make_cos_sin_cache(max_pos, rotary_dim, dtype, device):
@@ -95,7 +110,7 @@ def reference_update(
     num_ctx, L, _, nkv, hd = all_kv.shape
     all_k = torch.stack(
         [
-            flashinfer_norm.gemma_rmsnorm(all_kv[:, layer, 0], k_norm_w[layer], EPS)
+            _gemma_rmsnorm(all_kv[:, layer, 0], k_norm_w[layer], EPS)
             for layer in range(L)
         ]
     )  # [L, num_ctx, nkv, hd]
@@ -112,6 +127,25 @@ def reference_update(
     all_k = k_flat.view(L, num_ctx, nkv, hd)
     for layer, a in enumerate(layers):
         kc, vc = a.kv_cache.transpose(1, 2).split(hd, dim=-1)
+        if current_platform.is_rocm():
+            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+                triton_reshape_and_cache_flash,
+            )
+
+            if kv_cache_dtype == "fp8":
+                kc = kc.view(current_platform.fp8_dtype())
+                vc = vc.view(current_platform.fp8_dtype())
+            triton_reshape_and_cache_flash(
+                all_k[layer],
+                all_v[:, layer].contiguous(),
+                kc,
+                vc,
+                slot_mapping,
+                kv_cache_dtype,
+                a._k_scale,
+                a._v_scale,
+            )
+            continue
         ops.reshape_and_cache_flash(
             all_k[layer],
             all_v[:, layer].contiguous(),
@@ -150,6 +184,7 @@ def assert_fp8_close(got, exp):
 def run_case(
     kv_cache_dtype, num_ctx, nkv, L, seed=0, rotary_dim=ROTARY_DIM, unit_scale=False
 ):
+    _skip_without_writer()
     torch.manual_seed(seed)
     device = "cuda"
     num_blocks = (num_ctx * 2 + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
@@ -203,6 +238,7 @@ def test_dspark_context_kv_short_rope(kv_cache_dtype, rotary_dim):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_dspark_context_kv_cuda_graph(kv_cache_dtype):
+    _skip_without_writer()
     torch.manual_seed(0)
     device = "cuda"
     num_ctx, nkv, L = 16, 1, 5
@@ -261,6 +297,7 @@ def test_dspark_context_kv_cuda_graph(kv_cache_dtype):
 def test_dspark_context_kv_supported_by_cache_layout():
     """The writer engages on the [nb, nkv, bs, 2 * 128] page that FLASH_ATTN
     and FLASHINFER_TS share, whatever the backend, and not on a 5-D cache."""
+    _skip_without_writer()
     layers = build_layers("fp8", 5, 1, 4, "cuda", seed=0, unit_scale=True)
     assert DSparkContextKVWriter.supported(layers)
     layers[0].kv_cache = torch.zeros(
@@ -283,6 +320,9 @@ class _CaptureAttention(torch.nn.Module):
         return torch.zeros_like(q, dtype=output_dtype)
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="the CUDA draft attention fusion"
+)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_draft_attention_fused_qk_norm_rope(
     dist_init, default_vllm_config, kv_cache_dtype

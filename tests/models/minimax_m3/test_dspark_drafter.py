@@ -10,9 +10,10 @@
   fused_minimax_m3_qknorm_rope_kv_insert, Triton unified attention non-causal
   within the query block over a 4096-key window, NCCL all-reduces) on random
   weights at the real shapes: every request's final hidden states and every
-  layer's new K/V rows, for draft steps of 1, 2, 3, 8 and 10 requests (two
-  launches, the last request padded as a FULL graph replay pads it), and a CUDA
-  graph replay of the 10-request step.
+  layer's new K/V rows, for draft steps of 1, 2, 3 and 8 requests (the narrow
+  and wide kernels) and 10, 17 and 32 requests (the wide-R kernel; at 10 the
+  last request padded as a FULL graph replay pads it), and a CUDA graph replay
+  of the 10-request step.
 
 The kernel package imports flydsl at module import, so these tests run in the
 ROCm images (where FlyDSL is installed); elsewhere they are skipped.
@@ -88,7 +89,9 @@ ROT, THETA, WINDOW, BLOCK, EPS = 64, 1e7, 4096, 128, 1e-6
 # Context lengths of the step's requests: windows that do and do not fill the
 # 4096 keys, a single key and partial blocks.
 CTX = [9000, 300, 4200, 1, 7000, 130, 2047, 15000, 600, 5000]
-REQS = [1, 2, 3, 8, 10]
+CTX += [4096, 127, 8191, 129, 3000, 12000, 1000, 4097, 50, 6000, 2]
+CTX += [9999, 256, 16000, 700, 4000, 128, 20000, 1500, 5555, 64, 11000]
+REQS = [1, 2, 3, 8, 10, 17, 32]
 FP8 = torch.float8_e4m3fn
 # Two paths that round differently drift apart by about one e4m3 step wherever
 # MXFP8 re-quantizes an activation, however small the first difference, and

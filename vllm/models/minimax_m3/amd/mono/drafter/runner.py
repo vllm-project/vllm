@@ -10,18 +10,25 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.models.minimax_m3.amd.mono.config import MonoUnsupported
 from vllm.models.minimax_m3.amd.mono.drafter import layout
 from vllm.models.minimax_m3.amd.mono.drafter.layer import build_drafter
 from vllm.models.minimax_m3.amd.mono.drafter.wide import build_wide
+from vllm.models.minimax_m3.amd.mono.drafter.wide_r import WideRLayout, build_wide_r
 from vllm.models.minimax_m3.amd.mono.peer_buffer import PeerBuffer
 from vllm.platforms import current_platform
 
-# the symmetric buffer: the narrow kernel's all-reduce slots, then the wide kernel's
-PEER_BYTES = layout.SYM_BYTES + layout.SYM_W_BYTES
+logger = init_logger(__name__)
+
+# the symmetric buffer: the narrow kernel's all-reduce slots, then the wide
+# kernel's, then the wide-R kernel's
+WIDE_R_LAYOUT = WideRLayout(layout.MAX_REQS)
+PEER_BYTES = layout.SYM_BYTES + layout.SYM_W_BYTES + WIDE_R_LAYOUT.sym_bytes
 WIDE_BASE = layout.SYM_BYTES
+WIDE_R_BASE = layout.SYM_BYTES + layout.SYM_W_BYTES
 WAIT_S = 10.0
 
 _GEMV = {
@@ -136,6 +143,15 @@ class DrafterRunner:
         wait = int(WAIT_S * 1e8)
         self.narrow = build_drafter(wait_ticks=wait)
         self.wide = build_wide(WIDE_BASE, wait_ticks=wait)
+        # draft steps of WIDE_R_MIN_REQS..MAX_REQS requests: one wide-R launch
+        # (False: launches of <= 8 requests, the reference the tests compare to)
+        self.wide_r = True
+        self.wide_r_max_reqs = WIDE_R_LAYOUT.max_reqs
+        self.scratch_wr = torch.zeros(
+            WIDE_R_LAYOUT.scratch_bytes, dtype=torch.uint8, device=dev
+        )
+        self.wide_r_fn = build_wide_r(WIDE_R_BASE, WIDE_R_LAYOUT, wait_ticks=wait)
+        self.tl = None  # timeline builds only: int64 stamps [256][TL_SLOTS]
         self.no_slots = torch.full(
             (layout.QPR * layout.MAX_REQS,), -1, dtype=torch.int64, device=dev
         )
@@ -179,6 +195,39 @@ class DrafterRunner:
             stream=torch.cuda.current_stream(),  # flydsl rejects torch.Stream
         )
 
+    def _launch_wide_r(self, x, out, bt, pos, slots, seq_lens, n) -> None:
+        pk = self.packed
+        tl = self.tl
+        self.wide_r_fn(
+            x.data_ptr(),
+            out.data_ptr(),
+            self.tab.data_ptr(),
+            pk["qkv_w"].data_ptr(),
+            pk["qkv_s"].data_ptr(),
+            pk["o_w"].data_ptr(),
+            pk["o_s"].data_ptr(),
+            pk["gu_w"].data_ptr(),
+            pk["gu_s"].data_ptr(),
+            pk["d_w"].data_ptr(),
+            pk["d_s"].data_ptr(),
+            self.final_norm.data_ptr(),
+            self.cos_sin.data_ptr(),
+            bt.data_ptr(),
+            pos.data_ptr(),
+            slots.data_ptr(),
+            seq_lens.data_ptr(),
+            self.scratch_wr.data_ptr(),
+            int(self.peers.local),
+            *self.pe,
+            self.step.data_ptr(),
+            self.health.data_ptr(),
+            0 if tl is None else tl.data_ptr(),
+            self.rank,
+            bt.stride(0),
+            n,
+            stream=torch.cuda.current_stream(),  # flydsl rejects torch.Stream
+        )
+
     def forward(
         self, positions: torch.Tensor, inputs_embeds: torch.Tensor
     ) -> torch.Tensor:
@@ -192,6 +241,13 @@ class DrafterRunner:
         out = torch.empty((n, layout.HIDDEN), dtype=torch.bfloat16, device=x.device)
         q = layout.QPR
         n_req = n // q
+        if self.wide_r and layout.WIDE_R_MIN_REQS <= n_req <= self.wide_r_max_reqs:
+            logger.info_once(
+                "MiniMax-M3 DSpark drafter: wide-R launch for %d requests", n_req
+            )
+            self._launch_wide_r(x, out, bt, positions, slots, md.seq_lens, n)
+            self.step.add_(1)
+            return out
         # a request reads only its own rows and cache and every GEMV row is per
         # token, so a step splits into independent launches (a fresh tag each)
         for r0 in range(0, n_req, 8):

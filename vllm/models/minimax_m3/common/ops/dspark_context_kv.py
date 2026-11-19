@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused DSpark context-KV write for all draft layers in one CUDA kernel.
+"""Fused DSpark context-KV write for all draft layers in one kernel (CUDA, and a
+Triton launch on ROCm gfx950: `amd/ops/dspark_context_kv.py`).
 
 Replaces the permute copy, per-layer K-norm launches + stack, positions.repeat,
 rotary_embedding and per-layer reshape_and_cache_flash calls in
@@ -57,6 +58,9 @@ class DSparkContextKVWriter:
         self._table_key: tuple | None = None
         self._cache_offsets: torch.Tensor | None = None
         self._scale_offsets: torch.Tensor | None = None
+        # ROCm addresses the layers by their addresses, not by offsets
+        self._cache_ptrs: torch.Tensor | None = None
+        self._scale_ptrs: torch.Tensor | None = None
 
     @staticmethod
     def _validate(layers: list) -> str | None:
@@ -103,8 +107,14 @@ class DSparkContextKVWriter:
 
     @staticmethod
     def supported(attn_layers: list) -> bool:
-        # The fp8 store is OCP E4M3; ROCm fnuz caches keep the base path.
-        if not current_platform.is_cuda() or not hasattr(
+        # The fp8 store is OCP E4M3: on ROCm the Triton launch takes gfx950, and
+        # gfx942's fnuz caches keep the base path.
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                return False
+        elif not current_platform.is_cuda() or not hasattr(
             torch.ops._C, "fused_minimax_m3_dspark_context_kv"
         ):
             return False
@@ -137,6 +147,14 @@ class DSparkContextKVWriter:
                 for a in layers
             ]
         )
+        self._cache_ptrs = table([a.kv_cache.data_ptr() for a in layers])
+        self._scale_ptrs = table(
+            [
+                getattr(a, name).data_ptr()
+                for name in ("_k_scale", "_v_scale")
+                for a in layers
+            ]
+        )
         self._table_key = key
 
     def __call__(
@@ -154,6 +172,23 @@ class DSparkContextKVWriter:
         if num_ctx == 0:
             return
         self._ensure_tables()
+        if current_platform.is_rocm():
+            from vllm.models.minimax_m3.amd.ops.dspark_context_kv import context_kv
+
+            context_kv(
+                all_kv,
+                k_norm_weight,
+                eps,
+                positions,
+                cos_sin_cache,
+                rotary_dim,
+                slot_mapping,
+                self._cache_ptrs,
+                self._scale_ptrs,
+                self._layers[0].kv_cache.shape[2],
+                self._kv_cache_dtype == "fp8",
+            )
+            return
         ops.fused_minimax_m3_dspark_context_kv(
             all_kv,
             k_norm_weight,
