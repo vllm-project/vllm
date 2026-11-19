@@ -28,9 +28,9 @@ def real_dispatch():
 
 @pytest.fixture(autouse=True)
 def _pin_dotprod_cutoff(request, monkeypatch):
-    """Keep M>4 on split-K so these tests cover it on every arch.
+    """Keep M>4 on split-K so these tests cover it.
 
-    SM90 and SM100f move the dot-product cutoff up to M=6-16 for most N.
+    The default dispatch keeps M=6-16 on dot-product for most N.
     """
     if "real_dispatch" in request.fixturenames:
         return
@@ -251,7 +251,7 @@ def test_single_token(N, K):
     [(224, 7168), (160, 7168), (320, 7168), (192, 6144), (160, 5120), (128, 3072)],
 )
 def test_pruned_router_shapes(real_dispatch, M, N, K):
-    """Expert-pruned routers stay on dot-product past M=4 on SM90/SM100f."""
+    """Expert-pruned routers stay on dot-product past M=4."""
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")

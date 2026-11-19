@@ -41,15 +41,6 @@ _DEFAULT_SPLITK_CONFIG = (6, 4)
 # (7168, 256)  # DSV3.2
 # (7168, 384)  # DSV4-Pro
 
-# Dot-product launches one CTA per column. While those fit in about two
-# waves it beats split-K well past M=4: up to the per-arch M below for
-# K >= 4096 and up to M=16 below that, on stock and expert-pruned routers.
-_SM100F_DOTPROD_MAX_M = 9
-_SM90_DOTPROD_MAX_M = 6
-_SMALL_K_DOTPROD_MAX_M = 16
-# H200 prefers wider dot-product blocks once M > 4.
-_SM90_LARGE_M_DOTPROD_BS = 256
-
 # SM100f-specific tuned configs
 _SM100F_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
     (6144, 256): {M: 256 for M in (1, 3, 4)},
@@ -83,36 +74,41 @@ _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = 
 }
 
 
-@cache
-def _arch() -> str | None:
-    from vllm.platforms import current_platform
-
-    if current_platform.is_device_capability_family(100):
-        return "sm100f"
-    if current_platform.is_device_capability(90):
-        return "sm90"
-    return None
-
-
 def _arch_tuned_configs() -> tuple[
     dict[tuple[int, int], dict[int, int]],
     dict[tuple[int, int], dict[int, tuple[int, int]]],
 ]:
-    arch = _arch()
-    if arch == "sm100f":
-        return _SM100F_TUNED_DOTPROD_BS, _SM100F_TUNED_SPLITK_CONFIGS
-    if arch == "sm90":
-        return _SM90_TUNED_DOTPROD_BS, _SM90_TUNED_SPLITK_CONFIGS
+    from vllm.platforms import current_platform
+
+    if current_platform.is_device_capability_family(100):
+        return (
+            _SM100F_TUNED_DOTPROD_BS,
+            _SM100F_TUNED_SPLITK_CONFIGS,
+        )
+    if current_platform.is_device_capability(90):
+        return (
+            _SM90_TUNED_DOTPROD_BS,
+            _SM90_TUNED_SPLITK_CONFIGS,
+        )
     return {}, {}
 
 
+@cache
+def _large_k_dotprod_config() -> tuple[int, int]:
+    """Largest dot-product M for K >= 4096, and its block size above M=4."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_device_capability_family(100):
+        return 9, 128  # B300
+    return 6, 256  # H200, and the conservative cutoff elsewhere
+
+
 def _dotprod_max_m(K: int, N: int) -> int:
-    arch = _arch()
-    if arch is None or 2 * num_compute_units() < N:
+    # Dot-product launches one CTA per column and beats split-K well past
+    # M=4 while those fit in about two waves, on stock and pruned routers.
+    if 2 * num_compute_units() < N:
         return _DEFAULT_DOTPROD_MAX_M
-    if K < 4096:
-        return _SMALL_K_DOTPROD_MAX_M
-    return _SM100F_DOTPROD_MAX_M if arch == "sm100f" else _SM90_DOTPROD_MAX_M
+    return 16 if K < 4096 else _large_k_dotprod_config()[0]
 
 
 class LLBf16Gemm:
@@ -139,8 +135,8 @@ class LLBf16Gemm:
         tuned_bs, tuned_splitk = _arch_tuned_configs()
         if _dotprod_max_m(K, N) >= M or K < 2048:
             default_bs = (
-                _SM90_LARGE_M_DOTPROD_BS
-                if _arch() == "sm90" and M > _DEFAULT_DOTPROD_MAX_M
+                _large_k_dotprod_config()[1]
+                if M > _DEFAULT_DOTPROD_MAX_M
                 else _DEFAULT_DOTPROD_BS
             )
             bs = tuned_bs.get((K, N), {}).get(M, default_bs)
