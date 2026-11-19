@@ -45,6 +45,7 @@ def _release(
 ) -> None:
     """Drop `blocks[start:]` from a session. `demote` also stops retaining
     those that no other session or running request uses."""
+    demoted = []
     # Tail first, so demoted blocks keep the tail-first eviction order.
     for i in range(len(blocks) - 1, start - 1, -1):
         block = blocks[i]
@@ -54,10 +55,13 @@ def _release(
         block.num_sessions -= 1
         if demote and block.retain_until and not (block.num_sessions or block.ref_cnt):
             block.retain_until = 0.0
-            pool = block.pool() if block.pool is not None else None
-            if pool is not None:
-                pool.free_block_queue.remove(block)
-                pool.free_block_queue.append(block)
+            demoted.append(block)
+    pool = demoted[0].pool() if demoted and demoted[0].pool is not None else None
+    if pool is not None:
+        # A closed session's blocks are the first to be reused.
+        for block in demoted:
+            pool.free_block_queue.remove(block)
+        pool.free_block_queue.prepend_n(demoted)
     del blocks[start:], keys[start:]
 
 

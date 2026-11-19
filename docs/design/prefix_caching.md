@@ -212,7 +212,7 @@ When the head block (least recently used block) of the free queue is cached, we 
 Requests that send a `session_id` (request body field or the `X-Session-ID` header) have the blocks they use evicted after all other cached blocks, and their next request finds those blocks faster. Nothing is pinned: the cache capacity is unchanged. Requests without a `session_id` are unaffected.
 
 * `--session-cache-ttl <seconds>`: how long a block stays retained after a session request last used it. The default is 600; `0` disables session retention.
-* `POST /close_session` with `{"session_id": "<id>"}`: ends a session early, for example at the end of an RL episode. Its blocks stay cached and are evicted in normal LRU order, except those another session shares, which stay retained.
+* `POST /close_session` with `{"session_id": "<id>"}`: ends a session early, for example at the end of an RL episode. Its blocks stay cached but are the first to be evicted, except those another session shares, which stay retained.
 
 Retained blocks outlive every other cached block until their TTL runs out, so sessions that end without a `/close_session` take cache away from requests without a `session_id`. On a server that mixes short-lived sessions with other traffic that relies on the cache, close sessions when they end or lower the TTL.
 

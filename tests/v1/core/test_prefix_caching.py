@@ -7396,6 +7396,8 @@ def test_session_end_stops_retaining_blocks(monkeypatch, end):
     if end == "close":
         manager.sessions.close("s")
         assert _retained_blocks(manager) == []
+        # A closed session's blocks are reused first, tail first.
+        manager.block_pool.get_new_blocks(1)
     else:
         now += 1
         _run_turn(manager, "late", list(range(200, 200 + 16)))
@@ -7405,4 +7407,4 @@ def test_session_end_stops_retaining_blocks(monkeypatch, end):
         manager.block_pool.get_new_blocks(6)
         assert len(_retained_blocks(manager)) == 3
     hit = _lookup(manager, make_request("r", tokens + [0], 16, sha256))[1]
-    assert hit == (4 if end == "close" else 3) * 16
+    assert hit == 3 * 16
