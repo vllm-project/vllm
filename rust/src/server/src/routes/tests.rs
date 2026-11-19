@@ -983,6 +983,43 @@ async fn dev_routes_follow_api_server_options() {
     }
 }
 
+/// `VLLM_ALLOW_RUNTIME_LORA_UPDATING` reaches the router through
+/// `ApiServerOptions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn lora_routes_follow_api_server_options() {
+    // A registered POST-only route answers GET with 405.
+    for (allow_runtime_lora_updating, expected) in [
+        (false, StatusCode::NOT_FOUND),
+        (true, StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    allow_runtime_lora_updating,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("build request"))
+                .await
+                .expect("call app");
+            assert_eq!(
+                response.status(),
+                expected,
+                "{uri} allow_runtime_lora_updating={allow_runtime_lora_updating}"
+            );
+        }
+
+        engine_task.abort_and_join().await;
+    }
+}
+
 /// Assert that `method uri` hits the 501 placeholder for the Python route
 /// `route`.
 async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
@@ -1295,68 +1332,6 @@ async fn generative_scoring_rejects_invalid_requests_before_submission() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cohere_routes_follow_the_python_gates() {
-    const CHAT: &str = "/cohere/v2/chat";
-    const RENDER: &str = "/cohere/v2/chat/render";
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-cohere-routes",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
-
-    async fn post_status(app: &axum::Router, uri: &str) -> StatusCode {
-        app.clone()
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("call app")
-            .status()
-    }
-
-    let enabled = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            scale_out: true,
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&enabled, "POST", CHAT, CHAT).await;
-    assert_route_not_supported(&enabled, "POST", RENDER, RENDER).await;
-
-    let no_scale_out = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&no_scale_out, "POST", CHAT, CHAT).await;
-    assert_eq!(
-        post_status(&no_scale_out, RENDER).await,
-        StatusCode::NOT_FOUND
-    );
-
-    let disabled = build_router_with_gates(
-        state,
-        RouteGates {
-            scale_out: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
-    assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn scale_out_generate_and_abort_routes_are_disabled_by_default() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-scale-out-disabled",
@@ -1663,44 +1638,6 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn tokenizer_info_route_follows_api_server_options() {
-    for enabled in [false, true] {
-        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-            b"engine-tokenizer-info",
-            default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
-        )
-        .await;
-        let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
-                    enable_tokenizer_info_endpoint: enabled,
-                    ..Default::default()
-                },
-            ),
-        ));
-
-        if enabled {
-            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
-        } else {
-            let response = app
-                .clone()
-                .call(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/tokenizer_info")
-                        .body(Body::empty())
-                        .expect("build request"),
-                )
-                .await
-                .expect("call app");
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
-    }
-}
-
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -1875,7 +1812,6 @@ where
                 dev_mode: true,
                 runtime_lora_updating: true,
                 scale_out: true,
-                ..RouteGates::default()
             },
         ),
         engine_task,

@@ -26,10 +26,7 @@ impl FromStr for Unsupported {
     fn from_str(_s: &str) -> Result<Self, Self::Err> {
         Err("argument is not implemented in Rust frontend yet
 
-Remove this unsupported argument to continue.
-
-Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-This may lead to unexpected behavior as the Rust frontend will completely ignore that argument."
+Remove this argument, or unset the environment variable bound to it, to continue."
             .to_string())
     }
 }
@@ -321,6 +318,8 @@ pub struct EngineUnsupportedArgs {
 /// Source of truth in Python vLLM:
 /// - `vllm.entrypoints.common.cli_args.BaseFrontendArgs`
 /// - `vllm.entrypoints.common.cli_args.FrontendArgs`
+/// - `vllm.envs`, for switches that Python exposes only as environment
+///   variables, which `vllm-rs` binds to hidden flags
 ///
 /// These are not engine args. They belong to the Python OpenAI-compatible
 /// frontend / API-server layer itself, for example chat-template configuration,
@@ -447,4 +446,24 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_flash_late_interaction: Option<Noop>,
+
+    /// Enable the `/tokenizer_info` endpoint. May expose chat
+    /// templates and other tokenizer configuration.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+
+    /// Expose the Cohere Chat v2 API at `/cohere/v2/chat`. Like Python, it is
+    /// set only through `VLLM_ENABLE_COHERE_API`.
+    #[arg(long, hide = true, env = "VLLM_ENABLE_COHERE_API")]
+    pub enable_cohere_api: Option<Unsupported>,
+
+    /// Keep Responses API responses in memory for retrieval, `background`, and
+    /// `previous_response_id`. Like Python, it is set only through
+    /// `VLLM_ENABLE_RESPONSES_API_STORE`.
+    #[arg(long, hide = true, env = "VLLM_ENABLE_RESPONSES_API_STORE")]
+    pub enable_responses_api_store: Option<Unsupported>,
 }
