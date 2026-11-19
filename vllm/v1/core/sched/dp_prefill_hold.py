@@ -549,9 +549,11 @@ class PrefillHold:
         sx, sa = sum(x), sum(add)
         if sa <= 0:
             return "cost"
+        # Arrivals are whole requests, so `a` expected tokens do the attention
+        # work of `a` tokens of full-size prefills, not of one `a`-token chunk.
         phi_hat = fit.features(
             [xr + a for xr, a in zip(x, add)],
-            [i + a * (ctx + a / 2) for i, a in zip(attn, add)],
+            [i + a * (ctx + min(size, budget) / 2) for i, a in zip(attn, add)],
         )
         c_hat = max(0.0, fit.predict_ms(phi_hat)) / 1e3 / (sx + sa)
         gain = decodes * sx * (extra / sx - c_hat)

@@ -43,12 +43,27 @@ def _extra_ms(tokens: list[int], attn: list[float]) -> float:
     return f + a * max(tokens) / 1e3 + b * sum(tokens) / 1e3 + c * max(attn) / 1e9
 
 
-def _measure(hold: PrefillHold, rng: random.Random, steps: int, max_work: int):
-    """Feeds `steps` measured mixed steps with 1 to `max_work` ranks prefilling."""
+def _measure(
+    hold: PrefillHold,
+    rng: random.Random,
+    steps: int,
+    max_work: int,
+    prompt_len: int | None = None,
+):
+    """Feeds `steps` measured mixed steps with 1 to `max_work` ranks prefilling,
+    each one or two whole `prompt_len`-token prompts with no cached prefix if
+    set."""
     for _ in range(steps):
         n_work = rng.randint(1, max_work)
-        tokens = [rng.randint(256, 8192) if r < n_work else 0 for r in range(RANKS)]
-        attn = [t * (rng.uniform(0, 50e3) + t / 2) for t in tokens]
+        if prompt_len is None:
+            tokens = [rng.randint(256, 8192) if r < n_work else 0 for r in range(RANKS)]
+            attn = [t * (rng.uniform(0, 50e3) + t / 2) for t in tokens]
+        else:
+            tokens = [
+                prompt_len * rng.randint(1, 2) if r < n_work else 0
+                for r in range(RANKS)
+            ]
+            attn = [t * prompt_len / 2 for t in tokens]
         period = T_DEC + _extra_ms(tokens, attn) / 1e3 * rng.uniform(0.99, 1.01)
         hold.update(
             [
@@ -58,14 +73,20 @@ def _measure(hold: PrefillHold, rng: random.Random, steps: int, max_work: int):
         )
 
 
-def _warm(hold: PrefillHold, rng: random.Random, max_work: int = RANKS) -> None:
+def _warm(
+    hold: PrefillHold,
+    rng: random.Random,
+    max_work: int = RANKS,
+    prompt_len: int | None = None,
+) -> None:
     decode_only = [_row(done=1, period=T_DEC, decodes=16)] * RANKS
     hold.update(decode_only)  # The first sync has no step to time.
     hold.update(decode_only)
-    _measure(hold, rng, 100, max_work)
-    # 50 req/s of 4K uncached tokens each.
+    _measure(hold, rng, 100, max_work, prompt_len)
+    # 50 req/s of 4K (or `prompt_len`) uncached tokens each.
+    uncached = prompt_len or 4000
     hold.update(
-        [_row(arrived=1500 / RANKS, arrived_uncached=4000 * 1500 / RANKS)] * RANKS
+        [_row(arrived=1500 / RANKS, arrived_uncached=uncached * 1500 / RANKS)] * RANKS
     )
 
 
@@ -122,6 +143,20 @@ def test_unsure_until_aligned_steps_are_measured():
     assert hold.update(_one_rank_queued()) == "unsure"
     _measure(hold, rng, 100, RANKS)
     assert hold.update(_one_rank_queued()) == "wait"
+
+
+def test_holds_when_every_prompt_has_one_length():
+    """Prompts of one length with no cached prefix, as in fixed-length
+    benchmarks, make attention work proportional to tokens in every measured
+    step, so the fit cannot split the per-token and attention costs. Expected
+    arrivals are whole prompts of that length, whose cost needs no such split:
+    it holds rather than releasing as unsure."""
+    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    _warm(hold, random.Random(0), prompt_len=1024)
+    idle = _row(period=T_DEC, decodes=16)
+    queued = _row(period=T_DEC, decodes=16, work=1, x=1024, x_attn=1024 * 512, queued=1)
+    assert hold.update([queued] + [idle] * (RANKS - 1)) == "wait"
+    assert hold.update([idle] * RANKS) == "idle"
 
 
 def test_idle_holds_only_where_a_lone_arrival_would_be_held():
