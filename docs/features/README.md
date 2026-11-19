@@ -4,6 +4,10 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Attention
+
+- [Bidirectional attention spans](bidirectional_spans.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

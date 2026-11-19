@@ -47,21 +47,26 @@ class BeamSearchSequence:
         prompt_text = prompt.get("prompt")
         cache_salt = prompt.get("cache_salt")
 
+        beam_input: TokensInput | MultiModalInput
         if prompt["type"] == "token":
-            return tokens_input(
+            beam_input = tokens_input(
                 self.tokens,
                 prompt=prompt_text,
                 cache_salt=cache_salt,
             )
-
-        return mm_input(
-            prompt_token_ids=self.tokens,
-            mm_kwargs=prompt["mm_kwargs"],
-            mm_hashes=prompt["mm_hashes"],
-            mm_placeholders=prompt["mm_placeholders"],
-            prompt=prompt_text,
-            cache_salt=cache_salt,
-        )
+        else:
+            beam_input = mm_input(
+                prompt_token_ids=self.tokens,
+                mm_kwargs=prompt["mm_kwargs"],
+                mm_hashes=prompt["mm_hashes"],
+                mm_placeholders=prompt["mm_placeholders"],
+                prompt=prompt_text,
+                cache_salt=cache_salt,
+            )
+        # Spans index the prompt, which every beam starts with.
+        if (spans := prompt.get("bidirectional_spans")) is not None:
+            beam_input["bidirectional_spans"] = spans
+        return beam_input
 
     def _build_encoder_decoder_inputs(
         self, prompt: EncoderDecoderInput

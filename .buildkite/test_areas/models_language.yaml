@@ -61,6 +61,27 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 35GB) Bidirectional Attention Spans"
+  device: h200_35gb
+  key: language-models-tests-bidirectional-spans
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/v1/
+  - vllm/config/
+  - vllm/inputs/
+  - vllm/multimodal/
+  - vllm/renderers/
+  - vllm/model_executor/models/interfaces.py
+  - vllm/model_executor/models/registry.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/models/gemma4.py
+  - vllm/model_executor/models/gemma4_mm.py
+  - vllm/model_executor/models/gemma4_mtp.py
+  - tests/models/language/generation/test_bidirectional_spans_gemma4.py
+  commands:
+    - pytest -v -s models/language/generation/test_bidirectional_spans_gemma4.py
+
 - label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid)"
   device: h200_35gb
   key: language-models-tests-hybrid
@@ -144,13 +165,14 @@ steps:
   commands:
     # docker/Dockerfile prebuilds these exact CUDA extensions in the test image.
     - python3 ../.buildkite/scripts/check-hybrid-test-deps.py
-    # Every test in the ignored files is hybrid_model; without --ignore the shard planner counts them as untimed work.
+    # The hybrid_model files are ignored so the shard planner does not count them as untimed work; the spans file has its own step.
     - >-
       pytest -v -s
       models/language/generation
       -m '(not core_model) and (not hybrid_model)'
       --ignore=models/language/generation/test_hybrid.py
       --ignore=models/language/generation/test_gdn_sleep_wake.py
+      --ignore=models/language/generation/test_bidirectional_spans_gemma4.py
   mirror:
     amd:
       automatic_shard: true
@@ -167,6 +189,7 @@ steps:
         -m '(not core_model) and (not hybrid_model)'
         --ignore=models/language/generation/test_hybrid.py
         --ignore=models/language/generation/test_gdn_sleep_wake.py
+        --ignore=models/language/generation/test_bidirectional_spans_gemma4.py
 
 - label: ":nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)"
   key: language-models-test-ppl

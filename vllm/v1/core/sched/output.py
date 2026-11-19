@@ -53,6 +53,8 @@ class NewRequestData:
     prompt_is_token_ids: list[bool] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    # See Request.bidirectional_spans.
+    bidirectional_spans: tuple[tuple[int, int], ...] = ()
 
     @classmethod
     def from_request(
@@ -79,6 +81,7 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            bidirectional_spans=request.bidirectional_spans,
         )
 
     def __setstate__(self, state: dict) -> None:

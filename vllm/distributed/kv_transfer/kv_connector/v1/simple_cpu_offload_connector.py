@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -86,6 +86,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         # Runs as kv_both, but is a best-effort cache: a dropped save is just a
         # future cache miss, so opt out of the producer-role default.
         return False
+
+    @classmethod
+    def supports_bidirectional_spans(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Offloaded blocks are looked up and stored by vLLM's block hashes.
+        return True
 
     def __init__(
         self,

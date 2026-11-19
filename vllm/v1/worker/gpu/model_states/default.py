@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -10,7 +11,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_transferred_mrope_position_delta,
 )
-from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
+from vllm.v1.attention.backends.utils import (
+    compute_bidirectional_span_ranges,
+    compute_mm_prefix_ranges,
+)
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -81,6 +85,10 @@ class DefaultModelState(ModelState):
             and self.model_config.is_mm_prefix_lm
         ):
             self.mm_prefix_ranges = {}
+        # Per-request bidirectional attention spans.
+        self.bidirectional_spans: dict[str, tuple[tuple[int, int], ...]] | None = None
+        if self.model_config.declares_bidirectional_spans:
+            self.bidirectional_spans = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.mm_prefix_ranges is not None:
@@ -114,6 +122,10 @@ class DefaultModelState(ModelState):
             )
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
+        if self.bidirectional_spans is not None and new_req_data.bidirectional_spans:
+            self.bidirectional_spans[new_req_data.req_id] = (
+                new_req_data.bidirectional_spans
+            )
 
     def get_mrope_position_delta(self, req_index: int) -> int | None:
         if self.rope_state is None:
@@ -125,6 +137,27 @@ class DefaultModelState(ModelState):
             self.mm_prefix_ranges.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
+        if self.bidirectional_spans is not None:
+            self.bidirectional_spans.pop(req_id, None)
+
+    def _bidirectional_span_ranges(
+        self, input_batch: InputBatch, num_reqs: int
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        assert self.bidirectional_spans is not None
+        if not input_batch.has_prefill:
+            return None
+        req_ids = input_batch.req_ids[:num_reqs]
+        starts = input_batch.num_computed_tokens_np[:num_reqs]
+        return compute_bidirectional_span_ranges(
+            [
+                self.bidirectional_spans.get(req_id, ())
+                if input_batch.is_prefilling_np[i]
+                else ()
+                for i, req_id in enumerate(req_ids)
+            ],
+            starts.tolist(),
+            (starts + np.diff(input_batch.query_start_loc_np[: num_reqs + 1])).tolist(),
+        )
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
@@ -279,6 +312,11 @@ class DefaultModelState(ModelState):
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
+            bidirectional_span_ranges=(
+                self._bidirectional_span_ranges(input_batch, num_reqs)
+                if self.bidirectional_spans and not for_capture
+                else None
+            ),
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
             req_idx=input_batch.idx_mapping_np,

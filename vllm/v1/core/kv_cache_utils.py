@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import bisect
 import copy
 import hashlib
 import math
 import os
+import sys
 import weakref
+from array import array
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import (
@@ -624,12 +627,79 @@ def _gen_prompt_embeds_extra_hash_keys(
     return [("prompt_embeds", embeds_hash)]
 
 
+def _bidirectional_span_digest(request: Request, start: int, end: int) -> bytes:
+    """SHA-256 of a span's token ids as little-endian int32, then of the
+    length-prefixed identifier, offset and length of each multimodal item
+    inside it. Like the block hasher, this relies on `mm_features` being sorted
+    by offset and non-overlapping, and InputProcessor keeps every item inside
+    one span."""
+    tokens = array("i", token_slice(request._all_token_ids, start, end))
+    if sys.byteorder != "little":
+        tokens.byteswap()
+    digest = hashlib.sha256(tokens.tobytes())
+    mm_features = request.mm_features
+    lo, hi = get_mm_features_in_window(mm_features, start, end)
+    for feature in mm_features[lo:hi]:
+        position = feature.mm_position
+        assert feature.identifier is not None
+        assert start <= position.offset and position.offset + position.length <= end
+        identifier = feature.identifier.encode()
+        digest.update(len(identifier).to_bytes(8, "little") + identifier)
+        digest.update((position.offset - start).to_bytes(8, "little"))
+        digest.update(position.length.to_bytes(8, "little"))
+    return digest.digest()
+
+
+def _gen_bidirectional_span_extra_hash_keys(
+    request: Request, start_token_idx: int, end_token_idx: int
+) -> list[tuple[str, int, int, bytes]]:
+    """Generate extra keys for the bidirectional spans that overlap a block.
+
+    A token in a span attends to the whole span, so the KV of a block that
+    overlaps a span depends on the span's later tokens, its multimodal items
+    and its bounds. Each key is ("bidirectional_span", start, end, digest),
+    with the bounds relative to the block start.
+
+    Args:
+        request: The request object.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+
+    Returns:
+        The keys of the spans that overlap the block, in token order.
+
+    """
+    spans = request.bidirectional_spans
+    if not spans:
+        return []
+    keys: list[tuple[str, int, int, bytes]] = []
+    # Spans are sorted and disjoint: skip those that end before the block.
+    first = bisect.bisect_right(request._bidirectional_span_ends, start_token_idx)
+    for i in range(first, len(spans)):
+        start, end = spans[i]
+        if start >= end_token_idx:
+            break
+        digest = request._bidirectional_span_digests.get((start, end))
+        if digest is None:
+            digest = _bidirectional_span_digest(request, start, end)
+            request._bidirectional_span_digests[(start, end)] = digest
+        keys.append(
+            (
+                "bidirectional_span",
+                start - start_token_idx,
+                end - start_token_idx,
+                digest,
+            )
+        )
+    return keys
+
+
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs, request specific metadata (e.g., LoRA names), and
-    hashed data from prompt embeddings.
+    the multi-modal inputs, request specific metadata (e.g., LoRA names),
+    hashed data from prompt embeddings, and bidirectional attention spans.
 
     Args:
         request: The request object.
@@ -654,9 +724,16 @@ def generate_block_hash_extra_keys(
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
+    span_keys = _gen_bidirectional_span_extra_hash_keys(
+        request, start_token_idx, end_token_idx
+    )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + prompt_embeds_keys
+        + span_keys
     )
 
     if not extra_keys:
@@ -674,6 +751,7 @@ def to_event_extra_keys(
     External KV event consumers parse the pre-tagging shapes: bare LoRA names
     and cache salts, `(mm_identifier, offset)` pairs and bare prompt-embeds
     digests. Events keep that format until consumers handle the tagged keys.
+    Bidirectional span keys are published as `(start, end, digest)`.
 
     Args:
         extra_keys: One entry per block, each as returned by
@@ -688,7 +766,10 @@ def to_event_extra_keys(
     event_keys = [
         None
         if keys is None
-        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        else tuple(
+            key[1:] if key[0] in ("mm", "bidirectional_span") else key[1]
+            for key in keys
+        )
         for keys in extra_keys
     ]
     return event_keys or None
@@ -1020,7 +1101,8 @@ def frontend_block_hashes(
     """Return the frontend's prompt block hashes, unless their count doesn't
     match the prompt, in which case the engine hashes the prompt itself."""
     block_hashes = request.block_hashes
-    if block_hashes is None:
+    if block_hashes is None or request.bidirectional_spans:
+        # Frontends do not compute span keys.
         return None
     prompt_ids = request.prompt_token_ids
     prompt_len = len(prompt_ids) if prompt_ids is not None else 0

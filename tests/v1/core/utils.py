@@ -281,6 +281,7 @@ def create_requests(
     block_size: int = 16,
     req_ids: list[str] | None = None,
     sampling_params: SamplingParams | None = None,
+    bidirectional_spans: list[tuple[int, int]] | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -354,6 +355,7 @@ def create_requests(
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
             block_hasher=block_hasher,
+            bidirectional_spans=bidirectional_spans,
         )
         requests.append(request)
     return requests

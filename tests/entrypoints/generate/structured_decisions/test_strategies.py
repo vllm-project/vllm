@@ -86,12 +86,16 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 def model(
-    architecture: str, logprobs_mode: str = "raw_logprobs", multimodal: bool = False
+    architecture: str,
+    logprobs_mode: str = "raw_logprobs",
+    multimodal: bool = False,
+    spans: bool = False,
 ) -> Any:
     return SimpleNamespace(
         architecture=architecture,
         logprobs_mode=logprobs_mode,
         supports_multimodal_inputs=multimodal,
+        declares_bidirectional_spans=spans,
     )
 
 
@@ -114,6 +118,9 @@ def test_strategy_selection():
         "Gemma4UnifiedForConditionalGeneration",
     ):
         assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
+        # Its reads set no spans, which such a checkpoint requires.
+        with pytest.raises(ValueError, match="bidirectional attention spans"):
+            select_read_strategy(model(gemma4, spans=True), generate)
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):

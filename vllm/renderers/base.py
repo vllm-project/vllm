@@ -80,6 +80,46 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
+def _client_span_prompt_len(prompt: Mapping[str, Any]) -> int | None:
+    """The length of a prompt that carries client-set bidirectional spans,
+    which index token ids that must reach the engine unchanged."""
+    if prompt.get("bidirectional_spans") is None:
+        return None
+    if "prompt_token_ids" not in prompt or "prompt_embeds" in prompt:
+        raise VLLMValidationError(
+            "bidirectional_spans requires a token-id prompt (prompt_token_ids).",
+            parameter="bidirectional_spans",
+        )
+    return len(prompt["prompt_token_ids"])
+
+
+def _check_client_spans_not_truncated(
+    prompt: Mapping[str, Any], prompt_len: int | None
+) -> None:
+    if prompt_len is not None and len(prompt["prompt_token_ids"]) != prompt_len:
+        raise VLLMValidationError(
+            "bidirectional_spans cannot be combined with prompt truncation or "
+            "padding, which move the token positions the spans index.",
+            parameter="bidirectional_spans",
+        )
+
+
+def _attach_client_spans(
+    engine_input: TokensInput | MultiModalInput, prompt: Mapping[str, Any]
+) -> None:
+    if (spans := prompt.get("bidirectional_spans")) is None:
+        return
+    if engine_input["type"] != "token":
+        # Placeholder expansion moves the token positions the spans index.
+        # Spans over multimodal prompts are set on the engine input after
+        # expansion.
+        raise VLLMValidationError(
+            "bidirectional_spans cannot be combined with multimodal data.",
+            parameter="bidirectional_spans",
+        )
+    engine_input["bidirectional_spans"] = spans
+
+
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
 
@@ -738,6 +778,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        span_prompt_len = _client_span_prompt_len(prompt)
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -752,6 +793,7 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        _check_client_spans_not_truncated(prompt, span_prompt_len)
 
         # Detokenize after truncation so the text matches the tokens sent
         # to the engine.
@@ -782,6 +824,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        span_prompt_len = _client_span_prompt_len(prompt)
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -796,6 +839,7 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        _check_client_spans_not_truncated(prompt, span_prompt_len)
 
         # Detokenize after truncation so the text matches the tokens sent
         # to the engine.
@@ -1042,6 +1086,7 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+        _attach_client_spans(engine_input, prompt)
 
         return engine_input
 
@@ -1109,6 +1154,7 @@ class BaseRenderer(ABC, Generic[_T]):
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
             engine_input["prompt_token_offsets"] = offsets
+        _attach_client_spans(engine_input, prompt)
 
         return engine_input
 
