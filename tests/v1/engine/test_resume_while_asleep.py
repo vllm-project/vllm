@@ -89,3 +89,32 @@ def test_resume_endpoint_maps_refusal_to_client_error():
     response = asyncio.run(resume_generation(_request_with_engine(engine)))
 
     assert response.status_code == HTTPStatus.BAD_REQUEST
+
+
+def test_async_llm_resume_refusal_from_engine_process_is_value_error():
+    """In the multiprocess engine the refusal crosses the process boundary as
+    `Exception("Call to resume_scheduler method failed: ...")`, which the
+    endpoint's `except ValueError` would miss and report as a 500."""
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    llm = object.__new__(AsyncLLM)
+    llm.engine_core = MagicMock()
+    llm.engine_core.resume_scheduler_async = AsyncMock(
+        side_effect=Exception(
+            "Call to resume_scheduler method failed: Cannot resume generation "
+            "while the engine is asleep; wake up the engine first (e.g. via /wake_up)."
+        )
+    )
+    with pytest.raises(ValueError, match="asleep"):
+        asyncio.run(llm.resume_generation())
+
+
+def test_async_llm_resume_other_engine_failures_unchanged():
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    llm = object.__new__(AsyncLLM)
+    llm.engine_core = MagicMock()
+    llm.engine_core.resume_scheduler_async = AsyncMock(side_effect=Exception("boom"))
+    with pytest.raises(Exception, match="boom") as exc_info:
+        asyncio.run(llm.resume_generation())
+    assert not isinstance(exc_info.value, ValueError)
