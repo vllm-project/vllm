@@ -27,6 +27,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    convert_to_wna16_moe_kernel_format,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
@@ -205,16 +210,16 @@ def _gptq_moe_layer() -> RoutedExperts:
     return layer
 
 
-def _gptq_config(dynamic=None, modules_in_block_to_quantize=None):
+def _gptq_config(dynamic=None, modules_in_block_to_quantize=None, bits=4):
     full_config = {
         "quant_method": "gptq",
-        "bits": 4,
+        "bits": bits,
         "group_size": 128,
         "desc_act": False,
         "sym": True,
     }
     return AutoGPTQConfig(
-        4,
+        bits,
         128,
         False,
         True,
@@ -396,3 +401,107 @@ def test_routed_experts_loads_per_expert_biases():
     assert torch.equal(w13_bias, torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
     assert torch.equal(w2_bias, torch.arange(9, 13, dtype=torch.float32).reshape(1, 4))
     assert loader._loaded_expert_biases == {"w13_bias", "w2_bias"}
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin MoE repack needs CUDA"
+)
+@pytest.mark.parametrize("bits", [4, 8])
+def test_auto_gptq_moe_marlin_prep_skips_layout_copies(bits, default_vllm_config):
+    """Marlin prep converts GPTQ MoE weights without full-layer layout copies.
+
+    The old path copied the K-first checkpoint weights to N-first and Marlin
+    copied them straight back, so the layer briefly held two extra copies.
+    The result must match that path exactly.
+    """
+    num_experts, hidden_size, intermediate_size = 64, 2048, 1024
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=2,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.Default,
+        intermediate_size_per_partition_unpadded=intermediate_size,
+    )
+    moe_config.moe_backend = "marlin"
+    layer = RoutedExperts(
+        "model.layers.0.mlp.experts",
+        torch.bfloat16,
+        moe_config,
+        _gptq_config(bits=bits),
+        expert_map_manager=ExpertMapManager(
+            max_num_batched_tokens=256,
+            top_k=2,
+            global_num_experts=num_experts,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=moe_config.moe_parallel_config,
+            placement_strategy="linear",
+            enable_eplb=False,
+        ),
+    ).cuda()
+    method = layer.quant_method
+    assert isinstance(method, AutoGPTQMoEMethod)
+    assert method.wna16_moe_backend == WNA16MoEBackend.MARLIN
+
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    for parameter in layer.parameters():
+        if parameter.dtype == torch.int32:
+            parameter.data.copy_(
+                torch.randint(
+                    0,
+                    2**31 - 1,
+                    parameter.shape,
+                    dtype=torch.int32,
+                    device="cuda",
+                    generator=generator,
+                )
+            )
+        else:
+            parameter.data.copy_(
+                torch.rand(
+                    parameter.shape,
+                    dtype=parameter.dtype,
+                    device="cuda",
+                    generator=generator,
+                )
+            )
+
+    def contiguous_n_first(name: str) -> torch.Tensor:
+        return getattr(layer, name).data.transpose(1, 2).contiguous()
+
+    expected = convert_to_wna16_moe_kernel_format(
+        backend=WNA16MoEBackend.MARLIN,
+        layer=layer,
+        quant_config=method.quant_config,
+        w13=contiguous_n_first("w13_qweight"),
+        w2=contiguous_n_first("w2_qweight"),
+        w13_scale=contiguous_n_first("w13_scales"),
+        w2_scale=contiguous_n_first("w2_scales"),
+        w13_qzeros=contiguous_n_first("w13_qzeros"),
+        w2_qzeros=contiguous_n_first("w2_qzeros"),
+    )
+    assert expected is not None
+    w2_bytes = layer.w2_qweight.untyped_storage().nbytes()
+    packed_weight_bytes = layer.w13_qweight.untyped_storage().nbytes() + w2_bytes
+
+    torch.accelerator.synchronize()
+    allocated_before = torch.accelerator.memory_allocated()
+    torch.accelerator.reset_peak_memory_stats()
+    method.process_weights_after_loading(layer)
+    torch.accelerator.synchronize()
+    extra_peak = torch.accelerator.max_memory_allocated() - allocated_before
+
+    # Repacking needs one new copy of the packed weights.
+    # One extra layout copy of w2 alone, the smallest regression, would exceed this.
+    assert extra_peak < packed_weight_bytes + w2_bytes * 3 // 4
+    names = ("w13_qweight", "w2_qweight", "w13_scales", "w2_scales")
+    names += ("w13_qzeros", "w2_qzeros")
+    for name, value in zip(names, expected):
+        assert torch.equal(getattr(layer, name).data, value), name
