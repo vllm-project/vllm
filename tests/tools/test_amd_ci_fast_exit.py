@@ -28,6 +28,17 @@ class _CrashOnTeardown:
 _keep = _CrashOnTeardown()
 """
 
+FAULT_SIGNALS = (signal.SIGSEGV, signal.SIGBUS, signal.SIGABRT)
+
+
+def _default_fault_signals():
+    """Give the child default fault signals. An ignored or blocked SIGSEGV
+    survives exec; inherited on some CI pods, it turned the expected crashes into
+    exit 0."""
+    for sig in FAULT_SIGNALS:
+        signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, FAULT_SIGNALS)
+
 
 def _run(tmp_path, body, *, plugin=True, env=None, args=()):
     (tmp_path / "test_case.py").write_text(CRASH_AT_TEARDOWN + body)
@@ -50,6 +61,7 @@ def _run(tmp_path, body, *, plugin=True, env=None, args=()):
         env=run_env,
         capture_output=True,
         text=True,
+        preexec_fn=_default_fault_signals,
     )
 
 

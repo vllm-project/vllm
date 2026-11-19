@@ -648,6 +648,11 @@ class BaseProcessingInfo:
                             f"You must set `--enable-mm-embeds` to input "
                             f"`{modality}_embeds`"
                         )
+                    if not mm_config.is_mm_embeds_enabled(modality):
+                        raise ValueError(
+                            f"`{modality}_embeds` inputs are disabled via "
+                            f"`--limit-mm-per-prompt`"
+                        )
                     if mm_config.get_limit_per_prompt(modality) == 0:
                         logger.debug(
                             "Skipping count validation for modality "
