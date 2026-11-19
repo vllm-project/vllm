@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_FROM_MSG,
     LOOKUP_MSG,
+    RESP_ERR,
     encode_lookup_response,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -112,6 +113,28 @@ def test_lookup_sends_confirmed_local_prefix_and_preserves_legacy_frames(
             *([start_tokens.to_bytes(4, "big")] if start_tokens else []),
         ]
     ]
+
+
+@pytest.mark.parametrize("start_tokens", [0, 32])
+def test_store_error_opens_lookup_breaker(
+    lookup_service: tuple[worker.LookupKeyClient, zmq.Socket], start_tokens: int
+) -> None:
+    client, peer = lookup_service
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        lookup = executor.submit(
+            client.lookup,
+            "request",
+            65,
+            [BlockHash(b"hash")],
+            start_tokens=start_tokens,
+        )
+        assert peer.recv_multipart()[0] == (
+            LOOKUP_FROM_MSG if start_tokens else LOOKUP_MSG
+        )
+        peer.send(RESP_ERR)
+        result = lookup.result(timeout=5)
+    assert result is not None and result.hit_length == 0
+    assert client.circuit_breaker.is_open
 
 
 def test_local_prefix_change_requeries_a_cached_prefetch_miss(

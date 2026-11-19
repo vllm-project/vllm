@@ -84,6 +84,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease import (  # noqa: E501
     SelectiveLookupLease,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.store_service import (
+    MooncakeStoreService,
+)
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -114,7 +117,7 @@ MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _StoreGroupPlan:
     layer_specs: tuple[KVCacheSpec, ...]
     local_block_size: int
@@ -528,7 +531,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def __init__(
         self,
-        store: Any,
+        store_service: MooncakeStoreService,
         coord: MooncakeStoreCoordinator,
         token_databases: list[ChunkedTokenDatabase],
         block_size: int,
@@ -544,14 +547,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_participates: Sequence[bool] | None = None,
     ):
         super().__init__(
-            store,
+            store_service.store,
             token_databases,
             block_size,
             tp_rank,
             ready_event,
             name="KVCacheStoreSendingThread",
             record_operation=record_operation,
+            request_queue=store_service.save_queue,
         )
+        self.store_service = store_service
         # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
         self.coord = coord
@@ -753,7 +758,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
         start = time.perf_counter()
         try:
-            results = self.store.batch_is_exist(keys)
+            results = self.store_service.check_save_exists(keys)
         except Exception as e:
             self._record_operation(
                 "save_exists",
@@ -834,9 +839,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, self.replicate_config
-            )
+            res = self.store_service.put(keys, addrs, sizes, self.replicate_config)
         except Exception as e:
             self._record_operation(
                 "save_put",
@@ -1085,7 +1088,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
             try:
-                res = self.store.batch_put_from_multi_buffers(
+                res = self.store_service.put(
                     keys,
                     addrs,
                     sizes,
@@ -1230,7 +1233,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
     def __init__(
         self,
-        store: Any,
+        store_service: MooncakeStoreService,
         coord: MooncakeStoreCoordinator,
         token_databases: list[ChunkedTokenDatabase],
         block_size: int,
@@ -1238,19 +1241,18 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event,
         disk_offload_buffer_budget_bytes: int | None = None,
         record_operation: Callable[..., None] | None = None,
-        request_queue: queue.Queue[Any] | None = None,
         group_participates: Sequence[bool] | None = None,
         is_hma_required: bool = False,
     ):
         super().__init__(
-            store,
+            store_service.store,
             token_databases,
             block_size,
             tp_rank,
             ready_event,
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
-            request_queue=request_queue,
+            request_queue=store_service.load_queue,
         )
         self.group_participates = (
             list(group_participates)
@@ -1273,6 +1275,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
         )
         self.coord = coord
+        self.store_service = store_service
 
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
@@ -1289,9 +1292,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return failed
 
     def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
-        if self._is_hma_required:
-            self.set_failed_request(req_id)
-        else:
+        # Request-level failure survives cross-rank aggregation until every
+        # transfer is drained, including layouts with globally unique block IDs.
+        self.set_failed_request(req_id)
+        if not self._is_hma_required:
             self._add_load_error_block_ids(block_ids)
 
     def get_and_clear_block_ids_with_load_errors(self) -> set[int]:
@@ -1301,6 +1305,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
+        try:
+            self._load_request(req_meta)
+        except Exception:
+            self._report_load_error(
+                req_meta.req_id,
+                [
+                    bid
+                    for group in req_meta.block_ids
+                    for bid in group
+                    if bid != NULL_BLOCK_ID
+                ],
+            )
+            logger.exception("Mooncake load failed for request %s", req_meta.req_id)
+        finally:
+            self.set_finished_request(req_meta.req_id)
+            self.request_queue.task_done()
+
+    def _load_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         mask_num = (
@@ -1358,8 +1380,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             block_id_list.extend(g_block_ids)
 
         if not key_list:
-            self.set_finished_request(req_id)
-            self.request_queue.task_done()
             return
 
         # Rotate aligned lists by tp_rank for load balancing.
@@ -1407,8 +1427,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         oversized_key_bytes,
                         self.disk_offload_buffer_budget_bytes,
                     )
-                    self.set_finished_request(req_id)
-                    self.request_queue.task_done()
                     return
                 load_batches = []
                 block_id_offset = 0
@@ -1428,9 +1446,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_offset = next_block_id_offset
 
         current_batch_keys: list[str] = key_list_c
-        current_batch_block_ids: list[int] = block_id_list_c
         batch_bytes = 0
+        load_get_start = time.perf_counter()
         try:
+            remaining_blocks = list(block_id_list_c)
             for (
                 batch_keys,
                 batch_addrs,
@@ -1438,16 +1457,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 batch_block_ids,
             ) in load_batches:
                 current_batch_keys = batch_keys
-                current_batch_block_ids = batch_block_ids
                 batch_bytes = _sum_batch_bytes(batch_sizes)
                 tiers_by_key: dict[str, str] | None = None
                 if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
                 # Reset so the recorded RPC duration excludes tier lookup.
                 load_get_start = time.perf_counter()
-                res = self.store.batch_get_into_multi_buffers(
-                    batch_keys, batch_addrs, batch_sizes
-                )
+                res = self.store_service.get(batch_keys, batch_addrs, batch_sizes)
                 if tiers_by_key is not None:
                     _log_mooncake_load_tier_summary(
                         req_id, batch_keys, res, tiers_by_key
@@ -1469,7 +1485,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 )
                 if failed:
                     self._report_load_error(
-                        req_id, [block_id for _, _, block_id in failed]
+                        req_id,
+                        [block_id for _, _, block_id in failed]
+                        + remaining_blocks[len(batch_block_ids) :],
                     )
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
@@ -1479,8 +1497,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         [(key, value) for key, value, _ in failed[:3]],
                     )
                     break
+                remaining_blocks = remaining_blocks[len(batch_block_ids) :]
         except Exception as e:
-            self._report_load_error(req_id, current_batch_block_ids)
+            self._report_load_error(req_id, remaining_blocks)
             self._record_operation(
                 "load_get",
                 load_get_start,
@@ -1494,9 +1513,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 current_batch_keys[:3],
                 e,
             )
-
-        self.set_finished_request(req_id)
-        self.request_queue.task_done()
 
 
 # ============================================================
@@ -1645,6 +1661,7 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
+        self.store_service = MooncakeStoreService(self.store)
         setup_mooncake_store(
             self.store, store_config, local_hostname, engine=shared_engine
         )
@@ -1719,7 +1736,6 @@ class MooncakeStoreWorker:
         # Pool of load-receive threads
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
-        self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         # Device KV regions (addr -> len) registered with the store.
         self._device_regions: dict[int, int] = {}
         # Device regions unregistered for sleep and not yet registered again.
@@ -2280,7 +2296,7 @@ class MooncakeStoreWorker:
         if self.can_put:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreSendingThread(
-                self.store,
+                self.store_service,
                 self.coord,
                 self.token_dbs,
                 self.block_size,
@@ -2304,7 +2320,7 @@ class MooncakeStoreWorker:
         for i in range(self.num_recv_threads):
             ready_event_recving = threading.Event()
             recv_thread = KVCacheStoreRecvingThread(
-                self.store,
+                self.store_service,
                 self.coord,
                 self.token_dbs,
                 self.block_size,
@@ -2312,7 +2328,6 @@ class MooncakeStoreWorker:
                 ready_event_recving,
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
-                request_queue=self.recv_request_queue,
                 group_participates=[
                     group.prefix_cacheable for group in self._kv_cache_groups
                 ],
@@ -2358,7 +2373,7 @@ class MooncakeStoreWorker:
                 continue
 
             load_spec.token_len = load_spec.kvpool_cached_tokens
-            self.recv_request_queue.put(request)
+            self.store_service.load_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
 
@@ -2511,7 +2526,7 @@ class MooncakeStoreWorker:
         num_tokens: int,
         block_hashes: Sequence[BlockHash],
         start_tokens: int = 0,
-    ) -> MooncakeLookupResult:
+    ) -> MooncakeLookupResult | None:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
@@ -2569,7 +2584,7 @@ class MooncakeStoreWorker:
                     )
                 candidate_meta.append((g_idx, bytes(h), end_token))
 
-        if not candidate_keys and not local_exists:
+        if not candidate_keys:
             return MooncakeLookupResult(0)
 
         exists_fn = (
@@ -2577,26 +2592,35 @@ class MooncakeStoreWorker:
             if self._selective_lease is None
             else self._selective_lease.probe
         )
-        res: list[int] = []
-        if candidate_keys:
-            lookup_start = time.perf_counter()
-            try:
-                res = exists_fn(candidate_keys)
-                self._record_kv_connector_operation(
-                    "lookup_exists",
-                    time.perf_counter() - lookup_start,
-                    len(candidate_keys),
-                )
-            except Exception as e:
-                self._record_kv_connector_operation(
-                    "lookup_exists",
-                    time.perf_counter() - lookup_start,
-                    len(candidate_keys),
-                    status="error",
-                    num_failed_keys=len(candidate_keys),
-                )
-                logger.error("Remote connection failed in lookup: %s", e)
-                return MooncakeLookupResult(0)
+        lookup_start = time.perf_counter()
+        try:
+            res = self.store_service.lookup_exists(candidate_keys, exists_fn)
+        except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(candidate_keys),
+                status="error",
+                num_failed_keys=len(candidate_keys),
+            )
+            logger.error("Remote connection failed in lookup: %s", e)
+            return None
+
+        failed_keys = sum(value < 0 for value in res)
+        status = "ok"
+        if failed_keys:
+            status = (
+                "error" if failed_keys == len(candidate_keys) else "partial_failure"
+            )
+        self._record_kv_connector_operation(
+            "lookup_exists",
+            time.perf_counter() - lookup_start,
+            len(candidate_keys),
+            status=status,
+            num_failed_keys=failed_keys,
+        )
+        if failed_keys:
+            return None
 
         # A (group, hash) is "present" only when every namespace that will be
         # loaded has it (per-group count: sharded groups need every rank's
@@ -2831,17 +2855,24 @@ class LookupKeyServer:
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
+                    start_tokens = 0
                     if msg_type == LOOKUP_FROM_MSG:
                         if len(all_frames[4]) != 4:
                             self.socket.send(RESP_ERR)
                             continue
                         start_tokens = int.from_bytes(all_frames[4], byteorder="big")
+                    try:
                         result = self.store_worker.lookup(
                             num_tokens, block_hashes, start_tokens=start_tokens
                         )
-                    else:
-                        result = self.store_worker.lookup(num_tokens, block_hashes)
-                    self.socket.send(encode_lookup_response(result))
+                        self.socket.send(
+                            RESP_ERR
+                            if result is None
+                            else encode_lookup_response(result)
+                        )
+                    except Exception:
+                        logger.exception("Mooncake prefix lookup failed")
+                        self.socket.send(RESP_ERR)
 
                 elif msg_type == RESET_MSG:
                     try:
@@ -2886,7 +2917,7 @@ LOOKUP_BREAKER_COOLDOWN_S = 30.0
 RESET_TIMEOUT_S = 60.0
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, int, bytes]
@@ -2991,10 +3022,7 @@ class LookupKeyClient:
         )
         if start_tokens:
             all_frames += (start_tokens.to_bytes(4, byteorder="big"),)
-        response = self._request(all_frames, deadline)
-        if response == RESP_ERR:
-            return MooncakeLookupResult(0)
-        return decode_lookup_response(response)
+        return decode_lookup_response(self._request(all_frames, deadline))
 
     def lookup(
         self,

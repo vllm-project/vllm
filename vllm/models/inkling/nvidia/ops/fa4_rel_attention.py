@@ -117,7 +117,7 @@ def _num_warps_bucket(num_reqs: int) -> int:
 class InklingFA4RelAttentionKernel(
     VllmJitKernel["InklingFA4RelAttentionKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         is_local: bool
         num_heads: int

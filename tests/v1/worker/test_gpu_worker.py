@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm import LLM
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -58,9 +61,9 @@ def test_disabling_extensible_cache_keeps_fallback_budget(
         total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
     )
     with worker._external_weight_charges.track():
-        record_external_weight_charge("weights.sock", False, 20)
+        record_external_weight_charge("weights.sock", 20)
         if fallback:
-            record_external_weight_fallback("weights.sock", False)
+            record_external_weight_fallback("weights.sock")
     worker.disable_extensible_kv_cache()
     assert worker.requested_memory == requested
 
@@ -607,6 +610,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         ),
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
+        iteration_timer=None,
         _pp_send_work=[previous_tensor_send],
         _pp_transport=None,
     )
@@ -1020,3 +1024,22 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool"]
     Worker.discard(worker, ("weights",))
     assert log == ["release", "pool", "pool"]
+
+
+@create_new_process_for_each_test("spawn")
+def test_startup_heap_frozen_before_weight_loading(monkeypatch):
+    """Ensure objects alive before startup are frozen by the time weights
+    load, so the loader and memory-profiling gc.collect() calls skip them."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    frozen_before = gc.get_freeze_count()
+    frozen_at_load = 0
+    load_weights = DefaultModelLoader.load_weights
+
+    def spy_load_weights(self, model, model_config):
+        nonlocal frozen_at_load
+        frozen_at_load = gc.get_freeze_count()
+        return load_weights(self, model, model_config)
+
+    monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
+    LLM("facebook/opt-125m", enforce_eager=True)
+    assert frozen_at_load > frozen_before

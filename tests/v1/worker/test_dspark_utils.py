@@ -21,22 +21,22 @@ from vllm.v1.worker.gpu.spec_decode.speculator_config import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeHFConfig:
     model_type: str
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeModelConfig:
     hf_config: _FakeHFConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeEPLBConfig:
     num_redundant_experts: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _FakeParallelConfig:
     pipeline_parallel_size: int = 2
     tensor_parallel_size: int = 8
