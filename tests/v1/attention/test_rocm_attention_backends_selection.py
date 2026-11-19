@@ -320,11 +320,11 @@ def test_qsa_octave_spec_selection_rejects_unsupported_geometry(
     from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSABackend
     from vllm.platforms import rocm
     from vllm.v1.attention.ops import rocm_octave
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+    from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
     monkeypatch.setattr(rocm, "on_rdna4", lambda: True)
     monkeypatch.setattr(rocm_octave, "registered_rope_dim", lambda _: rope_dim)
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=2,
         head_size=head_dim,
