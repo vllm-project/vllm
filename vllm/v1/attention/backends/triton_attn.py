@@ -36,7 +36,10 @@ from vllm.v1.attention.backends.utils import (
     set_triton_ptr_range,
 )
 from vllm.v1.attention.ops.hd512_mfma_decode import (
+    HD512MixedSplit,
+    hd512_build_split,
     hd512_decode_attention,
+    hd512_decode_rows,
     hd512_get_kernel,
     hd512_partial_scratch_shape,
 )
@@ -102,6 +105,12 @@ class TritonAttentionMetadata:
     hd512_part_o: torch.Tensor | None = None
     hd512_part_ml: torch.Tensor | None = None
     hd512_capacity: int = 0
+    # Mixed-batch (chunked prefill + decode) support for the same kernel:
+    # CPU query offsets for the per-step partition plan, cached on the
+    # shared metadata object so every hd512 layer of the group reuses it.
+    query_start_loc_cpu: torch.Tensor | None = None
+    num_reqs: int = 0
+    hd512_split: HD512MixedSplit | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -340,6 +349,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata.hd512_part_o = self.hd512_part_o
         attn_metadata.hd512_part_ml = self.hd512_part_ml
         attn_metadata.hd512_capacity = self.hd512_capacity
+        attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        attn_metadata.num_reqs = num_reqs
         return attn_metadata
 
     def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
@@ -720,6 +731,88 @@ class TritonAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
             )
             return output
+
+        # gfx942 hd512 split over a mixed (chunked-prefill + decode) batch
+        # (VLLM_GEMMA4_HD512_DECODE): the batch's decode rows (one query
+        # token per request) run the split-KV kernel; its prefill-chunk rows
+        # run the stock unified kernel over a packed subset written back into
+        # the output's rows. The mixed stock call's decode rows are
+        # element-rate limited on this geometry (~3 TB/s in-trace where the
+        # pure-decode split-KV kernel does ~4.7 TB/s for the same read), so
+        # this dispatches each row class to its faster kernel. Any feature
+        # outside the covered set falls through to the stock full-batch path.
+        if (
+            self._hd512_mfma_decode
+            and attn_metadata.max_query_len > 1
+            and attn_metadata.hd512_part_o is not None
+            and attn_metadata.hd512_part_ml is not None
+            and kv_cache.shape[2] == 16
+            and kv_cache.dtype == torch.bfloat16
+            and kv_cache.stride(3) == 1
+            and query.dtype == torch.bfloat16
+            and query.is_contiguous()
+            and output.is_contiguous()
+            and not self._is_per_token_head_quant
+            and output_scale is None
+            and attn_metadata.causal is True
+            and attn_metadata.mm_prefix_range_tensor is None
+            and attn_metadata.rswa_prefix_lens is None
+            and attn_metadata.query_start_loc_cpu is not None
+        ):
+            split = attn_metadata.hd512_split
+            if split is None:
+                split = hd512_build_split(
+                    attn_metadata.query_start_loc_cpu,
+                    attn_metadata.num_reqs,
+                    attn_metadata.block_table,
+                    attn_metadata.seq_lens,
+                )
+                attn_metadata.hd512_split = split
+            if split is not None and split.num_dec <= attn_metadata.hd512_capacity:
+                hd512_decode_rows(
+                    query[:num_actual_tokens],
+                    output,
+                    kv_cache,
+                    split,
+                    attn_metadata.hd512_part_o,
+                    attn_metadata.hd512_part_ml,
+                    self.scale,
+                )
+                if split.chunk_tok is not None:
+                    kv_t = kv_cache.transpose(1, 2)
+                    key_cache, value_cache = kv_t.split(self.head_size, dim=-1)
+                    q_chunk = query[:num_actual_tokens].index_select(0, split.chunk_tok)
+                    out_chunk = torch.empty_like(q_chunk)
+                    unified_attention(
+                        q=q_chunk,
+                        k=key_cache,
+                        v=value_cache,
+                        out=out_chunk,
+                        cu_seqlens_q=split.chunk_cu,
+                        max_seqlen_q=split.chunk_max_q,
+                        seqused_k=split.sl_chunk,
+                        max_seqlen_k=attn_metadata.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=self.sliding_window,
+                        block_table=split.bt_chunk,
+                        softcap=self.logits_soft_cap,
+                        q_descale=None,
+                        k_descale=None,
+                        v_descale=None,
+                        seq_threshold_3D=attn_metadata.seq_threshold_3D,
+                        num_par_softmax_segments=(
+                            attn_metadata.num_par_softmax_segments
+                        ),
+                        softmax_segm_output=attn_metadata.softmax_segm_output,
+                        softmax_segm_max=attn_metadata.softmax_segm_max,
+                        softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+                        alibi_slopes=None,
+                        sinks=None,
+                        chunk_lookback=self.chunk_lookback,
+                    )
+                    output.index_copy_(0, split.chunk_tok, out_chunk)
+                return output
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

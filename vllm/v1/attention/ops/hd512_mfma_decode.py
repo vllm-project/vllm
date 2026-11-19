@@ -383,3 +383,113 @@ def hd512_decode_attention(
         NUM_SEGMENTS,
         stream,
     )
+
+
+class HD512MixedSplit:
+    """Per-step plan for routing a mixed (chunked-prefill + decode) batch.
+
+    Built once per step from the CPU-side query_start_loc and cached on the
+    attention-metadata object, so the (up to 7) hd512 layers of one KV-cache
+    group share the partition, its device index tensors and its packed
+    block-table / seq-lens gathers. Decode rows (one scheduled query token
+    per request) go to the split-KV kernel; chunk rows go to the stock
+    unified kernel over a packed subset.
+    """
+
+    __slots__ = (
+        "num_dec",
+        "dec_tok",
+        "bt_dec",
+        "sl_dec",
+        "num_chunk",
+        "chunk_tok",
+        "chunk_cu",
+        "bt_chunk",
+        "sl_chunk",
+        "chunk_max_q",
+    )
+
+
+def hd512_build_split(
+    query_start_loc_cpu: torch.Tensor,
+    num_reqs: int,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> "HD512MixedSplit | None":
+    """Partition the batch into decode rows (query_len == 1) and chunk rows.
+
+    Returns None when there are no decode rows to divert (pure prefill
+    step): the stock full-batch path handles it. Everything not returned
+    here stays on the stock full-batch path by the caller's gate.
+    """
+    qsl = query_start_loc_cpu[: num_reqs + 1].to(torch.int64)
+    lens = qsl[1:] - qsl[:-1]
+    dec = (lens == 1).nonzero(as_tuple=True)[0]
+    if dec.numel() == 0:
+        return None
+    device = block_table.device
+    split = HD512MixedSplit()
+    split.num_dec = int(dec.numel())
+    dec_dev = dec.to(device, non_blocking=True)
+    # Decode rows: a request's single query token sits at its
+    # query_start_loc; block_table / seq_lens gather by request index.
+    split.dec_tok = qsl[dec].to(device, non_blocking=True)
+    split.bt_dec = block_table.index_select(0, dec_dev).contiguous()
+    split.sl_dec = seq_lens.index_select(0, dec_dev).contiguous()
+    chunk = (lens != 1).nonzero(as_tuple=True)[0]
+    split.num_chunk = int(chunk.numel())
+    if chunk.numel() == 0:
+        split.chunk_tok = None
+        split.chunk_cu = None
+        split.bt_chunk = None
+        split.sl_chunk = None
+        split.chunk_max_q = 1
+        return split
+    chunk_dev = chunk.to(device, non_blocking=True)
+    clens = lens[chunk]
+    cu = clens.cumsum(0)
+    # Global token rows of every chunk request in original order: the
+    # decode rows are sparse singletons, so the chunk rows are the
+    # complement of the decode rows within [0, total_tokens).
+    num_tokens = int(qsl[num_reqs])
+    seen = torch.zeros(num_tokens, dtype=torch.bool)
+    seen[qsl[dec]] = True
+    split.chunk_tok = (~seen).nonzero(as_tuple=True)[0].to(device, non_blocking=True)
+    # Cumulative query offsets of the packed chunk subset, same dtype the
+    # stock path hands the unified kernel.
+    split.chunk_cu = (
+        torch.cat([torch.zeros(1, dtype=torch.int64), cu])
+        .to(torch.int32)
+        .to(device, non_blocking=True)
+    )
+    split.bt_chunk = block_table.index_select(0, chunk_dev).contiguous()
+    split.sl_chunk = seq_lens.index_select(0, chunk_dev).contiguous()
+    split.chunk_max_q = int(clens.max())
+    return split
+
+
+def hd512_decode_rows(
+    query: torch.Tensor,
+    output: torch.Tensor,
+    kv_cache: torch.Tensor,
+    split: HD512MixedSplit,
+    part_o: torch.Tensor,
+    part_ml: torch.Tensor,
+    softmax_scale: float,
+) -> None:
+    """Run this batch's decode rows through the split-KV kernel: gather the
+    decode q rows into a packed batch (the kernel indexes rows by request),
+    run the per-row-independent kernel, scatter back into the output."""
+    q_dec = query.index_select(0, split.dec_tok)
+    out_dec = torch.empty_like(q_dec)
+    hd512_decode_attention(
+        q=q_dec,
+        kv_cache=kv_cache,
+        block_table=split.bt_dec,
+        seq_lens=split.sl_dec,
+        part_o=part_o,
+        part_ml=part_ml,
+        out=out_dec,
+        softmax_scale=softmax_scale,
+    )
+    output.index_copy_(0, split.dec_tok, out_dec)
