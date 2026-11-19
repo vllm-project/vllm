@@ -11,3 +11,5 @@ class Gemma4MTPSpeculatorConfig(MTPSpeculatorConfig):
     supported_options = MTPSpeculatorConfig.supported_options - {
         "draft_lm_head_quantization"
     }
+    # Its KV-shared layers read the target's KV and write none of their own.
+    draft_kv_depends_on_next_token = False

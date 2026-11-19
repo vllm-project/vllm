@@ -2135,16 +2135,8 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
-        """Whether draft KV at a position depends on the next token.
-
-        EAGLE-style drafters build a position's draft KV from its hidden state
-        and the next token. DFlash/DSpark build it from the target hidden state
-        alone, and the Gemma-4 MTP drafter writes no KV (it reads the target's),
-        so only the remaining EAGLE/EAGLE3/MTP drafters require the drop.
-        """
-        return self.use_eagle() and not (
-            self.use_dflash() or self.use_dspark() or self.use_gemma4_mtp()
-        )
+        """Whether draft KV at a position depends on the next token."""
+        return self.speculator_config.draft_kv_depends_on_next_token
 
     def use_eagle_block_drop(self) -> bool:
         """Whether the volatile trailing prefix-cache block should be dropped."""

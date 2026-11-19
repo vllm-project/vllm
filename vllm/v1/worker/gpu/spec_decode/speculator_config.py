@@ -57,6 +57,9 @@ class SpeculatorConfig:
     parallel_drafting: ClassVar[bool] = False
     # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
+    # Draft KV at position i is built from token i + 1, which a prefix-cache hit
+    # ending at i may not match, so its last block is recomputed (EAGLE block drop).
+    draft_kv_depends_on_next_token: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
