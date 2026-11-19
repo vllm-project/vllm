@@ -422,7 +422,12 @@ def _run_single_benchmark(
     """
     total_q = q_list[0].shape[0]
     v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
-    out = torch.empty(total_q, config.num_q_heads, v_dim, device=device, dtype=dtype)
+    # One output per layer, like the inputs: a single buffer rewritten by every
+    # layer would stay in the cache and its writes would not reach DRAM.
+    out_list = [
+        torch.empty(total_q, config.num_q_heads, v_dim, device=device, dtype=dtype)
+        for _ in range(config.num_layers)
+    ]
 
     def benchmark_fn():
         for i in range(config.num_layers):
@@ -433,7 +438,7 @@ def _run_single_benchmark(
                 v_list[i],
                 cache_list[i],
                 attn_metadata,
-                output=out,
+                output=out_list[i],
             )
 
     if config.ncu_profile:
