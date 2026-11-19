@@ -1279,7 +1279,7 @@ def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_host_receive_completion_without_spill_metadata(failed, cancelled):
     """Only successful external receives make host pages readable."""
-    manager = make_hisparse_kv_cache_manager(32, 16)
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
     assert allocate_external_prefix(manager, request, 32) is not None
     request.num_computed_tokens = 32
@@ -1292,6 +1292,9 @@ def test_host_receive_completion_without_spill_metadata(failed, cancelled):
     composite = object.__new__(MultiConnector)
     composite._connectors = (connector,)
     if cancelled:
+        # A publication awaiting the receive may cache the host prefix, but its
+        # allocated GPU tail has never been filled.
+        manager.cache_blocks(request, request.num_computed_tokens)
         request.status = RequestStatus.FINISHED_ABORTED
         connector.request_finished_all_groups(
             request, manager.get_block_ids(request.request_id)
@@ -1304,15 +1307,19 @@ def test_host_receive_completion_without_spill_metadata(failed, cancelled):
     )
     state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
     if failed:
-        assert state is None
+        assert state is None or not state.valid_pages
     else:
         assert state is not None and state.valid_pages == {0, 1}
-    command = get_hisparse_coordinator(manager).build_offload_command()
+    coordinator = get_hisparse_coordinator(manager)
+    command = coordinator.build_offload_command()
     assert command is not None
     assert bool(command.page_transfers) == (not failed and not cancelled)
     if cancelled:
+        source = manager.get_blocks(request.request_id).blocks[0]
+        assert all((block.block_hash is None) == failed for block in source)
+        assert not coordinator.copies
         manager.free(request)
-        assert not get_hisparse_coordinator(manager).has_pending_work()
+        assert not coordinator.has_pending_work()
 
 
 def test_hisparse_recomputation_does_not_complete_failed_host_import():

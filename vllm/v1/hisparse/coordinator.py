@@ -638,9 +638,11 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
-        # A receive can finish after cancellation. Its host pages are valid,
-        # but the finished request will never consume a GPU copy.
-        if restore and num_computed_tokens:
+        if not restore:
+            # Publish the host prefix after cancellation, but skip these pages
+            # when indexing GPU copies: their landing blocks were never filled.
+            state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_pages)
+        elif num_computed_tokens:
             # A local prefix hit's surviving GPU copies cost no copy, so adopt
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
