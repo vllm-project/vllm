@@ -76,7 +76,7 @@ def fused_recurrent_gated_delta_rule_replayssm_kernel(
     # input (not derived) so align mode can force a flush mid-buffer.
     b_write_pos = tl.load(write_pos + i_n).to(tl.int64)
     b_is_flush = tl.load(is_flush + i_n) != 0
-    cache_valid = o_c < b_write_pos
+    cache_valid = (o_c < b_write_pos) & (o_c < MAX_CACHE_LEN)
 
     # Gate for the current token: decay g, its exp alpha, and the beta mixing weight.
     a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
@@ -366,25 +366,17 @@ def fused_recurrent_gated_delta_rule_replayssm(
         raise ValueError(f"`g_cache` must be float32 (got {g_cache.dtype}).")
 
     BK = triton.next_power_of_2(K)
-    if triton.cdiv(K, BK) != 1:
-        raise ValueError(
-            f"Cached decode kernel only supports NK_global=1 (got K={K}, BK={BK})."
-        )
     if BK % nk != 0:
         raise ValueError(f"nk={nk} must divide BK={BK}.")
     BKT = BK // nk
     if BKT < 16:
         raise ValueError(f"BKT={BKT} must be >=16 for tl.dot (nk={nk}, BK={BK}).")
-    # K-tiling keeps the per-program tile small enough that BV=64 (NV=1, half the
-    # grid -> fewer redundant cache/metadata loads) fits without register
-    # spilling.
-    BV = block_v if block_v is not None else min(triton.next_power_of_2(V), 64)
     BC = max(16, triton.next_power_of_2(max_cache_len))
     # AMD Triton does not support tf32x3, so use its backend default. CUDA
     # keeps fp32 rings at fp32 parity with the elementwise baseline.
     dot_input_precision = None if current_platform.is_rocm() else "tf32x3"
 
-    grid = (triton.cdiv(V, BV), B, HV)
+    grid = (triton.cdiv(V, block_v), B, HV)
     fused_recurrent_gated_delta_rule_replayssm_kernel[grid](
         mixed_qkv=mixed_qkv,
         a=a,
@@ -415,7 +407,7 @@ def fused_recurrent_gated_delta_rule_replayssm(
         K=K,
         V=V,
         BK=BK,
-        BV=BV,
+        BV=block_v,
         BC=BC,
         NK=nk,
         BKT=BKT,
