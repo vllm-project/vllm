@@ -11,6 +11,9 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from .base import MambaSSUKernel
 from .cpu import CPUSSUKernel
 from .flashinfer import FlashInferSSUKernel
+from .replayssm_flashinfer import FlashInferReplaySSMKernel
+from .replayssm_triton import TritonReplaySSMKernel
+from .replayssm_triton_spec import TritonReplaySSMSpecKernel
 from .triton import TritonSSUKernel
 
 if TYPE_CHECKING:
@@ -22,6 +25,9 @@ SSU_KERNELS: tuple[type[MambaSSUKernel], ...] = (
     TritonSSUKernel,
     CPUSSUKernel,
     FlashInferSSUKernel,
+    TritonReplaySSMKernel,
+    TritonReplaySSMSpecKernel,
+    FlashInferReplaySSMKernel,
 )
 
 

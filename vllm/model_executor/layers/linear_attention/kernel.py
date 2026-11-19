@@ -31,6 +31,12 @@ class LinearAttnSelectorConfig:
     dtype: torch.dtype | None = None
     use_stochastic_rounding: bool = False
     use_ssu_algorithm: bool = False
+    use_replayssm: bool = False
+    replayssm_buffer_len: int = 0
+    num_speculative_tokens: int = 0
+    use_ubatching: bool = False
+    use_pipeline_parallel: bool = False
+    use_prefix_caching: bool = False
 
     @classmethod
     def from_current_platform(
@@ -46,6 +52,8 @@ class LinearAttnSelectorConfig:
             capability = None
         model_config = vllm_config.model_config
         mamba_config = vllm_config.mamba_config
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
         return cls(
             current_platform._enum,
             capability,
@@ -53,6 +61,12 @@ class LinearAttnSelectorConfig:
             model_config.dtype if model_config is not None else None,
             use_stochastic_rounding=mamba_config.enable_stochastic_rounding,
             use_ssu_algorithm=mamba_config.ssu_algorithm is not None,
+            use_replayssm=cache_config.use_replayssm,
+            replayssm_buffer_len=cache_config.replayssm_buffer_len,
+            num_speculative_tokens=vllm_config.num_speculative_tokens,
+            use_ubatching=parallel_config.use_ubatching,
+            use_pipeline_parallel=parallel_config.pipeline_parallel_size > 1,
+            use_prefix_caching=cache_config.enable_prefix_caching,
         )
 
 
@@ -118,22 +132,25 @@ def select_linear_attn_kernel(
         kernels: The op's kernels, in priority order.
         cfg: What the kernels validate against.
         requested: The requested kernel's backend; None selects automatically.
+            Several kernels may share a backend: the first valid one is used.
 
     Raises:
         ValueError: If the requested kernel can't run, or no kernel can.
 
     """
-    by_backend = {kernel.backend: kernel for kernel in kernels}
     if requested is not None:
-        kernel = by_backend.get(requested)
-        if kernel is None:
-            reasons = [f"no {requested} kernel; options: {', '.join(by_backend)}"]
-        else:
-            reasons = kernel.validate_configuration(cfg)
-        if kernel is not None and not reasons:
-            logger.info_once("Using %s kernel for %s.", requested, op)
-            return kernel
-        raise ValueError(f"Backend {requested} can't run {op}: {'; '.join(reasons)}")
+        candidates = [kernel for kernel in kernels if kernel.backend == requested]
+        reasons: list[str] = []
+        if not candidates:
+            backends = ", ".join(dict.fromkeys(kernel.backend for kernel in kernels))
+            reasons = [f"no {requested} kernel; options: {backends}"]
+        for kernel in candidates:
+            kernel_reasons = kernel.validate_configuration(cfg)
+            if not kernel_reasons:
+                logger.info_once("Using %s kernel for %s.", kernel.backend, op)
+                return kernel
+            reasons.append("; ".join(kernel_reasons))
+        raise ValueError(f"Backend {requested} can't run {op}: {' | '.join(reasons)}")
 
     all_reasons = []
     for kernel in kernels:
