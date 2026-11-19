@@ -921,6 +921,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         # reads it.
         return ExportRelease.FREE_ON_FINISHED_SENDING
 
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_control_messages()
+
     def request_finished(
         self,
         request: "Request",
@@ -1205,6 +1209,13 @@ class MooncakeConnectorScheduler:
             params = request.kv_transfer_params
             if params and params.get("transfer_id"):
                 self._exports_to_drop.add(params["transfer_id"])
+
+    def has_pending_control_messages(self) -> bool:
+        """Drops and withdrawals queued for the worker. They leave with the
+        next step's metadata, so the engine must take that step even when
+        nothing else needs one (e.g. a paused D whose only import was still
+        pending when it was withdrawn)."""
+        return bool(self._withdrawals or self._exports_to_drop)
 
     def withdraw_imports(self, requests: list["Request"]) -> None:
         for request in requests:

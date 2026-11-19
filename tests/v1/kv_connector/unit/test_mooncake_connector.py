@@ -62,6 +62,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     RegisterWorkerPayload,
 )
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -2209,6 +2210,30 @@ def test_decode_withdraws_pulls_it_no_longer_waits_for(settled_by):
     }
     assert not meta.lease_heartbeats
     assert not scheduler.schedule().kv_connector_metadata.withdrawals
+
+
+def test_paused_decode_steps_until_last_withdrawal_is_sent():
+    """A paused D whose only import is still pending: retracting it closes
+    the import, so the ledger has nothing left to drive. The queued
+    withdrawal must still keep the engine stepping, and hold the clearing
+    pause, until a step carries it to the worker."""
+    scheduler, block_size = _lease_decode_scheduler(None)
+    pending = _remote_prefill_request(1, block_size)
+    scheduler.add_request(pending)
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+    scheduler.retract_kv_transfers()
+    assert not scheduler.ledger.needs_driving()
+    assert scheduler.has_requests()
+    assert not scheduler.quiesced("keep", True)
+
+    meta = scheduler.schedule().kv_connector_metadata
+    assert meta.withdrawals["my-engine-id"].transfer_ids == ["xfer-1"]
+    assert not scheduler.connector.has_pending_push_work()
+    # Sent: the clearing pause may complete; the kept request prefills
+    # locally after it.
+    assert scheduler.quiesced("keep", True)
+    assert not scheduler.has_requests()
 
 
 @pytest.mark.asyncio

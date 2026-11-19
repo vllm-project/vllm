@@ -147,15 +147,17 @@ class KVConnectorRole(enum.Enum):
 
 class ExportRelease(enum.Enum):
     """How the blocks of cancelled exports may be freed
-    (see `KVConnectorBase_V1.cancel_kv_transfers`)."""
+    (see `KVConnectorBase_V1.cancel_kv_transfers`). Either way the scheduler
+    frees them only on the connector's finished_sending: a block is reused
+    only once no reader or writer can still access it."""
 
-    # The connector still needs them (e.g. an async save): it reports each
-    # export in finished_sending as usual.
+    # Not cancelled: the connector reports each export in finished_sending
+    # as usual (the read completed, its lease expired, or local work such as
+    # an async save ended).
     KEPT = enum.auto()
-    # Only remote readers needed them: the scheduler frees them now.
-    FREE_NOW = enum.auto()
-    # The connector fails the reads that have not started and reports each
-    # export in finished_sending once no read in flight uses its blocks.
+    # Cancelled: the connector fails the reads that have not started and
+    # reports each export in finished_sending once no read in flight uses
+    # its blocks.
     FREE_ON_FINISHED_SENDING = enum.auto()
 
 
@@ -762,7 +764,9 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             How the exports' blocks may be freed. The default keeps them
-            until the connector reports them finished, as before.
+            until the connector reports them finished, as before. A connector
+            may cancel them only if it can tell when no read in flight still
+            uses their blocks.
 
         """
         return ExportRelease.KEPT
@@ -770,7 +774,8 @@ class KVConnectorBase_V1(ABC):
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires
         the engine main loop to keep stepping (e.g. a P-side request whose
-        KV blocks are waiting to be WRITTEN to a D node).
+        KV blocks are waiting to be WRITTEN to a D node), or a control
+        message for the worker that only the next step's metadata carries.
 
         Connectors that don't implement push-based KV transfer should
         leave this as False.
