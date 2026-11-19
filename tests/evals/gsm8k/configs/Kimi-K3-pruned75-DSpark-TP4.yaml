@@ -6,7 +6,6 @@ num_fewshot: 5
 startup_max_wait_seconds: 1800
 server_args: >-
   --trust-remote-code
-  --gpu-memory-utilization 0.90
   --tensor-parallel-size 4
   --load-format fastsafetensors
   --disable-flashinfer-autotune

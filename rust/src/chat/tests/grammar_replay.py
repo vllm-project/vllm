@@ -9,7 +9,7 @@
 #   "torch",
 #   "transformers>=5.10.4",
 #   # Keep in sync with requirements/common.txt.
-#   "xgrammar==0.2.7",
+#   "xgrammar==0.2.9",
 # ]
 #
 # [[tool.uv.index]]

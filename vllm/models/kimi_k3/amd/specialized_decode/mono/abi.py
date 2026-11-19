@@ -22,5 +22,5 @@ WAIT_SECONDS = 10  # an in-kernel wait gives up after this long
 
 
 def health_words(ctas: int) -> int:
-    """A rank's health words for a grid of ``ctas``: the header, a record a CTA."""
+    """A rank's health words for a grid of `ctas`: the header, a record a CTA."""
     return (ctas + 1) * RECORD_WORDS

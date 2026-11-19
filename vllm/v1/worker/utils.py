@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -29,14 +30,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
     create_kv_cache_views,
     get_block_table_width,
 )
@@ -106,7 +106,7 @@ class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
     Construct once after KV caches are allocated to precompute segment
-    addresses, then call :meth:`zero_block_ids` each step to zero
+    addresses, then call `zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 
@@ -124,7 +124,7 @@ class KVBlockZeroer:
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
-        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim 0; dims
+        Per-layer views are standardized `[B, H, N, C]` with blocks at dim 0; dims
         physically outside B (separate head groups under LHBNC) each get their own
         segment. A segment's page spans everything inside its block, so under BHLNC it
         also covers the block's other layers -- safe, since block IDs are global pool
@@ -258,7 +258,7 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
@@ -287,13 +287,14 @@ class AttentionGroup:
         device,
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
+        kv_cache_group: KVCacheGroup | None = None,
     ):
         spec = self.kv_cache_spec
         if kernel_block_size is not None and isinstance(spec, AttentionSpec):
             # A backend in a packed KV cache group may need smaller blocks than
             # the group is split into.
             kernel_block_size = select_common_block_size(
-                kernel_block_size, [self.backend], [spec]
+                kernel_block_size, [self.backend], [spec], [self.layer_names]
             )
             if kernel_block_size != spec.block_size:
                 self.kernel_block_size = kernel_block_size
@@ -306,9 +307,8 @@ class AttentionGroup:
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
-            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
-            )
+            assert kv_cache_group is not None
+            max_num_blocks = kv_cache_group.max_num_blocks_per_req(vllm_config)
             width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
             if kernel_block_size is not None:
                 width *= self.kv_cache_spec.block_size // kernel_block_size
@@ -394,13 +394,21 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
+        # A padded page spreads its kernel blocks evenly.
+        row_bytes = spec.num_heads * spec.state_content_size_bytes
+        page_stride = (
+            kernel_rows
+            * kv_cache.stride(-2)
+            * spec.page_size_bytes
+            // (spec.num_states * row_bytes)
+        )
         # Token and pooled caches are written through manager-block slot
-        # mappings, so only compressed caches (written from their block table)
-        # can be mapped.
+        # mappings unless self-addressed, so only those and compressed caches
+        # (written from their block table) can be mapped.
         if (
-            spec.tokens_per_state <= 1
+            (spec.tokens_per_state <= 1 and spec.uses_slot_mapping)
             or kv_cache.shape[1] != 1
-            or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
+            or kv_cache.stride(0) % page_stride
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -412,7 +420,6 @@ class AttentionGroup:
         # Kernel block j of block b is b * kernel_block_stride + j. The view
         # spans the other layers' pages between blocks (never addressing them),
         # which ``view`` cannot express.
-        page_stride = kernel_rows * kv_cache.stride(-2)
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             kv_cache.shape[-2] // kernel_rows
@@ -428,7 +435,9 @@ class AttentionGroup:
         """Views a packed cache in kernel blocks as manager blocks."""
         assert self.kernel_block_stride
         spec = self.kv_cache_spec
-        rows = spec.get_num_kernel_states(spec.block_size)
+        rows = cdiv(
+            spec.page_size_bytes, spec.num_heads * spec.state_content_size_bytes
+        )
         return kv_cache.as_strided(
             (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
             (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
@@ -450,10 +459,18 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
+def groups_with_metadata_builders(
+    groups: Iterable[AttentionGroup],
+) -> list[AttentionGroup]:
+    """The groups that build attention metadata: groups made only of
+    init_attn_backend's no_attn_metadata_layer_names have no builders."""
+    return [group for group in groups if group.metadata_builders]
+
+
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
-    """The views to bind to layers. The manager views in ``kv_caches`` stay for
+    """The views to bind to layers. The manager views in `kv_caches` stay for
     KV connectors."""
     mapped = dict(kv_caches)
     for group in attn_groups:
@@ -467,31 +484,41 @@ def map_kv_caches_to_kernel_blocks(
 
 
 def customize_attention_spec(
-    backend: type[AttentionBackend], spec: AttentionSpec
+    backend: type[AttentionBackend], spec: AttentionSpec, layer_name: str
 ) -> AttentionSpec:
     """The backend's spec. Blocks larger than every kernel block size a backend
     takes are split into kernel blocks, which packed blocks must keep whole."""
     spec = backend.customize_spec(spec)
-    sizes = backend.get_supported_kernel_block_sizes(spec)
+    sizes = backend.get_supported_kernel_block_sizes_for_layers(spec, [layer_name])
     fixed_sizes = [s for s in sizes if isinstance(s, int)]
     if spec.block_stride_alignment is None and sizes and fixed_sizes == sizes:
         spec = replace(spec, block_stride_alignment=MultipleOf(max(fixed_sizes)))
     return spec
 
 
+def customize_layer_config(
+    backend: type[AttentionBackend], layer_config: KVCacheLayerConfig, layer_name: str
+) -> KVCacheLayerConfig:
+    """Apply `customize_attention_spec` to an attention layer's spec."""
+    if not isinstance(layer_config.spec, AttentionSpec):
+        return layer_config
+    return replace(
+        layer_config,
+        spec=customize_attention_spec(backend, layer_config.spec, layer_name),
+    )
+
+
 def _block_size_is_supported(
-    backends: list[type[AttentionBackend]],
-    block_size: int,
-    specs: Sequence[KVCacheSpec | None],
+    supported_sizes: Sequence[list[int | MultipleOf]], block_size: int
 ) -> bool:
     """Check if the block size is supported by all backends.
 
-    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    An exact `int` declaration must match exactly; a `MultipleOf`
     declaration accepts any multiple of its base.
     """
-    for backend, spec in zip(backends, specs, strict=True):
+    for sizes in supported_sizes:
         is_supported = False
-        for supported_size in backend.get_supported_kernel_block_sizes(spec):
+        for supported_size in sizes:
             if isinstance(supported_size, int):
                 if block_size == supported_size:
                     is_supported = True
@@ -509,6 +536,7 @@ def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
     kv_cache_specs: Sequence[KVCacheSpec | None] | None = None,
+    layer_names: Sequence[list[str]] | None = None,
 ) -> int:
     """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
@@ -520,6 +548,7 @@ def select_common_block_size(
         kv_manager_block_size: Block size of KV cache.
         backends: List of attention backend classes.
         kv_cache_specs: Per-backend cache specs for spec-specific constraints.
+        layer_names: Per-backend layer names for layer-specific constraints.
 
     Returns:
         The selected block size.
@@ -529,26 +558,36 @@ def select_common_block_size(
 
     """
     specs = kv_cache_specs or [None] * len(backends)
-    if _block_size_is_supported(backends, kv_manager_block_size, specs):
+    if layer_names is None:
+        supported_sizes = [
+            b.get_supported_kernel_block_sizes(s)
+            for b, s in zip(backends, specs, strict=True)
+        ]
+    else:
+        supported_sizes = [
+            b.get_supported_kernel_block_sizes_for_layers(s, names)
+            for b, s, names in zip(backends, specs, layer_names, strict=True)
+        ]
+    if _block_size_is_supported(supported_sizes, kv_manager_block_size):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
     # Any remaining candidate must therefore be an explicit size from a backend.
     candidates = {
         size
-        for backend, spec in zip(backends, specs, strict=True)
-        for size in backend.get_supported_kernel_block_sizes(spec)
+        for sizes in supported_sizes
+        for size in sizes
         if isinstance(size, int) and kv_manager_block_size % size == 0
     }
 
     for size in sorted(candidates, reverse=True):
-        if _block_size_is_supported(backends, size, specs):
+        if _block_size_is_supported(supported_sizes, size):
             return size
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
         + "; ".join(
-            f"{b.get_name()}: {b.get_supported_kernel_block_sizes(s)}"
-            for b, s in zip(backends, specs, strict=True)
+            f"{b.get_name()}: {sizes}"
+            for b, sizes in zip(backends, supported_sizes, strict=True)
         )
         + ")."
     )
@@ -561,10 +600,10 @@ def allocate_kv_cache(
     kernel_block_sizes: list[int] | None = None,
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
+    """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
-    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
+    Every KVCacheTensor places its layers in the same backing allocation: layer `l` of
+    block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
     groups overlay each other, so tensors may address the same bytes.
 
     allocate replaces the default zeroed backing allocation: it takes the
@@ -576,6 +615,9 @@ def allocate_kv_cache(
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
+    # Create the wvSplitKrc workspaces before the backing allocation and any capture.
+    if current_platform.is_rocm():
+        warmup_rocm_skinny_gemm_workspaces(device)
     if allocate is not None:
         buf = allocate(raw_size)
     else:
@@ -610,10 +652,7 @@ def layer_spec_for_tensor(
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         if layer_name in group.layer_names
     )
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        spec = spec.kv_cache_specs[layer_name]
-    return group_id, spec
+    return group_id, group.kv_cache_specs[layer_name]
 
 
 def layer_kernel_block_size(
@@ -627,13 +666,7 @@ def layer_kernel_block_size(
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
-    # wvSplitKrc's process-lifetime static workspaces
-    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
-    # qualifying GEMM. Force that now, before
-    # the giant backing allocation below: if one landed in this segment's
-    # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
-        warmup_rocm_skinny_gemm_workspaces(device)
         # Pad to the page granularity MoRIIO needs to register the shared
         # backing as a single RDMA memory region. Other platforms keep the
         # exact-size allocation (see #53974), so anything reading
@@ -664,20 +697,20 @@ def prepare_kernel_block_sizes(
     """
     kernel_block_sizes = []
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # pick an arbitrary one to dispatch.
-            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+        if not kv_cache_group.kv_cache_specs:
+            # A PP stage holding none of the group's layers splits no blocks.
+            kernel_block_sizes.append(kv_cache_group.block_size)
             continue
+        # All layers of a group have the same kind of spec; pick any to dispatch.
+        kv_cache_spec = next(iter(kv_cache_group.kv_cache_specs.values()))
         if not kv_cache_spec.has_layer_views:
             kernel_block_sizes.append(kv_cache_spec.block_size)
         elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
-            kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            kv_manager_block_size = kv_cache_group.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
             group_specs = [g.kv_cache_spec for g in attn_groups[kv_cache_gid]]
+            group_layer_names = [g.layer_names for g in attn_groups[kv_cache_gid]]
             # Block-outermost packing puts other layers' pages between the
             # blocks, so they are never split group-wide.
             selected_kernel_size = (
@@ -688,7 +721,10 @@ def prepare_kernel_block_sizes(
                     if not set(t.layers).isdisjoint(kv_cache_group.layer_names)
                 )
                 else select_common_block_size(
-                    kv_manager_block_size, group_backends, group_specs
+                    kv_manager_block_size,
+                    group_backends,
+                    group_specs,
+                    group_layer_names,
                 )
             )
             kernel_block_sizes.append(selected_kernel_size)
@@ -696,9 +732,7 @@ def prepare_kernel_block_sizes(
             # This is likely Mamba or other non-attention cache, no splitting.
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
-            raise NotImplementedError(
-                f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
-            )
+            raise NotImplementedError(f"unknown kv cache spec {kv_cache_spec}")
     return kernel_block_sizes
 
 
@@ -729,6 +763,30 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
+
+
+def reserve_encoder_cache_residency(
+    encoder_outputs: dict[str, torch.Tensor],
+    dummy_outputs: Sequence[torch.Tensor],
+    encoder_cache_size: int,
+) -> int:
+    """Reserve the encoder cache's resident footprint during profiling, in bytes.
+
+    The dummy run only materialises one compute batch, so a cache larger than the
+    compute budget would be under-reserved and the surplus handed to the KV cache.
+    """
+    if not dummy_outputs:
+        return 0
+
+    # `sanity_check_mm_encoder_outputs` guarantees 2-D (tokens, hidden) outputs.
+    ref = dummy_outputs[0]
+    bytes_per_token = ref.element_size() * ref.shape[1]
+    shortfall = encoder_cache_size - sum(out.shape[0] for out in dummy_outputs)
+    if shortfall > 0:
+        encoder_outputs["tmp_residency"] = torch.empty(
+            (shortfall, ref.shape[1]), dtype=ref.dtype, device=ref.device
+        )
+    return encoder_cache_size * bytes_per_token
 
 
 def request_memory(
@@ -801,7 +859,7 @@ def request_memory(
 
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroup],
     runner_only_attn_layers: set[str] | None = None,
 ) -> None:
     """Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -822,14 +880,15 @@ def add_kv_sharing_layers_to_kv_cache_groups(
     if not shared_kv_cache_layers:
         return
 
-    layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
+    layer_to_kv_cache_group: dict[str, KVCacheGroup] = {}
     for kv_cache_group in kv_cache_groups:
         for layer_name in kv_cache_group.layer_names:
             layer_to_kv_cache_group[layer_name] = kv_cache_group
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
-        tgt_kv_cache_group.layer_names.append(layer_name)
+        specs = tgt_kv_cache_group.kv_cache_specs
+        specs[layer_name] = specs[target_layer_name]
 
         if runner_only_attn_layers is not None:
             runner_only_attn_layers.add(layer_name)
@@ -919,9 +978,46 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            if hasattr(layer.impl, "_kv_view_cache"):
+                layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
             if hasattr(layer, name):
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
+
+
+def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
+    """Split copies between the `[2, num_copies]` source and destination
+    `block_ids` of `blocks` into contiguous runs.
+
+    Returns:
+        An int64 array of shape `[3, num_runs]` holding source addresses,
+        destination addresses and sizes in bytes.
+
+    """
+    shape, strides = list(blocks.shape[1:]), list(blocks.stride()[1:])
+    run_len = 1
+    while shape and (shape[-1] == 1 or strides[-1] == run_len):
+        run_len *= shape.pop()
+        strides.pop()
+    offsets = np.zeros(1, dtype=np.int64)
+    for size, stride in zip(shape, strides):
+        offsets = (offsets[:, None] + np.arange(size) * stride).ravel()
+    elements = (block_ids[:, :, None] * blocks.stride(0) + offsets).reshape(2, -1)
+    addresses = blocks.data_ptr() + elements * blocks.element_size()
+    sizes = np.full((1, addresses.shape[1]), run_len * blocks.element_size())
+    return np.concatenate([addresses, sizes])
+
+
+@triton.jit(do_not_specialize=["num_runs"])
+def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
+    # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
+    # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
+    run = tl.program_id(0)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < tl.load(runs_ptr + 2 * num_runs + run)
+    src = tl.load(runs_ptr + run).to(tl.pointer_type(WORD))
+    dst = tl.load(runs_ptr + num_runs + run).to(tl.pointer_type(WORD))
+    tl.store(dst + offsets, tl.load(src + offsets, mask=mask), mask=mask)
 
 
 def copy_kv_cache_blocks_inplace(
@@ -933,7 +1029,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    block_views: list[torch.Tensor] = []
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
@@ -953,11 +1049,6 @@ def copy_kv_cache_blocks_inplace(
         if key in seen:
             continue
         seen.add(key)
-
-        if indices is None:
-            indices = async_tensor_h2d(indices_np, device=cache.device)
-        assert cache.device == indices.device
-        src, dst = indices.unbind(dim=1)
 
         kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
         assert remainder == 0, (
@@ -980,13 +1071,42 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        block_views.append(blocks)
+
+    if not block_views:
+        return
+    device = block_views[0].device
+    block_ids = indices_np.T
+    # Copy GPU blocks directly in one kernel: gathering the sources into a
+    # temporary can take GiBs. The kernel copies runs concurrently, which is
+    # safe because copy-on-write destinations are freshly allocated blocks.
+    if device.type == "cuda":
+        assert not np.intersect1d(*block_ids).size, "Chained block copies"
+        runs = np.concatenate(
+            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+        )
+        # Copy in the widest word that divides every address and size.
+        bits = int(np.bitwise_or.reduce(runs, axis=None))
+        word_bytes = min(8, bits & -bits)
+        runs[2] //= word_bytes
+        block = 4096
+        _copy_runs_kernel[(runs.shape[1], triton.cdiv(int(runs[2].max()), block))](
+            async_tensor_h2d(runs, device=device),
+            runs.shape[1],
+            WORD={8: tl.int64, 4: tl.int32, 2: tl.int16, 1: tl.int8}[word_bytes],
+            BLOCK=block,
+        )
+        return
+
+    src, dst = async_tensor_h2d(indices_np, device=device).unbind(dim=1)
+    for blocks in block_views:
         blocks[dst] = blocks[src]
 
 
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
     """Whether every request in the batch has the same query length.
 
-    Shape test only; use ``get_uniform_decode_token_count`` to classify a
+    Shape test only; use `get_uniform_decode_token_count` to classify a
     scheduled batch, since a prompt chunk can have a decode batch's shape.
     """
     return num_reqs > 0 and num_tokens == max_query_len * num_reqs
@@ -1003,7 +1123,7 @@ def get_uniform_decode_token_count(
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 

@@ -3,14 +3,14 @@
 
 """E2E tests for online FP8 per-channel quantization.
 
-Loads a BF16 model with ``--quantization fp8_per_channel`` (online
+Loads a BF16 model with `--quantization fp8_per_channel` (online
 quantization) and compares log-probabilities against the same model served in
 BF16 without quantization.  This exercises the full pipeline: config parsing,
-``Fp8PtpcOnlineLinearMethod``, ``Fp8PtpcOnlineMoEMethod``, weight
+`Fp8PtpcOnlineLinearMethod`, `Fp8PtpcOnlineMoEMethod`, weight
 loading, online quantization / shuffling, and inference.
 
-``example_prompts`` is a pytest fixture (from conftest.py) that loads 8
-diverse prompts from ``tests/prompts/example.txt``.
+`example_prompts` is a pytest fixture (from conftest.py) that loads 8
+diverse prompts from `tests/prompts/example.txt`.
 """
 
 import pytest

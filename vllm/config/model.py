@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import InitVar, field
+from dataclasses import InitVar, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -53,6 +53,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.processor import processor_has_attr
 from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -96,6 +97,7 @@ TokenizerMode = Literal[
     "hf",
     "glm5_next",
     "alpamayo2_super",
+    "hy_v4",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -137,7 +139,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
     """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
 
-    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    `W4A16_NVFP4` is excluded on purpose: it quantizes weights only, so there
     is no activation quantization for the fusion passes to act on.
     """
     layers = (quant_config or {}).get("quantized_layers")
@@ -185,16 +187,19 @@ class ModelConfig:
     - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
       trajectory and special tokens added; selected automatically for
       `nvidia/Alpamayo2-Super`.
+    - "hy_v4" uses the HF tokenizer with HYV4 VL chat rendering.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
-    - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
-      with Kimi K3's Python XTML encoding instead of a Jinja template.
+    - "kimi_k3" requires a tokenizer with native Kimi K3 XTML chat encoding.
+      It rejects the generic Hugging Face Jinja fallback.
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
-      (GLM-5.3-Flash).
+      (GLM-5.3-Flash). GLM-5.3-Flash multimodal inputs require the Rust
+      frontend; Python supports text-only inference with image and video
+      limits set to zero.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -282,7 +287,7 @@ class ModelConfig:
     determine the data type of the weights."""
     quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
     """User-facing quantization configuration. Carries per-layer-kind specs
-    (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
+    (linear, moe) and ignore patterns; see `QuantizationConfigArgs`.
     Auto-populated from the matching online shorthand when `quantization` is
     one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
@@ -355,7 +360,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
@@ -387,12 +392,12 @@ class ModelConfig:
     sleep_preserve_parameter_names: list[str] = field(default_factory=list)
     """Parameter-name globs to preserve across level-2 sleep.
     Use target globs for frozen Engram table weights and scales omitted by the
-    trainer (e.g. ``*.engram.embed_tokens.weight*``).
-    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
+    trainer (e.g. `*.engram.embed_tokens.weight*`).
+    Use `draft.<name>` for draft-private parameters, or `draft.*` for all.
     The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
-    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
-    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    """Mechanism used to free and restore GPU state for sleep mode. `"cumem"`
+    (default) uses the built-in `CuMemAllocator` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     sleep_mode_offload_cudagraph: bool = False
@@ -400,7 +405,7 @@ class ModelConfig:
     Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
-    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (`ncclCommSuspend`/`ncclCommResume`). Experimental; when disabled
     (the default) sleep still releases weights/KV-cache memory as before."""
     checkpoint_prepare_on_startup: bool = False
     """Prepare each engine for a process checkpoint once it starts, as
@@ -448,7 +453,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     language_model_only: InitVar[bool] = False
-    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int | bool]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
@@ -539,8 +544,9 @@ class ModelConfig:
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
         return factors
 
+    @classmethod
     def _update_nested(
-        self,
+        cls,
         target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
@@ -558,7 +564,7 @@ class ModelConfig:
                     isinstance(nested_target, dict)
                     or hasattr(nested_target, "__dict__")
                 ):
-                    self._update_nested(nested_target, value)
+                    cls._update_nested(nested_target, value)
                     continue
 
             # Set the value (base case)
@@ -567,8 +573,9 @@ class ModelConfig:
             else:
                 setattr(target, key, value)
 
+    @classmethod
     def _apply_dict_overrides(
-        self,
+        cls,
         config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
@@ -579,7 +586,7 @@ class ModelConfig:
             attr = getattr(config, key, None)
             if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
-                self._update_nested(attr, value)
+                cls._update_nested(attr, value)
             else:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
@@ -588,7 +595,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         language_model_only: bool,
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -760,6 +767,21 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Backend pooling classes wrap encoders and decoders, so default per model
+        if (
+            model_info.is_pooling_model
+            and not model_info.supports_multimodal
+            and self.using_transformers_backend()
+        ):
+            from vllm.model_executor.models.transformers.utils import (
+                get_default_seq_pooling_type,
+            )
+
+            seq_pooling_type = get_default_seq_pooling_type(self)
+            self._model_info = replace(
+                model_info, default_seq_pooling_type=seq_pooling_type
+            )
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
@@ -773,6 +795,8 @@ class ModelConfig:
                 "KimiK31ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "kimi_k3"
+            elif arch == "HYV4VLForConditionalGeneration":
+                self.tokenizer_mode = "hy_v4"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch in (
@@ -782,7 +806,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
@@ -1019,17 +1047,17 @@ class ModelConfig:
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
 
-        This runs more than once per config: once early in ``__post_init__``
-        (before ``multimodal_config`` exists), again after it is created, and
-        then for every ``get_model_arch_config`` regeneration -- notably
-        ``with_hf_config``, which deep-copies this ``ModelConfig`` and swaps
-        ``hf_config`` for a text-only submodule (e.g. ``Gemma4ForCausalLM``).
+        This runs more than once per config: once early in `__post_init__`
+        (before `multimodal_config` exists), again after it is created, and
+        then for every `get_model_arch_config` regeneration -- notably
+        `with_hf_config`, which deep-copies this `ModelConfig` and swaps
+        `hf_config` for a text-only submodule (e.g. `Gemma4ForCausalLM`).
 
         The result is cached for correctness, not just to save work: on the
-        ``with_hf_config`` copy the submodule architecture has no registered
+        `with_hf_config` copy the submodule architecture has no registered
         multimodal processor, so re-querying the registry would raise and be
-        treated as text-only, wrongly clearing ``is_mm_prefix_lm`` even when a
-        vision modality is still enabled (e.g. ``image=0`` but video allowed).
+        treated as text-only, wrongly clearing `is_mm_prefix_lm` even when a
+        vision modality is still enabled (e.g. `image=0` but video allowed).
         The deep-copied cache preserves the top-level decision instead.
         """
         if self.multimodal_config is None:
@@ -1172,6 +1200,14 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
+        elif cls == "TransformersMultiModal" and processor_has_attr(
+            self.model,
+            self.hf_config.model_type,
+            "apply_transcription_request",
+            revision=self.revision,
+            trust_remote_code=self.trust_remote_code,
+        ):
+            cls += "ForTranscription"
         else:
             cls += "ForCausalLM"
         return cls
@@ -1414,6 +1450,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "inkling2",
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
@@ -1425,6 +1462,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "modelopt_int8",
                 "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
@@ -1539,29 +1577,6 @@ class ModelConfig:
         if cls is not None:
             cls.verify_and_update_model_config(self)
 
-    def verify_dual_chunk_attention_config(
-        self,
-        load_config: LoadConfig,
-    ) -> None:
-        if hasattr(self.hf_config, "dual_chunk_attention_config"):
-            # Try loading the sparse attention config
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_sparse_attention_config,
-            )
-
-            sparse_attn_config = get_sparse_attention_config(self, load_config)
-            if sparse_attn_config:
-                self.hf_config.dual_chunk_attention_config[
-                    "sparse_attention_config"
-                ] = sparse_attn_config
-                if (
-                    "sparse_attention_enabled"
-                    not in self.hf_config.dual_chunk_attention_config
-                ):
-                    self.hf_config.dual_chunk_attention_config[
-                        "sparse_attention_enabled"
-                    ] = True
-
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1585,6 +1600,8 @@ class ModelConfig:
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
+
+        self.verify_eplb_config(parallel_config)
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
@@ -1642,6 +1659,92 @@ class ModelConfig:
                 "or pipeline_parallel_size > 1."
             )
 
+    def verify_eplb_config(
+        self,
+        parallel_config: ParallelConfig,
+        *,
+        num_experts: int | None = None,
+        config_name: str = "eplb_config.num_redundant_experts",
+        disable_config_name: str | None = None,
+    ) -> None:
+        """Validate that this model's experts can be evenly distributed by EPLB."""
+        if not parallel_config.enable_eplb:
+            return
+
+        from vllm.model_executor.layers.fused_moe.expert_substitution import (
+            get_expert_substitution_spec,
+        )
+
+        if get_expert_substitution_spec(self) is not None:
+            return
+
+        ep_size = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.prefill_context_parallel_size
+            * parallel_config.data_parallel_size
+        )
+        if ep_size <= 1:
+            return
+
+        redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        expert_counts = self.get_eplb_expert_counts(num_experts)
+        if not expert_counts:
+            return
+
+        if redundant_experts is None:
+            from vllm.config.parallel import get_min_num_redundant_experts
+
+            num_logical_experts = (
+                num_experts if num_experts is not None else self.get_num_experts()
+            )
+            redundant_experts = get_min_num_redundant_experts(
+                num_logical_experts, ep_size
+            )
+
+        invalid_counts = {
+            count
+            for count in expert_counts
+            if (count + redundant_experts) % ep_size != 0
+        }
+        if not invalid_counts:
+            return
+
+        lowest_valid_counts = {(-count) % ep_size for count in expert_counts}
+        if len(lowest_valid_counts) == 1:
+            lowest_valid = next(iter(lowest_valid_counts))
+            remediation = f"Set {config_name} to {lowest_valid}."
+        else:
+            remediation = (
+                f"No single {config_name} value makes all routed expert counts "
+                f"({', '.join(str(count) for count in sorted(expert_counts))}) "
+                "divisible by the EP size."
+            )
+        if disable_config_name is not None:
+            remediation += f" To disable EPLB, set {disable_config_name} to false."
+
+        raise ValueError(
+            "EPLB requires each model's routed experts plus redundant experts "
+            "to be evenly distributed across EP ranks. "
+            f"Model {self.model!r} has routed expert counts "
+            f"{', '.join(str(count) for count in sorted(invalid_counts))}, "
+            f"EP size {ep_size}, and {config_name}={redundant_experts}. "
+            f"{remediation}"
+        )
+
+    def get_eplb_expert_counts(self, num_experts: int | None = None) -> set[int]:
+        if num_experts is not None:
+            return {num_experts} if num_experts > 0 else set()
+
+        arch_config = self.model_arch_config
+        expert_counts = {arch_config.num_experts}
+        if arch_config.per_layer_overrides is not None:
+            expert_counts.update(
+                layer.get("num_experts", arch_config.num_experts)
+                for layer in arch_config.per_layer_overrides
+            )
+        expert_counts.discard(0)
+        return expert_counts
+
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
@@ -1687,7 +1790,7 @@ class ModelConfig:
     ) -> int:
         """Returns the number of KV heads per GPU.
 
-        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        Pass `arch_config` (from `model_arch_config[layer_idx]`) to size a
         single layer of a heterogeneous model rather than the model as a whole.
         """
         if self.use_mla:
@@ -1709,7 +1812,7 @@ class ModelConfig:
     ) -> int:
         """Returns the number of attention heads per GPU.
 
-        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        Pass `arch_config` (from `model_arch_config[layer_idx]`) to size a
         single layer of a heterogeneous model rather than the model as a whole.
         """
         arch_config = arch_config or self.model_arch_config

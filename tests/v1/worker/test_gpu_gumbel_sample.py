@@ -532,7 +532,7 @@ def test_logits_cache_narrower_than_logits_is_rejected():
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("vocab", [4096, 4097, 129280])
+@pytest.mark.parametrize("vocab", [1000, 4096, 4097, 129280])
 def test_greedy_argmax_matches_torch(dtype, vocab):
     """Random rows, cross-block ties, NaN/inf, masked tails and strided rows."""
     logits = torch.randn(64, vocab + 1, device=DEVICE, dtype=dtype)[:, 1:]

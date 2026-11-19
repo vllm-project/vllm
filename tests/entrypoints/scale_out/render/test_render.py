@@ -810,8 +810,8 @@ async def test_chat_completion_render_with_sampling_params(client):
     "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
 )
 async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
-    """``max_tokens=16`` (also the completions default) equals the
-    ``SamplingParams`` default; /render must still return it, or generate
+    """`max_tokens=16` (also the completions default) equals the
+    `SamplingParams` default; /render must still return it, or generate
     treats it as unset."""
     response = await client.post(
         "/v1/completions/render",
@@ -1119,7 +1119,8 @@ def deepseek_v41_server():
 async def test_messages_render_tool_search_result_for_deepseek_v41(
     deepseek_v41_server,
 ):
-    """A tool search result renders as one result naming the tools it found."""
+    """A tool search result renders as one result naming the tools it found,
+    followed by a system turn listing them, as in deepseek-recipe."""
     request = {
         "model": DEEPSEEK_V41_MODEL_NAME,
         "max_tokens": 16,
@@ -1182,7 +1183,8 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
     assert detokenize.status_code == 200
     assert (
         "<｜User｜><tool_result>get_weather</tool_result>\n\n"
-        "<tool_result>notes</tool_result><｜Assistant｜>"
+        "<tool_result>notes</tool_result><｜System｜>\n\n### Updated Tool Schemas\n\n"
+        '{"name": "get_weather", "parameters": {"type": "object"}}<｜Assistant｜>'
     ) in detokenize.json()["prompt"]
 
 

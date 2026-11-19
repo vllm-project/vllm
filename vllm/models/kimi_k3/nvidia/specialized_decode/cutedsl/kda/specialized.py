@@ -17,7 +17,7 @@ One CTA per SM walks a contiguous range of (request, head) items with two roles:
 
 So the per-item input and output phases (half the instructions of KdaWide) run on
 their own warps, overlapped with the recurrence, and the scan warps only scan
-(``setmaxnreg``: 168 registers for scan threads, 88 for prep).
+(`setmaxnreg`: 168 registers for scan threads, 88 for prep).
 
 Per item the math is KdaWide's: the stock Triton formulas and instructions, BF16
 roundings of the convolution outputs, raw gates and recurrence outputs, FP32 state;
@@ -159,8 +159,8 @@ def shared_bytes(tokens, conv_dim_first, window, conv_size):
 
 
 class KdaWS:
-    """KdaWide's operands and semantics (``tokens`` q, ``record``: RecoverSSM verify,
-    ``gate_mode`` the F_B chain order); ``ctas`` persistent CTAs (one per SM)."""
+    """KdaWide's operands and semantics (`tokens` q, `record`: RecoverSSM verify,
+    `gate_mode` the F_B chain order); `ctas` persistent CTAs (one per SM)."""
 
     def __init__(
         self,
@@ -198,7 +198,7 @@ class KdaWS:
 
     @cute.jit
     def stage_conv(self, args, convs, p, head, conv_slot, offset):
-        """cp.async the item's convolution window (prep thread ``p``)."""
+        """cp.async the item's convolution window (prep thread `p`)."""
         conv_state = args[3]
         dim: cutlass.Constexpr = self.heads * K
         size: cutlass.Constexpr = conv_state.element_type.width // 8
@@ -244,7 +244,7 @@ class KdaWS:
     @cute.jit
     def block_sums(self, values, sums, p, count: cutlass.Constexpr):
         """Per-value totals over the 128 prep threads (each thread one channel):
-        ``values`` (a power-of-two list) -> sums[value, warp]; the caller syncs."""
+        `values` (a power-of-two list) -> sums[value, warp]; the caller syncs."""
         lane, warp = p % 32, p // 32
         total, selected = scatter_reduce(values, lane, count)
         if lane % (32 // count) == 0:
@@ -262,7 +262,7 @@ class KdaWS:
 
     @cute.jit
     def decay(self, a, raw_g, dt, lower_bound):
-        """``a`` = exp(A_log) (tl.exp)."""
+        """`a` = exp(A_log) (tl.exp)."""
         gate = lower_bound * triton_sigmoid(a * (raw_g + dt))
         return triton_exp(gate)
 

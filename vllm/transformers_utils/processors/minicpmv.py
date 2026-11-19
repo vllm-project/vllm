@@ -71,12 +71,12 @@ class MiniCPMVProcessor(ProcessorMixin):
         """Run the vendored MiniCPMV processor on a (text, images) pair.
 
         Batched inputs are supported following the upstream MiniCPM-V
-        processor flow. ``images`` is forwarded to the underlying image
-        processor and ``text`` is tokenized with image placeholders
+        processor flow. `images` is forwarded to the underlying image
+        processor and `text` is tokenized with image placeholders
         replaced by the appropriate slice tokens. Returns a
-        ``MiniCPMVBatchFeature`` with at minimum ``input_ids`` and (when
-        images are provided) ``pixel_values``, ``image_sizes``,
-        ``image_bound`` and ``tgt_sizes``.
+        `MiniCPMVBatchFeature` with at minimum `input_ids` and (when
+        images are provided) `pixel_values`, `image_sizes`,
+        `image_bound` and `tgt_sizes`.
         """
         if images is not None:
             image_inputs = self.image_processor(
