@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
+from vllm.distributed.kv_transfer.kv_connector.v1.offload_limits import (
+    RequestOffloadLimits,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventGroupSpec,
     get_offloading_event_group_spec,
@@ -347,10 +349,7 @@ class RequestOffloadState:
     req_context: ReqContext
     offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
-    # upper bound on tokens to load for this request; None means no cap
-    max_load_tokens: int | None = None
-    # upper bound on tokens to offload for this request; None means no cap
-    max_offload_tokens: int | None = None
+    limits: RequestOffloadLimits = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -377,31 +376,11 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
-        params = self.req.kv_transfer_params
-
-        # NOTE: This field is experimental and subject to change in the future.
-        raw = params.get("max_load_tokens") if params else None
-        if type(raw) is int and raw >= 0:
-            self.max_load_tokens = raw
-            logger.debug(
-                "Request %s: max_load_tokens set to %d",
-                self.req.request_id,
-                raw,
-            )
-        elif raw is not None:
-            logger.warning(
-                "max_load_tokens must be a non-negative int, got %r; ignoring", raw
-            )
-
-        # NOTE: This field is experimental and subject to change in the future.
-        max_offload_tokens = get_max_offload_tokens(params)
-        if max_offload_tokens is not None:
-            self.max_offload_tokens = max_offload_tokens
-            logger.debug(
-                "Request %s: max_offload_tokens set to %d",
-                self.req.request_id,
-                self.max_offload_tokens,
-            )
+        self.limits = RequestOffloadLimits.from_kv_transfer_params(
+            self.req.kv_transfer_params
+        )
+        if self.limits != RequestOffloadLimits():
+            logger.debug("Request %s: %s", self.req.request_id, self.limits)
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -474,8 +453,7 @@ class RequestOffloadState:
                 num,
                 len(self.req.block_hashes) * self.config.tokens_per_hash,
             )
-        if self.max_offload_tokens is not None:
-            num = min(num, self.max_offload_tokens)
+        num = self.limits.cap_store(num)
         if self.config.offload_prompt_only:
             num = min(num, self.req.num_prompt_tokens)
         return num

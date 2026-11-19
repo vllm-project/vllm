@@ -33,6 +33,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler impor
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offload_limits import (
+    RequestOffloadLimits,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -1592,7 +1595,7 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
         completed_token_len=completed,
         boundary_puts=[BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
-        max_offload_tokens=max_offload_tokens,
+        offload_limits=RequestOffloadLimits(max_offload_tokens=max_offload_tokens),
     )
 
     assert _partial_tail_non_mamba_puts(coord, req_meta, [4, 16]) == expected
