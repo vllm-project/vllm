@@ -100,7 +100,7 @@ The concrete classes used for `MoERunner` and `RoutedExperts` can be overridden 
 - **Input/output transforms**: Applies `routed_input_transform` (e.g., latent projection for NemotronH) before expert computation and `routed_output_transform` after.
 - **Padding**: Pads `hidden_states` to `moe_config.hidden_dim` when quantization backends require alignment.
 - **Dispatch/Combine**: For DP/EP without internal MK support, dispatches tokens across ranks before computation and combines after.
-- **Expert execution**: Delegates to `RoutedExperts.forward_modular()` or `.forward_monolithic()` depending on whether the quant method handles routing internally.
+- **Expert execution**: Delegates to `RoutedExperts.forward_modular()` or `.forward_monolithic()`, with `.forward_monolithic_routed()` available for supported monolithic kernels when DP padding requires externally computed routing.
 - **Shared experts**: Manages `SharedExperts` lifecycle — triggering computation before, after, or overlapped with routed experts via CUDA streams.
 - **All-reduce**: Handles TP/EP all-reduce at the correct point (either after combine kernel or after shared+routed sum).
 - **Scaling**: Applies `routed_scaling_factor` to output (with FP16 overflow protection).
@@ -119,9 +119,10 @@ forward()
       → _maybe_dispatch() (DP/EP token redistribution)
       → _apply_quant_method()
         → shared_experts(NO_OVERLAP)  [if overlap is disabled]
-        → router.select_experts()    [modular path]
-        → routed_experts.forward_modular() / forward_monolithic()
-           └─ shared_experts(MK_INTERNAL_OVERLAPPED)  [inside async MK]
+        → router.select_experts()    [modular or monolithic DP-padding path]
+        → routed_experts.forward_modular() / forward_monolithic() /
+          forward_monolithic_routed()
+           └─ shared_experts(MK_INTERNAL_OVERLAPPED)  [inside async modular MK]
         → shared_experts.wait()  [if aux-stream work was launched]
       → _maybe_combine()
   → truncate fused_output to og_hidden_dim_pre_xform (if padded)
@@ -161,6 +162,12 @@ MoERunner.forward()
     │       → quant_method.apply_monolithic(layer=routed_experts, ...)
     │           → monolithic kernel (FlashInfer TRTLLM, etc.)
     │
+    ├── [MONOLITHIC WITH PRECOMPUTED ROUTING: supported DP-padding cases]
+    │   ├── router.select_experts() → (topk_weights, topk_ids)
+    │   │   with topk_ids == -1 for padding rows
+    │   └── RoutedExperts.forward_monolithic_routed(...)
+    │       → moe_kernel.apply_monolithic_routed(...) directly
+    │
     ├── [PARALLEL] SharedExperts(shared_input) → shared_output
     │   (on aux CUDA stream when possible)
     │
@@ -182,6 +189,12 @@ MoERunner.forward()
     │
     └── final output → back to transformer block
 ```
+
+#### Monolithic kernels with precomputed routing
+
+When `dp_size > 1`, a padding mask is present, and both the monolithic prepare/finalize adapter and experts support precomputed routing, `MoERunner` uses the router to select experts and marks padding rows with `topk_ids == -1`. It then calls `RoutedExperts.forward_monolithic_routed()`, which forwards the layer's weights directly to `moe_kernel.apply_monolithic_routed()` rather than calling the quant method's `apply_monolithic()`. This prevents padding rows from activating experts. `RoutingSimulatorRouter` is excluded from this path.
+
+The usual monolithic path still passes logits to the kernel, after `router.prepare_monolithic_logits()`. Precomputed routing is an optional interface on monolithic implementations, not a third kernel implementation type.
 
 ### 3. `FusedMoERouter` (`router/fused_moe_router.py`)
 
@@ -215,9 +228,10 @@ MoERunner.forward()
 
 - **Weight creation**: Delegates to `quant_method.create_weights(layer=self, ...)` which registers parameters on this module.
 - **Weight loading**: Implements `weight_loader()` — a complex method handling TP sharding, quantization-specific loading (per-tensor/channel/group/block scales, zero points, g_idx), and EP expert filtering. Also implements `load_weights()` for the newer fused loading path.
-- **Execution**: Two forward paths:
+- **Execution**: Forward entry points:
     - `forward_modular(x, topk_weights, topk_ids, ...)` — for decomposed kernels where the router has already selected experts. Calls `quant_method.apply()`.
     - `forward_monolithic(x, router_logits, ...)` — for monolithic kernels that handle routing internally. Calls `quant_method.apply_monolithic()`.
+    - `forward_monolithic_routed(x, topk_weights, topk_ids)` — optional monolithic path with precomputed routing for DP padding. Calls `moe_kernel.apply_monolithic_routed()` directly.
 - **Expert mapping**: Maintains `expert_map` (global→local ID tensor) and routing tables via `ExpertMapManager`. Supports EPLB weight rearrangement via `get_expert_weights()`.
 - **Quant method**: Holds the `FusedMoEMethodBase` instance that determines which kernel to use.
 
@@ -296,7 +310,7 @@ The base `apply()` and `apply_monolithic()` implementations raise `NotImplemente
 **Two execution modes**:
 
 - **Modular**: Router selects experts first → `apply(layer, x, topk_weights, topk_ids)`. Used by Triton, CUTLASS, and most backends.
-- **Monolithic**: Kernel handles routing internally → `apply_monolithic(layer, x, router_logits)`. Used by FlashInfer TRTLLM and some specialized backends.
+- **Monolithic**: Normally the kernel handles routing internally → `apply_monolithic(layer, x, router_logits)`. Used by FlashInfer TRTLLM and some specialized backends. Supported kernels can instead use the [precomputed-routing path](#monolithic-kernels-with-precomputed-routing) for DP padding.
 
 ### 9. MoE Kernel Oracle (`oracle/`)
 
@@ -336,7 +350,7 @@ The target interface includes `backend_enum_cls`, `get_priority_backends`, `back
 
 1. **Factory pattern over constructor**: `FusedMoEFactory()` is a function, not a class. This avoids deep inheritance hierarchies and allows the factory to select different `MoERunner` / `RoutedExperts` subclasses via `runner_cls` / `routed_experts_cls`.
 
-2. **Separation of routing from execution**: `FusedMoERouter` is decoupled from `RoutedExperts`. This allows monolithic kernels to bypass the router entirely while modular kernels use it for expert selection.
+2. **Separation of routing from execution**: `FusedMoERouter` is decoupled from `RoutedExperts`. Modular kernels consume external expert selection; monolithic kernels normally select experts internally, with an optional precomputed-routing path for DP padding.
 
 3. **Weights live on RoutedExperts, orchestration on MoERunner**: This separates concerns — `RoutedExperts` handles weight lifecycle (creation, loading, quantization) while `MoERunner` handles the forward pass orchestration (dispatch, shared experts, all-reduce).
 

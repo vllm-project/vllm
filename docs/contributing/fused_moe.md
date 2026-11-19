@@ -27,6 +27,8 @@ Add the adapter under [`fused_moe/experts/`](../../vllm/model_executor/layers/fu
 - `FusedMoEExpertsModular` consumes precomputed top-k IDs and weights. Implement `workspace_shapes()`, `finalize_weight_and_reduce_impl()`, and `apply()`. Normally `apply()` writes into the supplied output buffer and returns `None`; only the supported deferred-finalization path returns `UnfinalizedMoEOutput` instead.
 - `FusedMoEExpertsMonolithic` consumes router logits and performs routing internally. Implement its `apply()` contract and declare the supported routing methods and router-logits dtypes. It must be paired with a monolithic prepare/finalize adapter.
 
+For the optional [monolithic precomputed-routing path](../design/fused_moe_design.md#monolithic-kernels-with-precomputed-routing), implement `apply_precomputed_routing()` on the experts and `prepare_routed()` on prepare/finalize; both must opt in through `supports_precomputed_routing()`. Preserve `topk_ids == -1` for padding rows and test the DP-padding path. `RoutedExperts` calls this kernel interface directly, bypassing the quant method's usual execution entry point.
+
 For modular experts, specify the two scratch-buffer shapes and output shape. Override `workspace_dtype()` if the default activation dtype is unsuitable. Choose the top-k weight/reduction implementation according to whether the experts or finalization perform that work; do not apply router weights a second time when they were already applied to the input.
 
 Use an existing adapter with the same layout and quantization scheme as a reference. For example, [`TritonExperts`](../../vllm/model_executor/layers/fused_moe/experts/triton_moe.py) demonstrates a modular adapter and extending the shared support checker.
