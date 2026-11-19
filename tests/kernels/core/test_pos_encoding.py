@@ -229,7 +229,8 @@ def test_rotary_embedding_fp32_cache_with_bf16_query(cache_dtype, default_vllm_c
     query = torch.randn(17, 128, dtype=torch.bfloat16, device="cuda")
     key = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
 
-    out_query, out_key = rope.forward_cuda(positions, query.clone(), key.clone())
+    with ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]):
+        out_query, out_key = rope.forward_cuda(positions, query.clone(), key.clone())
     assert out_key is not None
     ref_query, ref_key = query.clone(), key.clone()
     ops.rotary_embedding(positions, ref_query, ref_key, 64, saved_table, False)

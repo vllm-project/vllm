@@ -335,7 +335,6 @@ def test_aiter_rotary_embedding_fp32_cache_with_bf16_query(default_vllm_config):
     """AITER Triton RoPE accepts FP32 tables with BF16 query and key."""
     set_random_seed(0)
     rope = RotaryEmbedding(64, 64, 128, 10000.0, False, torch.float32)
-    assert rope.use_aiter
     table = torch.randn(128, 64, dtype=torch.float32, device="cuda")
     rope.cos_sin_cache = table
     saved_table = table.clone()
@@ -343,7 +342,10 @@ def test_aiter_rotary_embedding_fp32_cache_with_bf16_query(default_vllm_config):
     query = torch.randn(17, 128, dtype=torch.bfloat16, device="cuda")
     key = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
 
-    out_query, out_key = rope.forward_hip(positions, query.clone(), key.clone())
+    with ir.ops.rotary_embedding.set_priority(["aiter", "vllm_c", "native"]):
+        impl = ir.ops.rotary_embedding.dispatch(positions, query, key, 64, table, False)
+        assert impl.provider == "aiter"
+        out_query, out_key = rope.forward_hip(positions, query.clone(), key.clone())
     assert out_key is not None
     ref_query, ref_key = query.clone(), key.clone()
     ops.rotary_embedding(positions, ref_query, ref_key, 64, saved_table, False)

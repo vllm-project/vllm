@@ -3,8 +3,9 @@
 """Muse Spark rotates keys and queries with its FP32 RoPE tables.
 
 Neither the DSpark drafter's context K/V precompute nor the unfused attention
-path may replace a table with a lower-precision copy or round the rotation to
-one.
+path may replace a table with a lower-precision copy. With a RoPE kernel
+provider (vLLM IR `vllm_c` / `aiter`) the rotation is not rounded to one
+either; the native provider computes in the model dtype for every model.
 """
 
 import json
@@ -12,6 +13,7 @@ import json
 import pytest
 import torch
 
+from vllm import ir
 from vllm.config import (
     AttentionConfig,
     CompilationConfig,
@@ -96,8 +98,9 @@ def drafter(request, tmp_path, dist_init):
             target_model_config=target_config,
             target_parallel_config=ParallelConfig(),
         ),
-        # Serving dispatches RoPE as a CustomOp; by default compiled models
-        # disable it and the module falls back to forward_native.
+        # With the RoPE custom op on, vLLM IR runs a kernel provider. By
+        # default compiled models disable it: the module falls back to
+        # forward_native, and forward_cuda runs the native provider.
         compilation_config=(
             CompilationConfig(custom_ops=request.param)
             if request.param
@@ -108,12 +111,23 @@ def drafter(request, tmp_path, dist_init):
     )
     with (
         set_current_vllm_config(vllm_config),
+        # As set at worker startup.
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
         set_default_torch_dtype(torch.bfloat16),
         torch.device("cuda"),
         torch.no_grad(),
     ):
+        if request.param:
+            assert _rotates_off_the_table(ir.ops.rotary_embedding)
+            assert _rotates_off_the_table(ir.ops.rotary_embedding_query_only)
         model = MuseSparkDSparkModel(vllm_config=vllm_config, prefix="model")
         yield model
+
+
+def _rotates_off_the_table(op) -> bool:
+    """A kernel provider is selected: these read the FP32 table as is, while
+    the native provider rounds its rows to the model dtype first."""
+    return op.get_priority()[0] != "native"
 
 
 def _assert_rotated(got, x, table, positions, what) -> None:
@@ -166,6 +180,8 @@ def test_dspark_context_keys_use_the_fp32_rope_table(drafter, monkeypatch):
 
     assert rope.cos_sin_cache is table
     assert len(stored) == NUM_LAYERS
+    if not _rotates_off_the_table(ir.ops.rotary_embedding_query_only):
+        return
     # K-norm as the drafter rounds it, then the rotation.
     kv = drafter._project_muse_context_kv(context)
     k32 = kv[..., :kv_size].unflatten(-1, (NUM_KV_HEADS, HEAD_DIM)).float()
@@ -187,6 +203,8 @@ def test_unfused_attention_uses_the_fp32_rope_table(drafter):
     q, k, _, _ = attn._qk_norm_rope_kv_insert(qkv.clone(), positions)
 
     assert attn.rotary_emb.cos_sin_cache is table
+    if not _rotates_off_the_table(ir.ops.rotary_embedding):
+        return
     for name, got, start, size in (
         ("query", q, 0, attn.q_size),
         ("key", k, attn.q_size, attn.kv_size),
