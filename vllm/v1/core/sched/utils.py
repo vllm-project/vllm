@@ -4,11 +4,24 @@ import contextlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+
+def prompt_embeds_bytes_per_token(vllm_config: "VllmConfig") -> int:
+    """GPU memory per token of `max_model_len` for the `prompt_embeds` rows the
+    workers hold. The scheduler admits rows up to `max_model_len`, so memory
+    planning sets this aside per token, like the KV cache."""
+    model_config = vllm_config.model_config
+    if model_config is None or not model_config.enable_prompt_embeds:
+        return 0
+    assert isinstance(model_config.dtype, torch.dtype)
+    return model_config.get_inputs_embeds_size() * model_config.dtype.itemsize
 
 
 def keep_prompt_embeds_until_finished(vllm_config: "VllmConfig") -> bool:

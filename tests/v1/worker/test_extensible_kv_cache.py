@@ -302,7 +302,9 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
         lambda available, *args: available - gib,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None),
+        model_config=SimpleNamespace(
+            multimodal_config=None, enable_prompt_embeds=False
+        ),
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
@@ -320,6 +322,62 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
     left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
+
+
+def test_measured_sizing_leaves_room_for_prompt_embeds_rows(monkeypatch):
+    """Workers hold up to max_model_len prompt_embeds rows, allocated per
+    request after the measurement, so the KV cache leaves them free."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=gib,
+        torch_reserve_growth_bytes=0,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "get_memory_info", lambda *args: (6 * gib, 0))
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        Platform.free_device_memory,
+    )
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 2 * gib)
+    monkeypatch.setattr(
+        extensible_kv_cache, "measure_kv_cache_bytes", lambda **kwargs: 5 * gib
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    # 512Ki rows of 1024 bf16 values: 1 GiB of prompt_embeds.
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            multimodal_config=None,
+            enable_prompt_embeds=True,
+            max_model_len=512 * 1024,
+            dtype=torch.bfloat16,
+            get_inputs_embeds_size=lambda: 1024,
+        ),
+        parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=None),
+        kv_transfer_config=None,
+    )
+
+    num_blocks = extensible_kv_cache.measure_kv_cache_blocks(
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        init_free_memory=10 * gib,
+        requested_memory=10 * gib,
+    )
+
+    assert num_blocks == 4
 
 
 @pytest.mark.parametrize(
@@ -364,7 +422,9 @@ def test_measured_sizing_warns_when_utilization_withholds_memory(
         lambda available, *args: available,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None),
+        model_config=SimpleNamespace(
+            multimodal_config=None, enable_prompt_embeds=False
+        ),
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(gpu_memory_utilization=utilization),
         kv_transfer_config=None,
@@ -425,7 +485,9 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
         lambda available, *args: available,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None),
+        model_config=SimpleNamespace(
+            multimodal_config=None, enable_prompt_embeds=False
+        ),
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
