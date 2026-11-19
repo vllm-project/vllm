@@ -54,6 +54,22 @@ def reload_weights(
             processed into kernel format (repacking, renaming, etc.)
 
     """
+    engram_config = vllm_config.engram_config
+    model_config = vllm_config.model_config
+    if (
+        engram_config is not None
+        and engram_config.peer_group_size
+        and model_config is not None
+        and model_config.architecture
+        in (
+            "Qwen4ExpForCausalLM",
+            "Qwen4ExpForConditionalGeneration",
+        )
+    ):
+        raise RuntimeError(
+            "Qwen4Exp Engram pool tables cannot reload weights; restart the group"
+        )
+
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
     if weights_iterator is None and not is_checkpoint_format:
@@ -63,7 +79,6 @@ def reload_weights(
             "to avoid weight reloading errors"
         )
 
-    model_config = vllm_config.model_config
     load_config = vllm_config.load_config
     weights_to_load = {
         name.replace(".base_layer.", ".") if vllm_config.lora_config else name

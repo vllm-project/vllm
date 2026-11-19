@@ -161,8 +161,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload`,
-`disk_offload` and, on NVIDIA, `dp_shared_memory`.
+Qwen4Exp PLE tables use ETP sharding by default. On NVIDIA they can also use
+the cross-engine NVLink pool described below.
 
 ## Sharing host tables across DP replicas
 
@@ -224,6 +224,16 @@ launch. `peer_group_transport` picks how rows move:
 compute stream, started before the decoder layers with each Engram layer
 waiting for its own rows; `async` on a side stream. Full CUDA graphs capture
 both; piecewise ones break at the start and at each Engram layer's wait.
+
+For Qwen3.8-Flash-Next-FP8, use the same options with `peer_group_transport`
+set to `nvlink` and `peer_group_fetch` set to `sync`. Start every engine
+with the same checkpoint and revision. Each worker loads the FP8 PLE rows
+assigned to its peer rank and keeps a local copy of the table's scale. The PLE
+layer reads from the pool on the compute stream. Set `disk_offload` and
+`embedding_across_dp` to false (their defaults).
+
+Use checkpoint loading with the pool. The `ipc_cache` loader and online weight
+updates are unsupported. Restart the peer group to change weights.
 
 Prefill and decode engines can share one group (each GPU holds less of every
 table) or form one group each (each group holds a full copy, and neither slows

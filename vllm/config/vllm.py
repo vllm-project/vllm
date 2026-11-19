@@ -1544,6 +1544,27 @@ class VllmConfig:
         self.engram_config.verify_model_config(model_config)
         self.engram_config.resolve_dp_shared_memory(self.parallel_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        if (
+            self.engram_config.peer_group_size
+            and model_config is not None
+            and model_config.architecture
+            in (
+                "Qwen4ExpForCausalLM",
+                "Qwen4ExpForConditionalGeneration",
+            )
+        ):
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support DBO or microbatching"
+                )
+            if self.load_config.load_format == "ipc_cache":
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support ipc_cache loading"
+                )
+            if self.weight_transfer_config:
+                raise ValueError(
+                    "Qwen4Exp Engram pool does not support weight transfer"
+                )
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
