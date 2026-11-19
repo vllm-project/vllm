@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import copy
 import gc
 import math
 import threading
@@ -46,7 +47,7 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import AsyncMPClient, SyncMPClient
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
@@ -2289,3 +2290,93 @@ async def test_async_client_sends_the_release_to_every_engine_without_waiting():
     for _, (_, (_, call_id, method, args)) in sent:
         assert method == "release_unreturned_aux_outputs" and args == ({"r": ["k"]},)
         assert call_id in client.utility_results
+
+
+def _session_engine(n=1):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="r",
+        external_req_id="r-ext",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, max_tokens=2, n=n),
+        pooling_params=None,
+    )
+    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id="r")
+    if n == 1:
+        output_processor.add_request(request, prompt=None, queue=queue)
+    else:
+        parent = ParentRequest(request)
+        for index in range(n):
+            child = copy.copy(request)
+            child.request_id, child.sampling_params = parent.get_child_info(index)
+            output_processor.add_request(child, None, parent, index, queue)
+    released = []
+    aborted = []
+
+    async def add_request(*args, **kwargs):
+        return queue
+
+    async def abort_requests_async(request_ids):
+        aborted.extend(request_ids)
+
+    engine = object.__new__(AsyncLLM)
+    engine.output_processor = output_processor
+    engine.log_requests = False
+    engine.add_request = add_request
+    engine.engine_core = SimpleNamespace(
+        abort_requests_async=abort_requests_async,
+        release_unreturned_aux_outputs=released.append,
+        shutdown=lambda timeout: None,
+    )
+    return engine, queue, released, aborted
+
+
+def _final_output(request_id, owned=True):
+    return EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=[42],
+        finish_reason=FinishReason.LENGTH,
+        aux_output_keys=["job/s/a", "job/s/b", "job/s/tail/t"],
+        aux_version_segments=[(0, "p@v1"), (16, f"{request_id}@v1"), (32, None)],
+        aux_keys_owned=owned,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "n,owned,keys",
+    [
+        (1, True, ["job/s/a", "job/s/b", "job/s/tail/t"]),
+        (1, False, ["job/s/b", "job/s/tail/t"]),
+        (2, True, ["job/s/a", "job/s/b", "job/s/tail/t"]),
+    ],
+    ids=["held", "not-held", "child-of-n-2"],
+)
+async def test_generate_cancelled_before_reading_its_final_output_releases_it(
+    n, owned, keys
+):
+    engine, _, released, _ = _session_engine(n)
+    request_id = "r" if n == 1 else "0_r"
+    stream = engine.generate("prompt", SamplingParams(max_tokens=2), "r-ext")
+    first = asyncio.ensure_future(anext(stream))
+    await asyncio.sleep(0)
+    engine.output_processor.process_outputs([_final_output(request_id, owned)])
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert released == [{request_id: keys}]
+
+
+@pytest.mark.asyncio
+async def test_generate_that_reads_an_error_releases_the_final_output_it_dropped():
+    engine, queue, released, _ = _session_engine()
+    engine.output_processor.process_outputs([_final_output("r")])
+    queue.put(RuntimeError("lost"))
+    with pytest.raises(EngineGenerateError):
+        await anext(engine.generate("prompt", SamplingParams(max_tokens=2), "r-ext"))
+    assert released == [{"r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]

@@ -52,6 +52,16 @@ if TYPE_CHECKING:
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
 
+def _owned_aux_keys(output: EngineCoreOutput) -> list[str]:
+    assert output.aux_output_keys is not None
+    assert output.aux_version_segments is not None
+    if output.aux_keys_owned:
+        return list(output.aux_output_keys)
+    return aux_owned_keys(
+        output.request_id, output.aux_output_keys, output.aux_version_segments
+    )
+
+
 class RequestOutputCollector:
     """Collects streamed RequestOutputs per individual request,
     for hand-off to the consuming asyncio generate task.
@@ -64,6 +74,7 @@ class RequestOutputCollector:
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.unread_aux_keys: dict[str, list[str]] = {}
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
@@ -92,6 +103,7 @@ class RequestOutputCollector:
         self.ready.clear()
         if isinstance(output, Exception):
             raise output
+        self.unread_aux_keys = {}
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
@@ -102,6 +114,8 @@ class RequestOutputCollector:
             self.ready.clear()
         if isinstance(output, Exception):
             raise output
+        if output is not None:
+            self.unread_aux_keys = {}
         return output
 
     def close(self):
@@ -775,16 +789,7 @@ class OutputProcessor:
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 if engine_core_output.aux_output_keys:
-                    assert engine_core_output.aux_version_segments is not None
-                    unreturned_aux_keys[req_id] = (
-                        list(engine_core_output.aux_output_keys)
-                        if engine_core_output.aux_keys_owned
-                        else aux_owned_keys(
-                            req_id,
-                            engine_core_output.aux_output_keys,
-                            engine_core_output.aux_version_segments,
-                        )
-                    )
+                    unreturned_aux_keys[req_id] = _owned_aux_keys(engine_core_output)
                 # Ignore output for already-aborted request.
                 continue
 
@@ -898,6 +903,15 @@ class OutputProcessor:
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
+
+            if (
+                req_state.queue is not None
+                and finish_reason is not None
+                and engine_core_output.aux_output_keys
+            ):
+                req_state.queue.unread_aux_keys[req_id] = _owned_aux_keys(
+                    engine_core_output
+                )
 
             # Free completed requests.
             if finish_reason is not None:

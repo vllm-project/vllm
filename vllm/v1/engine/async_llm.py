@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import os
 import socket
 import time
@@ -865,6 +866,11 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
         finally:
             if q is not None:
+                if q.unread_aux_keys:
+                    with contextlib.suppress(EngineDeadError):
+                        self.engine_core.release_unreturned_aux_outputs(
+                            q.unread_aux_keys
+                        )
                 q.close()
 
     def _run_output_handler(self):
