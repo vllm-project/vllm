@@ -14,6 +14,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

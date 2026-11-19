@@ -8,8 +8,13 @@ A trace has no data, so nothing it feeds reaches memory: its `copy_` is
 recorded, and any other op on it runs on meta copies of its arguments. Ops on
 real tensors alone run for real: `_TargetGuard` makes a loader that reads a
 checkpoint tensor a fallback, and constant writes into one (`fill_`,
-`zero_`) happen, mid-update, and stay out of the plan (post-load processing
-owns padding)."""
+`zero_`) happen, mid-update, and stay out of the plan: replays don't redo
+them. `begin` zero-fills params flagged `fill_on_reload` (padded
+`RoutedExperts` params, `MergedColumnParallelLinear` output padding), so
+padding a loader fills in those stays 0 on replays, e.g. block scales under
+`tp_shard_with_padding` (1 at cold start). Padding a loader fills in
+unflagged params, such as vocab rows, keeps its bytes. Outputs are
+unaffected: the padded weights are 0."""
 
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -36,7 +41,7 @@ _META = torch.device("meta")
 # ---- targets
 
 
-@dataclass
+@dataclass(slots=True)
 class Target:
     """A checkpoint tensor, as a write destination."""
 
@@ -86,7 +91,7 @@ class _SinkClosed(RuntimeError):
 _VALUE_READ = "its loader reads tensor values (.item(), bool(), ...)"
 
 
-@dataclass
+@dataclass(slots=True)
 class Copy:
     """One `dest.copy_(src)` from a trace."""
 
@@ -98,7 +103,7 @@ class Copy:
     dtype: torch.dtype
 
 
-@dataclass
+@dataclass(slots=True)
 class _PlanSink:
     """One bake's record. Traces call `accept_copy` for a `copy_` from
     them, `unsupported` for any other op outside `VIEW_OPS` and
@@ -231,8 +236,8 @@ _METADATA_OPS = {
     torch.ops.aten.new_full,
 }
 # Writes into a target that do not read it: constants, or copies of tensors
-# that are not checkpoint tensors. They run, and stay out of the plan:
-# post-load processing owns padding.
+# that are not checkpoint tensors. They run, and stay out of the plan (see
+# the module docstring for the padding replays don't reset).
 _CONSTANT_WRITES = {
     torch.ops.aten.copy_,
     torch.ops.aten.fill_,
@@ -327,7 +332,7 @@ def _bake(
     return sink
 
 
-@dataclass
+@dataclass(slots=True)
 class Traced:
     copies: dict[str, list[Copy]]  # per name
     reasons: dict[str, str]  # fallback names and why

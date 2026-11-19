@@ -15,12 +15,12 @@ from vllm.utils.async_utils import make_async
 MODEL_NAME = "openai-community/gpt2"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -43,18 +43,18 @@ class MockModelConfig:
         return self.hidden_size
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyTokenizer:
     truncation_side: str = "left"
     max_chars_per_token: int = 1

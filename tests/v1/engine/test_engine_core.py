@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import gc
 import time
 import uuid
 from collections import deque
@@ -9,9 +10,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+import vllm.envs as envs
+from vllm import LLM, SamplingParams
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -22,6 +25,12 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -203,6 +212,75 @@ def test_engine_core():
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("receiver_cache_enabled", [False, True])
+def test_admission_requires_resolved_multimodal_data(receiver_cache_enabled: bool):
+    engine_args = EngineArgs(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        load_format="dummy",
+        enforce_eager=True,
+        max_model_len=4096,
+        max_num_seqs=1,
+        skip_mm_profiling=True,
+        mm_processor_cache_type="lru",
+        mm_processor_cache_gb=1 if receiver_cache_enabled else 0,
+    )
+    config = engine_args.create_engine_config()
+    core = EngineCore(config, Executor.get_class(config), log_stats=False)
+    try:
+        request = make_request()
+        request.mm_features = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier="shared-image",
+                mm_position=PlaceholderRange(offset=1, length=1),
+            )
+        ]
+        if not receiver_cache_enabled:
+            with pytest.raises(MultiModalCacheMissError) as exc_info:
+                core.preprocess_add_request(request)
+            assert exc_info.value.mm_hashes == ["shared-image"]
+            return
+
+        item = MultiModalKwargsItem.dummy()
+        seed_request = make_request()
+        seed_request.mm_features = [copy.copy(request.mm_features[0])]
+        seed_request.mm_features[0].data = item
+        core.preprocess_add_request(seed_request)
+
+        admitted, _ = core.preprocess_add_request(request)
+        assert admitted.mm_features is not None
+        assert admitted.mm_features[0].data is item
+    finally:
+        core.shutdown()
+
+
+@create_new_process_for_each_test()
+def test_failed_inprocess_startup_releases_model(monkeypatch):
+    """An in-process engine that fails to start must release its model."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    # About 1.6 GiB of weights, more than the requested memory
+    with pytest.raises(ValueError, match="No available memory for the cache blocks"):
+        LLM(
+            model="TitanML/tiny-mixtral",
+            load_format="dummy",
+            hf_overrides={
+                "num_hidden_layers": 8,
+                "hidden_size": 1024,
+                "intermediate_size": 4096,
+            },
+            enforce_eager=True,
+            gpu_memory_utilization=0.001,
+            max_model_len=128,
+        )
+
+    gc.collect()
+    assert torch.accelerator.memory_allocated() < 256 * 1024**2
 
 
 @create_new_process_for_each_test()
@@ -414,6 +492,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
+    core.deferred_step = None
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
     core.scheduler.has_requests.side_effect = [True, False, False]
@@ -439,6 +518,33 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
         core.model_executor.sample_tokens.assert_not_called()
     else:
         core.model_executor.sample_tokens.assert_called_once()
+
+
+@pytest.mark.parametrize("step_fn", [EngineCore.step, EngineCore.step_with_batch_queue])
+def test_prefill_interval_counts_only_executed_steps(step_fn):
+    """Prefills run every Nth executed step; empty schedules don't advance it."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.deferred_step = None
+    core.is_mm_encoder_only = False
+    core.is_pooling_model = False
+    core.prefill_schedule_interval = 3
+    core.num_executed_steps = 0
+    core.scheduler.has_requests.return_value = True
+    core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
+
+    scheduled_tokens = [16, 0, 0, 16, 16, 16]
+    core.scheduler.schedule.side_effect = [
+        MagicMock(total_num_scheduled_tokens=n, pending_structured_output_tokens=False)
+        for n in scheduled_tokens
+    ]
+    for _ in scheduled_tokens:
+        core.batch_queue.clear()
+        step_fn(core)
+
+    throttled = [call.args[0] for call in core.scheduler.schedule.call_args_list]
+    assert throttled == [False, True, True, True, True, False]
 
 
 @multi_gpu_test(num_gpus=2)
@@ -539,7 +645,6 @@ def test_encoder_instance_zero_kv_cache(
     model_config = ModelConfig(
         model="llava-hf/llava-1.5-7b-hf",  # Multimodal model
         enforce_eager=True,
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
         max_model_len=512,
@@ -756,6 +861,9 @@ def test_paused_dp_rank_ignores_start_wave(paused):
 def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._checkpoint_error = None
+    core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
@@ -947,6 +1055,8 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
     """Keeping the connector's cache steps the in-process engine until its
     pending work, such as connector stores, is done; a reset does not step."""
     core = object.__new__(EngineCore)
+    core._checkpoint_state = CheckpointState.RUNNING
+    core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()
     core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
