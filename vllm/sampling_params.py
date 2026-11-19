@@ -928,25 +928,28 @@ class SamplingParams(
             model_config, structured_outputs_config, tokenizer
         )
 
+    def returns_sampling_mask(self, enabled: bool) -> bool:
+        """Whether to return a sampling mask after request validation."""
+        return enabled and self.return_sampling_mask is not False
+
     def validate_sampling_mask(self, enabled: bool) -> None:
         """Validate the request against the engine's sampling-mask setting."""
-        if self.return_sampling_mask is False:
-            return
-        if enabled:
-            if self.temperature <= 0:
-                raise ValueError(
-                    "sampling distribution replay requires temperature > 0"
-                )
-            if self.top_k <= 0:
-                raise ValueError(
-                    "sampling distribution replay requires top_k > 0 to "
-                    "bound sampling mask size, reduce transfer overhead, "
-                    "and avoid potential OOMs"
-                )
-        elif self.return_sampling_mask is True:
+        if self.return_sampling_mask is True and not enabled:
             raise VLLMValidationError(
                 "Enable --return-sampling-mask to request sampling mask capture",
                 parameter="return_sampling_mask",
+            )
+        if not self.returns_sampling_mask(enabled):
+            return
+        if self.temperature <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires temperature > 0"
+            )
+        if self.top_k <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires top_k > 0 to "
+                "bound sampling mask size, reduce transfer overhead, "
+                "and avoid potential OOMs"
             )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:

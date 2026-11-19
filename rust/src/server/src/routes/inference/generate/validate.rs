@@ -13,12 +13,6 @@ pub(crate) fn validate_request_compat(
 ) -> Result<(), ApiError> {
     served_model_names.check(request.model.as_deref())?;
 
-    if request.sampling_params.inner.return_sampling_mask.is_some()
-        && (request.stream || request.output_mode.unwrap_or_default() != GenerateOutputMode::Tokens)
-    {
-        bail_invalid_request!("A sampling-mask override requires a non-streaming tokens request.");
-    }
-
     if request.output_mode == Some(GenerateOutputMode::Text)
         && request.sampling_params.detokenize == Some(false)
     {
@@ -103,24 +97,6 @@ mod tests {
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
-    }
-
-    #[test]
-    fn sampling_mask_override_requires_non_streaming_tokens() {
-        for (stream, output_mode) in [(true, "tokens"), (false, "text")] {
-            for override_mask in [None, Some(false), Some(true)] {
-                let request: GenerateRequest = serde_json::from_value(json!({
-                    "token_ids": [11, 22],
-                    "stream": stream,
-                    "output_mode": output_mode,
-                    "sampling_params": {"return_sampling_mask": override_mask},
-                }))
-                .expect("parse request");
-                let result =
-                    validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]));
-                assert_eq!(result.is_ok(), override_mask.is_none());
-            }
-        }
     }
 
     /// Python's generate route has no `stream_options` check and ignores the

@@ -55,12 +55,13 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 
 With `stream=true`, each chunk carries the masks of the tokens it emits.
 
-On either the Python or Rust frontend with `--return-sampling-mask` enabled, set
-`sampling_params.return_sampling_mask` to `false` in a non-streaming
-`/inference/v1/generate` tokens request to omit the mask from the response.
-This allows greedy or untruncated sampling. The request can still
-return sampled-token logprobs or routed experts. Omitting the field inherits
-the engine setting. Explicitly requesting `true` requires
+On either the Python or Rust frontend, set
+`sampling_params.return_sampling_mask` to `false` in an
+`/inference/v1/generate` request to omit the mask from the response.
+The override works with streaming and non-streaming responses in both token
+and text modes. This allows greedy or untruncated sampling while preserving
+requested sampled-token logprobs or routed experts. Omitting the field
+inherits the engine setting. Explicitly requesting `true` requires
 `--return-sampling-mask`.
 
 GPU Model Runner V2 also skips mask capture for opted-out requests, including
@@ -73,8 +74,8 @@ when `--return-sampling-mask` is enabled.
 | --- | --- |
 | `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
-| `temperature > 0` | Greedy has no truncated distribution |
-| `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
+| `temperature > 0` when capturing a mask | Greedy has no truncated distribution |
+| `top_k > 0` when capturing a mask | Bounds mask size; pure top-p can produce vocab-sized masks |
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.

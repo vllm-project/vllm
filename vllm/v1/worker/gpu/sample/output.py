@@ -211,6 +211,9 @@ class SamplingMaskTensors(NamedTuple):
         """Join captured chunks and attach their request slots in the full batch."""
         first = chunks[0]
         assert len({(c.vocab_size, c.rows_per_request) for c in chunks}) == 1
+        assert sum(len(chunk.counts) for chunk in chunks) == (
+            np.count_nonzero(captured_requests) * first.rows_per_request
+        )
         batch_capture = None if captured_requests.all() else captured_requests
         if len(chunks) == 1:
             return first._replace(captured_requests=batch_capture)

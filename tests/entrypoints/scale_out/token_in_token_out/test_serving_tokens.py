@@ -204,17 +204,7 @@ async def test_generate_sampling_mask(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("override_mask", "stream", "output_mode", "error"),
-    [
-        (True, False, "tokens", "Enable --return-sampling-mask"),
-        (False, True, "tokens", "requires a non-streaming tokens request"),
-        (False, False, "text", "requires a non-streaming tokens request"),
-    ],
-)
-async def test_generate_rejects_incompatible_sampling_mask_override(
-    client, override_mask, stream, output_mode, error
-):
+async def test_generate_sampling_mask_opt_in_requires_engine_flag(client):
     response = await client.post(
         GEN_ENDPOINT,
         json={
@@ -223,14 +213,100 @@ async def test_generate_rejects_incompatible_sampling_mask_override(
             "sampling_params": {
                 "max_tokens": 1,
                 "top_k": 5,
-                "return_sampling_mask": override_mask,
+                "return_sampling_mask": True,
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert "Enable --return-sampling-mask" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("temperature", "top_k", "parameter"), [(0, 5, "temperature"), (1, 0, "top_k")]
+)
+async def test_generate_sampling_mask_invalid_sampling_params(
+    client, temperature, top_k, parameter
+):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 1,
+                "temperature": temperature,
+                "top_k": top_k,
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert f"requires {parameter} > 0" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("stream", "output_mode"), [(True, "tokens"), (False, "text"), (True, "text")]
+)
+@pytest.mark.parametrize("return_sampling_mask", [True, False])
+async def test_generate_sampling_mask_override_in_stream_and_text(
+    client, stream, output_mode, return_sampling_mask
+):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": 5,
+                "ignore_eos": True,
+                "top_k": 5,
+                "seed": 0,
+                "logprobs": 0,
+                "return_sampling_mask": return_sampling_mask,
             },
             "stream": stream,
             "output_mode": output_mode,
         },
     )
-    assert response.status_code == 400
-    assert error in response.json()["error"]["message"]
+    response.raise_for_status()
+    if stream:
+        assert response.text.rstrip().endswith("data: [DONE]")
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+    else:
+        events = [response.json()]
+
+    num_tokens = 0
+    for event in events:
+        assert event["output_mode"] == output_mode
+        for choice in event["choices"]:
+            token_ids = choice["token_ids"]
+            if not token_ids:
+                continue
+            num_tokens += len(token_ids)
+            assert len(choice["logprobs"]["content"]) == len(token_ids)
+            mask = choice.get("sampling_mask")
+            if return_sampling_mask:
+                assert mask is not None
+                for token_id, support in zip(token_ids, mask, strict=True):
+                    assert token_id in support
+            else:
+                assert mask is None
+    assert num_tokens == 5
 
 
 @pytest.mark.asyncio

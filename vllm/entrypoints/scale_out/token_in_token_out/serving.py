@@ -250,12 +250,6 @@ class ServingTokens(GenerateBaseServing):
             raw_request.state.request_metadata = request_metadata
 
         sampling_params = request.sampling_params
-        if sampling_params.return_sampling_mask is not None and (
-            request.stream or request.output_mode != "tokens"
-        ):
-            return self.create_error_response(
-                "A sampling-mask override requires a non-streaming tokens request."
-            )
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
         if sampling_params.n > max_num_seqs:
             return self.create_error_response(

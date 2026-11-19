@@ -108,8 +108,8 @@ class Sampler:
         self.needs_logits_processing[req_idx] = needs_processing or may_mask
         self.may_mask_logits[req_idx] = may_mask
         if self.capture_sampling_mask is not None:
-            self.capture_sampling_mask[req_idx] = (
-                sampling_params.return_sampling_mask is not False
+            self.capture_sampling_mask[req_idx] = sampling_params.returns_sampling_mask(
+                self.return_sampling_mask
             )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)

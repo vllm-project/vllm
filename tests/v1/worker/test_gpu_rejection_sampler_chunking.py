@@ -419,7 +419,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(capture):
     input_batch = replace(
         input_batch,
         cu_num_logits_np=cu_num_logits_np,
-        cu_num_logits=input_batch.query_start_loc,
+        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
         expanded_idx_mapping=input_batch.idx_mapping.repeat_interleave(
             rows_per_request
         ),

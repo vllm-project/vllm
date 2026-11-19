@@ -2575,14 +2575,16 @@ class Scheduler(SchedulerInterface):
 
             if (
                 self.return_sampling_mask
+                and new_token_ids
+                and (sampling_masks := model_runner_output.sampling_masks) is not None
                 and request.sampling_params is not None
-                and request.sampling_params.return_sampling_mask is not False
+                and request.sampling_params.returns_sampling_mask(
+                    self.return_sampling_mask
+                )
             ):
-                sampling_masks = model_runner_output.sampling_masks
-                if new_token_ids and sampling_masks is not None:
-                    new_sampling_mask = sampling_masks.slice_request(
-                        req_index, len(new_token_ids)
-                    )
+                new_sampling_mask = sampling_masks.slice_request(
+                    req_index, len(new_token_ids)
+                )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]

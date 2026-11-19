@@ -1281,10 +1281,7 @@ class EngineCore:
         model_config = self.vllm_config.model_config
         if params is not None and model_config is not None:
             # Direct engine clients such as the Rust frontend skip InputProcessor.
-            try:
-                params.validate_sampling_mask(model_config.return_sampling_mask)
-            except ValueError as error:
-                raise VLLMValidationError(str(error)) from error
+            params.validate_sampling_mask(model_config.return_sampling_mask)
 
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
