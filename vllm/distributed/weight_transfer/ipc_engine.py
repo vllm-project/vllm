@@ -27,8 +27,6 @@ if TYPE_CHECKING:
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     PackedIpcConsumer,
-    dtype_name,
-    local_rebuild_args,
     packed_ipc_producer,
 )
 
@@ -186,6 +184,13 @@ class IPCWeightTransferEngine(
                         GPU UUID and the rebuild_cuda_tensor args tuple.
 
         """
+        # Use the worker's assigned device rather than the ambient current
+        # device: the receive path is no longer wrapped in
+        # `with torch.device(self.device)` by the caller, so the current device
+        # is not guaranteed to match self.device. The IPC tensors must be
+        # rebuilt on the device the model lives on.
+        device_index = self.device.index
+
         if self.packed:
             assert self._packed_consumer is not None, (
                 "packed IPC receive_weights called outside "
@@ -200,19 +205,34 @@ class IPCWeightTransferEngine(
                 chunk_capacity=update_info.chunk_capacity,
                 last=update_info.last,
             )
+            if not weights:  # a chunk may complete no tensor
+                return
         else:
             assert isinstance(update_info.ipc_handles, list)
-            # Rebuild on the model's device, not the ambient current one.
-            gpu_uuid, device_index = self._local_gpu()
-            weights = [
-                (
-                    name,
-                    rebuild_cuda_tensor(*local_rebuild_args(h, gpu_uuid, device_index)),
-                )
-                for name, h in zip(update_info.names, update_info.ipc_handles)
-            ]
-        if weights:
-            self.model.load_weights(weights)
+            weights = []
+            for name, ipc_handle in zip(
+                update_info.names,
+                update_info.ipc_handles,
+            ):
+                props = torch.cuda.get_device_properties(device_index)
+                physical_gpu_id = str(props.uuid)
+
+                if physical_gpu_id not in ipc_handle:
+                    raise ValueError(
+                        f"IPC handle not found for GPU UUID "
+                        f"{physical_gpu_id}. "
+                        f"Available UUIDs: {list(ipc_handle.keys())}"
+                    )
+
+                args = ipc_handle[physical_gpu_id]
+                list_args = list(args)
+                # Index 6 of the args from reduce_tensor is the device_index.
+                # We need to overwrite it with the receiver's device index.
+                list_args[6] = device_index
+                weight = rebuild_cuda_tensor(*list_args)
+                weights.append((name, weight))
+
+        self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         self._packed_consumer = None
@@ -321,6 +341,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         world_size = torch.distributed.get_world_size()
         gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
         torch.distributed.all_gather_object(gathered, handles)
+        torch.distributed.barrier()
+        torch.accelerator.synchronize()
 
         if self.is_sender:
             merged: list[dict[str, tuple]] = []
@@ -366,7 +388,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         for name, tensor in source.iter_full():
             # FSDP shards were gathered by the source; ensure contiguity here.
             names.append(name)
-            dtype_names.append(dtype_name(tensor.dtype))
+            dtype_names.append(str(tensor.dtype).split(".")[-1])
             shapes.append(list(tensor.shape))
 
             weight = tensor.detach().contiguous()
@@ -374,7 +396,6 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             _, ipc_args = reduce_tensor(weight)
             ipc_handles.append({self.gpu_uuid: ipc_args})
 
-        torch.accelerator.synchronize()  # the copies land before the send
         ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
         self._do_send(
             names=names,
