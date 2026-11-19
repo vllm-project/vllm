@@ -342,7 +342,7 @@ async def test_no_args_tool_call(
 async def test_strict_tool_without_parameters(
     client: openai.AsyncOpenAI, model_name: str
 ):
-    # `parameters` is optional; a strict tool without it takes any arguments.
+    # `parameters` is optional; a strict tool without it takes no arguments.
     response = await client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": "What time is it now?"}],
