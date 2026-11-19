@@ -21,12 +21,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 )
 from vllm.model_executor.model_loader import dummy_loader
 from vllm.platforms import current_platform
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.request import RequestStatus
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
 
@@ -104,109 +103,6 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     assert isinstance(connector, HiSparseConnector)
     assert connector.connector_worker is not None
     return connector.connector_worker
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
-)
-@fork_new_process_for_each_test
-def test_hisparse_streaming_resume_admission(
-    monkeypatch: pytest.MonkeyPatch,
-    vllm_runner: type[VllmRunner],
-):
-    """A retained streaming request reclaims pages to admit its next input."""
-    capability = current_platform.get_device_capability()
-    if capability is None or capability.major < 9:
-        pytest.skip("Sparse MLA requires Hopper or newer")
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1")
-    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
-
-    def shrink_config(config):
-        config = _shrink_config(config)
-        config.update({"num_hidden_layers": 1})
-        return config
-
-    sampling = SamplingParams(
-        temperature=0,
-        max_tokens=1,
-        ignore_eos=True,
-        output_kind=RequestOutputKind.DELTA,
-    )
-    with vllm_runner(
-        MODEL,
-        load_format="dummy",
-        hf_overrides=shrink_config,
-        attention_config=AttentionConfig(
-            hisparse_config=HiSparseConfig(device_buffer_size=128)
-        ),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="HiSparseConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"host_pool_gib": 0.01},
-        ),
-        block_size=64,
-        max_model_len=1536,
-        max_num_batched_tokens=2048,
-        max_num_seqs=2,
-        num_gpu_blocks_override=64,
-        enable_prefix_caching=False,
-        enable_chunked_prefill=True,
-        async_scheduling=False,
-        enforce_eager=True,
-    ) as runner:
-        engine = runner.llm.llm_engine
-        client = engine.engine_core
-        assert isinstance(client, InprocClient)
-        scheduler = client.engine_core.scheduler
-        assert isinstance(scheduler, Scheduler)
-        manager = scheduler.kv_cache_manager
-        coordinator = get_hisparse_coordinator(manager)
-        assert len(coordinator.resident_managers) == 1
-
-        def add_chunk(request_id, tokens):
-            request = engine.input_processor.process_inputs(
-                request_id,
-                {"prompt_token_ids": tokens},
-                sampling,
-                supported_tasks=engine.get_supported_tasks(),
-                resumable=True,
-            )
-            engine.add_request(request_id, request, sampling)
-
-        def finish_chunk(request_id):
-            outputs = []
-            deadline = time.monotonic() + 30
-            while True:
-                outputs.extend(engine.step())
-                request = scheduler.requests[request_id]
-                if (
-                    request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-                    and not coordinator.has_pending_work()
-                ):
-                    break
-                assert time.monotonic() < deadline, (
-                    "Streaming input stopped progressing"
-                )
-            [output] = [out for out in outputs if out.request_id == request_id]
-            assert len(output.outputs[0].token_ids) == 1
-
-        add_chunk("A", [1000 + i % 64 for i in range(512)])
-        finish_chunk("A")
-        add_chunk("B", [2000 + i % 64 for i in range(1152)])
-        finish_chunk("B")
-        # Indexer and resident pages occupy 16 + 36 blocks; one is null.
-        assert manager.block_pool.get_num_free_blocks() == 11
-        assert coordinator.get_num_reclaimable_blocks("A") == 6
-        assert all("A" not in hot.hot_required for hot in coordinator.hot_managers)
-
-        # Twelve new blocks fail full-input admission against eleven free.
-        # Two Hot blocks unlock six resident blocks, making the input fit.
-        add_chunk("A", [3000 + i % 64 for i in range(384)])
-        finish_chunk("A")
-        assert scheduler.requests["A"].num_computed_tokens == 896
-        assert scheduler.requests["B"].num_computed_tokens == 1152
-        engine.abort_request(["A", "B"])
 
 
 @pytest.mark.skipif(

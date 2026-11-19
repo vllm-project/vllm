@@ -487,11 +487,18 @@ class HiSparseCoordinator:
         request_id: str,
         num_tokens: int,
         num_tokens_main_model: int,
-        required: int,
+        shortfall: int,
         available: int,
+        has_new_computed_kv: bool,
     ) -> dict[int, list[KVCacheBlock]] | None:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
-        if not self.resident_managers or required > self.gpu_pool.num_gpu_blocks:
+        # Computed KV must be attached before any group grows. Empty groups
+        # without new computed tokens can come from a retained streaming request.
+        if (
+            has_new_computed_kv
+            or not self.resident_managers
+            or shortfall + available > self.gpu_pool.num_gpu_blocks
+        ):
             return None
         upfront = 0
         for manager in self.hot_managers:
@@ -500,10 +507,10 @@ class HiSparseCoordinator:
             # A running request's ordinary estimate counts Hot only after it
             # has been requested. Charge any additional Hot groups here.
             if request_id not in manager.hot_required:
-                required += missing
+                shortfall += missing
         if not upfront or upfront > available:
             return None
-        if self.get_num_reclaimable_blocks(request_id) < required - available:
+        if self.get_num_reclaimable_blocks(request_id) < shortfall:
             return None
         hot_blocks = {}
         for manager in self.hot_managers:

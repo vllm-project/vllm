@@ -197,7 +197,9 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.try_preallocate: (
-            Callable[[str, int, int, int, int], dict[int, list[KVCacheBlock]] | None]
+            Callable[
+                [str, int, int, int, int, bool], dict[int, list[KVCacheBlock]] | None
+            ]
             | None
         ) = None
         self.retained_hit_group_ids = tuple(
@@ -552,7 +554,7 @@ class KVCacheManager:
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
-        admission_blocks = 0
+        full_sequence_shortfall = 0
         if full_sequence_must_fit:
             # First check whether the full request sequence fits.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -569,12 +571,9 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
-                if self.try_preallocate is None:
-                    return None
-                # Let preallocation reclaim retained blocks, but require it to
-                # fund the full admission as well as the current step.
-                admission_blocks = num_blocks_to_allocate
+            full_sequence_shortfall = (
+                required_blocks - self.block_pool.get_num_free_blocks()
+            )
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
@@ -590,11 +589,13 @@ class KVCacheManager:
         # Free on the processed-token basis: in-flight steps' attention windows
         # still read blocks below the optimistic boundary, and rejected spec
         # tokens can roll it back.
-        self.coordinator.remove_skipped_blocks(
-            request.request_id,
-            max(0, total_computed_tokens - request.num_in_flight_tokens),
-            num_prompt_tokens=request.num_prompt_tokens,
-        )
+        # Preserve existing allocations when full-sequence admission failed.
+        if full_sequence_shortfall <= 0:
+            self.coordinator.remove_skipped_blocks(
+                request.request_id,
+                max(0, total_computed_tokens - request.num_in_flight_tokens),
+                num_prompt_tokens=request.num_prompt_tokens,
+            )
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
@@ -610,29 +611,30 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        num_blocks_to_allocate = max(num_blocks_to_allocate, admission_blocks)
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
+        shortfall = full_sequence_shortfall > 0 or required_blocks > available_blocks
         preallocated = None
-        if required_blocks > available_blocks:
-            # Real hits must be attached first. A resumed request may explicitly
-            # supply empty groups, even after retained-hit slicing.
-            if (
-                self.try_preallocate is None
-                or num_new_computed_tokens
-                or num_external_computed_tokens
-                or any(new_computed_block_list)
-            ):
-                return None
+        if shortfall and self.try_preallocate is not None:
             preallocated = self.try_preallocate(
                 request.request_id,
                 num_tokens_need_slot,
                 num_tokens_main_model,
-                num_blocks_to_allocate,
+                max(
+                    required_blocks - available_blocks,
+                    full_sequence_shortfall + reserved_blocks
+                    if full_sequence_shortfall > 0
+                    else 0,
+                ),
                 available_blocks - watermark_blocks,
+                bool(
+                    num_new_computed_tokens
+                    or num_external_computed_tokens
+                    or any(new_computed_block_list)
+                ),
             )
-            if preallocated is None:
-                return None
+        if shortfall and preallocated is None:
+            return None
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
