@@ -18,8 +18,10 @@ use the parent's Ray connection).
 import gc
 import os
 import weakref
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -69,6 +71,36 @@ def _config(tp_size: int = 1) -> SimpleNamespace:
             tensor_parallel_size=tp_size, prefill_context_parallel_size=1
         ),
     )
+
+
+def _inject_mori_setup_failure(stack: ExitStack, phase: str) -> None:
+    """Make one MoRI-IO setup phase raise on this rank, for as long as `stack`
+    is open: `dependency` (MoRI availability check), `register` (receive slot
+    registration), `connect` (session creation) or `worker` (a background
+    thread selecting its GPU)."""
+    import threading
+
+    import mori.io
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(f"injected MoRI {phase} failure")
+
+    if phase == "dependency":
+        stack.enter_context(patch("vllm.utils.import_utils.has_mori", new=fail))
+    elif phase == "worker":
+        set_device = torch.accelerator.set_device_index
+
+        def fail_in_thread(device):
+            if threading.current_thread() is not threading.main_thread():
+                fail()
+            return set_device(device)
+
+        stack.enter_context(
+            patch.object(torch.accelerator, "set_device_index", fail_in_thread)
+        )
+    else:
+        methods = {"register": "register_torch_tensor", "connect": "create_session"}
+        stack.enter_context(patch.object(mori.io.IOEngine, methods[phase], new=fail))
 
 
 @ray.remote(num_gpus=1)
@@ -176,18 +208,13 @@ class PPTransportWorker:
         port: int,
         tp_size: int = 1,
         phase: str = "connect",
+        # Not used here: `_run_scenario` reads it to pick the MoRI platform check.
         transport_cls: type = MoriIOTransport,
     ) -> None:
         """A failed dependency, allocation, connection or GPU thread on one
         TP chain must reject setup on all chains and release receive slots."""
         if self.rank >= pp_size * tp_size:
             return
-        import threading
-        from contextlib import ExitStack
-        from unittest.mock import patch
-
-        import mori.io
-
         pp_group = self._init(pp_size, port, tp_size)
         try:
             persistent = (
@@ -203,43 +230,14 @@ class PPTransportWorker:
                 )
             )
             before = torch.accelerator.memory_allocated()
+            # Receive slots are registered only on non-first stages, so a
+            # register failure is injected on PP1 / TP0 (rank tp_size); the
+            # other phases fail on rank 0. The other TP chain must fail too.
+            fail_rank = tp_size if phase == "register" else 0
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, VLLM_PP_TRANSPORT="mori_io"))
-                fail_rank = tp_size if phase == "register" else 0
                 if self.rank == fail_rank:
-
-                    def fail(*args, **kwargs):
-                        raise RuntimeError(f"injected MoRI {phase} failure")
-
-                    if phase == "dependency":
-                        stack.enter_context(
-                            patch("vllm.utils.import_utils.has_mori", new=fail)
-                        )
-                    elif phase == "worker":
-                        set_device = torch.accelerator.set_device_index
-
-                        def fail_thread(device):
-                            if (
-                                threading.current_thread()
-                                is not threading.main_thread()
-                            ):
-                                fail()
-                            return set_device(device)
-
-                        stack.enter_context(
-                            patch.object(
-                                torch.accelerator, "set_device_index", fail_thread
-                            )
-                        )
-                    else:
-                        method = (
-                            "register_torch_tensor"
-                            if phase == "register"
-                            else "create_session"
-                        )
-                        stack.enter_context(
-                            patch.object(mori.io.IOEngine, method, new=fail)
-                        )
+                    _inject_mori_setup_failure(stack, phase)
                 with pytest.raises(
                     RuntimeError, match=f"injected MoRI {phase} failure"
                 ):
