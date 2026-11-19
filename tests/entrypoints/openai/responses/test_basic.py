@@ -52,6 +52,25 @@ async def test_chat(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_previous_input_messages_rejected_for_non_harmony(
+    client: openai.AsyncOpenAI,
+):
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client.responses.create(
+            input="What is my name?",
+            extra_body={
+                "previous_input_messages": [
+                    {"role": "user", "content": "My name is Zedoriah."},
+                    {"role": "assistant", "content": "Nice to meet you, Zedoriah."},
+                ]
+            },
+        )
+
+    assert excinfo.value.status_code == 400
+    assert "previous_input_messages" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 async def test_chat_with_input_type(client: openai.AsyncOpenAI):
     response = await client.responses.create(
         input=[
