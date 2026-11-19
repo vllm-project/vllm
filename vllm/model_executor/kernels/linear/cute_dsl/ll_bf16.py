@@ -7,12 +7,9 @@ import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import cache
 from typing import Any, Literal
 
 import torch
-
-from vllm.utils.platform_utils import num_compute_units
 
 from ._ll_router_common import (
     current_cuda_stream,
@@ -46,10 +43,14 @@ _SM100F_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
     (6144, 256): {M: 256 for M in (1, 3, 4)},
 }
 _SM100F_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
+    (4096, 256): {
+        **{M: (8, 5) for M in (5, 8)},
+        9: (8, 2),
+    },
     (5120, 1792): {M: (2, 4) for M in range(5, 17)},
     (5120, 3584): {M: (2, 4) for M in range(5, 17)},
     (7168, 256): {14: (8, 2)},
-    (6144, 256): {M: (8, 2) for M in (12, 16)},
+    (6144, 256): {M: (8, 2) for M in (9, 12, 16)},
     (7168, 384): {M: (7, 5) for M in (13, 16)},
 }
 
@@ -60,7 +61,7 @@ _SM90_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
 }
 _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
     (4096, 256): {
-        7: (8, 2),
+        **{M: (8, 2) for M in range(5, 8)},
         **{M: (8, 5) for M in range(10, 12)},
         **{M: (8, 2) for M in (13, 16)},
         **{M: (8, 5) for M in (14, 15)},
@@ -93,24 +94,6 @@ def _arch_tuned_configs() -> tuple[
     return {}, {}
 
 
-@cache
-def _large_k_dotprod_config() -> tuple[int, int]:
-    """Largest dot-product M for K >= 4096, and its block size above M=4."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_device_capability_family(100):
-        return 9, 128  # B300
-    return 6, 256  # H200, and the conservative cutoff elsewhere
-
-
-def _dotprod_max_m(K: int, N: int) -> int:
-    # Dot-product launches one CTA per column and beats split-K well past
-    # M=4 while those fit in about two waves, on stock and pruned routers.
-    if 2 * num_compute_units() < N:
-        return _DEFAULT_DOTPROD_MAX_M
-    return 16 if K < 4096 else _large_k_dotprod_config()[0]
-
-
 class LLBf16Gemm:
     @dataclass(frozen=True, slots=True)
     class CompileKey:
@@ -133,13 +116,8 @@ class LLBf16Gemm:
         self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
     ) -> CompileKey:
         tuned_bs, tuned_splitk = _arch_tuned_configs()
-        if _dotprod_max_m(K, N) >= M or K < 2048:
-            default_bs = (
-                _large_k_dotprod_config()[1]
-                if M > _DEFAULT_DOTPROD_MAX_M
-                else _DEFAULT_DOTPROD_BS
-            )
-            bs = tuned_bs.get((K, N), {}).get(M, default_bs)
+        if M <= _DEFAULT_DOTPROD_MAX_M or K < 2048:
+            bs = tuned_bs.get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
             return self.CompileKey(
                 backend="dotprod", M=M, K=K, bs=bs, output_dtype=output_dtype
             )

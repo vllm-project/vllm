@@ -29,19 +29,26 @@ def is_available() -> bool:
     return is_cutedsl_available("ll_fp32w_gemm")
 
 
+_DEFAULT_DOTPROD_CONFIG = (192, 1, 1)
+_DEFAULT_DOTPROD_GROUPED_CONFIG = (192, 2, 1)
+
+
 def _default_config(M: int, N: int) -> tuple[int, int, int]:
     """`(bs, token_groups, epb)` for any `(K, N)` without a tuned entry.
 
-    Fit on B300 and H200 over K in [2048, 8192] and N in [96, 296],
-    expert-pruned shapes included. Small M wants wide blocks, even M splits
-    tokens into two groups to cut accumulator registers, and once N > 128
-    keeps half the grid busy two experts per block reuse each activation.
+    `_DEFAULT_DOTPROD_CONFIG` runs up to 1.9x slower than the best config
+    above M=4 on B300 and H200 (K in [2048, 8192], N in [96, 296]). There,
+    even M splits the tokens into two groups to cut accumulator registers,
+    and once N > 128 keeps half the grid busy each block takes two experts.
     """
-    wide_grid = N > 128
     even = M % 2 == 0
+    if M <= 4:
+        return _DEFAULT_DOTPROD_CONFIG
+    if N <= 128 and even and M >= 12:
+        return _DEFAULT_DOTPROD_GROUPED_CONFIG
+    wide_grid = N > 128
     if M <= 8:
-        bs = 384 if M <= 4 and wide_grid else 256
-        return bs, 2 if even and not wide_grid else 1, 1
+        return 256, 2 if even and not wide_grid else 1, 1
     return (128, 2, 2 if wide_grid else 1) if even else (256, 1, 2 if wide_grid else 1)
 
 

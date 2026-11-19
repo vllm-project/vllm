@@ -21,26 +21,6 @@ def _require_sm90_and_cutedsl():
         pytest.skip("cuteDSL (CUTLASS Python) not installed")
 
 
-@pytest.fixture
-def real_dispatch():
-    """Opt out of `_pin_dotprod_cutoff` to test the shipped dispatch."""
-
-
-@pytest.fixture(autouse=True)
-def _pin_dotprod_cutoff(request, monkeypatch):
-    """Keep M>4 on split-K so these tests cover it.
-
-    The default dispatch keeps M=6-16 on dot-product for most N.
-    """
-    if "real_dispatch" in request.fixturenames:
-        return
-    from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-
-    monkeypatch.setattr(
-        ll_bf16, "_dotprod_max_m", lambda K, N: ll_bf16._DEFAULT_DOTPROD_MAX_M
-    )
-
-
 # ===== Helpers =====
 
 
@@ -243,19 +223,6 @@ def test_single_token(N, K):
     out = _gemm(a, b)
     assert out.shape == (1, N)
     _assert_close(out, _ref(a, b), context=f"M=1 {N}x{K}")
-
-
-@pytest.mark.parametrize("M", [5, 8, 9, 12, 16])
-@pytest.mark.parametrize(
-    "N,K",
-    [(224, 7168), (160, 7168), (320, 7168), (192, 6144), (160, 5120), (128, 3072)],
-)
-def test_pruned_router_shapes(real_dispatch, M, N, K):
-    """Expert-pruned routers stay on dot-product past M=4."""
-    torch.manual_seed(42)
-    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
-    b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
-    _assert_close(_gemm(a, b), _ref(a, b), context=f"{M}x{N}x{K}")
 
 
 def test_inkling_max_tokens():
