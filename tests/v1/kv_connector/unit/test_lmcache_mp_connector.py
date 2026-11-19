@@ -8,9 +8,11 @@ pytest.importorskip("lmcache")
 
 from vllm import SamplingParams  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector import (  # noqa: E402
+    _LMCACHE_PACKS_TOKEN_IDS,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+    _pack_token_ids,
 )
 from vllm.utils.hashing import sha256  # noqa: E402
 from vllm.v1.core.kv_cache_utils import (  # noqa: E402
@@ -18,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (  # noqa: E402
     init_none_hash,
 )
 from vllm.v1.request import Request  # noqa: E402
+from vllm.v1.token_buffer import TokenBuffer  # noqa: E402
 
 BLOCK_SIZE = 16
 BLOCKS_IN_CHUNK = 2
@@ -65,3 +68,14 @@ def test_store_range_follows_tokens(lookahead):
 
     assert meta is not None
     assert (meta.op.start, meta.op.end) == (0, NUM_TOKENS)
+
+
+@pytest.mark.skipif(
+    not _LMCACHE_PACKS_TOKEN_IDS, reason="LMCache predates packed token IDs"
+)
+def test_packed_token_ids_match_lmcache_codec():
+    from lmcache.v1.multiprocess.token_codec import pack_token_ids
+
+    token_ids = [0, 1, 255, 256, 151_643, 2**31 - 1]
+    assert _pack_token_ids(TokenBuffer(token_ids)) == pack_token_ids(token_ids)
+    assert _pack_token_ids(token_ids) == pack_token_ids(token_ids)
