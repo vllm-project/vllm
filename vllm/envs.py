@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_DECODE_BYTES: int = 268_435_456
+    VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES: int = 715_827_880
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_EMBED_DECODE_BYTES: int = 2_147_483_648
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
@@ -1083,6 +1084,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 256 MiB (sufficient for 600s mono 48 kHz float32).
     "VLLM_MAX_AUDIO_DECODE_BYTES": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_BYTES", "268435456")
+    ),
+    # Estimated bytes for FunAudioChat feature extraction per prompt.
+    # Set to 0 to disable this preprocessing limit.
+    "VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES": lambda: int(
+        os.getenv("VLLM_MAX_FUNAUDIOCHAT_PREPROCESSING_BYTES", "715827880")
     ),
     # Maximum bytes a client-supplied embedding payload (`prompt_embeds`,
     # `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once it is
