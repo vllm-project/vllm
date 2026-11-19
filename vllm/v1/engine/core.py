@@ -309,7 +309,9 @@ class EngineCore:
         global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, layer_configs)
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
-            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+            layout.name,
+            vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            global_kv_cache_groups,
         )
 
         has_kv_cache = any(layer_configs)

@@ -772,6 +772,25 @@ def test_plan_chunk_rows_assume_worst_case_query_tiles(heads, expected_rows):
     assert sm90_mod._max_plan_chunk_rows(heads) == expected_rows
 
 
+def test_chunking_keeps_one_row_over_native_capacity_plannable():
+    fa = pytest.importorskip("flashinfer.mla._batch_mla._backends._fa_common")
+
+    # Exercise FlashInfer's checked host-side admission path without a kernel.
+    def work_count(rows):
+        return fa._fa_plan_work_count([1] * rows, [1] * rows, 16, 132, False)
+
+    limit = fa._FA_MAX_WORK_ITEMS
+    assert work_count(limit) == limit
+    with pytest.raises(fa._BackendPlanUnsupportedError, match="native capacity"):
+        work_count(limit + 1)
+
+    rows = limit + 1
+    cap = sm90_mod._max_plan_chunk_rows(16)
+    assert (
+        sum(work_count(min(cap, rows - start)) for start in range(0, rows, cap)) == rows
+    )
+
+
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
@@ -798,6 +817,28 @@ def test_chunk_capacity_bounds_planner_work_items(heads):
         assert state._plan_offsets is not None and state._int_ws is not None
         num_works_idx = state._plan_offsets[0]
         assert 0 < int(state._int_ws[num_works_idx]) <= 8192
+
+
+class PlannerWorkspaceProbe:
+    model_runner: Any
+
+    def profiled_chunk_rows(self):
+        runner = self.model_runner
+        (bank,) = next(iter(runner.attn_workspaces.values()))
+        (builder,) = [
+            builder
+            for groups in runner.attn_groups
+            for group in groups
+            for builder in group.metadata_builders
+            if isinstance(builder, FlashInferMLASparseSM90Builder)
+        ]
+        assert bank is builder._chunk_states
+        assert all(state._int_ws is not None for state in bank)
+        assert all(
+            state.wrapper._planned_backend._pin_memory_int_workspace_buffer.is_pinned()
+            for state in bank
+        )
+        return [state.max_tokens for state in bank]
 
 
 @pytest.mark.skipif(
@@ -844,12 +885,16 @@ def test_large_mqa_step_matches_scheduler_chunking(tmp_path, vllm_runner):
             enable_chunked_prefill=True,
             enable_prefix_caching=False,
             enforce_eager=True,
+            worker_extension_cls=f"{__name__}.PlannerWorkspaceProbe",
             gpu_memory_utilization=0.25,
             attention_config={
                 "backend": "FLASHINFER_MLA_SPARSE_SM90",
                 "sparse_mla_force_mqa": True,
             },
         ) as runner:
+            assert runner.llm.collective_rpc("profiled_chunk_rows") == [
+                [8192] * (budget // 8192)
+            ]
             outputs = runner.llm.generate(
                 prompts,
                 SamplingParams(

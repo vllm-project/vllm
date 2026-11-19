@@ -1119,9 +1119,11 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
     builder = get_kv_cache_config_builder(runner.vllm_config)
-    kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
-    )
+    kv_cache_groups = runner.profile_kv_cache_groups
+    if kv_cache_groups is None:
+        kv_cache_groups = get_kv_cache_groups_from_builder(
+            builder, runner.vllm_config, runner.get_kv_cache_layer_configs()
+        )
     # At least one block per sequence is required to capture the graphs.
     min_blocks = (
         min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)

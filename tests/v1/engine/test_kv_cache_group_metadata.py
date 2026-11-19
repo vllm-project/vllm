@@ -22,6 +22,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -56,10 +57,14 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
     config.cache_config.kv_cache_layout = "BLHNC"
     workers = []
     specs = []
+    prepared_groups: list[list[KVCacheGroup]] = []
     for i, block_size in enumerate((16, 64)):
         worker = object.__new__(WorkerBase)
         worker.vllm_config = deepcopy(config)
         worker.vllm_config.cache_config.kv_cache_layout = None
+        worker.model_runner = SimpleNamespace(
+            prepare_attention_workspaces=prepared_groups.append
+        )
         workers.append(worker)
         spec = AttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
@@ -86,6 +91,12 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
                 getattr(worker, method)(*args)
 
         def determine_available_memory(self):
+            assert len(prepared_groups) == len(workers)
+            assert all(
+                {name for group in groups for name in group.layer_names}
+                == {"layer0", "layer1"}
+                for groups in prepared_groups
+            )
             assert all(
                 parallel.cp_kv_cache_interleave_size == expected
                 for parallel in parallel_configs

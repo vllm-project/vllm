@@ -187,6 +187,23 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         return FlashInferMLASparseSM90Builder
 
     @staticmethod
+    def reserve_metadata_workspace(
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> list["_SM90State"]:
+        states = FlashInferMLASparseSM90Builder.make_chunk_states(
+            kv_cache_spec, layer_names, vllm_config, device
+        )
+        # FlashInfer allocates each wrapper's device and pinned integer buffers
+        # on its first plan. A single real row materializes them before KV sizing.
+        one = torch.ones(1, dtype=torch.int32, device="cpu")
+        for state in states:
+            state.plan(1, one, None, None)
+        return states
+
+    @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
         return FlashInferMLASparseSM90Impl
 
@@ -488,8 +505,28 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         layer_names: list[str],
         vllm_config: "VllmConfig",
         device: torch.device,
+        *,
+        workspace: list[_SM90State] | None = None,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._chunk_states = (
+            workspace
+            if workspace is not None
+            else self.make_chunk_states(kv_cache_spec, layer_names, vllm_config, device)
+        )
+        self.state = self._chunk_states[0]
+        spec_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            spec_config is not None and spec_config.enable_adaptive_verification
+        )
+
+    @staticmethod
+    def make_chunk_states(
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> list[_SM90State]:
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
@@ -509,7 +546,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             if kv_cache_spec.dtype == torch.uint8
             else kv_cache_spec.dtype
         )
-        self.state = _SM90State(
+        first = _SM90State(
             device,
             impl.num_heads,
             kv_plan_dtype,
@@ -524,18 +561,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
         )
-        # Allocate the index buffers at builder construction, with just enough
-        # space for the tail. Each plan has private indices and shares scratch.
+        # Each plan has private indices and shares scratch. Size the last
+        # chunk for the remaining rows only.
         budget = vllm_config.scheduler_config.max_num_batched_tokens
-        chunk_rows = self.state.max_tokens
-        self._chunk_states = [self.state] + [
-            self.state.clone(min(chunk_rows, budget - start))
+        chunk_rows = first.max_tokens
+        return [first] + [
+            first.clone(min(chunk_rows, budget - start))
             for start in range(chunk_rows, budget, chunk_rows)
         ]
-        spec_config = vllm_config.speculative_config
-        self._adaptive_verification = bool(
-            spec_config is not None and spec_config.enable_adaptive_verification
-        )
 
     def _kv_lens_host(
         self, cam: CommonAttentionMetadata

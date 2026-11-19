@@ -765,14 +765,14 @@ def test_project_kv_cache_groups_to_worker():
         new_kv_cache_group(["layer1", "layer2", "layer3"], layer_a),
     ]
     worker_spec = {"layer1": layer_a, "layer2": layer_a}
-    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning.project_kv_cache_groups_to_worker(
         global_groups, worker_spec
     )
     assert len(projected) == 1
     assert projected[0].layer_names == ["layer1", "layer2"]
     assert uniform_spec(projected[0]) is layer_a.spec
 
-    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning.project_kv_cache_groups_to_worker(
         global_groups, {"layer4": layer_a}
     )
     assert len(projected) == 1
@@ -782,7 +782,7 @@ def test_project_kv_cache_groups_to_worker():
     mixed_group = KVCacheGroup.from_layers(
         {"layer1": layer_a, "layer2": layer_b, "layer3": layer_a}
     )
-    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning.project_kv_cache_groups_to_worker(
         [mixed_group], {"layer1": layer_a, "layer3": layer_a}
     )
     assert len(projected) == 1
@@ -809,7 +809,7 @@ def test_group_on_pp_stage_keeps_the_whole_groups_specs(stage_layers):
         new_kv_cache_group(["attn3"], new_kv_cache_spec(num_kv_heads=4)),
         new_kv_cache_group(["mamba"], new_mamba_spec()),
     ]
-    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+    projected = kv_cache_planning.project_kv_cache_groups_to_worker(
         global_groups, dict.fromkeys(stage_layers, full_layer(new_kv_cache_spec()))
     )
 
@@ -838,7 +838,7 @@ def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
         new_kv_cache_group(["layer1", "layer2"], spec_a),
         new_kv_cache_group(["layer3"], spec_b),
     ]
-    groups = kv_cache_planning._project_kv_cache_groups_to_worker(
+    groups = kv_cache_planning.project_kv_cache_groups_to_worker(
         global_groups, {"layer2": full_layer(spec_a)}
     )
     config = SimpleNamespace(

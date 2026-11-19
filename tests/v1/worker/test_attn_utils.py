@@ -80,6 +80,47 @@ from vllm.v1.worker.utils import (
 )
 
 
+def test_profile_workspaces_are_private_to_each_group_and_microbatch(monkeypatch):
+    backend = SimpleNamespace(
+        full_cls_name=lambda: ("test", "test"),
+        reserve_metadata_workspace=lambda *args: object(),
+    )
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=heads)
+        for name, heads in {"a": 16, "b": 16, "draft": 8, "c": 16, "skip": 8}.items()
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *args: layers)
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        parallel_config=SimpleNamespace(use_ubatching=True, num_ubatches=2),
+    )
+    spec = new_kv_cache_spec()
+    groups = [
+        new_kv_cache_group(names, spec)
+        for names in (["a", "b", "draft"], ["c", "skip"])
+    ]
+    device = torch.device("cpu")
+    target = attn_utils.reserve_attn_workspaces(
+        groups, config, device, no_attn_metadata_layer_names={"skip"}
+    )
+    draft = attn_utils.reserve_attn_workspaces(
+        groups, config, device, active_layer_names={"draft"}
+    )
+    assert set(target) == {
+        (0, frozenset(["a", "b"])),
+        (0, frozenset(["draft"])),
+        (1, frozenset(["c"])),
+    }
+    assert set(draft) == {(0, frozenset(["draft"]))}
+    slots = [
+        slot
+        for owner in (target, draft)
+        for group_slots in owner.values()
+        for slot in group_slots
+    ]
+    assert len(slots) == len(set(slots)) == 8
+
+
 @pytest.mark.parametrize(
     ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
@@ -1542,6 +1583,7 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
 
     built.clear()
     drafter = SimpleNamespace(
+        attn_workspaces=None,
         attn_vllm_config=vllm_config,
         device="cpu",
         draft_attn_layer_names={"draft"},
