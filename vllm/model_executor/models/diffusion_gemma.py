@@ -56,11 +56,11 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ProcessingInfo,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     maybe_prefix,
+    recursive_replace_linear,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform

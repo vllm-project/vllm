@@ -20,8 +20,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalHashes
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
@@ -441,14 +441,19 @@ class DeepseekVLV2ForCausalLM(
         for name, module in vit.named_modules():
             if isinstance(module, nn.Linear):
                 parent, attr_name = self._get_parent_and_attr(vit, name)
-                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":
-                    new_linear = replace_linear_class(
-                        module, "colwise", quant_config, prefix=name
+                if isinstance(parent, timm.layers.Mlp) and attr_name in ("fc1", "fc2"):
+                    linear_cls = (
+                        ColumnParallelLinear
+                        if attr_name == "fc1"
+                        else RowParallelLinear
                     )
-                    setattr(parent, attr_name, new_linear)
-                elif isinstance(parent, timm.layers.Mlp) and attr_name == "fc2":
-                    new_linear = replace_linear_class(
-                        module, "rowwise", quant_config, prefix=name
+                    new_linear = linear_cls(
+                        input_size=module.in_features,
+                        output_size=module.out_features,
+                        bias=module.bias is not None,
+                        quant_config=quant_config,
+                        prefix=name,
+                        return_bias=False,
                     )
                     setattr(parent, attr_name, new_linear)
 

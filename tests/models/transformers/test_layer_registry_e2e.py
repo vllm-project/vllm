@@ -117,3 +117,22 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
         name_0="vllm",
         name_1="hw_agnostic",
     )
+
+
+def test_hw_agnostic_rejects_quantization(monkeypatch, vllm_runner, tiny_llama_path):
+    """The hw-agnostic linear layers are unquantized, so building the model fails
+    with a message naming the flag instead of a generic quant-method error."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    # In-process engine core, so the worker's error reaches the caller.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        pytest.raises(ValueError, match="not supported with VLLM_USE_HW_AGNOSTIC"),
+        vllm_runner(
+            tiny_llama_path,
+            model_impl="transformers",
+            quantization="fp8",
+            max_model_len=64,
+            enforce_eager=True,
+        ),
+    ):
+        pass

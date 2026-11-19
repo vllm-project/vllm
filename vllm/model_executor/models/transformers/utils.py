@@ -41,13 +41,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import hw_agnostic
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import LayerNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import iter_rope_parameters
 
 if TYPE_CHECKING:
@@ -119,6 +113,14 @@ Style = Literal[
     "rowwise_split_input",
 ]
 
+_STYLE_TO_LINEAR: dict[str, tuple[str, dict[str, bool]]] = {
+    "colwise": ("ColumnParallelLinear", {}),
+    "rowwise": ("RowParallelLinear", {}),
+    "replicate": ("ReplicatedLinear", {}),
+    "colwise_gather_output": ("ColumnParallelLinear", {"gather_output": True}),
+    "rowwise_split_input": ("RowParallelLinear", {"input_is_parallel": False}),
+}
+
 
 def replace_linear_class(
     linear: nn.Linear,
@@ -126,8 +128,11 @@ def replace_linear_class(
     quant_config: "QuantizationConfig | None" = None,
     *,
     prefix: str = "",
-) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
+) -> nn.Module:
     """Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+
+    The class is resolved through `hw_agnostic.resolve`, so it is the
+    hw-agnostic one if `VLLM_USE_HW_AGNOSTIC` is set.
 
     Args:
         linear: `nn.Linear` to be replaced.
@@ -142,16 +147,8 @@ def replace_linear_class(
     if not isinstance(style, str):
         raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
-    ColumnParallelLinear = hw_agnostic.resolve("linear", "ColumnParallelLinear")
-    RowParallelLinear = hw_agnostic.resolve("linear", "RowParallelLinear")
-    ReplicatedLinear = hw_agnostic.resolve("linear", "ReplicatedLinear")
-    vllm_linear_cls, vllm_linear_kwargs = {
-        "colwise": (ColumnParallelLinear, {}),
-        "rowwise": (RowParallelLinear, {}),
-        "replicate": (ReplicatedLinear, {}),
-        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
-        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
-    }.get(style, (ReplicatedLinear, {}))
+    cls_name, vllm_linear_kwargs = _STYLE_TO_LINEAR.get(style, ("ReplicatedLinear", {}))
+    vllm_linear_cls = hw_agnostic.resolve("linear", cls_name)
 
     return vllm_linear_cls(
         input_size=linear.in_features,
@@ -313,33 +310,6 @@ def replace_embedding_class(
     embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
     VocabParallelEmbedding.__init__(embedding, **kwargs)
     return embedding
-
-
-def recursive_replace_linear(
-    model: nn.Module,
-    quant_config: "QuantizationConfig | None",
-    prefix: str = "",
-):
-    """Recursively replace linear modules in the model as needed."""
-
-    def _recursive_replace(module: nn.Module, prefix: str):
-        for child_name, child_module in module.named_children():
-            new_module = child_module
-            qual_name = maybe_prefix(prefix, child_name)
-            # Replace modules as needed
-            if isinstance(child_module, nn.Linear):
-                new_module = replace_linear_class(
-                    child_module,
-                    "replicate",
-                    quant_config,
-                    prefix=qual_name,
-                )
-            else:
-                _recursive_replace(child_module, prefix=qual_name)
-            if new_module is not child_module:
-                setattr(module, child_name, new_module)
-
-    _recursive_replace(model, prefix=prefix)
 
 
 T = TypeVar("T")

@@ -120,9 +120,11 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
 
 def test_ilama_lora_rejects_hw_agnostic(monkeypatch):
     """LoRA wraps the in-tree linear layers, which the hw-agnostic layers do not
-    derive from, so enabling both fails at startup rather than when loading an
-    adapter."""
+    derive from, so enabling both fails when the model is built rather than when
+    loading an adapter."""
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    # In-process engine core, so the worker's error reaches the caller.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     with pytest.raises(ValueError, match="LoRA is not supported with VLLM_USE_HW"):
         vllm.LLM(
             MODEL_PATH,
