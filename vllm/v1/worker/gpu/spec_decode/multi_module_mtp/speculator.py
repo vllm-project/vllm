@@ -5,12 +5,14 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -52,6 +54,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # Cached input ids, embeddings, and target hidden states from the last
         # decode step. Used to re-prefill tokens to update stale KV cache slots
         # in later MTP modules.
+        # Valid entries occupy the right-aligned tail of each cache row.
+        self.num_cached_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         self.cached_draft_input_ids = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps - 1,
@@ -68,6 +74,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        self.num_cached_tokens[req_index : req_index + 1].zero_()
 
     def load_draft_model(
         self,
@@ -96,8 +105,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # TODO(TheEpicDolphin): Support piecewise cudagraph for multi-module MTP.
-        if cudagraph_mode.has_piecewise_cudagraphs():
+        # Compiled piecewise graphs do not specialize the Python module index.
+        if (
+            cudagraph_mode.has_piecewise_cudagraphs()
+            and not is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
+        ):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY
                 if cudagraph_mode.has_full_cudagraphs()
@@ -107,7 +119,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
         )
 
     def capture(self) -> None:
@@ -117,7 +131,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.last_token_indices.zero_()
         assert self.cudagraph_manager is not None
         if self.cudagraph_manager.use_breakable_cg:
-            self.cudagraph_manager.init_breakable_cg_runner(self.model)
+            num_layers = self.speculative_config.num_mtp_modules()
+            self.cudagraph_manager.init_breakable_cg_runner(
+                self.model,
+                key_fn=lambda **kwargs: kwargs["spec_step_idx"] % num_layers,
+            )
         self.cudagraph_manager.capture(
             self._generate_drafts,
             self.model_state,
@@ -127,6 +145,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing multi-module MTP CUDA graphs",
         )
+
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
 
     @torch.inference_mode()
     def propose(
@@ -150,11 +172,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
@@ -166,6 +189,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         num_tokens = input_batch.num_tokens
@@ -189,7 +213,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
-            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
+            num_reqs, num_tokens, max_query_len, input_batch.decode_graph_eligible
         )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -199,7 +223,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
@@ -251,6 +276,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
         return self.draft_tokens[:num_reqs]
+
+    # Each MTP module may carry its own LM head, selected by spec_step_idx.
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
 
     @torch.inference_mode()
     def _run_model(
@@ -323,6 +359,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             num_reqs,
             input_batch,
             self.cached_draft_input_ids,
+            self.num_cached_tokens,
             num_sampled,
             num_rejected,
             last_sampled,
@@ -360,6 +397,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.hidden_states,
             target_hidden_states,
             self.cached_target_hidden_states,
+            self.num_cached_tokens,
             self.inputs_embeds,
             self.cached_draft_input_embeds,
             input_batch,
@@ -395,6 +433,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.cached_draft_input_ids,
             self.cached_draft_input_embeds,
             self.cached_target_hidden_states,
+            self.num_cached_tokens,
             last_token_indices,
             idx_mapping,
             num_reqs,
@@ -426,6 +465,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens
@@ -473,6 +513,7 @@ def _prepare_input_buffers_kernel(
     next_prefill_tokens_stride0,
     num_sampled_ptr,
     num_rejected_ptr,
+    num_cached_tokens_ptr,
     target_seq_lens_ptr,
     query_start_loc_ptr,
     max_num_reqs,
@@ -492,7 +533,8 @@ def _prepare_input_buffers_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_tokens = max(0, num_rejected - 1)
+    num_cached_tokens = tl.load(num_cached_tokens_ptr + req_state_idx)
+    num_reprefill_tokens = min(max(0, num_rejected - 1), num_cached_tokens)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_tokens = query_len - num_rejected
@@ -597,6 +639,8 @@ def prepare_input_buffers(
     input_batch: InputBatch,
     # [max_num_reqs, num_speculative_steps - 1]
     cached_draft_input_ids: torch.Tensor,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_reqs]
     num_sampled: torch.Tensor,
     # [num_reqs]
@@ -630,6 +674,7 @@ def prepare_input_buffers(
         next_prefill_tokens.stride(0),
         num_sampled,
         num_rejected,
+        num_cached_tokens,
         input_batch.seq_lens,
         input_buffers.query_start_loc,
         max_num_reqs,
@@ -654,6 +699,7 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     cached_draft_input_embeds_stride1,
     idx_mapping_ptr,
     num_rejected_ptr,
+    num_cached_tokens_ptr,
     query_start_loc_ptr,
     num_speculative_steps,
     hidden_size,
@@ -676,7 +722,8 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     # the last decode step that need to be re-prefilled to update the stale
     # KV cache slots in later MTP modules.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    num_reprefill_hidden_states = max(0, num_rejected - 1)
+    num_cached_tokens = tl.load(num_cached_tokens_ptr + req_state_idx)
+    num_reprefill_hidden_states = min(max(0, num_rejected - 1), num_cached_tokens)
 
     # The rejected tokens are excluded as inputs to the draft model.
     num_input_hidden_states = query_len - num_rejected
@@ -752,6 +799,8 @@ def prepare_input_hidden_states_and_embeddings(
     target_hidden_states: torch.Tensor,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_target_hidden_states: torch.Tensor | None,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_tokens, hidden_size]
     input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
@@ -794,6 +843,7 @@ def prepare_input_hidden_states_and_embeddings(
         else 0,
         input_batch.idx_mapping,
         num_rejected,
+        num_cached_tokens,
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,
@@ -863,6 +913,7 @@ def _cache_inputs_kernel(
     cached_target_hidden_states_stride1,
     idx_mapping_ptr,
     last_token_indices_ptr,
+    num_cached_tokens_ptr,
     query_start_loc_ptr,
     num_speculative_steps,
     hidden_size,
@@ -887,6 +938,11 @@ def _cache_inputs_kernel(
     # may be needed to re-prefill the tokens during the next decode step.
     cache_window_size = num_speculative_steps - 1
     window_start = last_token_index - cache_window_size + 1
+    if block_idx == 0:
+        num_cached_tokens = min(
+            cache_window_size, max(0, last_token_index - query_start + 1)
+        )
+        tl.store(num_cached_tokens_ptr + req_state_idx, num_cached_tokens)
     for i in range(max(window_start, query_start), last_token_index + 1):
         cache_write_slot = i - window_start
         if block_idx == 0:
@@ -938,6 +994,8 @@ def cache_inputs(
     cached_draft_input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_target_hidden_states: torch.Tensor,
+    # [max_num_reqs]
+    num_cached_tokens: torch.Tensor,
     # [num_reqs]
     last_token_indices: torch.Tensor,
     # [num_reqs]
@@ -968,6 +1026,7 @@ def cache_inputs(
         cached_target_hidden_states.stride(1),
         idx_mapping,
         last_token_indices,
+        num_cached_tokens,
         input_buffers.query_start_loc,
         num_speculative_steps,
         hidden_size,

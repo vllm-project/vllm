@@ -266,7 +266,10 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
         streamed_logprob_token_ids = []
         first_chunk = True
         async for chunk in stream:
-            for token_str in chunk.choices[0].logprobs.tokens:
+            # A chunk may carry no logprobs, e.g. a leading chunk with only
+            # prompt_token_ids or a trailing chunk with only finish_reason.
+            logprobs = chunk.choices[0].logprobs
+            for token_str in logprobs.tokens if logprobs else []:
                 # Token format is "token_id:12345" when
                 # return_tokens_as_token_ids is True
                 if token_str.startswith("token_id:"):

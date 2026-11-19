@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers.activations import ACT2FN
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
@@ -518,7 +518,7 @@ class ResidualVectorQuantizer(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class MiMoAudioTokenizerConfig(PretrainedConfig):
+class MiMoAudioTokenizerConfig(PreTrainedConfig):
     model_type = "mimo_audio_tokenizer"
 
     def __init__(
@@ -980,12 +980,6 @@ class AudioEncoder(nn.Module):
         hidden_states = torch.where(attention_mask, hidden_states, 0)
         return hidden_states, hidden_states_packed, output_length, codes
 
-    @torch.no_grad()
-    def decode_vq(self, codes):
-        assert self.quantizer is not None
-        self.quantizer.float()
-        return self.quantizer.decode(codes)
-
 
 class MiMoAudioTokenizer(PreTrainedModel):
     config_class = MiMoAudioTokenizerConfig
@@ -1115,7 +1109,7 @@ def tokenize_audio_batch(mels, audio_tokenizer_encoder, segment_size=6000, devic
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class MimoAudioEncoderConfig:
     """Config for MimoAudioEncoder.
 

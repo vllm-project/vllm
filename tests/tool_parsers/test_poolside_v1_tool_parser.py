@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for ``PoolsideV1ToolParser``.
+"""Regression tests for `PoolsideV1ToolParser`.
 
 Covers two bugs:
 
-1. ``adjust_request`` did not skip the forced ``structured_outputs`` JSON
-   for ``required``/named tool choice. These models emit XML tool calls
-   (``<tool_call>...<arg_value>...</arg_value></tool_call>``) per the chat
+1. `adjust_request` did not skip the forced `structured_outputs` JSON
+   for `required`/named tool choice. These models emit XML tool calls
+   (`<tool_call>...<arg_value>...</arg_value></tool_call>`) per the chat
    template, so guided JSON decoding conflicts with the format: the call
-   leaks as content with empty ``tool_calls``. ``adjust_request`` now skips
-   the constraint for both ChatCompletion (``ChatCompletionNamedToolChoice``)
-   and Responses (``ToolChoiceFunction``) named choices.
+   leaks as content with empty `tool_calls`. `adjust_request` now skips
+   the constraint for both ChatCompletion (`ChatCompletionNamedToolChoice`)
+   and Responses (`ToolChoiceFunction`) named choices.
 
-2. ``extract_tool_calls`` stripped string-typed argument values, corrupting
+2. `extract_tool_calls` stripped string-typed argument values, corrupting
    content whose whitespace is significant (e.g. code/file bodies losing
    leading indent and trailing newline). String values are now kept verbatim;
    only non-string types are stripped/deserialized.
@@ -23,15 +23,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers.poolside_v1_tool_parser import PoolsideV1ToolParser
 
 
 def _write_file_tool() -> dict[str, Any]:
-    """Tool with a string arg (``content``) and a non-string arg (``mode``)."""
+    """Tool with string (`content`), integer and nullable string args."""
     return {
         "type": "function",
         "function": {
@@ -42,6 +44,7 @@ def _write_file_tool() -> dict[str, Any]:
                 "properties": {
                     "content": {"type": "string"},
                     "mode": {"type": "integer"},
+                    "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
                 "required": ["content"],
             },
@@ -78,12 +81,15 @@ def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionR
 
 
 def _build_responses_request(
-    *, tool_choice: str | dict[str, Any], include: list[str] | None = None
+    *,
+    tool_choice: str | dict[str, Any],
+    include: list[str] | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> ResponsesRequest:
     return ResponsesRequest(
         model="poolside-test",
         input=[{"role": "user", "content": "write the file"}],
-        tools=[_responses_write_file_tool()],
+        tools=tools if tools is not None else [_responses_write_file_tool()],
         tool_choice=tool_choice,
         stream=True,
         max_output_tokens=200,
@@ -92,10 +98,13 @@ def _build_responses_request(
 
 
 class _StubTokenizer:
-    """Minimal tokenizer stub to satisfy ``PoolsideV1ToolParser.__init__``."""
+    """Minimal tokenizer stub to satisfy `PoolsideV1ToolParser.__init__`."""
 
     def get_vocab(self) -> dict[str, int]:
         return {"<tool_call>": 151_657, "</tool_call>": 151_658}
+
+    def tokenize(self, text: str) -> list[str]:
+        return []
 
 
 def _make_parser(request: ChatCompletionRequest) -> PoolsideV1ToolParser:
@@ -138,6 +147,19 @@ def test_named_skips_structured_outputs_responses() -> None:
     # type than the ChatCompletion named choice; both must be handled.
     request = _build_responses_request(
         tool_choice={"type": "function", "name": "write_file"}
+    )
+    PoolsideV1ToolParser(_StubTokenizer()).adjust_request(request)
+
+    assert request.text is None
+    assert request.skip_special_tokens is False
+
+
+def test_named_custom_tool_choice_skips_structured_outputs_responses() -> None:
+    # A named custom choice parses to ToolChoiceCustom; custom tools ride the
+    # function shim, so it must route like ToolChoiceFunction.
+    request = _build_responses_request(
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
     )
     PoolsideV1ToolParser(_StubTokenizer()).adjust_request(request)
 
@@ -201,7 +223,7 @@ def test_non_string_arg_still_deserialized() -> None:
 
 def test_responses_extract_tool_calls_with_flat_tools() -> None:
     # required/named Responses calls route into extract_tool_calls with flat
-    # FunctionTool (.name); _is_string_type must not raise.
+    # FunctionTool (.name); _allowed_types must not raise.
     request = _build_responses_request(tool_choice="required")
     parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
 
@@ -348,3 +370,21 @@ def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
     result = _stream_partial_start_token(request)
     assert result is not None
     assert result.content == ""
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(" 1.10\n", " 1.10\n"), (" null ", None)]
+)
+def test_nullable_string_keeps_raw_text(raw: str, expected: Any, stream: bool) -> None:
+    request = _build_chat_request(tool_choice="auto")
+    parser = _make_parser(request)
+    output = (
+        "<tool_call>write_file\n<arg_key>note</arg_key>"
+        f"<arg_value>{raw}</arg_value></tool_call>"
+    )
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(output), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(output, request).tool_calls
+    assert [json.loads(c.function.arguments) for c in calls] == [{"note": expected}]

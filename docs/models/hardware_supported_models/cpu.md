@@ -12,17 +12,17 @@
 
 ## Deploy from a vLLM Recipe
 
-The **Recipe** column below links to validated Xeon 6 configurations when
-available. Use the Recipe conversion tool to generate `config.yaml` and
-`env.sh`; see the
-[Recipes conversion tool README](../../../tools/recipes/README.md) for usage.
+The **Recipe** column below links to published Xeon 6 configurations when
+available. Open a recipe to review the latest deployment configuration for the
+model and hardware.
 
-Load the generated environment before starting vLLM:
+For one-step deployment with the pre-built CPU image, see
+[Serve with vLLM Recipes](../../getting_started/installation/cpu.md#serve-with-vllm-recipes).
+The image includes the Recipes tool, which can retrieve the latest published
+recipe, apply Xeon hardware detection, and start `vllm serve`.
 
-```bash
-source env.sh
-vllm serve --config config.yaml
-```
+For converter usage and interactive model/hardware discovery, see the
+[Recipes tool documentation](../../../tools/recipes/README.md).
 
 ## Recommended Models
 

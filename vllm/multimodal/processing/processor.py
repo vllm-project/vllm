@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -13,12 +13,14 @@ from typing import (
     NamedTuple,
     Protocol,
     TypeAlias,
+    assert_never,
 )
 
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
+from vllm.exceptions import PromptUpdateMismatchError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -39,7 +41,7 @@ from ..inputs import (
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 from .context import BaseProcessingInfo, TimingContext
-from .dummy_inputs import BaseDummyInputsBuilder
+from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
 if TYPE_CHECKING:
@@ -87,7 +89,7 @@ class _GetTextMatchIndex(Protocol):
     ) -> int | None: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptIndex:
     """Resolves to an index in the prompt."""
 
@@ -170,7 +172,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdateDetails:
     """Details about the token sequence that is part of the update."""
 
@@ -237,12 +239,12 @@ instead of a function if it does not depend on the input.
 """
 
 
-class UpdateMode(str, Enum):
+class UpdateMode(StrEnum):
     INSERT = "insert"
     REPLACE = "replace"
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdate(ABC):
     """Defines how to update a prompt with placeholder tokens.
 
@@ -304,7 +306,7 @@ class PromptUpdate(ABC):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptInsertion(PromptUpdate):
     """Defines how to insert placeholder tokens into a prompt.
 
@@ -372,7 +374,7 @@ class PromptInsertion(PromptUpdate):
         return UpdateMode.INSERT
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptReplacement(PromptUpdate):
     """Defines how to replace portions of an input prompt with placeholder tokens.
 
@@ -453,7 +455,7 @@ class PromptTargetMatch(NamedTuple):
     end_idx: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedPromptUpdate:
     """A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
     lazy attributes resolved.
@@ -574,7 +576,7 @@ def replace_token_matches(
     return flatten_2d_lists(out_seqs)
 
 
-@dataclass
+@dataclass(slots=True)
 class PlaceholderFeaturesInfo:
     modality: str
     item_idx: int
@@ -1055,6 +1057,41 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        """Build the input which, after processing, results in
+        the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional)
+
+        """
+        builder = self.dummy_inputs
+        dummy_text = builder.get_dummy_text(mm_counts)
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
+        tokenizer = self.info.ctx.tokenizer
+        dummy_prompt: list[int]
+        if tokenizer is None:
+            # Tokenizer-less models (e.g. `skip_tokenizer_init=True`) only
+            # accept embeddings and have an empty dummy text, so there are no
+            # prompt tokens.
+            dummy_prompt = []
+        else:
+            dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
+
+        return ProcessorInputs(
+            prompt=dummy_prompt,
+            mm_data_items=dummy_mm_items,
+        )
+
     def get_dummy_mm_inputs(
         self,
         mm_counts: Mapping[str, int],
@@ -1070,7 +1107,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         mm_config = model_config.get_multimodal_config()
 
-        processor_inputs = self.dummy_inputs.get_dummy_processor_inputs(
+        processor_inputs = self.get_dummy_inputs(
             seq_len=seq_len,
             mm_counts=mm_counts,
             mm_options=mm_config.limit_per_prompt,
@@ -1236,7 +1273,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
@@ -1326,6 +1363,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
+        mm_missing_idxs_without_data: dict[str, list[int]] = {}
         for modality, idxs in mm_missing_idxs.items():
             if not idxs:
                 continue
@@ -1334,14 +1372,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise ValueError(
-                        f"Cache miss for {modality} at index {idx} "
-                        f"but data is not provided."
-                    )
+                    mm_missing_idxs_without_data.setdefault(modality, []).append(idx)
                 else:
                     missing_modality_data.append(data)
 
             mm_missing_data[modality] = missing_modality_data
+
+        if mm_missing_idxs_without_data:
+            missing_items = "; ".join(
+                f"{modality} at index {', '.join(map(str, idxs))}"
+                for modality, idxs in mm_missing_idxs_without_data.items()
+            )
+            raise ValueError(
+                f"Cache miss for {missing_items} but data is not provided."
+            )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
@@ -1357,6 +1401,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return replace(cached_update, item_idx=new_item_idx)
 
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        """Get each item's processor and encoder cache identity."""
+        return inputs.get_mm_hashes(
+            self.info.model_id,
+            self.info.ctx.get_mm_config().mm_hasher_algorithm,
+        )
+
+    def _get_cache_missing_processor_kwargs(
+        self,
+        inputs: ProcessorInputs,
+        mm_is_cached: MultiModalIsCached,
+    ) -> Mapping[str, object]:
+        """Select processor options for the items missing from the cache."""
+        return inputs.hf_processor_mm_kwargs
+
     def _merge_mm_kwargs(
         self,
         cache: BaseMultiModalProcessorCache,
@@ -1365,6 +1424,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        # A request can exceed the cache capacity. Retain local payloads before
+        # inserting misses can evict hits that occur later in this request.
+        cached_items = {
+            item_hash: cache.get_cached_item(item_hash)
+            for hashes in mm_hashes.values()
+            for item_hash in hashes
+        }
+
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
         for hashes in mm_hashes.values():
@@ -1382,6 +1449,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
+                item = cached_items.get(item_hash)
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     missing_kwargs_item = missing_kwargs[missing_next_idx]
@@ -1390,8 +1458,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_missing_next_idx[modality] += 1
 
                     item = missing_kwargs_item, missing_updates_item
-                else:
-                    item = None
 
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 
@@ -1428,10 +1494,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
+            mm_hashes = self._get_mm_hashes(inputs)
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1464,10 +1527,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
+            mm_hashes = self._get_mm_hashes(inputs)
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
@@ -1476,36 +1536,43 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_hashes=mm_hashes,
             )
 
+        missing_processor_kwargs = self._get_cache_missing_processor_kwargs(
+            inputs, mm_is_cached
+        )
+
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
         with timing_ctx.record("apply_hf_processor"):
             mm_missing_processed_data = self._apply_hf_processor_main(
                 mm_items=mm_missing_data_items,
-                hf_kwargs=inputs.hf_processor_mm_kwargs,
+                hf_kwargs=missing_processor_kwargs,
             )
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(
-                mm_missing_processed_data, inputs.hf_processor_mm_kwargs
+                mm_missing_processed_data, missing_processor_kwargs
             ),
         )
 
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,
-            inputs.hf_processor_mm_kwargs,
+            missing_processor_kwargs,
             mm_missing_kwargs,
         )
 
         with timing_ctx.record("merge_mm_kwargs"):
-            mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
-                cache,
-                mm_hashes=mm_hashes,
-                mm_is_cached=mm_is_cached,
-                mm_missing_kwargs=mm_missing_kwargs,
-                mm_missing_prompt_updates=mm_missing_prompt_updates,
-            )
+            try:
+                mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+                    cache,
+                    mm_hashes=mm_hashes,
+                    mm_is_cached=mm_is_cached,
+                    mm_missing_kwargs=mm_missing_kwargs,
+                    mm_missing_prompt_updates=mm_missing_prompt_updates,
+                )
+            finally:
+                cache.release_sender_touches()
 
         return MultiModalProcessingResult(
             prompt_ids=self._postprocess_prompt(inputs.prompt),
@@ -1633,10 +1700,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, update_idxs in match_result.items():
             for item_idx, update_idx in enumerate(update_idxs):
-                assert update_idx is not None, (
-                    "Failed to apply prompt replacement for "
-                    f"mm_items[{modality!r}][{item_idx}]"
-                )
+                if update_idx is None:
+                    raise PromptUpdateMismatchError(
+                        "Failed to apply prompt replacement for "
+                        f"mm_items[{modality!r}][{item_idx}]"
+                    )
 
                 matched_updates[modality].append(
                     [mm_prompt_updates[modality][item_idx][update_idx]]

@@ -26,6 +26,8 @@ class KimiK25Processor(ProcessorMixin):
         text: str | list[str] | None = None,
         vision_chunks: list[VisionChunk] | None = None,
         return_tensors: str | TensorType | None = None,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
         **kwargs,
     ) -> BatchFeature:
         """Args:
@@ -49,6 +51,8 @@ class KimiK25Processor(ProcessorMixin):
             mm_inputs = self.image_processor.preprocess(
                 vision_chunks,
                 return_tensors=return_tensors,
+                do_rescale=do_rescale,
+                do_normalize=do_normalize,
             )
         else:
             mm_inputs = {}

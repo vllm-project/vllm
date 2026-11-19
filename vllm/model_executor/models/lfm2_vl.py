@@ -13,8 +13,8 @@ from transformers import BatchFeature
 from transformers.activations import ACT2FN
 from transformers.models.lfm2_vl import Lfm2VlProcessor
 from transformers.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig
-from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
-    Lfm2VlImageProcessorFast,
+from transformers.models.lfm2_vl.image_processing_lfm2_vl import (
+    Lfm2VlImageProcessor,
     find_closest_aspect_ratio,
     round_by_factor,
 )
@@ -69,17 +69,6 @@ from .utils import (
 from .vision import is_vit_use_data_parallel
 
 
-def _pad_cumulative_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
-
-
 class Lfm2VLImagePixelInputs(TensorSchema):
     """Dimensions:
     - b: Number of images in the prompt
@@ -104,7 +93,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(Lfm2VlProcessor, **kwargs)
 
-    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_default_tok_params(self) -> TokenizeParams:
@@ -213,7 +202,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -336,7 +325,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         processor: Lfm2VlProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+        image_processor: Lfm2VlImageProcessor = processor.image_processor
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
         downsample_factor = mm_kwargs.get(
@@ -868,9 +857,6 @@ class Lfm2VLForConditionalGeneration(
                 "gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={
-                "cu_seqlens": _pad_cumulative_seqlens_buffer,
-            },
         )
 
     def get_max_frames_per_video(self) -> int:

@@ -4,17 +4,32 @@
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    _make_fused_conv1d_weight_loader,
+)
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+    TritonKDACheckpointSpec,
+    get_triton_kda_checkpoint_buffer,
+    kda_prefill_checkpoint_alignment,
+    reserve_triton_kda_checkpoint_buffer,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -31,13 +46,25 @@ from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
+    refill_derived,
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd_block
+from vllm.utils.flashinfer import (
+    flashinfer_fused_kda_decode,
+    flashinfer_packed_fused_kda_decode,
+    flashinfer_recurrent_kda,
+    has_flashinfer_fused_kda_decode,
+    has_flashinfer_packed_fused_kda_decode,
+    has_flashinfer_recurrent_kda,
+)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.worker.workspace import current_workspace_manager
+
+logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import (
@@ -54,7 +81,7 @@ else:
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Merged projection with multiple replicated output shards.
 
-    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
+    Extends K3's `_KimiGDNMergedColumnParallelLinear` to support two
     replicated shards (f_a, g_a) instead of one. Pre-multiplies each
     replicated entry's output_size by tp_size so the per-rank shard
     divides back to the full size, and forces tp_rank=0 during weight
@@ -125,14 +152,31 @@ def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
 
 
 def _resolve_kda_prefill_backend(
-    backend: str, head_dim: int, dtype: torch.dtype, lower_bound: float | None
+    backend: str,
+    head_dim: int,
+    dtype: torch.dtype,
+    lower_bound: float | None,
+    state_dtype: torch.dtype = torch.float32,
 ) -> str:
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
-    SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
-    ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
-    if backend not in ("auto", "triton", "flashkda"):
+    SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate), FlashInfer's
+    CuTe DSL kernel (opt-in; updates the state pool in place) or the Triton
+    `chunk_kda_with_fused_gate` path. `backend` comes from
+    `additional_config.kda_prefill_backend` (auto / triton / flashkda /
+    flashinfer)."""
+    if backend not in ("auto", "triton", "flashkda", "flashinfer"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if backend == "flashinfer":
+        if not _is_flashinfer_kda_prefill_supported(
+            head_dim, dtype, state_dtype, lower_bound
+        ):
+            raise RuntimeError(
+                "FlashInfer KDA prefill requires CUDA SM100/SM103/SM107, "
+                "bfloat16 activations, a float32 or bfloat16 recurrent state, "
+                "head_dim=128 and a bounded KDA gate."
+            )
+        logger.info_once("Using FlashInfer KDA prefill.")
+        return "flashinfer"
     capability = current_platform.get_device_capability()
     supported = (
         current_platform.is_cuda()
@@ -150,10 +194,166 @@ def _resolve_kda_prefill_backend(
     return "flashkda" if supported and backend != "triton" else "triton"
 
 
+def _fused_qkv_conv1d(
+    conv_size: int, projection_size: int, tp_size: int, tp_rank: int, prefix: str
+) -> ColumnParallelLinear:
+    """The q|k|v short convs as one `[3 * C_local, 1, K]` parameter.
+
+    Checkpoint `q/k/v_conv1d` weights load as shards 0/1/2 (see
+    `stacked_params_mapping`). The conv kernels read this parameter directly,
+    so every weight write (load, refit, offload, IPC cache) lands in it and its
+    address stays fixed for cudagraphs (#55087).
+    """
+    conv1d = ColumnParallelLinear(
+        input_size=conv_size,
+        output_size=3 * projection_size,
+        bias=False,
+        params_dtype=torch.float32,
+        prefix=prefix,
+    )
+    conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
+    delattr(conv1d.weight, "weight_loader")
+    set_weight_attrs(
+        conv1d.weight,
+        {
+            "weight_loader": _make_fused_conv1d_weight_loader(
+                [projection_size] * 3, tp_size, tp_rank
+            )
+        },
+    )
+    return conv1d
+
+
+def _is_flashinfer_kda_prefill_supported(
+    head_dim: int,
+    dtype: torch.dtype,
+    state_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> bool:
+    """Whether FlashInfer's CuTe DSL chunked KDA prefill runs this layer."""
+    if not current_platform.is_cuda() or not has_flashinfer_recurrent_kda():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    return (
+        (capability.major, capability.minor) in ((10, 0), (10, 3), (10, 7))
+        and head_dim == 128
+        and dtype == torch.bfloat16
+        and state_dtype in (torch.float32, torch.bfloat16)
+        and lower_bound is not None
+        and lower_bound < 0
+    )
+
+
+def _int64_cu_seqlens(
+    metadata: GDNAttentionMetadata, cu_seqlens: torch.Tensor
+) -> torch.Tensor:
+    """`cu_seqlens` as int64, converted once per step and shared by every KDA
+    layer of the step (cached on the step's metadata). FlashInfer's CuTe DSL
+    prefill would otherwise convert int32 offsets to a new tensor in each
+    layer, and its few-sequence route reads the offsets to the host, memoized
+    by tensor identity: a shared tensor makes that one blocking read per step
+    instead of one per layer."""
+    cached = getattr(metadata, "_kda_int64_cu_seqlens", None)
+    if cached is None or cached[0] is not cu_seqlens:
+        cached = (cu_seqlens, cu_seqlens.to(torch.int64))
+        metadata._kda_int64_cu_seqlens = cached  # type: ignore[attr-defined]
+    return cached[1]
+
+
+def _is_flashinfer_kda_decode_supported(
+    num_heads: int,
+    head_dim: int,
+    conv_size: int,
+    query_len: int,
+    dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    state_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> bool:
+    """Whether FlashInfer's fused KDA decode (`query_len` 1) or its packed
+    draft-verify decode (`query_len` 1 + num_spec) runs this layer."""
+    heads: tuple[int, ...]
+    if query_len == 1:
+        has_kernel = has_flashinfer_fused_kda_decode()
+        heads = (8, 12, 16, 24, 32, 48, 64, 96)
+    else:
+        # The packed kernel supports only the SD conv-state layout.
+        has_kernel = (
+            has_flashinfer_packed_fused_kda_decode() and not is_conv_state_dim_first()
+        )
+        heads = (12, 16, 24, 32, 48, 64, 96)
+    return (
+        has_kernel
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and num_heads in heads
+        and head_dim == 128
+        and conv_size == 4
+        and 1 <= query_len <= 8
+        and dtype == torch.bfloat16
+        and conv_state_dtype == torch.bfloat16
+        and state_dtype in (torch.float32, torch.bfloat16)
+        and lower_bound is not None
+        and lower_bound < 0
+    )
+
+
+def _resolve_kda_decode_backend(
+    backend: str,
+    num_heads: int,
+    head_dim: int,
+    conv_size: int,
+    query_len: int,
+    dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    state_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> str:
+    """Pick the decode kernels: FlashInfer's fused KDA decode (conv + SiLU, the
+    recurrence and the gated RMSNorm in one launch per layer) or the Triton
+    conv, recurrence and norm kernels. `backend` comes from
+    `additional_config.kda_decode_backend` (`--kda-decode-backend`: auto /
+    flashinfer / triton) and covers plain and draft-verify rows; `auto` picks
+    FlashInfer when it supports the layer. `query_len` is 1 for plain decode
+    rows and 1 + num_speculative_tokens for draft-verify rows."""
+    if backend not in ("auto", "flashinfer", "triton"):
+        raise ValueError(f"Unsupported GLM-5.3 KDA decode backend: {backend}")
+    if backend == "triton":
+        return "triton"
+    if _is_flashinfer_kda_decode_supported(
+        num_heads,
+        head_dim,
+        conv_size,
+        query_len,
+        dtype,
+        conv_state_dtype,
+        state_dtype,
+        lower_bound,
+    ):
+        logger.info_once(
+            "Using FlashInfer fused KDA decode (%d tokens per row).", query_len
+        )
+        return "flashinfer"
+    if backend == "flashinfer":
+        raise RuntimeError(
+            "FlashInfer fused KDA decode requires CUDA SM10x, 8/12/16/24/32/48/"
+            "64/96 local heads (12-96 and the SD conv-state layout for "
+            "draft-verify rows, at most 7 speculative tokens), head_dim 128, "
+            "conv width 4, bfloat16 activations and conv state, a float32 or "
+            "bfloat16 recurrent state and a bounded gate."
+        )
+    return "triton"
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def get_state_dtype(
         self,
@@ -161,7 +361,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(
@@ -181,17 +383,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
-        # KDA projections remain BF16 because fp8 checkpoints omit their scales.
-        saved_quant_config = vllm_config.quant_config
-        try:
-            vllm_config.quant_config = None
-            super().__init__(config, vllm_config, prefix)
-        finally:
-            vllm_config.quant_config = saved_quant_config
+        super().__init__(config, vllm_config, prefix)
 
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
@@ -244,37 +440,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.q_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.q_conv1d",
+        self.conv1d = _fused_qkv_conv1d(
+            self.conv_size,
+            projection_size,
+            self.tp_size,
+            self.tp_rank,
+            prefix=f"{prefix}.conv1d",
         )
-        self.k_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.k_conv1d",
-        )
-        self.v_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.v_conv1d",
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -288,7 +460,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
@@ -319,6 +495,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
         additional_config = vllm_config.additional_config
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -326,10 +503,51 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
+            recurrent_state_dtype,
         )
+        if self.kda_prefill_backend == "triton":
+            l2norm_fwd_block.register_warmup(
+                dtype=vllm_config.model_config.dtype,
+                dim=self.head_dim,
+            )
+
+        # One option (`--kda-decode-backend`) for every decode row: with
+        # speculative decoding they are draft-verify rows of 1 + num_spec
+        # tokens, otherwise single-token rows.
+        self.kda_decode_backend = _resolve_kda_decode_backend(
+            additional_config.get("kda_decode_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto",
+            self.local_num_heads,
+            self.head_dim,
+            self.conv_size,
+            1 + self.num_spec,
+            vllm_config.model_config.dtype,
+            conv_state_dtype,
+            recurrent_state_dtype,
+            self.kda_lower_bound,
+        )
+        # FlashInfer's [3, width, P] fp32 conv weight and fp32 norm weight,
+        # built in process_weights_after_loading.
+        self._fi_conv_weight: torch.Tensor | None = None
+        self._fi_norm_weight: torch.Tensor | None = None
+
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
+        self._triton_checkpoint_spec: TritonKDACheckpointSpec | None = None
+        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
+        if self.kda_prefill_backend == "triton":
+            self._triton_checkpoint_spec = reserve_triton_kda_checkpoint_buffer(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.get_state_dtype()[1],
+            )
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -339,6 +557,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 max_tokens, self.local_num_heads, max_seqs
             )
             self._flashkda_buffer_specs = (
+                (
+                    (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
+                    self.get_state_dtype()[1],
+                ),
                 (
                     (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
                     self.get_state_dtype()[1],
@@ -362,25 +584,35 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
         out: torch.Tensor | None,
+        checkpoint: MambaPrefillCheckpointMetadata | None = None,
+        raw_qkv: torch.Tensor | None = None,
+        conv_state: torch.Tensor | None = None,
+        recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
-        and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
-        bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
-        matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
-        attention output into ``out`` (a workspace buffer when ``None``) and
-        returns ``(out, final_state)``."""
+        """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits `g`
+        and raw `beta` logits, l2-normalizes q/k in-kernel and applies the
+        bounded gate `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`,
+        matching `chunk_kda_with_fused_gate(..., safe_gate=True)`. Writes the
+        attention output into `out` (a workspace buffer when `None`) and
+        returns `(out, final_state)`."""
         assert self._flashkda_buffer_specs is not None
-        final_state, workspace, workspace_out = (
+        final_state, checkpoint_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)
         )
         final_state = final_state[: initial_state.shape[0]]
+        checkpoint_state = (
+            checkpoint_state[: initial_state.shape[0]]
+            if checkpoint is not None
+            else None
+        )
         if out is None:
             out = workspace_out[:, : q.shape[1]]
-        # FlashKDA hardcodes dense q/k/v/g strides; beta may be row-strided.
+        # FlashKDA accepts row-strided q/k/v (contiguous H/D rows, aligned
+        # token stride), so the packed q|k|v views are passed without a copy.
         torch.ops._flashkda_C.fwd(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
+            q,
+            k,
+            v,
             g.contiguous(),
             beta,
             self.head_dim**-0.5,
@@ -392,9 +624,23 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state.contiguous(),
             final_state,
             cu_seqlens.contiguous(),
-            None,
-            None,
+            checkpoint_state,
+            checkpoint.checkpoint_offsets.contiguous()
+            if checkpoint is not None
+            else None,
         )
+        if checkpoint is not None:
+            assert self._checkpoint_exporter is not None
+            assert raw_qkv is not None and conv_state is not None
+            assert recurrent_state is not None
+            self._checkpoint_exporter.export(
+                checkpoint,
+                raw_qkv=raw_qkv,
+                conv_state=conv_state,
+                recurrent_checkpoint=checkpoint_state,
+                recurrent_state=recurrent_state,
+                cu_seqlens=cu_seqlens,
+            )
         return out, final_state
 
     def forward(
@@ -440,10 +686,207 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             g1=g1,
             beta=beta,
             core_attn_out=core_attn_out,
+            g2=g2,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
+        if not self._norm_in_forward:
+            core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
+
+    @property
+    def _norm_in_forward(self) -> bool:
+        """FlashInfer's fused decode applies o_norm itself, so with it
+        `_forward` returns normed output for every step type: a breakable CUDA
+        graph replays the code after `_forward` as captured, whatever the live
+        step."""
+        return self.kda_decode_backend == "flashinfer"
+
+    def process_weights_after_loading(self) -> None:
+        """Build FlashInfer's conv and norm weights from the loaded weights;
+        reloads refill them in place."""
+        if not self._norm_in_forward:
+            return
+        conv_weight = self.conv1d.weight.view(
+            3, self.local_projection_size, self.conv_size
+        )
+        refill_derived(
+            self, "_fi_conv_weight", conv_weight.transpose(1, 2).contiguous()
+        )
+        refill_derived(self, "_fi_norm_weight", self.o_norm.weight.float().contiguous())
+
+    def _flashinfer_decode_rows(
+        self,
+        metadata: GDNAttentionMetadata,
+        qkv: torch.Tensor,
+        g1: torch.Tensor,
+        beta: torch.Tensor,
+        g2: torch.Tensor,
+        out: torch.Tensor,
+        conv_state: torch.Tensor,
+        state: torch.Tensor,
+    ) -> int:
+        """Runs the step's leading decode rows through FlashInfer's fused
+        decode and returns their token count (0 if it runs none). Without
+        speculative decoding these are the decode rows of decode and mixed
+        steps (vLLM orders decodes first); with it, every row of a step of
+        draft-verify rows only."""
+        if self.kda_decode_backend != "flashinfer":
+            return 0
+        if self.num_spec:
+            if (
+                metadata.spec_sequence_masks is None
+                or metadata.num_spec_decodes == 0
+                or metadata.num_decodes
+                or metadata.num_prefills
+            ):
+                return 0
+            assert metadata.spec_state_indices_tensor is not None
+            assert metadata.spec_query_start_loc is not None
+            n = metadata.num_actual_tokens
+            self._flashinfer_decode(
+                x=qkv,
+                conv_state=conv_state,
+                raw_gate=g1,
+                raw_beta=beta,
+                state_indices=metadata.spec_state_indices_tensor,
+                state=state,
+                output_gate=g2[:n],
+                output=out[:, :n],
+                query_start_loc=metadata.spec_query_start_loc,
+                num_accepted_tokens=metadata.num_accepted_tokens,
+            )
+            return n
+        n = metadata.num_decode_tokens
+        # A mixed step with prefix-cache checkpoints runs on the chunked path.
+        if n == 0 or (metadata.num_prefills and metadata.checkpoint is not None):
+            return 0
+        assert metadata.non_spec_state_indices_tensor is not None
+        self._flashinfer_decode(
+            x=qkv[:n],
+            conv_state=conv_state,
+            raw_gate=g1[:, :n],
+            raw_beta=beta[:, :n],
+            state_indices=metadata.non_spec_state_indices_tensor[:n],
+            state=state,
+            output_gate=g2[:n],
+            output=out[:, :n],
+        )
+        return n
+
+    def _flashinfer_decode(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor,
+        raw_gate: torch.Tensor,
+        raw_beta: torch.Tensor,
+        state_indices: torch.Tensor,
+        state: torch.Tensor,
+        output_gate: torch.Tensor,
+        output: torch.Tensor,
+        query_start_loc: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+    ) -> None:
+        """FlashInfer fused KDA decode: conv + SiLU with the conv-state update,
+        the recurrence and the gated RMSNorm, written into `output`. Rows
+        with a non-positive slot are null rows. With `query_start_loc` the
+        rows are draft-verify rows (`state_indices` [N, 1 + num_spec])."""
+        assert self._fi_conv_weight is not None
+        assert self._fi_norm_weight is not None
+        kwargs = dict(
+            x=x,
+            weight=self._fi_conv_weight,
+            conv_state=conv_state,
+            raw_gate=raw_gate,
+            raw_beta=raw_beta,
+            A_log=self.A_log.view(-1),
+            dt_bias=self.dt_bias,
+            state=state,
+            output_gate=output_gate,
+            norm_weight=self._fi_norm_weight,
+            lower_bound=self.kda_lower_bound,
+            norm_eps=self.o_norm.eps,
+            output=output,
+        )
+        if query_start_loc is None:
+            flashinfer_fused_kda_decode(state_indices=state_indices, **kwargs)
+        else:
+            flashinfer_packed_fused_kda_decode(
+                state_indices=state_indices.contiguous(),
+                query_start_loc=query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
+                **kwargs,
+            )
+
+    def _flashinfer_prefill(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        metadata: GDNAttentionMetadata,
+        out: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """FlashInfer's CuTe DSL chunked prefill from the raw gate and beta
+        logits, reading and writing the recurrent states in place at
+        `state_indices`. Writes `out` (a new buffer when `None`) and returns
+        it."""
+        # FlashInfer has no has-initial-state flag: zero the slots of fresh
+        # sequences first (the others zero the unused null slot).
+        state.index_fill_(
+            0, torch.where(has_initial_state, NULL_BLOCK_ID, state_indices).long(), 0
+        )
+        if out is None:
+            out = torch.empty_like(q)
+        # With speculative decoding the slots are column 0 of the
+        # [N, 1 + num_spec] block table, which FlashInfer rejects.
+        state_indices = state_indices.contiguous()
+        if q.size(1) == 1:
+            # FlashInfer's prefill needs two tokens; one is a decode step.
+            fused_recurrent_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                ssm_state_indices=state_indices,
+                out=out,
+                sigmoid_beta=True,
+                a_log=self.A_log,
+                g_bias=self.dt_bias,
+                compute_gate=True,
+                lower_bound=self.kda_lower_bound,
+            )
+            return out
+        assert self.kda_lower_bound is not None
+        flashinfer_recurrent_kda(
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            g=g.contiguous(),
+            beta=beta.contiguous(),
+            A_log=self.A_log.view(-1),
+            dt_bias=self.dt_bias,
+            scale=q.shape[-1] ** -0.5,
+            initial_state=state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            lower_bound=self.kda_lower_bound,
+            cu_seqlens=_int64_cu_seqlens(metadata, cu_seqlens),
+            ssm_state_indices=state_indices,
+            output=out,
+            beta_is_logit=True,
+            backend="cute-dsl",
+        )
+        return out
 
     @eager_break_during_capture
     def _forward(
@@ -452,6 +895,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        g2: torch.Tensor,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -499,20 +943,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
+        # three calls. conv_state is already stored as the merged q|k|v state.
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(-1)
+        )
+        conv_bias = self.conv1d.bias
 
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
-        conv_weights = self._merged_conv_weight
-        conv_bias = self.q_conv1d.bias
+        num_fused_decodes = self._flashinfer_decode_rows(
+            attn_metadata_narrowed,
+            qkv_proj_states,
+            g1,
+            beta,
+            g2,
+            core_attn_out,
+            conv_state,
+            recurrent_state,
+        )
+        if num_fused_decodes and attn_metadata_narrowed.num_prefills == 0:
+            return
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
@@ -565,7 +1013,21 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
+        raw_qkv_ns = qkv_ns
         q_ns = k_ns = v_ns = None
+        conv_cache_indices = non_spec_state_indices_tensor
+        prefill_query_start_loc = non_spec_query_start_loc
+        prefill_state_indices = non_spec_state_indices_tensor
+        prefill_has_initial_state = has_initial_state
+        if num_fused_decodes:
+            # Mixed step: the conv skips the decode rows FlashInfer ran (null
+            # slots) and the prefill kernel sees the builder's prefill tail.
+            assert non_spec_state_indices_tensor is not None
+            conv_cache_indices = non_spec_state_indices_tensor.clone()
+            conv_cache_indices[:num_fused_decodes] = NULL_BLOCK_ID
+            prefill_query_start_loc = attn_metadata_narrowed.prefill_query_start_loc
+            prefill_state_indices = attn_metadata_narrowed.prefill_state_indices
+            prefill_has_initial_state = attn_metadata_narrowed.prefill_has_initial_state
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
             qkv_ns = causal_conv1d_fn(
@@ -575,7 +1037,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 activation="silu",
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
+                cache_indices=conv_cache_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
@@ -642,54 +1104,101 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # stays None there and the merge copy below runs as before.
         ns_out = None
         if attn_metadata_narrowed.num_prefills > 0:
-            assert q_ns is not None
-            assert non_spec_state_indices_tensor is not None
-            assert has_initial_state is not None
-            initial_state = gather_initial_states(
-                recurrent_state, non_spec_state_indices_tensor, has_initial_state
-            )
-            if self.kda_prefill_backend == "flashkda":
-                # Non-spec step: write straight into the layer output buffer
-                # (dense token order, no merge copy). Step with spec-decode
-                # tokens: write to the workspace buffer and scatter below.
-                ns_out = None if use_spec else core_attn_out[:, :num_actual_tokens]
-                core_attn_out_non_spec, last_recurrent_state = self._flashkda_prefill(
-                    q=_rearr(q_ns),
-                    k=_rearr(k_ns),
-                    v=_rearr(v_ns),
+            assert q_ns is not None and k_ns is not None and v_ns is not None
+            assert g1_ns is not None and beta_ns is not None
+            assert prefill_query_start_loc is not None
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            # Without the decode rows FlashInfer ran (none outside mixed steps).
+            q_ns, k_ns, v_ns = (t[num_fused_decodes:] for t in (q_ns, k_ns, v_ns))
+            g1_ns = g1_ns[:, num_fused_decodes:]
+            beta_ns = beta_ns[:, num_fused_decodes:]
+            q_p, k_p, v_p = _rearr(q_ns), _rearr(k_ns), _rearr(v_ns)
+            if self.kda_prefill_backend != "triton" and not use_spec:
+                # FlashInfer / FlashKDA write a non-spec step straight into the
+                # layer output (dense token order, no merge copy); a step with
+                # spec-decode tokens gets its own buffer, scattered below.
+                ns_out = core_attn_out[:, num_fused_decodes:num_actual_tokens]
+            if self.kda_prefill_backend == "flashinfer":
+                # In place on the state pool: no gather / scatter.
+                core_attn_out_non_spec = self._flashinfer_prefill(
+                    q=q_p,
+                    k=k_p,
+                    v=v_p,
                     g=g1_ns,
                     beta=beta_ns,
-                    initial_state=initial_state,
-                    cu_seqlens=non_spec_query_start_loc,
+                    state=recurrent_state,
+                    state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
+                    cu_seqlens=prefill_query_start_loc,
+                    metadata=attn_metadata_narrowed,
                     out=ns_out,
                 )
             else:
-                (
-                    core_attn_out_non_spec,
-                    last_recurrent_state,
-                ) = chunk_kda_with_fused_gate(
-                    q=_rearr(q_ns),
-                    k=_rearr(k_ns),
-                    v=_rearr(v_ns),
-                    raw_g=g1_ns,
-                    # Chunk path wants the pre-sigmoided fp32 beta (its
-                    # kernels don't sigmoid); beta_ns is raw bf16 from forward.
-                    beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
-                    A_log=self.A_log,
-                    g_bias=self.dt_bias,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=non_spec_query_start_loc,
-                    safe_gate=safe_gate,
-                    lower_bound=lower_bound,
+                initial_state = gather_initial_states(
+                    recurrent_state, prefill_state_indices, prefill_has_initial_state
                 )
-            # Init cache
-            scatter_states(
-                recurrent_state,
-                last_recurrent_state,
-                non_spec_state_indices_tensor,
-            )
+                if self.kda_prefill_backend == "flashkda":
+                    core_attn_out_non_spec, last_recurrent_state = (
+                        self._flashkda_prefill(
+                            q=q_p,
+                            k=k_p,
+                            v=v_p,
+                            g=g1_ns,
+                            beta=beta_ns,
+                            initial_state=initial_state,
+                            cu_seqlens=prefill_query_start_loc,
+                            out=ns_out,
+                            checkpoint=attn_metadata_narrowed.checkpoint,
+                            raw_qkv=raw_qkv_ns,
+                            conv_state=conv_state,
+                            recurrent_state=recurrent_state,
+                        )
+                    )
+                else:
+                    checkpoint = attn_metadata_narrowed.checkpoint
+                    checkpoint_state, checkpoint_offsets = (
+                        get_triton_kda_checkpoint_buffer(
+                            checkpoint,
+                            self._triton_checkpoint_spec,
+                            initial_state.shape[0],
+                        )
+                    )
+                    core_attn_out_non_spec, last_recurrent_state = (
+                        chunk_kda_with_fused_gate(
+                            q=q_p,
+                            k=k_p,
+                            v=v_p,
+                            raw_g=g1_ns,
+                            # Chunk path wants the pre-sigmoided fp32 beta (its
+                            # kernels don't sigmoid); beta_ns is raw bf16.
+                            beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
+                            A_log=self.A_log,
+                            g_bias=self.dt_bias,
+                            initial_state=initial_state,
+                            output_final_state=True,
+                            use_qk_l2norm_in_kernel=True,
+                            cu_seqlens=prefill_query_start_loc,
+                            safe_gate=safe_gate,
+                            lower_bound=lower_bound,
+                            checkpoint_state=checkpoint_state,
+                            checkpoint_offsets=checkpoint_offsets,
+                        )
+                    )
+                    if checkpoint is not None:
+                        assert self._checkpoint_exporter is not None
+                        self._checkpoint_exporter.export(
+                            checkpoint,
+                            raw_qkv=raw_qkv_ns,
+                            conv_state=conv_state,
+                            recurrent_checkpoint=checkpoint_state,
+                            recurrent_state=recurrent_state,
+                            cu_seqlens=prefill_query_start_loc,
+                        )
+                # Init cache
+                scatter_states(
+                    recurrent_state, last_recurrent_state, prefill_state_indices
+                )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
@@ -731,6 +1240,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             assert core_attn_out_non_spec is not None
             if ns_out is None:
-                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                    0, :num_actual_tokens
-                ]
+                core_attn_out[0, num_fused_decodes:num_actual_tokens] = (
+                    core_attn_out_non_spec[0, : num_actual_tokens - num_fused_decodes]
+                )
+        if self._norm_in_forward:
+            # Rows from the fused decode kernel are normed already.
+            live_out = core_attn_out[:, num_fused_decodes:num_actual_tokens]
+            normed = self.o_norm(live_out, g2[num_fused_decodes:num_actual_tokens])
+            if normed.data_ptr() != live_out.data_ptr():
+                live_out.copy_(normed)

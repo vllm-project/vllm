@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal
+from typing import Literal, Self
 
 from pydantic import model_validator
-from typing_extensions import Self
 
-from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors, config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -22,7 +23,9 @@ class StructuredOutputsConfig:
     """Which engine will be used for structured outputs (e.g. JSON schema,
     regex, etc) by default. With "auto", we will make opinionated choices
     based on request contents and what the backend libraries currently support,
-    so the behavior is subject to change in each release."""
+    so the behavior is subject to change in each release.
+    The "lm-format-enforcer" backend is deprecated and will be removed in
+    v0.35.0. Use "auto", "xgrammar", or "guidance" instead."""
     disable_any_whitespace: bool = False
     """If `True`, json output will always be compact without any whitespace.
     If `False`, the model may generate whitespace between JSON fields,
@@ -41,22 +44,14 @@ class StructuredOutputsConfig:
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {}
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
@@ -69,5 +64,13 @@ class StructuredOutputsConfig:
             raise ValueError(
                 "disable_additional_properties is only supported "
                 "for the guidance backend."
+            )
+        if self.backend == "lm-format-enforcer":
+            logger.warning_once(
+                "The lm-format-enforcer structured outputs backend is deprecated "
+                "and will be removed in v0.35.0. Use auto, xgrammar, or guidance "
+                "instead. See https://docs.vllm.ai/en/latest/features/"
+                "structured_outputs/#migrating-from-lm-format-enforcer "
+                "for migration guidance."
             )
         return self

@@ -5,7 +5,6 @@ from collections.abc import Sequence
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -18,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -46,12 +46,13 @@ class DeepSeekV3ToolParser(ToolParser):
         self.tool_call_start_token: str = "<｜tool▁call▁begin｜>"
         self.tool_call_end_token: str = "<｜tool▁call▁end｜>"
 
+        # The arguments may be pretty-printed over several lines.
         self.tool_call_regex = re.compile(
-            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
+            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>[\s\S]*?)\n```<｜tool▁call▁end｜>"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*[^\n`])"
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>[\s\S]*[^\n`])"
         )
 
         self.stream_tool_call_name_regex = re.compile(
@@ -109,7 +110,13 @@ class DeepSeekV3ToolParser(ToolParser):
                         )
                     )
 
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                tool_calls_start = model_output.find(self.tool_calls_start_token)
+                tool_calls_end = model_output.rfind(self.tool_calls_end_token)
+                content = model_output[:tool_calls_start]
+                if tool_calls_end != -1:
+                    content += model_output[
+                        tool_calls_end + len(self.tool_calls_end_token) :
+                    ]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,

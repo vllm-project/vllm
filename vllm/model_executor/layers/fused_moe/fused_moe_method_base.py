@@ -26,6 +26,8 @@ logger = init_logger(__name__)
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
+    accepts_quantized_input: bool = False
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe: FusedMoEConfig = moe
@@ -148,7 +150,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Apply the MoE operation using modular kernels.
 
         Args:
@@ -160,7 +162,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             shared_experts: The shared experts module, if any
 
         Returns:
-            Output tensor from routed experts.
+            Finalized routed states or a deferred-finalize output.
 
         """
         raise NotImplementedError

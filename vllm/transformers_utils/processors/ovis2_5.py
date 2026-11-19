@@ -96,9 +96,14 @@ class Ovis2_5Processor(ProcessorMixin):
         # missing from the vocab. Re-add them to restore the expected ids.
         self.tokenizer.add_tokens(list(required_tokens.values()), special_tokens=True)
 
+        # in TokenizerPool tokenizer.get_added_vocab() gets values from an instance
+        # that was updated with tokenizer.add_tokens(), so it is favourable over
+        # self.tokenizer.convert_tokens_to_ids(), which refers to a copy before
+        # mutation by tokenizer.add_tokens()
+        added_vocab = self.tokenizer.get_added_vocab()
+
         return {
-            key: self.tokenizer.convert_tokens_to_ids(token_name)
-            for key, token_name in required_tokens.items()
+            key: added_vocab[token_name] for key, token_name in required_tokens.items()
         }
 
     def __call__(
@@ -115,7 +120,7 @@ class Ovis2_5Processor(ProcessorMixin):
         and image(s). This method forwards the `text`and `kwargs` arguments
         to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text`
         is not `None` to encode the text. To prepare the vision inputs,
-        this method forwards the `vision_infos` and `kwrags` arguments to
+        this method forwards the `vision_infos` and `kwargs` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`]
         if `vision_infos` is not `None`.
 
@@ -350,8 +355,8 @@ class Ovis2_5Processor(ProcessorMixin):
 
         image_placeholders = [start_token, self.get_token_value("visual_atom")]
         if grid[0] * grid[1] > 1:
-            for r in range(grid[0]):
-                for c in range(grid[1]):
+            for _ in range(grid[0]):
+                for _ in range(grid[1]):
                     image_placeholders.append(self.get_token_value("visual_atom"))
 
         image_placeholders.append(end_token)

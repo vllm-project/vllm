@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+from unittest.mock import patch
 
+from transformers import processing_utils
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
+from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils.processor import (
+    get_processor,
     get_processor_kwargs_keys,
     get_processor_kwargs_type,
 )
+from vllm.transformers_utils.repo_utils import _snapshot_non_weight_files
 
 
 class _FakeProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore
@@ -44,7 +49,7 @@ class _ProcWithUnpack:
 
 def test_get_processor_kwargs_from_processor_unpack_path_returns_full_union():
     proc = _ProcWithUnpack()
-    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))  # type: ignore[arg-type]
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
 
 
@@ -63,5 +68,28 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     assert hasattr(mod, "_FakeProcessorKwargs")
 
     proc = _ProcWithoutUnpack()
-    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))  # type: ignore[arg-type]
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
+
+
+def test_hub_processor_loads_from_local_snapshot():
+    """Transformers makes a Hub request per file when given a repo ID."""
+    with patch.object(
+        processing_utils,
+        "list_repo_templates",
+        wraps=processing_utils.list_repo_templates,
+    ) as list_repo_templates:
+        processor = get_processor("Qwen/Qwen2-VL-2B-Instruct")
+
+    assert processor.tokenizer.name_or_path == "Qwen/Qwen2-VL-2B-Instruct"
+    assert processor.chat_template is not None
+    list_repo_templates.assert_not_called()
+
+
+def test_processor_reuses_tokenizer_snapshot():
+    """The chat template lookup must not snapshot the repo a second time."""
+    model = "Qwen/Qwen2-VL-2B-Instruct"
+    _snapshot_non_weight_files.cache_clear()
+    get_tokenizer(model)
+    get_processor(model)
+    assert _snapshot_non_weight_files.cache_info().misses == 1

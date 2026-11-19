@@ -16,10 +16,13 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.protocol import StreamingInput
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from ....utils import ROCM_ENGINE_KWARGS, create_new_process_for_each_test
 
@@ -68,24 +71,31 @@ def _normalize(texts: list[str]) -> list[str]:
 def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     vllm_config = engine.llm_engine.vllm_config
     audio_config = vllm_config.model_config.hf_config.audio_config
-    kv_cache_specs_per_rank = engine.llm_engine.model_executor.get_kv_cache_specs()
+    layer_configs_per_rank = (
+        engine.llm_engine.model_executor.get_kv_cache_layer_configs()
+    )
 
-    assert len(kv_cache_specs_per_rank) == 1
-    kv_cache_specs = kv_cache_specs_per_rank[0]
-    assert AUDIO_LAYER_NAME in kv_cache_specs, kv_cache_specs.keys()
-    spec = kv_cache_specs[AUDIO_LAYER_NAME]
+    assert len(layer_configs_per_rank) == 1
+    layer_configs = layer_configs_per_rank[0]
+    assert AUDIO_LAYER_NAME in layer_configs, layer_configs.keys()
+    layer_config = layer_configs[AUDIO_LAYER_NAME]
+    spec = layer_config.spec
+    manager_config = layer_config.manager_config
 
     assert audio_config.sliding_window == 750
     assert audio_config.block_pool_size == 4
-    assert isinstance(spec, SlidingWindowSpec)
+    assert layer_config.manager_cls is SlidingWindowManager
+    assert isinstance(spec, AttentionSpec)
     assert spec.block_size == 16
     assert spec.num_kv_heads == 32
     assert spec.tokens_per_state == Fraction(1, 4)
     # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
-    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_spec).
-    assert spec.sliding_window == cdiv(750, 4) + 1 == 189
+    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_config).
+    assert manager_config.params.sliding_window == cdiv(750, 4) + 1 == 189
     assert (
-        spec.max_admission_blocks_per_request(
+        SlidingWindowManager.max_admission_blocks(
+            manager_config,
+            spec.block_size,
             max_in_flight_tokens=1,
             max_model_len=vllm_config.model_config.max_model_len,
         )
@@ -104,7 +114,8 @@ def tokenizer() -> MistralTokenizer:
 
 
 @pytest_asyncio.fixture
-async def async_engine():
+async def async_engine(request):
+    engine_config = {**ENGINE_CONFIG, **getattr(request, "param", {})}
     gpu_memory_utilization = ENGINE_CONFIG.get("gpu_memory_utilization", 0.9)
     from vllm.platforms import current_platform
 
@@ -113,7 +124,7 @@ async def async_engine():
 
         wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
-    engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
+    engine_args = AsyncEngineArgs(**engine_config)
     llm = AsyncLLM.from_engine_args(engine_args)
     try:
         yield llm
@@ -222,6 +233,14 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
+    async def input_stream(audio_buffer):
+        async for prompt in audio_buffer.get_input_stream():
+            parsed_prompt = parse_model_prompt(async_engine.model_config, prompt)
+            (engine_input,) = await async_engine.renderer.render_cmpl_async(
+                [parsed_prompt]
+            )
+            yield StreamingInput(prompt=engine_input)
+
     output_tokens_list = []
     for i, audio_asset in enumerate(audio_assets):
         output_tokens = []
@@ -241,7 +260,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
         request_id = f"session-{i}"
 
         async for resp in async_engine.generate(
-            prompt=buffer.get_input_stream(),
+            prompt=input_stream(buffer),
             sampling_params=sampling_params,
             request_id=request_id,
         ):
@@ -265,3 +284,82 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
             f"  got:      {got!r}\n"
             f"  expected: {expected!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_voxtral_realtime_buffer_stops_at_max_model_len(tokenizer):
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+    audio = Audio.from_file(AudioAsset("winning_call").get_local_path(), strict=False)
+    req = TranscriptionRequest(
+        streaming=StreamingMode.OFFLINE,
+        audio=audio.to_base64(audio.format),
+        language=None,
+    )
+    audio_enc = tokenizer.encode_transcription(req)
+
+    max_model_len = 64
+    buffer = VoxtralRealtimeBuffer(
+        audio_config, audio_enc.tokens, max_model_len=max_model_len
+    )
+    await buffer.append_audio(audio_enc.audios[0].audio_array)
+    await buffer.append_audio(None)
+    # Unlimited feedback tokens so only the length cap can stop the stream.
+    await buffer.append_tokens([0] * max_model_len)
+
+    n_tokens = 0
+    async for prompt in buffer.get_input_stream():
+        n_tokens += len(prompt["prompt_token_ids"])
+
+    assert len(audio_enc.tokens) < n_tokens < max_model_len
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_engine", [{"max_model_len": 128}], indirect=True)
+async def test_voxtral_realtime_generator_max_model_len(
+    audio_assets, tokenizer, async_engine
+):
+    # Lazy import to avoid CUDA-reinitialization error
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    max_model_len = async_engine.model_config.max_model_len
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+
+    async def input_stream(audio_buffer):
+        async for prompt in audio_buffer.get_input_stream():
+            parsed_prompt = parse_model_prompt(async_engine.model_config, prompt)
+            (engine_input,) = await async_engine.renderer.render_cmpl_async(
+                [parsed_prompt]
+            )
+            yield StreamingInput(prompt=engine_input)
+
+    # winning_call is ~300 tokens long, well past max_model_len.
+    audio = Audio.from_file(audio_assets[1].get_local_path(), strict=False)
+    req = TranscriptionRequest(
+        streaming=StreamingMode.OFFLINE,
+        audio=audio.to_base64(audio.format),
+        language=None,
+    )
+    audio_enc = tokenizer.encode_transcription(req)
+    buffer = VoxtralRealtimeBuffer(
+        audio_config, audio_enc.tokens, max_model_len=max_model_len
+    )
+    await buffer.append_audio(audio_enc.audios[0].audio_array)
+    await buffer.append_audio(None)
+
+    output_tokens = []
+    async for resp in async_engine.generate(
+        prompt=input_stream(buffer),
+        sampling_params=sampling_params,
+        request_id="session-max-len",
+    ):
+        tokens = resp.outputs[0].token_ids[-1:]
+        output_tokens.extend(tokens)
+        await buffer.append_tokens(tokens)
+
+    assert resp.finished
+    assert 0 < len(output_tokens) < max_model_len
+    # The engine is still healthy after the session hit the cap.
+    assert not async_engine.errored

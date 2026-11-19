@@ -268,6 +268,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -317,7 +318,7 @@ class KimiVLForConditionalGeneration(
 
         assert isinstance(config.vision_config, MoonViTConfig)
         self.use_data_parallel = (
-            model_config.multimodal_config.mm_encoder_tp_mode == "data"
+            model_config.get_multimodal_config().mm_encoder_tp_mode == "data"
         )
         self.hidden_size = config.text_config.hidden_size
 
@@ -366,20 +367,6 @@ class KimiVLForConditionalGeneration(
             ],
             out_hidden_size=self.hidden_size,
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config,
-    ) -> tuple[int, int]:
-        # Min: estimated smallest possible encoder input.
-        # 224x224 image with patch_size=14 -> 16x16 patches, then merge
-        # kernel (2,2) -> 8x8 = 64 output tokens.
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
 
     def _get_grid_hws(
         self,
@@ -469,7 +456,7 @@ class KimiVLForConditionalGeneration(
         )
         grid_hws_list = [(ho * kh, wo * kw) for _ in range(max_batch_size)]
 
-        patch_size = self.config.vision_config.patch_size
+        patch_size: int | tuple[int, int] = self.config.vision_config.patch_size
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size)
 
@@ -487,7 +474,7 @@ class KimiVLForConditionalGeneration(
         buffers = self.vision_tower.prepare_encoder_metadata(
             grid_hws_list,
             max_batch_size=max_batch_size,
-            max_seqlen_override=token_budget,
+            max_seqlen_override=token_budget * kh * kw,
             device=device,
         )
         values = buffers | {"pixel_values": dummy_pixel_values}
