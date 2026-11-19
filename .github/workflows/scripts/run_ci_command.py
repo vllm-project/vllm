@@ -1281,7 +1281,7 @@ def handle_rocm_cache(
         for branch in (pr["head"].get("label"), pr["head"]["ref"])
         if branch and branch != pr["base"]["ref"]
     )
-    sources = [
+    builds = [
         build
         for client in (buildkite, ci_buildkite)
         for branch in branches
@@ -1289,10 +1289,24 @@ def handle_rocm_cache(
             client, branch=branch, created_from=pr.get("created_at")
         )
         if str((build.get("pull_request") or {}).get("id")) == str(pr["number"])
-        and (build.get("meta_data") or {}).get(ROCM_STACK_BUILT_KEY)
+    ]
+    sources = [
+        build
+        for build in builds
+        if (build.get("meta_data") or {}).get(ROCM_STACK_BUILT_KEY)
     ]
     source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
     if source is None:
+        running = [build for build in builds if is_active_build(build)]
+        if running:
+            latest = max(running, key=lambda build: build.get("created_at", ""))
+            raise CiPreparationError(
+                "Can't cache yet: [Buildkite "
+                f"#{latest.get('number')}]({latest.get('web_url')}) is still "
+                "running and hasn't pushed the ROCm base image. Comment "
+                f"`{COMMAND_ROCM_CACHE}` again once its ROCm base image step "
+                "finishes; the rest of the build doesn't need to pass."
+            )
         raise CiPreparationError(
             "Can't cache: no CI build of this PR built the ROCm base image itself. "
             f"Run `{COMMAND_RUN_CI}`, then `{COMMAND_ROCM_CACHE}` once it passes. "
