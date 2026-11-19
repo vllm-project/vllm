@@ -1,18 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
-from typing import cast
-
 import jinja2
 import pytest
 import requests
-from transformers import Gemma3TextConfig, ShieldGemma2Config
+from transformers import ShieldGemma2Config
 
 from tests.utils import RemoteOpenAIServer, large_gpu_test
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.config import ModelConfig
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
-from vllm.model_executor.models.config import ShieldGemma2ForImageClassificationConfig
 from vllm.model_executor.models.shieldgemma2 import ShieldGemma2ForImageClassification
 from vllm.transformers_utils.chat_templates import (
     get_chat_template_override_path,
@@ -80,20 +76,10 @@ def test_weight_names_map_to_gemma3_layout():
         assert mapper.map_name(original) == expected
 
 
-def make_model_config(softcap=None):
-    text_config = Gemma3TextConfig(final_logit_softcapping=softcap)
-    hf_config = ShieldGemma2Config(text_config=text_config)
-    # Only hf_config is read; same stand-in as test_jina_embeddings_v5.py.
-    model_config = cast(ModelConfig, SimpleNamespace(hf_config=hf_config))
-    return model_config, hf_config, hf_config.get_text_config()
-
-
 def test_config_selects_two_way_softmax_over_no_yes():
-    model_config, hf_config, text_config = make_model_config()
-
-    ShieldGemma2ForImageClassificationConfig.verify_and_update_model_config(
-        model_config
-    )
+    model_config = ModelConfig(MODEL_NAME, runner="pooling")
+    hf_config = model_config.hf_config
+    text_config = hf_config.get_text_config()
 
     assert text_config.method == "from_2_way_softmax"
     assert text_config.classifier_from_token == ["No", "Yes"]
@@ -101,12 +87,10 @@ def test_config_selects_two_way_softmax_over_no_yes():
 
 
 def test_config_rejects_logit_softcap():
-    model_config, _, _ = make_model_config(softcap=30.0)
+    hf_overrides = {"text_config": {"final_logit_softcapping": 30.0}}
 
     with pytest.raises(ValueError, match="final_logit_softcapping"):
-        ShieldGemma2ForImageClassificationConfig.verify_and_update_model_config(
-            model_config
-        )
+        ModelConfig(MODEL_NAME, runner="pooling", hf_overrides=hf_overrides)
 
 
 def test_image_tokens_attend_bidirectionally():
