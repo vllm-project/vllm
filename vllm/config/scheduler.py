@@ -192,25 +192,17 @@ class SchedulerConfig:
 
     Resolved in `__post_init__`; never None afterwards."""
 
-    max_num_prompt_embeds_tokens: int | None = Field(default=None, ge=1)
+    max_num_prompt_embeds_tokens: int | None = Field(default=None, init=False)
     """Maximum number of `prompt_embeds` rows held on the GPU at once, summed
-    over the requests whose prompts are not yet fully computed, or None to use
-    `max_model_len`. Only used with `enable_prompt_embeds`.
+    over the requests whose prompts are not yet fully computed. A request with
+    `prompt_embeds` waits until its rows fit.
 
-    This is a capacity, like `encoder_cache_size`, not a per-step budget like
-    `max_num_batched_tokens`: A request's whole prompt is uploaded when it is
-    admitted and held until its last chunk is computed, so this must be at
-    least `max_model_len` even when steps are much smaller. A request with
-    `prompt_embeds` waits until its rows fit. Smaller values are raised to
-    `max_model_len`.
-
-    Costs `hidden_size * dtype size` bytes of GPU memory per row,
-    reserved during memory profiling and taken from the KV cache.
-    
-    Raise it to let more long prompts prefill concurrently.
-
-    Resolved by `VllmConfig` when `enable_prompt_embeds` is set; None
-    otherwise."""
+    NOTE: This is not currently configurable. With `enable_prompt_embeds`,
+    `VllmConfig` sets it to `max_model_len`, so any request fits; it is None
+    otherwise. Memory profiling reserves it at `hidden_size * dtype size` bytes
+    per row, taken from the KV cache. With `kv_load_failure_policy="recompute"`
+    rows are held until a request finishes, so it also caps how many requests
+    with `prompt_embeds` run at once."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:

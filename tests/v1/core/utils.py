@@ -99,7 +99,6 @@ def create_scheduler(
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
     enable_prompt_embeds: bool = False,
-    max_num_prompt_embeds_tokens: int | None = None,
     kv_load_failure_policy: str | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
@@ -152,7 +151,6 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
-        max_num_prompt_embeds_tokens=max_num_prompt_embeds_tokens,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
