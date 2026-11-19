@@ -14,8 +14,8 @@ import torch
 import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed.weight_transfer.base import WeightUpdateAborted
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.model_loader.reload import lifecycle
 from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import Worker
@@ -24,17 +24,14 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(
-        self,
-        raise_on_update: bool = False,
-        raise_on_finish: type[Exception] | None = None,
-    ):
+    def __init__(self, raise_on_update: bool = False, raise_on_finish: bool = False):
         self.raise_on_update = raise_on_update
         self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
         self.closed = False
         self.reset_count = 0
+        self.model = nn.Module()
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
@@ -54,8 +51,8 @@ class _RecordingEngine:
 
     def finish_weight_update(self) -> None:
         self._record_config()
-        if self.raise_on_finish is not None:
-            raise self.raise_on_finish("boom")
+        if self.raise_on_finish:
+            raise ValueError("boom")
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
@@ -309,28 +306,26 @@ def test_update_resets_active_on_error():
     assert worker._weight_update_active is False
 
 
-@pytest.mark.parametrize(
-    "mode, error",
-    [
-        ("direct", ValueError),
-        ("layerwise", ValueError),
-        ("layerwise", WeightUpdateAborted),
-    ],
-)
-def test_failed_finish_ends_session_unless_retryable(mode, error, monkeypatch):
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    engine = _RecordingEngine(raise_on_finish=error)
+    engine = _RecordingEngine(raise_on_finish=True)
     worker = _make_worker(engine)
     Worker.start_weight_update(worker)
+    # what start_reload set; a failed direct finish must clear it
+    monkeypatch.setattr(lifecycle, "_weight_update_active", True)
+    engine.model._direct_reload_begun = True
 
-    with pytest.raises(error, match="boom"):
+    with pytest.raises(ValueError, match="boom"):
         Worker.finish_weight_update(worker)
 
-    # a failed direct or aborted finish cannot be retried, so the next start
-    # must work; another failed layerwise finish stays active for a retry
-    ended = mode == "direct" or error is WeightUpdateAborted
-    assert worker._weight_update_active is not ended
-    assert engine.reset_count == int(ended)
+    # a failed direct finish cannot be retried, so the next start must work;
+    # a failed layerwise finish stays active and can be retried
+    direct = mode == "direct"
+    assert worker._weight_update_active is not direct
+    assert engine.reset_count == int(direct)
+    assert lifecycle.weight_update_active() is not direct
+    assert hasattr(engine.model, "_direct_reload_begun") is not direct
 
 
 def test_missing_engine_raises():

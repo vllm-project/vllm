@@ -20,7 +20,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
-    WeightUpdateAborted,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +44,7 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 @dataclass
 class IPCTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for IPC weight transfer. Rank 0 ships the
-    merged IPC handles; the worker reads the chunk size from the shared buffer."""
+    merged IPC handles and the chunk size with the first chunk."""
 
     backend: ClassVar[str] = "ipc"
     packed: bool = False
@@ -67,6 +66,8 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     transfer with bytes, else empty."""
     ipc_handles_pickled: str | None = None
     """Base64-encoded pickled IPC handles, used for HTTP transport."""
+    chunk_capacity: int | None = None
+    """Packed mode: the chunk size in bytes, set on the first chunk."""
     last: bool = False
     """Packed mode: whether this chunk ends the transfer."""
 
@@ -135,17 +136,13 @@ class IPCWeightTransferEngine(
         super().__init__(config, vllm_config, device, model)
         # Set from the trainer-supplied init info at the handshake.
         self.packed = False
-        self._gpu_uuid: str | None = None
         # The current packed transfer, between start and finish.
         self._packed_consumer: PackedIpcConsumer | None = None
 
     def _local_gpu(self) -> tuple[str, int]:
         """This worker's GPU UUID and device index, for rebuilding handles."""
         device_index = self.device.index
-        if self._gpu_uuid is None:
-            props = torch.cuda.get_device_properties(device_index)
-            self._gpu_uuid = str(props.uuid)
-        return self._gpu_uuid, device_index
+        return str(torch.cuda.get_device_properties(device_index).uuid), device_index
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """Initialize the weight transfer mechanism. No data-plane rendezvous is
@@ -173,11 +170,7 @@ class IPCWeightTransferEngine(
 
         consumer, self._packed_consumer = self._packed_consumer, None
         if consumer is not None:
-            try:
-                consumer.close()
-            except RuntimeError as e:
-                # nothing is finished: a new full update repairs the model
-                raise WeightUpdateAborted(str(e)) from e
+            consumer.close()  # raises if the transfer was cut short
         finish_reload(self.model, self.model_config, self.device)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
@@ -205,6 +198,7 @@ class IPCWeightTransferEngine(
                 names=update_info.names,
                 shapes=update_info.shapes,
                 dtype_names=update_info.dtype_names,
+                chunk_capacity=update_info.chunk_capacity,
                 last=update_info.last,
             )
         else:
@@ -410,6 +404,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
                 dtype_names=chunk.dtype_names,
                 shapes=chunk.shapes,
                 ipc_handles=handle,
+                chunk_capacity=chunk.chunk_capacity,
                 last=chunk.last,
             )
             self._barrier()
@@ -420,6 +415,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         dtype_names: list[str],
         shapes: list[list[int]],
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
+        chunk_capacity: int | None = None,
         last: bool = False,
     ) -> None:
         """Build one update payload and ship it via the client. Only the sender
@@ -435,6 +431,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             dtype_names=dtype_names,
             shapes=shapes,
             ipc_handles=ipc_handles,
+            chunk_capacity=chunk_capacity,
             last=last,
         )
         self.client.update_weights(asdict(update_info))

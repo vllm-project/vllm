@@ -69,15 +69,23 @@ class Chunk(NamedTuple):
         return self.nbytes > 0
 
 
-def fit_buffer(
-    buf: torch.Tensor | None, chunk: Chunk, capacity: int, device: torch.device
+def grow_buffer(
+    buf: torch.Tensor | None,
+    nbytes: int,
+    capacity: int,
+    device: torch.device,
+    keep: int = 0,
 ) -> torch.Tensor:
-    """`buf`, or a new buffer if it is too small for `chunk`; a full chunk
-    allocates `capacity` bytes, which fits every later chunk."""
-    if buf is not None and buf.numel() >= chunk.nbytes:
+    """`buf` if it holds `nbytes`, else a new buffer with its first `keep` bytes:
+    the first sized to `nbytes`, a later one to `capacity`, so at most two sizes."""
+    if buf is not None and buf.numel() >= nbytes:
         return buf
-    size = capacity if chunk.full else chunk.nbytes
-    return torch.empty(size, dtype=torch.uint8, device=device)
+    size = capacity if buf is not None else round_up(nbytes, ALIGN)
+    grown = torch.empty(size, dtype=torch.uint8, device=device)
+    if keep:
+        assert buf is not None
+        grown[:keep].copy_(buf[:keep])
+    return grown
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -254,8 +262,6 @@ def packed_nccl_broadcast_producer(
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     caller_stream = torch.accelerator.current_stream()
     done: list[torch.Event | None] = [None] * num_buffers
-    # Sized to the first bytes packed into it, then to `capacity` if a chunk
-    # needs more: at most two sizes, so freed ones are reused.
     bufs: list[torch.Tensor | None] = [None] * num_buffers
     k = 0  # the chunk being packed
     filled = 0  # the bytes of its copied pieces end at
@@ -276,15 +282,8 @@ def packed_nccl_broadcast_producer(
             done[slot] = None
         # On the caller stream, so the source's next writes wait for the copies.
         with torch.cuda.stream(caller_stream):
-            buf = bufs[slot]
-            if buf is None or buf.numel() < end:
-                size = capacity if buf is not None else round_up(end, ALIGN)
-                device = tensors[pieces[0].position].device
-                grown = torch.empty(size, dtype=torch.uint8, device=device)
-                if filled:
-                    assert buf is not None
-                    grown[:filled].copy_(buf[:filled])
-                buf = bufs[slot] = grown
+            device = tensors[pieces[0].position].device
+            buf = bufs[slot] = grow_buffer(bufs[slot], end, capacity, device, filled)
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             torch._foreach_copy_(dsts, srcs)
             for t in srcs:  # not reused before the copy ends
@@ -398,13 +397,14 @@ def local_rebuild_args(
 @dataclass(slots=True)
 class PackedIpcChunk:
     """One chunk of a packed IPC transfer, naming the tensors that start in it.
-    Only the first chunk carries the buffer's `ipc_handle`, none if the
-    transfer has no bytes; only the last one has `last` set."""
+    Only the first chunk carries `chunk_capacity` and the buffer's `ipc_handle`
+    (none if the transfer has no bytes); only the last one has `last` set."""
 
     names: list[str]
     shapes: list[list[int]]
     dtype_names: list[str]
     ipc_handle: dict[str, tuple] | None
+    chunk_capacity: int | None
     last: bool
 
 
@@ -424,13 +424,17 @@ def packed_ipc_producer(
         iterator: Iterator of (name, tensor) pairs.
         gpu_uuid: Physical GPU UUID string for this rank.
         post_iter_func: Applied to each (name, tensor) before packing.
-        buffer_size_bytes: Size of the IPC buffer, the chunk size.
+        buffer_size_bytes: Chunk size; the IPC buffer is smaller when the
+            transfer ends within its first chunk.
 
     """
+    capacity = chunk_capacity(buffer_size_bytes)
     caller_stream = torch.accelerator.current_stream()
     buf: torch.Tensor | None = None  # at the first byte: none for no bytes
+    filled = 0  # the bytes of the current chunk's copied pieces end at
     items = iter(iterator)
-    ahead: list[tuple[str, torch.Tensor]] = []  # pulled to see if a chunk is last
+    # pulled to see if a chunk is last; None once `items` is exhausted
+    ahead: list[tuple[str, torch.Tensor] | None] = []
 
     tensors: dict[int, torch.Tensor] = {}  # each tensor, until all is copied
     started: list[tuple[str, list[int], str]] = []  # since the last chunk
@@ -446,29 +450,30 @@ def packed_ipc_producer(
             yield t.shape, t.dtype
 
     def pack(pieces: list[Piece]) -> None:
-        nonlocal buf
+        nonlocal buf, filled
+        end = max(
+            (p.offset + p.end - p.start for p in pieces if p.end > p.start),
+            default=0,
+        )
         with torch.cuda.stream(caller_stream):
-            if buf is None and any(p.end > p.start for p in pieces):
+            if end:  # grows only in the first chunk, before it is exported
                 device = tensors[pieces[0].position].device
-                buf = torch.empty(
-                    chunk_capacity(buffer_size_bytes), dtype=torch.uint8, device=device
-                )
+                buf = grow_buffer(buf, end, capacity, device, filled)
+                filled = end
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             if dsts:
                 torch._foreach_copy_(dsts, srcs)
             for t in srcs:  # not reused before the copy ends
                 t.record_stream(caller_stream)
 
-    exported = False
+    exported = first_sent = False
     for chunk in chunks(specs(), buffer_size_bytes, before_pull=pack):
         caller_stream.synchronize()  # before the consumer reads
         # the last chunk ends a tensor, and no item follows
         last = chunk.pieces[-1].position not in tensors
         if last and chunk.full:
-            item = next(items, None)
-            if item is not None:
-                ahead.append(item)
-                last = False
+            ahead.append(next(items, None))
+            last = ahead[0] is None
         handle = None
         if buf is not None and not exported:
             handle, exported = {gpu_uuid: reduce_tensor(buf)[1]}, True
@@ -477,8 +482,10 @@ def packed_ipc_producer(
             shapes=[shape for _, shape, _ in started],
             dtype_names=[dtype for _, _, dtype in started],
             ipc_handle=handle,
+            chunk_capacity=None if first_sent else capacity,
             last=last,
         )
+        first_sent, filled = True, 0
         started.clear()
 
 
@@ -489,10 +496,8 @@ class PackedIpcConsumer:
     `close()` releases it and raises if a transfer did not reach its last
     chunk."""
 
-    def __init__(self, device_index: int, gpu_uuid: str | None = None) -> None:
+    def __init__(self, device_index: int, gpu_uuid: str) -> None:
         self._device_index = device_index
-        if gpu_uuid is None:
-            gpu_uuid = str(torch.cuda.get_device_properties(device_index).uuid)
         self._gpu_uuid = gpu_uuid
         self._buf: torch.Tensor | None = None
         self._unpacker: _Unpacker | None = None  # of the transfer in progress
@@ -503,6 +508,7 @@ class PackedIpcConsumer:
         names: list[str],
         shapes: list[list[int]],
         dtype_names: list[str],
+        chunk_capacity: int | None,
         last: bool,
     ) -> list[tuple[str, torch.Tensor]]:
         """Unpack the next chunk; returns the tensors it completes, copied out
@@ -515,22 +521,23 @@ class PackedIpcConsumer:
             names: Names of the tensors that start in this chunk
             shapes: Their shapes
             dtype_names: Their dtype names (e.g. "float16")
+            chunk_capacity: The chunk size in bytes; set on the first chunk.
             last: Whether this chunk ends the transfer.
 
         """
         if self._unpacker is None:  # the first chunk of a transfer
+            if chunk_capacity is None:
+                raise ValueError("the first packed IPC chunk must set chunk_capacity")
             if ipc_handle:
                 args = local_rebuild_args(
                     ipc_handle, self._gpu_uuid, self._device_index
                 )
                 self._buf = rebuild_cuda_tensor(*args)
-                # the producer's buffer is exactly the chunk size
-                self._unpacker = _Unpacker(self._buf.numel(), views=False)
-            else:  # no bytes: the layout is one chunk of nothing
+            else:  # no bytes
                 self._buf = torch.empty(
                     0, dtype=torch.uint8, device=f"cuda:{self._device_index}"
                 )
-                self._unpacker = _Unpacker(ALIGN, views=False)
+            self._unpacker = _Unpacker(chunk_capacity, views=False)
         elif ipc_handle:
             raise RuntimeError(
                 "a packed IPC transfer started before the previous one ended"

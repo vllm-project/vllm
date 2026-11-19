@@ -79,8 +79,7 @@ identical either way.
 `packed` is a must-agree wire param: `trainer_init` ships it to the worker, which
 records it and decodes accordingly. It is not a `WeightTransferConfig` field and
 not a per-round `update_weights` field. `packed_buffer_size_bytes` is
-producer-only — the consumer takes the chunk size from the size of the shared
-buffer.
+producer-only — the producer sends the chunk size with the first chunk.
 
 ## Packed (Chunked) Transfer
 
@@ -91,7 +90,7 @@ GPU memory:
 
 - Weights are laid out as one byte stream, each starting 16-byte aligned, and cut into chunks of `packed_buffer_size_bytes`; a tensor larger than a chunk is split across chunks (the same layout as NCCL packed transfer).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
-- One buffer of `packed_buffer_size_bytes` is reused for every chunk of a transfer, bounding its extra GPU memory; a non-contiguous tensor split across chunks also needs a contiguous copy of its full size on the trainer while it is sent.
+- One buffer of `packed_buffer_size_bytes` (less if the transfer fits in one chunk) is reused for every chunk of a transfer, bounding its extra GPU memory; a non-contiguous tensor split across chunks also needs a contiguous copy of its full size on the trainer while it is sent.
 
 ```python
 engine = WeightTransferTrainerFactory.trainer_init(
@@ -126,6 +125,7 @@ the first `/update_weights` returns 500. Reference:
 | ----- | ------- |
 | `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes. Packed: only the tensors whose first bytes are in this chunk |
 | `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer in the first chunk, `{}` in the rest |
+| `chunk_capacity` | Packed: the chunk size in bytes, a multiple of 16, on the first chunk only |
 | `last` | Packed: `true` on the chunk that ends the transfer, else `false` (the default) |
 
 - A handle dict is `{gpu_uuid: reduce_tensor(t)[1]}` with one entry per GPU the
@@ -135,15 +135,16 @@ the first `/update_weights` returns 500. Reference:
   (device index) with its own.
 - `ipc_handles` (unpickled) is not JSON-serializable; over HTTP use
   `ipc_handles_pickled`.
-- Packed: export one `uint8` buffer once per transfer, its size a multiple of
-  16 (the chunk size), send its handle with the first chunk only, and reuse it
-  for every chunk. Lay the tensors'
+- Packed: export one `uint8` buffer once per transfer, its size the chunk
+  size, or the stream's length rounded up to 16 if it fits in one chunk; send
+  its handle and `chunk_capacity` with the first chunk only, and reuse it for
+  every chunk. Lay the tensors'
   `t.contiguous().view(-1).view(torch.uint8)` bytes out as one stream, each
   tensor starting at a multiple of 16, and send a chunk each time the buffer is
   full (or only alignment padding would fit), then the rest; a tensor crossing
   a cut continues at offset 0 of the next chunk. Mark the last chunk `last`:
-  `/finish_weight_update` fails and ends the update if a transfer did not reach
-  it; a new full update repairs the model. Synchronize before each
+  `/finish_weight_update` fails if a transfer did not reach it; a new full
+  update repairs the model. Synchronize before each
   `/update_weights`; do not overwrite the buffer until the call returns.
 - Keep every exported tensor alive until `/finish_weight_update` returns, then
   drop the references and call `torch.cuda.ipc_collect()`.

@@ -491,7 +491,8 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
     try:
         torch.accelerator.set_device_index(device_index)
         all_results = []
-        consumer = PackedIpcConsumer(device_index)
+        uuid = str(torch.cuda.get_device_properties(device_index).uuid)
+        consumer = PackedIpcConsumer(device_index, uuid)
         while True:
             cd = cmd_q.get()
             if cd is None:
@@ -501,6 +502,7 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
                 names=cd["names"],
                 shapes=cd["shapes"],
                 dtype_names=cd["dtype_names"],
+                chunk_capacity=cd["chunk_capacity"],
                 last=cd["last"],
             )
             for name, tensor in result:
@@ -561,6 +563,7 @@ class TestPackedIpcRoundtrip:
                         "names": chunk.names,
                         "shapes": chunk.shapes,
                         "dtype_names": chunk.dtype_names,
+                        "chunk_capacity": chunk.chunk_capacity,
                         "last": chunk.last,
                     }
                 )
@@ -739,11 +742,12 @@ class TestPackedIpcRoundtrip:
         fake_handle = {"fake-uuid-12345": c.ipc_handle[gpu_uuid]}
 
         with pytest.raises(ValueError, match="IPC handle not found"):
-            PackedIpcConsumer(torch.cuda.current_device()).receive(
+            PackedIpcConsumer(torch.cuda.current_device(), gpu_uuid).receive(
                 ipc_handle=fake_handle,
                 names=c.names,
                 shapes=c.shapes,
                 dtype_names=c.dtype_names,
+                chunk_capacity=c.chunk_capacity,
                 last=c.last,
             )
 

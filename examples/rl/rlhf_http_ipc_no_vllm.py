@@ -84,6 +84,7 @@ def update_weights(
     weights: Weights,
     names: list[str],
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
+    chunk_capacity: int | None = None,
     last: bool = False,
 ) -> None:
     w = next(iter(weights.values()))
@@ -92,6 +93,7 @@ def update_weights(
         "dtype_names": [str(w[n].dtype).removeprefix("torch.") for n in names],
         "shapes": [list(w[n].shape) for n in names],
         "ipc_handles_pickled": base64.b64encode(pickle.dumps(ipc_handles)).decode(),
+        "chunk_capacity": chunk_capacity,
         "last": last,
     }
     post("/update_weights", {"update_info": update_info})
@@ -107,10 +109,15 @@ def send_unpacked(weights: Weights, names: list[str]) -> list[torch.Tensor]:
 
 def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tensor]:
     """One /update_weights call per chunk of the 16-byte aligned byte stream;
-    only the first carries the buffer's handles, only the last `last`."""
-    cap -= cap % 16  # the server takes the chunk size from the buffer's size
+    only the first carries the chunk size and the buffer's handles, only the
+    last `last`."""
+    cap -= cap % 16
+    total = 0  # the stream's length
+    for n in names:
+        total = (total + 15) // 16 * 16 + next(iter(weights.values()))[n].nbytes
+    size = min(cap, (total + 15) // 16 * 16)  # smaller when one chunk holds all
     buffers = {
-        u: torch.empty(cap, dtype=torch.uint8, device=w[names[0]].device)
+        u: torch.empty(size, dtype=torch.uint8, device=w[names[0]].device)
         for u, w in weights.items()
     }
     handle = {u: reduce_tensor(b)[1] for u, b in buffers.items()}  # export once
@@ -121,18 +128,23 @@ def send_packed(weights: Weights, names: list[str], cap: int) -> list[torch.Tens
     def flush(last: bool) -> None:
         for b in buffers.values():
             torch.accelerator.synchronize(b.device)  # copies must land before the read
-        update_weights(weights, started, handle if first[0] else {}, last)
+        if first[0]:
+            update_weights(weights, started, handle, cap, last)
+        else:
+            update_weights(weights, started, {}, last=last)
         first[0] = False
         started.clear()
 
     for n in names:
         used = (used + 15) // 16 * 16
         started.append(n)
-        nbytes, start = next(iter(weights.values()))[n].nbytes, 0
+        flats = {
+            u: w[n].contiguous().view(-1).view(torch.uint8) for u, w in weights.items()
+        }
+        nbytes, start = next(iter(flats.values())).numel(), 0
         while True:
             end = min(nbytes, start + cap - used)
-            for u, w in weights.items():
-                flat = w[n].contiguous().view(-1).view(torch.uint8)
+            for u, flat in flats.items():
                 buffers[u][used : used + end - start].copy_(flat[start:end])
             used += end - start
             start = end

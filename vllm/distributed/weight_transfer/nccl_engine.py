@@ -40,7 +40,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     chunk_capacity,
     chunks,
     dtype_name,
-    fit_buffer,
+    grow_buffer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -656,7 +656,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             specs = ((m.shape, m.dtype) for m in meta)
             for chunk in chunks(specs, self.packed_buffer_size_bytes):
                 if chunk.sent:
-                    buf = fit_buffer(buf, chunk, capacity, device)
+                    buf = grow_buffer(buf, chunk.nbytes, capacity, device)
                     self.model_update_group.broadcast(buf[: chunk.nbytes], src=src)
             torch.accelerator.current_stream().synchronize()
         else:
