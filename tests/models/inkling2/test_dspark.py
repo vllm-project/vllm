@@ -3,12 +3,10 @@
 """Inkling2 DSpark draft components against torch ports of the reference
 implementation."""
 
-import os
 from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
@@ -19,18 +17,15 @@ if not (
 ):
     pytest.skip("Inkling2 requires Hopper or Blackwell", allow_module_level=True)
 
-from vllm.models.inkling2.dspark import (  # noqa: E402
+from vllm.models.inkling2.nvidia.dspark import (  # noqa: E402
     Inkling2MarkovHead,
 )
-from vllm.models.inkling2.ops.attention import block_decode_attention  # noqa: E402
-from vllm.models.inkling2.ops.dspark import (  # noqa: E402
-    Inkling2DSparkArgmax,
+from vllm.models.inkling2.nvidia.ops.attention import block_decode_attention  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.dspark import (  # noqa: E402
     add_softcap,
-    dspark_argmax,
     markov_gate,
     mix_rmsnorm,
 )
-from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax  # noqa: E402
 
 DEVICE = "cuda"
 
@@ -74,6 +69,13 @@ def test_markov_head_fold_and_softcapped_logits(dist_init, default_vllm_config):
     assert torch.equal(
         head.fold_bias, (lm_head.double() @ head.hidden_out.bias.double()).bfloat16()
     )
+    # A refold after a weight update refills the same tensors (CUDA graphs).
+    pointers = head.fold_weight.data_ptr(), head.fold_bias.data_ptr()
+    lm_head.copy_(normal(vocab, width, scale=0.03))
+    head.fold(lm_head)
+    assert (head.fold_weight.data_ptr(), head.fold_bias.data_ptr()) == pointers
+    projection = lm_head.double() @ head.hidden_out.weight.double()
+    assert torch.equal(head.fold_weight, projection.bfloat16())
 
     base, bias = normal(3, vocab, scale=20.0), normal(3, vocab)
     ref = ((base + bias).float() / cap).tanh().mul(cap).bfloat16()
@@ -87,128 +89,6 @@ def test_markov_head_fold_and_softcapped_logits(dist_init, default_vllm_config):
     new_state, latent = markov_gate(raw, state)
     assert torch.equal(new_state, gate * state + (1.0 - gate) * torch.tanh(cand_raw))
     assert torch.equal(latent, torch.tanh(out_raw))
-
-
-def _sharded_argmax_reference(base, bias, cap, world, valid):
-    """`greedy_argmax` of the gathered softcapped logits, NaN and each
-    shard's columns from `valid` on as -inf."""
-    logits = add_softcap(base, bias, cap).float()
-    cols = base.shape[1] // world
-    mask = (torch.arange(base.shape[1], device=DEVICE) % cols) >= torch.tensor(
-        valid, device=DEVICE
-    ).repeat_interleave(cols)
-    logits[mask | logits.isnan()] = float("-inf")
-    return greedy_argmax(logits)
-
-
-def _sharded_argmax_worker(rank: int, world: int, port: int, queue) -> None:
-    import vllm._C_stable_libtorch  # noqa: F401
-
-    os.environ.update(MASTER_ADDR="localhost", MASTER_PORT=str(port))
-    torch.accelerator.set_device_index(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world)
-    group = dist.new_group(backend="gloo")
-    failures = []
-
-    def check(name, workspace, base, bias, cap, vocab):
-        cols = workspace.num_cols
-        valid = [min(cols, vocab - r * cols) for r in range(world)]
-        shard = slice(rank * cols, (rank + 1) * cols)
-        out = dspark_argmax(
-            workspace, base[:, shard], bias[:, shard], cap, valid[rank], shard.start
-        )
-        expected = _sharded_argmax_reference(base, bias, cap, world, valid)
-        if not torch.equal(out, expected):
-            bad = (out != expected).nonzero().flatten()[:4].tolist()
-            failures.append(f"{name}: rows {bad} {out[bad]} != {expected[bad]}")
-        return out, expected
-
-    # Real-size shards; the last one is partly padding.
-    cols, vocab, cap = 50256, 200058, 30.0
-    big = Inkling2DSparkArgmax(group, 64, cols)
-    g = torch.Generator().manual_seed(853)  # shared by all ranks
-
-    def rand(rows):
-        base = torch.randn(rows, world * cols, generator=g).bfloat16().to(DEVICE)
-        bias = torch.randn(rows, world * cols, generator=g).bfloat16().to(DEVICE)
-        return base, bias
-
-    base, bias = rand(9)
-    planted = [5, cols, cols + 3, cols + 900, 2 * cols + 1, 3 * cols - 1]
-    base[:3, planted], bias[:3, planted] = 90.0, 0.0
-    base[0, [5, cols + 3, cols + 900, 3 * cols - 1]] = 0.0  # Across shards.
-    base[1, [5, cols, 2 * cols + 1, 3 * cols - 1]] = 0.0  # Within a shard.
-    base[3, vocab:] = 90.0  # Padding.
-    base[4], bias[4] = 1.0, 0.0  # All tied.
-    base[5], bias[5] = -0.0, -0.0  # A -0.0 maximum (the Lamport sentinel).
-    base[6], bias[6] = -1.0, 0.0
-    base[6, 2 * cols + 7], bias[6, 2 * cols + 7] = -0.0, -0.0
-    base[7] = float("nan")  # All NaN: index 0.
-    base[8, : 3 * cols] = float("nan")
-    out, expected = check("planted", big, base, bias, cap, vocab)
-    if expected[:3].tolist() != [cols, cols + 3, 5]:
-        failures.append(f"planted reference {expected[:3].tolist()}")
-    # Changing row counts flip the rows' buffers unevenly; strided rows.
-    for i, rows in enumerate([1, 7, 64, 2, 33, 64, 5]):
-        base, bias = rand(rows)
-        base = base.view(rows, 1, -1).expand(rows, 3, -1).contiguous()[:, 1]
-        check(f"call {i}", big, base, bias, 5.0 + i, vocab)
-    # Replayed in a CUDA graph.
-    static = rand(5)
-    shard = slice(rank * cols, (rank + 1) * cols)
-    valid = min(cols, vocab - rank * cols)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        out = dspark_argmax(
-            big, static[0][:, shard], static[1][:, shard], cap, valid, shard.start
-        )
-    for i in range(4):
-        base, bias = rand(5)
-        base[0, [i, 2 * cols + i]] = 90.0
-        static[0].copy_(base)
-        static[1].copy_(bias)
-        graph.replay()
-        valid_all = [min(cols, vocab - r * cols) for r in range(world)]
-        expected = _sharded_argmax_reference(base, bias, cap, world, valid_all)
-        if not torch.equal(out, expected):
-            failures.append(f"graph replay {i}")
-    # Every bf16 input next to its neighbors, on two ranks in either order:
-    # the softcap's rounding of every input matches add_softcap's.
-    small = Inkling2DSparkArgmax(group, 1024, 8)
-    x = torch.arange(1 << 16, dtype=torch.int32).short().view(torch.bfloat16)
-    for step in (1, 2):
-        lo, hi = x.to(DEVICE), x.roll(-step).to(DEVICE)
-        for first, second in ((lo, hi), (hi, lo)):
-            base = torch.full((1 << 16, world * 8), float("nan"), device=DEVICE)
-            base = base.bfloat16()
-            base[:, 3], base[:, 13] = first, second
-            for start in range(0, 1 << 16, 1024):
-                rows = slice(start, start + 1024)
-                check(
-                    f"neighbors {step} at {start}",
-                    small,
-                    base[rows],
-                    torch.zeros_like(base[rows]),
-                    cap,
-                    world * 8,
-                )
-    torch.accelerator.synchronize()
-    queue.put((rank, failures[:20]))
-    dist.destroy_process_group()
-
-
-def test_sharded_argmax_matches_full_vocab():
-    """`dspark_argmax` at TP4 equals the first argmax of the gathered
-    softcapped logits: ties within and across shards, padding columns holding
-    the largest value, NaN, -0.0 maxima, repeated calls with changing row
-    counts, CUDA graph replay, and every bf16 input's softcap."""
-    world = 4
-    if torch.accelerator.device_count() < world:
-        pytest.skip(f"needs {world} GPUs")
-    queue = mp.get_context("spawn").Queue()
-    mp.spawn(_sharded_argmax_worker, args=(world, 29650, queue), nprocs=world)
-    results = dict(queue.get() for _ in range(world))
-    assert all(not f for f in results.values()), results
 
 
 @pytest.mark.parametrize("is_local", [True, False])
@@ -271,19 +151,19 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
     from vllm.distributed.device_communicators.cuda_communicator import (
         CudaCommunicator,
     )
-    from vllm.models.inkling2.dspark import _RMSNorm, all_reduce_add_rmsnorm
-    from vllm.models.inkling2.ops import use_sm100_kernels
+    from vllm.models.inkling2.nvidia.dspark import _RMSNorm, all_reduce_add_rmsnorm
 
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(world, 1, rank, str(port), rank)
     comm = get_tp_group().device_communicator
     assert isinstance(comm, CudaCommunicator) and comm.fi_ar_comm is not None
-    sm100 = use_sm100_kernels()
     dim = 4608
     norm = _RMSNorm(dim, 1e-6).to(DEVICE, torch.bfloat16)
     failures, stats = [], {}
-    # One shot, two shots, and above the workspace (unfused).
-    for rows in (8, 64, 256, 8192):
+    # One shot, two shots, and just above the workspace (unfused). The
+    # workspace size depends on the GPU and the world size.
+    max_rows = comm.fi_ar_comm.max_workspace_size // (dim * 2)
+    for rows in (8, 64, 256, max_rows + 1):
         g = torch.Generator().manual_seed(rows)  # shared by all ranks
         residual = torch.randn(rows, dim, generator=g).bfloat16().to(DEVICE)
         norm.weight.copy_(0.5 + torch.rand(dim, generator=g))
@@ -301,12 +181,9 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
             ((o.double() - exact).abs() / ulp).mean().item() for o in (out, ref)
         ]
         gathered = tensor_model_parallel_all_gather(out[None], 0)
-        fused = comm.fi_ar_comm.should_use_fi_ar(x)
         checks = {
-            # Hopper's tuned FlashInfer size limits are below Blackwell's.
-            "fused iff it fits": (
-                fused == (rows < 8192) if sm100 else not (fused and rows >= 8192)
-            ),
+            "fused iff it fits": comm.fi_ar_comm.should_use_fi_ar(x)
+            == (rows <= max_rows),
             "same on all ranks": all(torch.equal(o, out) for o in gathered),
             "residual": torch.equal(fused_res, ref_res),
             # The norm reads the bf16-rounded residual.
@@ -320,8 +197,6 @@ def _all_reduce_norm_worker(rank: int, world: int, port: int, queue) -> None:
 def test_all_reduce_add_rmsnorm_matches_unfused(world):
     """The fused all-reduce + residual add + RMSNorm keeps the unfused bf16
     residual bits and gives the same norm output on every rank."""
-    import torch.multiprocessing as mp
-
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
     queue = mp.get_context("spawn").Queue()

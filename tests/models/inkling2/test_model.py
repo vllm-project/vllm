@@ -99,6 +99,30 @@ def test_tiny_model_generates(tmp_path, draft_sample_method):
         assert all(0 <= t < 1000 for t in token_ids)
 
 
+def test_tiny_model_lora_with_quantized_experts(tmp_path):
+    """With LoRA enabled, the NVFP4 / MXFP8 experts are no LoRA target: the
+    engine starts (its warmup adapter covers every LoRA module) and decodes
+    with the attention-only adapters these checkpoints support."""
+    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
+    llm = LLM(
+        model=str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        tokenizer_mode="hf",
+        gpu_memory_utilization=0.035,
+        max_model_len=2048,
+        max_num_seqs=4,
+        enable_lora=True,
+        max_lora_rank=8,
+        limit_mm_per_prompt={"image": 0},
+    )
+    outputs = llm.generate(
+        [{"prompt_token_ids": [5, 5, 5]}],
+        SamplingParams(max_tokens=8, temperature=0, ignore_eos=True, detokenize=False),
+    )
+    assert len(outputs[0].outputs[0].token_ids) == 8
+
+
 def _chunked_mixed_run(model: str, enforce_eager: bool) -> list[list[float]]:
     llm = LLM(
         model=model,
@@ -148,17 +172,35 @@ def test_piecewise_graphs_match_eager(tmp_path):
         torch.testing.assert_close(torch.tensor(g), torch.tensor(e), rtol=0, atol=1e-2)
 
 
+# `quantization_config` of the released checkpoints' config.json.
+RELEASED_QUANTIZATION_CONFIGS = {
+    "NVFP4": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    "MXFP8": {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "scale_fmt": "ue8m0",
+        "weight_block_size": [1, 32],
+        "modules_to_not_convert": [
+            "model.llm.unembed",
+            "model.visual",
+            "model.llm.layers.*.attn.*",
+        ],
+    },
+}
+
+
 @pytest.mark.parametrize("quant_algo", ["NVFP4", "MXFP8"])
 def test_released_checkpoint_quant_config(tmp_path, quant_algo):
-    """Released checkpoints declare a ModelOpt `quantization_config` in
-    config.json; the per-tensor precisions in hf_quant_config.json win."""
+    """Released checkpoints declare a ModelOpt (NVFP4) or FP8 (MXFP8)
+    `quantization_config` in config.json; the per-tensor precisions in
+    hf_quant_config.json win."""
     from vllm.config import LoadConfig, ModelConfig
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
     from vllm.models.inkling2.quant_config import Inkling2QuantConfig
 
     config = {
         **TINY_CONFIG,
-        "quantization_config": {"quant_method": "modelopt", "quant_algo": quant_algo},
+        "quantization_config": RELEASED_QUANTIZATION_CONFIGS[quant_algo],
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
     experts = "model.llm.layers.{}.mlp.experts.w13_weight"

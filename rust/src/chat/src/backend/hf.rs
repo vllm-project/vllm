@@ -207,6 +207,7 @@ pub(super) async fn load_model_backends(
         tokenizer: options.tokenizer.clone(),
         hf_config: options.hf_config.clone(),
         skip_tokenizer_init: options.skip_tokenizer_init,
+        hf_token: options.hf_token.clone(),
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
@@ -214,6 +215,7 @@ pub(super) async fn load_model_backends(
         files.clone(),
         model_id.to_string(),
         options.generation_config,
+        &options.override_generation_config,
     )?;
     let tokenizer = text_backend.tokenizer();
     // Rendering and parsing a chat need a tokenizer.
@@ -323,6 +325,7 @@ mod tests {
                 hf_config: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
+                override_generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
@@ -331,6 +334,7 @@ mod tests {
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
                 skip_tokenizer_init: false,
+                hf_token: None,
             },
             test_tokenizer(),
         )
@@ -500,7 +504,7 @@ mod tests {
             r#"{"model_type":"deepseek_v4"}"#,
             "{}",
         );
-        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+        let processor = crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
             .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
 
         let mut request = request_with_user_text("hello");
@@ -541,7 +545,7 @@ mod tests {
             let backend = backend_for_selection(Auto, config_json, TOKENIZER_CONFIG);
             let mut request = request_with_user_text("hello");
             request.chat_options.chat_template = Some(TEMPLATE.to_string());
-            crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
                 .prepare_for_tokenization(request)
                 .await
                 .unwrap_err()

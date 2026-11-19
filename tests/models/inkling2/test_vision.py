@@ -9,8 +9,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.models.inkling2.ops.vision import gather_patches
-from vllm.models.inkling2.vision import (
+from vllm.models.inkling2.nvidia.ops.vision import gather_patches
+from vllm.models.inkling2.nvidia.vision import (
     _CLIP_MEAN,
     _CLIP_STD,
     _PROCESSOR_CLIP_STD,
@@ -150,7 +150,7 @@ def test_gather_patches_matches_cpu_normalization():
 def test_cuda_graph_replay_matches_eager():
     """A graph captured on padded budget buffers (as EncoderCudaGraphManager
     pads them) replays smaller batches bitwise like the eager encoder."""
-    from vllm.models.inkling2.model import Inkling2ForConditionalGeneration as M
+    from vllm.models.inkling2.nvidia.model import Inkling2ForConditionalGeneration as M
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
     torch.manual_seed(0)

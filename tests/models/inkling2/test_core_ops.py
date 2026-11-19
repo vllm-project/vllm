@@ -9,10 +9,10 @@ import pytest
 import torch
 
 from tests.models.inkling2.test_attention import shear_rel_logits
-from vllm.models.inkling2.ops.attn_res import attn_res
-from vllm.models.inkling2.ops.conv_mix import conv_mix
-from vllm.models.inkling2.ops.norm import rms_norm
-from vllm.models.inkling2.ops.sconv import (
+from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
+from vllm.models.inkling2.nvidia.ops.conv_mix import conv_mix
+from vllm.models.inkling2.nvidia.ops.norm import rms_norm
+from vllm.models.inkling2.nvidia.ops.sconv import (
     attention_prologue,
     shift_rel_proj,
     short_conv,

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 END_OF_TEXT = "<|endoftext|>"
@@ -142,17 +143,52 @@ def render_inkling_messages(
             reasoning_effort = None
 
         if role == "tool":
-            tool_name = message.get("name") or tool_call_id_to_name.get(
-                str(message.get("tool_call_id") or ""), ""
+            tool_name = str(
+                message.get("name")
+                or tool_call_id_to_name.get(str(message.get("tool_call_id") or ""), "")
             )
-            _append_message(
-                input_ids,
-                tokenizer,
-                "tool",
-                "text",
-                _flatten_text_content(message.get("content")),
-                author_name=str(tool_name),
-            )
+            # Tool responses may carry media parts (e.g. screenshots). Emit one
+            # marker per media item for the MM processor, but coalesce adjacent
+            # text parts so text-only results keep the same framing as before.
+            tool_parts = list(_iter_render_parts(message.get("content")))
+            if not tool_parts:
+                # Keep an empty block so the tool call it answers is not left
+                # dangling.
+                tool_parts = [("text", "")]
+            text_parts: list[str] = []
+            for kind, text in tool_parts:
+                if kind == "thinking":
+                    raise ValueError("Inkling thinking parts require role='assistant'")
+                if kind == "text":
+                    text_parts.append(text)
+                    continue
+                if text_parts:
+                    _append_message(
+                        input_ids,
+                        tokenizer,
+                        "tool",
+                        "text",
+                        "".join(text_parts),
+                        author_name=tool_name,
+                    )
+                    text_parts.clear()
+                _append_message(
+                    input_ids,
+                    tokenizer,
+                    "tool",
+                    kind,
+                    text,
+                    author_name=tool_name,
+                )
+            if text_parts:
+                _append_message(
+                    input_ids,
+                    tokenizer,
+                    "tool",
+                    "text",
+                    "".join(text_parts),
+                    author_name=tool_name,
+                )
             continue
 
         if role == "assistant":
@@ -400,10 +436,9 @@ def _tool_call_json(name: str, args: Mapping[str, Any]) -> str:
 # ── Inkling2 ──────────────────────────────────────────────────────────────
 #
 # Inkling2 keeps Inkling's block format but its reference renderer differs:
-# no generation prefix (the model emits its own ``<|message_model|>``), no
-# tool name in tool-call headers, tool results named only by an explicit
-# ``name``, empty string contents kept as empty blocks, effort quantized to
-# integer milli-effort, and its own canonical JSON spelling for floats.
+# no generation prefix (the model emits its own ``<|message_model|>``), empty
+# string contents kept as empty blocks, effort quantized to integer
+# milli-effort, and its own canonical JSON spelling for floats.
 
 
 def render_inkling2_messages(
@@ -411,6 +446,8 @@ def render_inkling2_messages(
     tokenizer: InklingTextTokenizer,
     *,
     tools: Sequence[Mapping[str, Any]] | None = None,
+    tool_choice: Any = None,
+    parallel_tool_calls: bool = True,
     reasoning_effort: float = DEFAULT_REASONING_EFFORT,
     continue_final_message: bool = False,
 ) -> list[int]:
@@ -427,18 +464,38 @@ def render_inkling2_messages(
             messages.pop()
 
     input_ids: list[int] = []
-    all_tools = _collect_tools(messages, tools)
-    if all_tools:
+    choice = _inkling2_tool_choice(tool_choice)
+    declared_tools = _collect_tools(messages, None if choice == "none" else tools)
+    if isinstance(choice, _NamedToolChoice):
+        declared_tools = [
+            tool
+            for tool in declared_tools
+            if _as_mapping(_as_mapping(tool).get("function", {})).get("name")
+            == choice.name
+        ]
+    if declared_tools:
         _append_message(
             input_ids,
             tokenizer,
             "system",
             "xml",
-            _inkling2_tool_declare_json(all_tools),
+            _inkling2_tool_declare_json(declared_tools),
             author_name="tool_declare",
         )
 
     effort_text: str | None = _inkling2_effort_text(reasoning_effort)
+    instruction = (
+        _inkling2_tool_choice_instruction(choice, parallel_tool_calls)
+        if declared_tools
+        else None
+    )
+    if instruction is not None:
+        if messages and messages[0].get("role") in {"system", "developer"}:
+            messages[0] = _with_appended_text(messages[0], instruction)
+        else:
+            effort_text = f"{effort_text}\n\n{instruction}"
+
+    tool_call_id_to_name: dict[str, str] = {}
     for message in messages:
         role = _expect_role(message)
         if effort_text is not None and role not in {"system", "developer"}:
@@ -446,12 +503,22 @@ def render_inkling2_messages(
             effort_text = None
 
         author_name = None
-        if role == "tool" and message.get("name") is not None:
-            author_name = str(message["name"])
-        blocks = _inkling2_blocks(message, role)
-        for kind, text in blocks:
+        if role == "tool":
+            name = message.get("name")
+            author_name = (
+                str(name)
+                if name
+                else tool_call_id_to_name.get(str(message.get("tool_call_id") or ""))
+            )
+        blocks = _inkling2_blocks(message, role, tool_call_id_to_name)
+        for kind, text, block_author in blocks:
             _append_message(
-                input_ids, tokenizer, role, kind, text, author_name=author_name
+                input_ids,
+                tokenizer,
+                role,
+                kind,
+                text,
+                author_name=block_author or author_name,
             )
         if role == "assistant" and blocks:
             input_ids.append(tokenizer.encode_special(CONTENT_MODEL_END_SAMPLING))
@@ -488,10 +555,14 @@ def continuation_prefix(message: Mapping[str, Any]) -> str | None:
     return content
 
 
-def _inkling2_blocks(message: Mapping[str, Any], role: str) -> list[tuple[str, str]]:
+def _inkling2_blocks(
+    message: Mapping[str, Any],
+    role: str,
+    tool_call_id_to_name: dict[str, str],
+) -> list[tuple[str, str, str | None]]:
     content = message.get("content")
     if role != "assistant":
-        return list(_iter_inkling2_parts(content))
+        return [(kind, text, None) for kind, text in _iter_inkling2_parts(content)]
 
     reasoning = _assistant_reasoning(message)
     if reasoning is not None and not isinstance(reasoning, str):
@@ -500,18 +571,76 @@ def _inkling2_blocks(message: Mapping[str, Any], role: str) -> list[tuple[str, s
     if content == "" and (tool_calls or reasoning):
         content = None
 
-    blocks = [("thinking", reasoning)] if reasoning else []
-    blocks.extend(_iter_inkling2_parts(content))
+    blocks: list[tuple[str, str, str | None]] = (
+        [("thinking", reasoning, None)] if reasoning else []
+    )
+    blocks.extend((kind, text, None) for kind, text in _iter_inkling2_parts(content))
     for tool_call in tool_calls:
         name, args = _tool_call_name_and_args(tool_call)
+        tool_call_id = _as_mapping(tool_call).get("id")
+        if tool_call_id:
+            tool_call_id_to_name[str(tool_call_id)] = name
         args = _tml_json_loads(json.dumps(args, allow_nan=False))
+        args_json = _tml_json_dumps(
+            {key: args[key] for key in sorted(args)}, sort_keys=False
+        )
         blocks.append(
             (
                 "invoke_tool_json",
-                f'{{"name":{_tml_json_dumps(name)},"args":{_tml_json_dumps(args)}}}',
+                f'{{"name":{_tml_json_dumps(name)},"args":{args_json}}}',
+                name,
             )
         )
     return blocks
+
+
+@dataclass(frozen=True)
+class _NamedToolChoice:
+    name: str
+
+
+def _inkling2_tool_choice(tool_choice: Any) -> str | _NamedToolChoice:
+    if tool_choice is None:
+        return "auto"
+    if isinstance(tool_choice, str):
+        return tool_choice
+    choice = _as_mapping(tool_choice)
+    if choice.get("type") != "function":
+        raise ValueError(f"unsupported tool_choice: {tool_choice!r}")
+    function = choice.get("function")
+    return _NamedToolChoice(
+        _as_mapping(function)["name"] if function else choice["name"]
+    )
+
+
+def _inkling2_tool_choice_instruction(
+    choice: str | _NamedToolChoice, parallel_tool_calls: bool
+) -> str | None:
+    if isinstance(choice, _NamedToolChoice):
+        once = "" if parallel_tool_calls else " exactly once"
+        return (
+            f"Call the function named {json.dumps(choice.name)}{once} "
+            "in your next response."
+        )
+    if choice == "required":
+        quantity = "at least one" if parallel_tool_calls else "exactly one"
+        return f"Call {quantity} of the provided functions in your next response."
+    if choice == "auto" and not parallel_tool_calls:
+        return (
+            "If you call a function, call at most one function in your next response."
+        )
+    return None
+
+
+def _with_appended_text(message: Mapping[str, Any], text: str) -> dict[str, Any]:
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        content = f"{content}\n\n{text}"
+    elif not content:
+        content = text
+    else:
+        content = [*content, {"type": "text", "text": text}]
+    return {**message, "content": content}
 
 
 def _iter_inkling2_parts(content: Any) -> Iterator[tuple[str, str]]:
@@ -602,8 +731,10 @@ def _tml_json_loads(text: str) -> Any:
     )
 
 
-def _tml_json_dumps(value: Any, *, legacy_floats: bool = True) -> str:
-    """Compact, key-sorted JSON with the Inkling2 reference float spelling."""
+def _tml_json_dumps(
+    value: Any, *, legacy_floats: bool = True, sort_keys: bool = True
+) -> str:
+    """Compact JSON with the Inkling2 reference float spelling."""
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("JSON object keys must be strings")
@@ -612,13 +743,18 @@ def _tml_json_dumps(value: Any, *, legacy_floats: bool = True) -> str:
             + ",".join(
                 _tml_json_dumps(key)
                 + ":"
-                + _tml_json_dumps(value[key], legacy_floats=legacy_floats)
-                for key in sorted(value)
+                + _tml_json_dumps(
+                    value[key], legacy_floats=legacy_floats, sort_keys=sort_keys
+                )
+                for key in (sorted(value) if sort_keys else value)
             )
             + "}"
         )
     if isinstance(value, (list, tuple)):
-        items = (_tml_json_dumps(item, legacy_floats=legacy_floats) for item in value)
+        items = (
+            _tml_json_dumps(item, legacy_floats=legacy_floats, sort_keys=sort_keys)
+            for item in value
+        )
         return "[" + ",".join(items) + "]"
     if isinstance(value, float):
         if not math.isfinite(value):

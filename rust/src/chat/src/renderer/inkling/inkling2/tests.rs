@@ -32,10 +32,23 @@ fn request(messages: Vec<ChatMessage>) -> ChatRequest {
     }
 }
 
-fn with_tools(mut request: ChatRequest, tools: Vec<ChatTool>) -> ChatRequest {
-    request.tool_context =
-        ResolvedToolContext::new(&request.messages, tools, Some(ChatToolChoice::Auto), true)
-            .unwrap();
+fn with_tools(request: ChatRequest, tools: Vec<ChatTool>) -> ChatRequest {
+    with_tool_choice(request, tools, ChatToolChoice::Auto, true)
+}
+
+fn with_tool_choice(
+    mut request: ChatRequest,
+    tools: Vec<ChatTool>,
+    tool_choice: ChatToolChoice,
+    parallel_tool_calls: bool,
+) -> ChatRequest {
+    request.tool_context = ResolvedToolContext::new(
+        &request.messages,
+        tools,
+        Some(tool_choice),
+        parallel_tool_calls,
+    )
+    .unwrap();
     request
 }
 
@@ -122,13 +135,14 @@ fn renders_tool_round_trip() {
                 text(""),
                 tool_call("get_weather", r#"{"city": "SF"}"#),
             ]),
-            ChatMessage::tool_response(r#"{"temperature":58,"condition":"fog"}"#, "call_1"),
+            ChatMessage::tool_response(
+                r#"{"temperature":58,"condition":"fog"}"#,
+                "call_get_weather",
+            ),
             ChatMessage::assistant_text("Wear a light jacket."),
         ]),
         vec![weather_tool()],
     );
-    // The Rust request model carries no tool-result `name`, so results render
-    // unnamed, as the reference does for requests without one.
     assert_eq!(
         render(&with_effort(request, "medium")),
         "<|message_system|>tool_declare<|content_xml|>\
@@ -138,17 +152,18 @@ fn renders_tool_round_trip() {
          <|message_system|><|content_text|>Thinking effort level: 0.7<|end_message|>\
          <|message_user|><|content_text|>What should I wear in SF today?<|end_message|>\
          <|message_model|><|content_thinking|>Check the current weather.<|end_message|>\
-         <|message_model|><|content_invoke_tool_json|>\
+         <|message_model|>get_weather<|content_invoke_tool_json|>\
          {\"name\":\"get_weather\",\"args\":{\"city\":\"SF\"}}<|end_message|>\
          <|content_model_end_sampling|>\
-         <|message_tool|><|content_text|>{\"temperature\":58,\"condition\":\"fog\"}<|end_message|>\
+         <|message_tool|>get_weather<|content_text|>\
+         {\"temperature\":58,\"condition\":\"fog\"}<|end_message|>\
          <|message_model|><|content_text|>Wear a light jacket.<|end_message|>\
          <|content_model_end_sampling|>"
     );
 }
 
 #[test]
-fn renders_multiple_calls_split_results_and_json_floats() {
+fn renders_multiple_calls_named_results_and_json_floats() {
     let search = ChatTool {
         name: "search".to_string(),
         description: None,
@@ -184,15 +199,100 @@ fn renders_multiple_calls_split_results_and_json_floats() {
          <|message_system|><|content_text|>Be terse.<|end_message|>\
          <|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|>\
          <|message_user|><|content_text|>news <|end_message|>?<|end_message|>\
-         <|message_model|><|content_invoke_tool_json|>\
+         <|message_model|>get_weather<|content_invoke_tool_json|>\
          {\"name\":\"get_weather\",\"args\":{}}<|end_message|>\
-         <|message_model|><|content_invoke_tool_json|>\
+         <|message_model|>search<|content_invoke_tool_json|>\
          {\"name\":\"search\",\"args\":{\"q\":\"news\",\"x\":1e37,\"y\":0.00001,\"z\":-0.0}}\
          <|end_message|><|content_model_end_sampling|>\
-         <|message_tool|><|content_text|>sunny<|end_message|>\
-         <|message_tool|><|content_text|>r1<|end_message|>\
-         <|message_tool|><|content_text|>r2<|end_message|>"
+         <|message_tool|>get_weather<|content_text|>sunny<|end_message|>\
+         <|message_tool|>search<|content_text|>r1<|end_message|>\
+         <|message_tool|>search<|content_text|>r2<|end_message|>"
     );
+}
+
+#[test]
+fn sorts_only_top_level_argument_names() {
+    let request = request(vec![
+        ChatMessage::user("q"),
+        ChatMessage::assistant_blocks(vec![tool_call(
+            "get_weather",
+            r#"{"zeta":1,"filters":{"status":"open","assignee":"me"},"alpha":[{"y":2,"b":3}]}"#,
+        )]),
+    ]);
+    assert!(render(&request).contains(
+        "{\"name\":\"get_weather\",\"args\":{\"alpha\":[{\"y\":2,\"b\":3}],\
+         \"filters\":{\"status\":\"open\",\"assignee\":\"me\"},\"zeta\":1}}"
+    ));
+}
+
+#[test]
+fn renders_tool_choice_as_an_instruction() {
+    let search = ChatTool {
+        name: "search".to_string(),
+        description: None,
+        parameters: json!({"type": "object"}),
+        strict: None,
+        defer_loading: None,
+    };
+    let weather_spec = "{\"description\":\"Get weather information\",\"name\":\"get_weather\",\
+         \"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\
+         \"required\":[\"city\"],\"type\":\"object\"},\"type\":\"function\"}";
+    let search_spec = "{\"description\":\"\",\"name\":\"search\",\"parameters\":{\"type\":\"object\"},\
+         \"type\":\"function\"}";
+    let declare_both = format!(
+        "<|message_system|>tool_declare<|content_xml|>\
+         [{weather_spec},{search_spec}]<|end_message|>"
+    );
+    let declare_search =
+        format!("<|message_system|>tool_declare<|content_xml|>[{search_spec}]<|end_message|>");
+    let effort = "<|message_system|><|content_text|>Thinking effort level: 0.9";
+    let user = "<|message_user|><|content_text|>q<|end_message|>";
+    let tools = || vec![weather_tool(), search.clone()];
+    let with_system = || {
+        request(vec![
+            ChatMessage::system("Be terse."),
+            ChatMessage::user("q"),
+        ])
+    };
+    let without_system = || request(vec![ChatMessage::user("q")]);
+
+    for (request, expected) in [
+        (
+            with_tool_choice(with_system(), tools(), ChatToolChoice::Required, true),
+            format!(
+                "{declare_both}<|message_system|><|content_text|>Be terse.\n\nCall at least one of \
+                 the provided functions in your next response.<|end_message|>\
+                 {effort}<|end_message|>{user}"
+            ),
+        ),
+        (
+            with_tool_choice(
+                without_system(),
+                tools(),
+                ChatToolChoice::Function {
+                    name: "search".to_string(),
+                },
+                false,
+            ),
+            format!(
+                "{declare_search}{effort}\n\nCall the function named \"search\" exactly once in \
+                 your next response.<|end_message|>{user}"
+            ),
+        ),
+        (
+            with_tool_choice(without_system(), tools(), ChatToolChoice::Auto, false),
+            format!(
+                "{declare_both}{effort}\n\nIf you call a function, call at most one function in \
+                 your next response.<|end_message|>{user}"
+            ),
+        ),
+        (
+            with_tool_choice(without_system(), tools(), ChatToolChoice::None, true),
+            format!("{effort}<|end_message|>{user}"),
+        ),
+    ] {
+        assert_eq!(render(&request), expected);
+    }
 }
 
 #[test]

@@ -179,7 +179,7 @@ impl VisionPreProcessor for Inkling2ImageProcessor {
 
     fn preprocess(
         &self,
-        images: &[DynamicImage],
+        images: &[&DynamicImage],
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);

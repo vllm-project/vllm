@@ -35,6 +35,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4FlashConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4FlashVLConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4VLConfig": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4VLVisionConfig": "vllm.transformers_utils.configs.hy_v4",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -54,6 +58,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "Lfm3Config": "vllm.transformers_utils.configs.lfm3",
     "Lfm3AudioConfig": "vllm.transformers_utils.configs.lfm3_audio",
+    "Lfm3OmniConfig": "vllm.transformers_utils.configs.lfm3_omni",
     "Lfm3VlConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "Lfm3VlVisionConfig": "vllm.transformers_utils.configs.lfm3_vl",
     "MuseSparkTextConfig": "vllm.transformers_utils.configs.muse_spark",
@@ -63,6 +68,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MuseSparkConfig": "vllm.transformers_utils.configs.muse_spark",
     "KimiK3Config": "vllm.transformers_utils.configs.kimi_k3",
     "KimiK3VisionConfig": "vllm.transformers_utils.configs.kimi_k3",
+    "NemotronLabsDiffusionConfig": (
+        "vllm.transformers_utils.configs.nemotron_labs_diffusion"
+    ),
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
@@ -121,6 +129,7 @@ __all__ = [
     "MingV3ASRConfig",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3VLConfig",
+    "NemotronLabsDiffusionConfig",
     "Moondream3Config",
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
@@ -131,6 +140,7 @@ __all__ = [
     "Kimi_K25Config",
     "Lfm3Config",
     "Lfm3AudioConfig",
+    "Lfm3OmniConfig",
     "Lfm3VlConfig",
     "Lfm3VlVisionConfig",
     "MuseSparkTextConfig",

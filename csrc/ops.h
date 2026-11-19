@@ -249,6 +249,14 @@ void rotary_embedding(torch::stable::Tensor& positions,
                       int64_t head_size, torch::stable::Tensor& cos_sin_cache,
                       bool is_neox, int64_t rope_dim_offset, bool inverse);
 
+void rotary_embedding_out(torch::stable::Tensor& positions,
+                          torch::stable::Tensor& query,
+                          std::optional<torch::stable::Tensor> key,
+                          torch::stable::Tensor& query_out,
+                          std::optional<torch::stable::Tensor> key_out,
+                          int64_t head_size,
+                          torch::stable::Tensor& cos_sin_cache, bool is_neox);
+
 void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
                         int64_t head_dim, double eps,
@@ -376,7 +384,7 @@ void fused_qknorm_rope_cache(
     torch::stable::Tensor& k_cache, torch::stable::Tensor& v_cache,
     int64_t head_dim, int64_t num_q_heads, int64_t num_kv_heads,
     int64_t rotary_pairs, double epsilon, double norm_weight_bias,
-    const std::string& kv_cache_dtype,
+    const std::string& kv_cache_dtype, double q_scale,
     std::optional<torch::stable::Tensor> k_scale,
     std::optional<torch::stable::Tensor> v_scale);
 }  // namespace vllm
@@ -567,13 +575,6 @@ void inkling2_seq_parallel_conv_mix(
 void inkling2_reduce_scatter(int64_t bases, torch::stable::Tensor& epochs,
                              int64_t rank, int64_t world, int64_t src_offset,
                              int64_t first, torch::stable::Tensor& out);
-
-void inkling2_dspark_argmax(torch::stable::Tensor const& base,
-                            torch::stable::Tensor const& bias, double softcap,
-                            int64_t valid, int64_t offset,
-                            int64_t multicast_ptr, int64_t local_ptr,
-                            torch::stable::Tensor& row_state, int64_t rank,
-                            int64_t world, torch::stable::Tensor& out);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

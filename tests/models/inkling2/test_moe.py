@@ -15,24 +15,24 @@ if not (
 ):
     pytest.skip("Inkling2 MoE requires Hopper or Blackwell", allow_module_level=True)
 
-import vllm.models.inkling2.moe as moe_module  # noqa: E402
-import vllm.models.inkling2.ops.moe_sm90 as moe_sm90  # noqa: E402
-import vllm.models.inkling2.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
-from vllm.models.inkling2.moe import Inkling2MoE  # noqa: E402
-from vllm.models.inkling2.ops import use_sm100_kernels  # noqa: E402
-from vllm.models.inkling2.ops.activation import (  # noqa: E402
+import vllm.models.inkling2.nvidia.moe as moe_module  # noqa: E402
+import vllm.models.inkling2.nvidia.ops.moe_sm90 as moe_sm90  # noqa: E402
+import vllm.models.inkling2.nvidia.ops.trtllm_bmm as trtllm_bmm  # noqa: E402
+from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
+from vllm.models.inkling2.nvidia.ops import use_sm100_kernels  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.activation import (  # noqa: E402
     _div_rn,
     _sigmoid_approx,
     swiglu_quantize,
 )
-from vllm.models.inkling2.ops.block_scales import (  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.block_scales import (  # noqa: E402
     shuffle_rows,
     swizzle_block_scales,
 )
-from vllm.models.inkling2.ops.linear import linear_k_groups  # noqa: E402
-from vllm.models.inkling2.ops.mxfp8 import mxfp8_quantize  # noqa: E402
-from vllm.models.inkling2.ops.nvfp4 import nvfp4_quantize  # noqa: E402
-from vllm.models.inkling2.ops.trtllm_bmm import ExpertPlan  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.linear import linear_k_groups  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.mxfp8 import mxfp8_quantize  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.nvfp4 import nvfp4_quantize  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.trtllm_bmm import ExpertPlan  # noqa: E402
 from vllm.triton_utils import tl, triton  # noqa: E402
 
 E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
@@ -391,7 +391,7 @@ def _route(
     plan: ExpertPlan,
     is_padding: torch.Tensor | None = None,
 ):
-    from vllm.models.inkling2.ops.moe import route
+    from vllm.models.inkling2.nvidia.ops.moe import route
 
     gate, experts = moe.gate, moe.experts
     return route(

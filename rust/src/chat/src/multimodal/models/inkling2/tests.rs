@@ -42,7 +42,7 @@ fn patches_match_python_processor() {
     let gray = GrayImage::from_pixel(1, 1, Luma([77]));
     let images = [rgba.into(), rgb.into(), gray.into()];
 
-    let output = Inkling2ImageProcessor.preprocess(&images).unwrap();
+    let output = Inkling2ImageProcessor.preprocess(&images.iter().collect::<Vec<_>>()).unwrap();
 
     assert_eq!(output.encoder_input.shape(), [10, 40, 40, 3]);
     assert_eq!(output.feature_token_counts, [6, 3, 1]);
