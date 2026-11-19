@@ -4192,6 +4192,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         mooncake_stats,
         KvConnectorStats::Mooncake(stats)
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
+                && stats.0.contains_key(&MooncakeOperation::LookupLease)
     ));
 
     let mooncake_transfer_stats: KvConnectorStats =

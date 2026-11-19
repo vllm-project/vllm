@@ -293,6 +293,7 @@ pub mod kv_connector {
         SavePut,
         LoadGet,
         LookupExists,
+        LookupLease,
     }
 
     impl MooncakeOperation {
@@ -302,6 +303,7 @@ pub mod kv_connector {
                 Self::SavePut => "save_put",
                 Self::LoadGet => "load_get",
                 Self::LookupExists => "lookup_exists",
+                Self::LookupLease => "lookup_lease",
             }
         }
     }
@@ -336,9 +338,33 @@ pub mod kv_connector {
     }
 
     /// Mooncake store telemetry grouped by operation.
-    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    ///
+    /// Operations Rust does not know yet are skipped, like the typed payloads'
+    /// unknown fields: failing on one would fail this payload and, through the
+    /// untagged [`KvConnectorStats`], every typed sibling of a `MultiConnector`.
+    /// Their values must still be operation records, which keeps other
+    /// connectors' payloads from decoding as Mooncake.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize)]
     #[serde(transparent)]
     pub struct MooncakeStats(pub BTreeMap<MooncakeOperation, Vec<MooncakeRecord>>);
+
+    impl<'de> Deserialize<'de> for MooncakeStats {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            use serde::de::IntoDeserializer;
+            use serde::de::value::{Error, StrDeserializer};
+
+            let by_name = BTreeMap::<String, Vec<MooncakeRecord>>::deserialize(deserializer)?;
+            Ok(Self(
+                by_name
+                    .into_iter()
+                    .filter_map(|(name, records)| {
+                        let name: StrDeserializer<'_, Error> = name.as_str().into_deserializer();
+                        MooncakeOperation::deserialize(name).ok().map(|op| (op, records))
+                    })
+                    .collect(),
+            ))
+        }
+    }
 
     /// UMBP store connector transfer operation name.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -515,8 +541,8 @@ pub struct SchedulerStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
-        SchedulerStats, UmbpOperation,
+        CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeOperation,
+        PrefixCacheStats, SchedulerStats, UmbpOperation,
     };
 
     #[test]
@@ -545,6 +571,41 @@ mod tests {
         let encoded: serde_json::Value =
             rmp_serde::from_slice(&rmp_serde::to_vec_named(&stats).unwrap()).unwrap();
         assert_eq!(encoded, payload);
+    }
+
+    #[test]
+    fn mooncake_stats_decode_lookup_lease_and_skip_unknown_operations() {
+        let decode = |payload: serde_json::Value| -> KvConnectorStats {
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap()
+        };
+        let record = serde_json::json!({
+            "duration_seconds": 0.5, "num_keys": 4, "num_bytes": 0, "status": "ok",
+            "num_failed_keys": 1
+        });
+        let nixl = serde_json::json!({
+            "transfer_duration": [0.5], "post_duration": [0.1], "bytes_transferred": [4096],
+            "num_descriptors": [2], "num_failed_transfers": [], "num_failed_notifications": [],
+            "num_kv_expired_reqs": [], "num_future_counter": [1]
+        });
+        // A selective-lease lookup, next to an operation Rust does not know.
+        let store = serde_json::json!({"lookup_lease": [record], "save_remove": [record]});
+
+        let KvConnectorStats::Mooncake(stats) = decode(store.clone()) else {
+            panic!("expected Mooncake store stats");
+        };
+        assert_eq!(
+            stats.0.keys().copied().collect::<Vec<_>>(),
+            [MooncakeOperation::LookupLease]
+        );
+        assert_eq!(
+            stats.0[&MooncakeOperation::LookupLease][0].num_failed_keys,
+            1
+        );
+        assert!(matches!(
+            decode(serde_json::json!({"NixlConnector": nixl, "MooncakeStoreConnector": store})),
+            KvConnectorStats::Multi(stats) if stats.nixl.is_some()
+                && stats.mooncake.as_ref().is_some_and(|m| m.0.len() == 1)
+        ));
     }
 
     #[test]
