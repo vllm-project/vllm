@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
 import torch
 from torch.distributed import ProcessGroup
@@ -23,7 +24,7 @@ from vllm.platforms import current_platform
 
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
-from .base_device_communicator import DeviceCommunicatorBase
+from .base_device_communicator import All2AllManagerBase, DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
@@ -861,6 +862,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         else:
             raise ValueError("No PyNCCL communicator found")
 
+    def retire_device_collectives(self) -> DeviceCommunicatorBase:
+        """Transfer FT all2all to a replacement before deferred NCCL cleanup."""
+        if self.all2all_manager is not None and not (
+            self.all2all_manager.support_fault_tolerance
+        ):
+            raise ValueError("Retirement requires fault-tolerant all2all")
+        replacement = FTOnlyCommunicator(self)
+        self.all2all_manager = None
+        return replacement
+
     def destroy(self):
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
@@ -1144,3 +1155,57 @@ class CudaCommunicator(DeviceCommunicatorBase):
             pynccl_comm.batch_isend_irecv(p2p_ops)
         else:
             raise ValueError("No PyNCCL communicator found")
+
+
+class FTOnlyCommunicator(CudaCommunicator):
+    """Retired CUDA communicator retaining only fault-tolerant all2all."""
+
+    _ALLOWED_METHODS = frozenset(
+        {
+            "dispatch_router_logits",
+            "dispatch",
+            "combine",
+            "allocate_combine_input",
+            "combine_into_output",
+            "retire_device_collectives",
+            "destroy",
+        }
+    )
+
+    def __init__(self, original: CudaCommunicator):
+        self.unique_name = original.unique_name
+        self.device = original.device
+        self.cpu_group = original.cpu_group
+        self.device_group = original.device_group
+        self.rank = original.rank
+        self.world_size = original.world_size
+        self.ranks = original.ranks
+        self.global_rank = original.global_rank
+        self.global_world_size = original.global_world_size
+        self.rank_in_group = original.rank_in_group
+        self.is_ep_communicator = original.is_ep_communicator
+        self.use_all2all = original.use_all2all
+        self.all2all_backend = original.all2all_backend
+        self.all2all_manager: All2AllManagerBase | None = original.all2all_manager
+        self.pynccl_comm = None
+
+    def __getattribute__(self, name: str) -> Any:
+        value = super().__getattribute__(name)
+        if (
+            callable(value)
+            and name not in FTOnlyCommunicator._ALLOWED_METHODS
+            and not (name.startswith("__") and name.endswith("__"))
+        ):
+            raise RuntimeError(
+                f"Device collectives for {self.unique_name!r} are retired; "
+                f"{name!r} is unavailable"
+            )
+        return value
+
+    def retire_device_collectives(self) -> "FTOnlyCommunicator":
+        return self
+
+    def destroy(self):
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None

@@ -250,6 +250,15 @@ class DeviceCommunicatorBase:
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
+    def retire_device_collectives(self) -> "DeviceCommunicatorBase":
+        """Detach FT all2all into a replacement before cleaning up this object.
+
+        Call after outstanding device work completes. The caller must install
+        the replacement, then destroy this communicator and abort its NCCL group.
+        Old communicators and raw NCCL handles cannot be reused for inference.
+        """
+        raise NotImplementedError
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_

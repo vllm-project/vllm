@@ -12,6 +12,7 @@ import torch.distributed
 import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
@@ -82,6 +83,26 @@ def test_pynccl():
     distributed_run(worker_fn, 2)
 
 
+def test_ft_only_communicator_rejects_inherited_cuda_operations():
+    group = torch.distributed.ProcessGroup(0, 1)
+    original = CudaCommunicator(
+        group,
+        device=torch.device("cpu"),
+        device_group=group,
+        unique_name="dp:test",
+        global_ranks=[0],
+        global_world_size=1,
+    )
+    communicator = original.retire_device_collectives()
+    try:
+        for name in ("suspend", "resume", "checkpoint_prepare", "checkpoint_restore"):
+            with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+                getattr(communicator, name)
+    finally:
+        communicator.destroy()
+        original.destroy()
+
+
 @worker_fn_wrapper
 def retire_faulted_nccl_worker_fn():
     from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
@@ -93,18 +114,27 @@ def retire_faulted_nccl_worker_fn():
         [world.ranks], world.local_rank, "nccl", group_name="dp"
     )
     try:
-        torch.distributed.all_reduce(
-            torch.ones(1, device=world.device), group=group.device_group
-        )
+        tensor = torch.ones(1, device=world.device)
+        torch.distributed.all_reduce(tensor, group=group.device_group)
         torch.accelerator.synchronize()
         # Isolate native NCCL allocations from the separately owned PyNCCL comm.
         group.device_communicator.pynccl_comm.destroy()
         torch.distributed.barrier(group=group.cpu_group)
         free_before = torch.accelerator.memory.get_memory_info(world.device)[0]
-        WorkerSentinel._retire_device_communicators([group])
+        retired = WorkerSentinel._retire_device_communicators([group])
+        with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+            group.all_reduce(tensor)
+        assert not WorkerSentinel._retire_device_communicators([group])
+        for communicator, device_group in retired:
+            if communicator is not None:
+                communicator.destroy()
+            device_group.abort()
         torch.distributed.barrier(group=group.cpu_group)
         if torch.accelerator.memory.get_memory_info(world.device)[0] <= free_before:
             raise AssertionError("Native NCCL allocations remained after retirement")
+        tensor = torch.ones(1, device="cpu")
+        group.cpu_all_reduce_(tensor)
+        assert tensor.item() == world.world_size
     finally:
         group.destroy()
 
