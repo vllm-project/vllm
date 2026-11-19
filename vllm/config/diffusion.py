@@ -38,6 +38,6 @@ class DiffusionConfig:
     `DiffusionGemmaDiffusionOptions` in `vllm.model_executor.models.config`."""
 
     single_pass_reads: bool = False
-    """Fuse eligible one-step reads into their final prompt step. CPU only.
+    """Fuse one-step DiffusionGemma reads into their final prompt step. CPU only.
     Reads with prompt logprobs keep the two-step path. Fusion can change outputs.
     Incompatible with pipeline parallelism, KV connectors and KV offloading."""

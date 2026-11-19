@@ -3527,6 +3527,14 @@ class VllmConfig:
         diffusion_config = self.diffusion_config
         if diffusion_config is None or not diffusion_config.single_pass_reads:
             return
+        from vllm.config.diffusion import DiffusionModelOptions
+        from vllm.model_executor.models.config import DiffusionGemmaDiffusionOptions
+
+        options = diffusion_config.model_options
+        if isinstance(options, DiffusionModelOptions) and not isinstance(
+            options, DiffusionGemmaDiffusionOptions
+        ):
+            raise ValueError("single_pass_reads is only supported for DiffusionGemma.")
         if self.device_config.device_type != "cpu":
             raise ValueError("single_pass_reads is only supported on the CPU backend.")
         if self.parallel_config.pipeline_parallel_size > 1:

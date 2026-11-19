@@ -543,6 +543,15 @@ def test_single_pass_reads_rejects_incompatible_configs(kwargs, match):
         )
 
 
+def test_single_pass_reads_rejects_other_models():
+    with pytest.raises(ValueError, match="DiffusionGemma"):
+        VllmConfig(
+            model_config=ModelConfig("nvidia/Nemotron-Labs-Diffusion-3B"),
+            device_config=DeviceConfig(device="cpu"),
+            diffusion_config=DiffusionConfig(canvas_length=32, single_pass_reads=True),
+        )
+
+
 @pytest.mark.parametrize(
     "device, enabled, offloading_size", [("cpu", True, None), ("auto", False, 1)]
 )

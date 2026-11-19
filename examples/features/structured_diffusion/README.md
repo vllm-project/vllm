@@ -40,7 +40,7 @@ Per-request canvas widths may be smaller than the served canvas with either
 synchronous or asynchronous scheduling. Omit `diffusion_canvas_length` to use
 the served canvas width.
 
-On CPU, `--diffusion-config '{"canvas_length": 64, "single_pass_reads": true}'`
+For DiffusionGemma on CPU, `--diffusion-config '{"canvas_length": 64, "single_pass_reads": true}'`
 runs a read with `diffusion_read_only` and `diffusion_max_steps: 1` in the step
 that finishes its prompt, saving one forward pass. Reads with prompt logprobs
 keep the two-step path. Outputs can differ slightly. Validate them on your
