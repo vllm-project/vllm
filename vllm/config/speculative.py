@@ -28,6 +28,7 @@ from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    DraftModelSpeculatorConfig,
     SpeculatorConfig,
     get_custom_speculator_config_class,
     get_method_config_class,
@@ -1505,12 +1506,11 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # These drafts carry their own width, so resolve their default model
-        # even without num_speculative_tokens.
+        # A draft checkpoint may give num_speculative_tokens, so resolve its
+        # default model even without it.
         if self.model is None and (
             self.num_speculative_tokens is not None
-            or self.use_dspark()
-            or self.method == "dfly"
+            or issubclass(config_cls, DraftModelSpeculatorConfig)
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
@@ -2138,9 +2138,6 @@ class SpeculativeConfig:
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
-
-    def uses_draft_model(self) -> bool:
-        return self.method == "draft_model"
 
     def num_mtp_modules(self) -> int:
         """Number of MTP modules the drafter selects among by draft step."""

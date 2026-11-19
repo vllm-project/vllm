@@ -195,6 +195,10 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
+        """Overridden by drafts whose checkpoint the target implies (e.g.
+        MTP), which may then also give `num_speculative_tokens`."""
+        if spec.num_speculative_tokens is None:
+            return None
         raise ValueError(
             "num_speculative_tokens was provided but without speculative model."
         )
