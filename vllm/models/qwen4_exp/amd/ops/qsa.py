@@ -52,6 +52,7 @@ def _qsa_mqa_paged_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
+    UPCAST_FP8: tl.constexpr,
 ) -> None:
     rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     row_valid = rows < num_rows
@@ -107,7 +108,11 @@ def _qsa_mqa_paged_kernel(
                 mask=key_valid[:, None] & (dims[None, :] < HEAD_DIM),
                 other=0.0,
             )
-            keys = tl.trans(keys).to(q_ptr.dtype.element_ty)
+            keys = tl.trans(keys)
+            if UPCAST_FP8:
+                keys = keys.to(tl.bfloat16)
+            else:
+                keys = keys.to(q_ptr.dtype.element_ty)
             request_score = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for head in tl.static_range(0, NUM_HEADS):
                 query = tl.load(
@@ -118,6 +123,8 @@ def _qsa_mqa_paged_kernel(
                     mask=in_request[:, None] & (dims[None, :] < HEAD_DIM),
                     other=0.0,
                 )
+                if UPCAST_FP8:
+                    query = query.to(tl.bfloat16)
                 dot = tl.dot(query, keys, out_dtype=tl.float32)
                 request_score += tl.maximum(dot, 0.0)
             request_valid_2d = (
@@ -852,6 +859,9 @@ def qsa_mqa_paged(
         BLOCK_N=block_n,
         BLOCK_D=triton.next_power_of_2(q.shape[2]),
         COMPRESS_RATIO=compress_ratio,
+        UPCAST_FP8=(
+            q.dtype == current_platform.fp8_dtype() and get_cdna_version() != 3
+        ),
         num_warps=4,
     )
     return logits, visible_blocks

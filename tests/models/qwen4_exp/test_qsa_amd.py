@@ -446,7 +446,6 @@ def test_qsa_mqa_paged_matches_reference(
     # share one 16-row block of the tiled kernel, whose widest row sees 257
     # columns (one past a 64-column block). decodeN: one row per request,
     # lengths ending mid-page; up to 32 rows use the gfx942 one-row kernel.
-    monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: 3)
     spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
     monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -493,7 +492,9 @@ def test_qsa_mqa_paged_matches_reference(
         single_row_decode=case != "mixed",
     )
 
-    assert spy.launches == (case in ("decode1", "decode32"))
+    assert spy.launches == (
+        qsa_ops.get_cdna_version() == 3 and case in ("decode1", "decode32")
+    )
     expected_visible = torch.minimum(
         (query_positions + 1) // compress_ratio,
         lengths[token_to_req.long()] // compress_ratio,
