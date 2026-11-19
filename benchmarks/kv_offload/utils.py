@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S = 30.0
 VLLM_FORCE_SHUTDOWN_TIMEOUT_S = 10.0
 VLLM_SURVIVOR_TIMEOUT_S = 15.0
+VLLM_PORT_RELEASE_TIMEOUT_S = 15.0
 
 
 class _SignalHandlers:
@@ -205,6 +207,7 @@ class VLLMServer:
         self.graceful_shutdown_timeout_s = VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S
         self.force_shutdown_timeout_s = VLLM_FORCE_SHUTDOWN_TIMEOUT_S
         self.survivor_timeout_s = VLLM_SURVIVOR_TIMEOUT_S
+        self.port_release_timeout_s = VLLM_PORT_RELEASE_TIMEOUT_S
         self._stopped = False
         self.pgid: int | None = None
 
@@ -312,6 +315,12 @@ class VLLMServer:
                         f"vLLM workers {survivors} did not exit within "
                         f"{self.survivor_timeout_s}s."
                     )
+
+            if not self._wait_for_port_release():
+                raise RuntimeError(
+                    f"Port {self.port} did not become available within "
+                    f"{self.port_release_timeout_s}s after vLLM shutdown."
+                )
             print("      vLLM successfully terminated.")
         finally:
             self.signal_handlers.restore()
@@ -351,6 +360,23 @@ class VLLMServer:
         except OSError:
             return False
         return True
+
+    def _port_available(self) -> bool:
+        try:
+            with socket.socket() as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", self.port))
+            return True
+        except OSError:
+            return False
+
+    def _wait_for_port_release(self) -> bool:
+        deadline = time.monotonic() + self.port_release_timeout_s
+        while time.monotonic() < deadline:
+            if self._port_available():
+                return True
+            time.sleep(0.5)
+        return self._port_available()
 
     def assert_running(self) -> None:
         """Raise if the server exited before expected."""
