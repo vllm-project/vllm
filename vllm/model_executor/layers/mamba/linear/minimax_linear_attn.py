@@ -205,12 +205,6 @@ class MiniMaxText01LinearAttention(LinearAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @staticmethod
-    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight)
-        return
-
-    @staticmethod
     def _build_slope_tensor(n_attention_heads: int):
         def get_slopes(n):
             def get_slopes_power_of_2(n):
