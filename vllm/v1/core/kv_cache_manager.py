@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
@@ -14,9 +15,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_sessions import KVCacheSessions
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    FullAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -146,6 +149,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        session_ttl: float = 0,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -202,6 +206,18 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
+
+        # A TTL of 0 keeps the session table empty.
+        self.sessions = KVCacheSessions(
+            ttl=session_ttl if enable_caching else 0,
+            hash_block_size=hash_block_size,
+            # Only the full-attention lookup scans from the first block.
+            lookup_block_sizes={
+                manager.kv_cache_group_id: manager.block_size
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, FullAttentionManager)
+            },
+        )
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -269,7 +285,9 @@ class KVCacheManager:
             return 0
         # Mirrors `get_computed_blocks`: the last token is always recomputed.
         _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes,
+            request.num_tokens - 1,
+            session_blocks=self.sessions.get_blocks(request),
         )
         return num_computed_tokens
 
@@ -323,7 +341,10 @@ class KVCacheManager:
         max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length, request.num_tokens
+                request.block_hashes,
+                max_cache_hit_length,
+                request.num_tokens,
+                self.sessions.get_blocks(request),
             )
         )
 
@@ -384,7 +405,10 @@ class KVCacheManager:
         max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, max_cache_hit_length, request.num_tokens
+            request.block_hashes,
+            max_cache_hit_length,
+            request.num_tokens,
+            self.sessions.get_blocks(request),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -525,6 +549,13 @@ class KVCacheManager:
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
+        if request.session_id and self.sessions.ttl:
+            # The blocks this request hits or caches are evicted after all others.
+            request.retain_until = time.monotonic() + self.sessions.ttl
+            for blocks in new_computed_block_list:
+                for block in blocks:
+                    block.retain_until = request.retain_until
+
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_local_computed_tokens = (
@@ -656,6 +687,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self.sessions.register(request, self.coordinator.get_blocks(request.request_id))
         self.coordinator.free(request)
 
     def remove_skipped_blocks(
@@ -690,6 +722,7 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
+        self.sessions.register(request, self.coordinator.get_blocks(request.request_id))
         return self.coordinator.pop_blocks_for_free(request)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
@@ -941,4 +974,5 @@ class KVCacheManager:
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
+        self.sessions.expire()
         self.coordinator.new_step_starts()

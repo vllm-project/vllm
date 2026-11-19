@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import time
 import weakref
 from collections.abc import Callable
 from dataclasses import replace
@@ -7265,3 +7266,198 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+# Session retention (`session_ttl`).
+
+SESSION_TTL = 60.0
+
+
+def _session_manager(
+    kv_cache_config: KVCacheConfig, session_ttl: float = SESSION_TTL
+) -> KVCacheManager:
+    return make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=1 << 16,
+        enable_caching=True,
+        hash_block_size=16,
+        session_ttl=session_ttl,
+    )
+
+
+def _lookup(manager: KVCacheManager, request: Request) -> tuple[tuple, int]:
+    """A prefix hit as its blocks' hashes: equal-content blocks compare equal."""
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    blocks = manager.block_pool.blocks
+    return tuple(
+        [blocks[i].block_hash if i else None for i in ids]
+        for ids in computed.get_block_ids()
+    ), num_computed
+
+
+def _run_turn(
+    manager: KVCacheManager, request_id: str, token_ids: list[int], **kwargs
+) -> Request:
+    """Prefill a request in one chunk, then free it."""
+    request = make_request(request_id, token_ids, 16, sha256, **kwargs)
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    num_new_tokens = request.num_tokens - num_computed
+    assert manager.allocate_slots(request, num_new_tokens, num_computed, computed)
+    request.num_computed_tokens = request.num_tokens
+    manager.new_step_starts()
+    manager.free(request)
+    return request
+
+
+def _retained_blocks(manager: KVCacheManager) -> list[KVCacheBlock]:
+    queue = manager.block_pool.free_block_queue
+    blocks = []
+    block = queue.fake_free_list_tail.next_free_block
+    while block is not queue.fake_retained_list_tail:
+        blocks.append(block)
+        block = block.next_free_block
+    return blocks
+
+
+def _full32_sw_hash16_config() -> KVCacheConfig:
+    config = _make_hybrid_kv_cache_config(16, 800, ["full", "sliding_window"])
+    config.kv_cache_groups[0] = new_kv_cache_group(
+        ["layer0"],
+        AttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32),
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    "make_config",
+    [
+        _full32_sw_hash16_config,
+        lambda: _make_hybrid_kv_cache_config(16, 800, ["full", "mamba"]),
+        lambda: _make_hybrid_kv_cache_config(
+            16, 800, ["full", "full", "sliding_window"]
+        ),
+    ],
+    ids=["full32+sw-hash16", "full+mamba", "2full+sw"],
+)
+def test_session_lookup_matches_normal_lookup(make_config):
+    """Every turn gets the same prefix hit with and without session retention."""
+    managers = [_session_manager(make_config(), ttl) for ttl in (SESSION_TTL, 0)]
+    t1 = list(range(5 * 16 + 3))
+    t2 = t1 + list(range(1000, 1000 + 3 * 16 + 5))
+    t3 = t2 + list(range(2000, 2000 + 4 * 16))
+    turns = [
+        t1,
+        t2,
+        t3,
+        t2[: 2 * 16 + 7] + list(range(3000, 3000 + 2 * 16)),  # diverges
+        t3[: 3 * 16],  # shorter
+        t3 + list(range(4000, 4000 + 2 * 16 + 1)),
+    ]
+    num_session_lookups = 0
+    for turn, token_ids in enumerate(turns):
+        requests = [
+            make_request(f"{turn}", token_ids, 16, sha256, session_id="s")
+            for _ in managers
+        ]
+        sessions = managers[0].sessions
+        num_session_lookups += sessions.get_blocks(requests[0]) is not None
+        assert _lookup(managers[0], requests[0]) == _lookup(managers[1], requests[1])
+        for manager in managers:
+            _run_turn(manager, f"{turn}", token_ids, session_id="s")
+    # Turns that diverge from the session use the normal lookup.
+    assert num_session_lookups >= 3
+
+
+@pytest.mark.parametrize(
+    "session_ttl,session_id,session_blocks_survive",
+    [(0, "s", False), (SESSION_TTL, None, False), (SESSION_TTL, "s", True)],
+    ids=["disabled", "no-session-id", "session"],
+)
+def test_session_blocks_evicted_after_other_blocks(
+    session_ttl, session_id, session_blocks_survive
+):
+    """Pressure evicts a later-freed non-session prefix before an older
+    session prefix; without retention it is plain LRU."""
+    manager = _session_manager(make_kv_cache_config(16, 11), session_ttl)
+    session_tokens = list(range(2 * 16))
+    other_tokens = list(range(100, 100 + 2 * 16))
+    _run_turn(manager, "a", session_tokens, session_id=session_id)
+    _run_turn(manager, "b", other_tokens)
+
+    # Takes the 6 never-used blocks and 2 cached ones.
+    _run_turn(manager, "p", list(range(500, 500 + 8 * 16)))
+
+    hits = [
+        _lookup(manager, make_request("r", tokens + [0], 16, sha256))[1]
+        for tokens in (session_tokens, other_tokens)
+    ]
+    assert hits == ([2 * 16, 0] if session_blocks_survive else [0, 2 * 16])
+
+
+@pytest.mark.parametrize(
+    "evict,expected_hit", [("pressure", 2 * 16), ("evict_blocks", 16), ("reset", 0)]
+)
+def test_session_lookup_stops_at_evicted_block(evict, expected_hit):
+    manager = _session_manager(make_kv_cache_config(16, 11))
+    t1 = list(range(4 * 16))
+    first = _run_turn(manager, "t1", t1, session_id="s")
+    if evict == "pressure":
+        # Takes the 6 never-used blocks, then the session's 2 tail blocks.
+        _run_turn(manager, "x", list(range(500, 500 + 8 * 16)))
+    elif evict == "evict_blocks":
+        cached = manager.block_pool.get_cached_block(first.block_hashes[1], [0])
+        manager.evict_blocks({cached[0].block_id})
+    else:
+        assert manager.reset_prefix_cache()
+
+    t2 = t1 + list(range(1000, 1000 + 16))
+    hit = _lookup(manager, make_request("t2", t2, 16, sha256, session_id="s"))
+    assert hit == _lookup(manager, make_request("plain", t2, 16, sha256))
+    assert hit[1] == expected_hit
+
+
+def test_hybrid_session_retains_every_group():
+    """Blocks a request cached but no longer holds when it finishes (Mamba
+    checkpoints) are retained with its full-attention blocks."""
+    manager = _session_manager(make_kv_cache_config_hybrid_model(16, 30, 2))
+    _run_turn(manager, "t1", list(range(4 * 16)), session_id="s")
+    cached = [b for b in manager.block_pool.blocks if b.block_hash is not None]
+    assert len(cached) > 4
+    assert set(map(id, _retained_blocks(manager))) == set(map(id, cached))
+
+
+def test_close_session_keeps_blocks_another_session_shares():
+    manager = _session_manager(make_kv_cache_config(16, 11))
+    shared = list(range(2 * 16))
+    _run_turn(manager, "a", shared + list(range(100, 116)), session_id="a")
+    _run_turn(manager, "b", shared + list(range(200, 216)), session_id="b")
+    manager.sessions.close("a")
+    assert len(_retained_blocks(manager)) == 3
+
+
+@pytest.mark.parametrize("end", ["close", "ttl"])
+def test_session_end_stops_retaining_blocks(monkeypatch, end):
+    now = 1000.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    manager = _session_manager(make_kv_cache_config(16, 11))
+    tokens = list(range(4 * 16))
+    _run_turn(manager, "t1", tokens, session_id="s")
+    _run_turn(manager, "other", list(range(100, 100 + 2 * 16)))
+    now += SESSION_TTL - 1
+    assert len(_retained_blocks(manager)) == 4
+
+    if end == "close":
+        manager.sessions.close("s")
+        assert _retained_blocks(manager) == []
+        # A closed session's blocks are reused first, tail first.
+        manager.block_pool.get_new_blocks(1)
+    else:
+        now += 1
+        _run_turn(manager, "late", list(range(200, 200 + 16)))
+        # Takes the 3 never-used blocks and the 2 blocks cached before the
+        # session expired, then an expired block (tail first) ahead of the
+        # block freed after it expired.
+        manager.block_pool.get_new_blocks(6)
+        assert len(_retained_blocks(manager)) == 3
+    hit = _lookup(manager, make_request("r", tokens + [0], 16, sha256))[1]
+    assert hit == 3 * 16

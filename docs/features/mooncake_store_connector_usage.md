@@ -373,6 +373,12 @@ This bounds the scheduler's wait for prefix lookup. It does not cancel a master
 RPC already running inside the worker or apply to KV loads and saves. Store
 reset waits at most 60 seconds.
 
+### Saves of a stored prefix
+
+A save checks and stores only the blocks past a prefix an earlier save on this
+server stored. Every five minutes the next save of that prefix checks the
+whole prompt again, which stores any blocks the store evicted in the meantime.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.

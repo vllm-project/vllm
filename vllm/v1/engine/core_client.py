@@ -325,6 +325,9 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    async def close_session_async(self, session_id: str) -> None:
+        raise NotImplementedError
+
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
@@ -1424,6 +1427,9 @@ class AsyncMPClient(MPClient):
                 "reset_prefix_cache", reset_running_requests, reset_connector
             )
         )
+
+    async def close_session_async(self, session_id: str) -> None:
+        await self.call_utility_all_async("close_session", session_id)
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")

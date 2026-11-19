@@ -112,6 +112,10 @@ from .metrics import MooncakeStoreConnectorStats
 logger = init_logger(__name__)
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+# How long saves trust a stored prefix before checking the store again,
+# which re-saves anything the store evicted.
+STORED_PREFIX_TTL_S = 300.0
+MAX_STORED_PREFIXES = 65536
 _T = TypeVar("_T")
 
 
@@ -587,6 +591,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         # Per-request high-water mark of complete hybrid checkpoints.
         self._saved_offset: dict[str, int] = {}
+        # Last block hash of a stored prefix -> (its tokens, expiry). Hashes
+        # are chained, so a request containing that hash saves from there.
+        self._stored_prefix: dict[BlockHash, tuple[int, float]] = {}
         # Retained only after a failed store so retry events can recover the
         # token suffix without full snapshots on the normal path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
@@ -890,6 +897,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         save_completed = False
         available_token_len = 0
         checkpoint_len = 0
+        prefix_hash = None
+        prefix_expiry = time.monotonic() + STORED_PREFIX_TTL_S
         req_id = req_meta.req_id
         event_token_ids = req_meta.token_ids
         token_ids_start = req_meta.token_ids_start
@@ -927,6 +936,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             save_start = self._saved_offset.get(req_id, 0)
+            for prefix_hash in reversed(req_meta.block_hashes or ()):
+                stored = self._stored_prefix.get(prefix_hash)
+                if stored is not None:
+                    if stored[1] > time.monotonic():
+                        save_start = max(save_start, stored[0])
+                        prefix_expiry = stored[1]
+                    break
             if checkpoint_len <= save_start:
                 return
 
@@ -1215,6 +1231,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         finally:
             if save_completed:
                 self._record_saved_offset(req_meta, checkpoint_len)
+                if prefix_hash is not None:
+                    self._stored_prefix.pop(prefix_hash, None)
+                    end = checkpoint_len // self.coord.hash_block_size - 1
+                    self._stored_prefix[req_meta.block_hashes[end]] = (
+                        checkpoint_len,
+                        prefix_expiry,
+                    )
+                    if len(self._stored_prefix) > MAX_STORED_PREFIXES:
+                        del self._stored_prefix[next(iter(self._stored_prefix))]
             if self.enable_kv_event and available_token_len:
                 self._update_retry_token_ids(
                     req_meta,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 import weakref
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
@@ -274,6 +275,8 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            if request.retain_until:
+                blk.retain_until = request.retain_until
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -531,6 +534,8 @@ class BlockPool:
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
+        if request.retain_until:
+            block.retain_until = request.retain_until
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -674,6 +679,7 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        dst_block.retain_until = src_block.retain_until
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
@@ -812,6 +818,8 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
         blocks_to_evict_first = []
+        blocks_to_retain = []
+        now = time.monotonic()
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
@@ -827,14 +835,19 @@ class BlockPool:
                     # LIFO reuse of non-cached blocks for better GPU locality,
                     # and of cached ones when asked to evict them first.
                     blocks_to_evict_first.append(block)
+                elif block.retain_until > now:
+                    # Used by a recent session request: evict after all others.
+                    blocks_to_retain.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
+                    block.freed_at = now
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        self.free_block_queue.append_n(blocks_to_retain, retained=True)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks, evict_first=evict_first)
 

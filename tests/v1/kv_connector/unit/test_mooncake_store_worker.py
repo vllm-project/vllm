@@ -1075,6 +1075,20 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
     ]
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
+    # A later request skips the prefix this one stored.
+    store.batch_put_from_multi_buffers.return_value = [256]
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-b",
+            token_len_chunk=80,
+            block_ids=([1, 2, 3, 4, 5],),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3", b"a4"],
+            can_save=True,
+        ),
+    )
+    assert len(store.batch_is_exist.call_args.args[0]) == 1
+
 
 def test_store_sending_thread_delta_strides_with_local_phase():
     store = MagicMock()
@@ -1973,6 +1987,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
     coord = SimpleNamespace(
         lcm_block_size=16,
+        hash_block_size=16,
         store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
             None,
             None,

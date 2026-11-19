@@ -183,6 +183,14 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Until this time, the block is evicted after all others once it is free.
+    # Set by requests that carry a session id.
+    retain_until: float = 0.0
+    # Sessions that recorded the block; closing one keeps it retained for the rest.
+    num_sessions: int = 0
+    # When the block was last freed with its hash, outside a session.
+    freed_at: float = 0.0
+
     def set_block_hash(
         self,
         block_hash: BlockHashWithGroupId,
@@ -198,6 +206,8 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self.block_hash = None
         self.block_hash_num_tokens = None
+        self.retain_until = 0.0
+        self.num_sessions = 0
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -263,6 +273,10 @@ class FreeKVCacheBlockQueue:
     Note that we maintain this order by reversing the block order when free
     blocks of a request. This operation is outside of this class.
 
+    Blocks appended with `retained=True` follow `fake_free_list_tail` and are
+    only popped once the blocks before it are gone, or were all freed after
+    the first retained block's `retain_until`.
+
     Args:
         blocks: A list of KVCacheBlock objects.
 
@@ -298,6 +312,12 @@ class FreeKVCacheBlockQueue:
             self.fake_free_list_head.next_free_block = self.fake_free_list_tail
             self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
+        self.fake_retained_list_tail = KVCacheBlock(
+            block_id=-1, retain_until=float("inf")
+        )
+        self.fake_free_list_tail.next_free_block = self.fake_retained_list_tail
+        self.fake_retained_list_tail.prev_free_block = self.fake_free_list_tail
+
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
 
@@ -307,7 +327,15 @@ class FreeKVCacheBlockQueue:
         """
         head = self.fake_free_list_head
         first_block = head.next_free_block
-        if first_block is self.fake_free_list_tail or first_block is None:
+        retained_block = self.fake_free_list_tail.next_free_block
+        assert first_block is not None and retained_block is not None
+        if first_block is self.fake_free_list_tail or (
+            # Uncached blocks still go first.
+            first_block.block_hash is not None
+            and retained_block.retain_until <= first_block.freed_at
+        ):
+            head, first_block = self.fake_free_list_tail, retained_block
+        if first_block is self.fake_retained_list_tail:
             assert self.num_free_blocks == 0, (
                 f"num_free_blocks ({self.num_free_blocks}) is out of sync "
                 "with the free list."
@@ -347,6 +375,9 @@ class FreeKVCacheBlockQueue:
         if n == 0:
             return []
         assert self.num_free_blocks >= n
+        if self.fake_retained_list_tail.prev_free_block is not self.fake_free_list_tail:
+            # The pop may cross into the retained list.
+            return [self.popleft() for _ in range(n)]
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
@@ -446,17 +477,19 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
-    def append_n(self, blocks: list[KVCacheBlock]) -> None:
+    def append_n(self, blocks: list[KVCacheBlock], retained: bool = False) -> None:
         """Put a list of blocks back into the free list
 
         Args:
             blocks: The blocks to append.
+            retained: Append to the retained list instead, which is only
+                popped once the free list is empty.
 
         """
         if not blocks:
             return
 
-        tail = self.fake_free_list_tail
+        tail = self.fake_retained_list_tail if retained else self.fake_free_list_tail
         last_block = tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist"
@@ -490,7 +523,8 @@ class FreeKVCacheBlockQueue:
         # As long as next_free_block is available, we haven't reached to
         # the fake tail yet.
         while curr_block.next_free_block is not None:
-            ret.append(curr_block)
+            if curr_block is not self.fake_free_list_tail:
+                ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
 
@@ -504,8 +538,9 @@ class FreeKVCacheBlockQueue:
         else:
             curr_block = cursor.next_free_block
 
-        while curr_block is not None and curr_block is not self.fake_free_list_tail:
-            yield curr_block
+        while curr_block is not None and curr_block.next_free_block is not None:
+            if curr_block is not self.fake_free_list_tail:
+                yield curr_block
             curr_block = curr_block.next_free_block
 
 
