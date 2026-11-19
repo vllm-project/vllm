@@ -13,7 +13,10 @@ from vllm.platforms import current_platform
 
 
 def _pack_fp8_ds_mla(kv: torch.Tensor) -> torch.Tensor:
-    """bf16 [n, 576] -> 656-byte rows: 512 fp8 (4 tiles of 128), 4 pow2 fp32 scales, 64 bf16 rope."""
+    """bf16 [n, 576] -> 656-byte rows.
+
+    512 fp8 values (4 tiles of 128), 4 pow2 fp32 scales, then 64 bf16 rope values.
+    """
     n = kv.shape[0]
     rows = torch.zeros(n, 656, dtype=torch.uint8, device=kv.device)
     for t in range(4):

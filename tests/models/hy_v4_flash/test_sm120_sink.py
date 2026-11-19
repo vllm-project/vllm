@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm.models.hy_v4_flash.nvidia.model import _EXPERT_WEIGHT
+from vllm.models.hy_v4_flash.common.model import _EXPERT_WEIGHT
 from vllm.models.hy_v4_flash.nvidia.sm120 import (
     FlashSM120Impl,
     FlashSM120SparseBackend,
