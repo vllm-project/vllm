@@ -4,13 +4,14 @@
 import hashlib
 import math
 import queue
-import re
 import threading
 import time
 import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
+
+import regex as re
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import ReqMeta
 from vllm.logger import init_logger
