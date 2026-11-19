@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms.interface import PlatformEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from .base import MambaSSUKernel
+from .base import MambaSSUKernel, SSULayer
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
@@ -32,7 +32,7 @@ class CPUSSUKernel(MambaSSUKernel):
     @classmethod
     def forward(
         cls,
-        mamba_config: MambaConfig,
+        layer: SSULayer,
         metadata: "BaseMambaAttentionMetadata",
         state: torch.Tensor,
         x: torch.Tensor,

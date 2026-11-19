@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelectorConfig
 from vllm.platforms.interface import PlatformEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from .base import MambaSSUKernel
+from .base import MambaSSUKernel, SSULayer
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
@@ -73,7 +73,7 @@ class FlashInferSSUKernel(MambaSSUKernel):
     @classmethod
     def forward(
         cls,
-        mamba_config: MambaConfig,
+        layer: SSULayer,
         metadata: "BaseMambaAttentionMetadata",
         state: torch.Tensor,
         x: torch.Tensor,
@@ -86,6 +86,7 @@ class FlashInferSSUKernel(MambaSSUKernel):
         out: torch.Tensor,
         z: torch.Tensor | None = None,
     ) -> None:
+        mamba_config = layer.mamba_config
         rand_seed = (
             torch.randint(0, 2**32, (1,), device=state.device)
             if mamba_config.enable_stochastic_rounding

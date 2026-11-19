@@ -5,14 +5,14 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelectorConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import PlatformEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from .base import MambaSSUKernel
+from .base import MambaSSUKernel, SSULayer
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
@@ -72,7 +72,7 @@ class TritonSSUKernel(MambaSSUKernel):
     @classmethod
     def forward(
         cls,
-        mamba_config: MambaConfig,
+        layer: SSULayer,
         metadata: "BaseMambaAttentionMetadata",
         state: torch.Tensor,
         x: torch.Tensor,
@@ -103,6 +103,6 @@ class TritonSSUKernel(MambaSSUKernel):
             num_accepted_tokens=metadata.num_accepted_tokens,
             cu_seqlens=metadata.query_start_loc_d,
             is_blackwell=cls._is_blackwell(),
-            enable_stochastic_rounding=mamba_config.enable_stochastic_rounding,
-            cache_philox_rounds=mamba_config.stochastic_rounding_philox_rounds,
+            enable_stochastic_rounding=layer.mamba_config.enable_stochastic_rounding,
+            cache_philox_rounds=layer.mamba_config.stochastic_rounding_philox_rounds,
         )

@@ -555,7 +555,8 @@ def test_flashinfer_forwards_ssu_algorithm(
         backend=MambaBackendEnum.FLASHINFER, ssu_algorithm=algorithm
     )
     tensor = torch.empty(1)
-    FlashInferSSUKernel.forward(mamba_config, _NO_INDICES, *[tensor] * 9)
+    layer = SimpleNamespace(mamba_config=mamba_config)
+    FlashInferSSUKernel.forward(layer, _NO_INDICES, *[tensor] * 9)
     assert kernel.call_args.kwargs["algorithm"] == expected
 
 
@@ -577,9 +578,8 @@ def test_triton_basic_call():
     C = torch.randn(batch_size, dstate, device=device)
     D = torch.randn(dim, device=device)
 
-    TritonSSUKernel.forward(
-        MambaConfig(), _NO_INDICES, state, x, dt, A, B, C, D, dt_bias, out
-    )
+    layer = SimpleNamespace(mamba_config=MambaConfig())
+    TritonSSUKernel.forward(layer, _NO_INDICES, state, x, dt, A, B, C, D, dt_bias, out)
     assert not torch.isnan(out).any()
 
 

@@ -988,7 +988,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     )
             else:
                 self.ssu_kernel.forward(
-                    self.mamba_config,
+                    self,
                     attn_metadata,
                     ssm_state,
                     hidden_states_d,
