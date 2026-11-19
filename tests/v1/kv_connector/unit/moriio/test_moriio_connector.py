@@ -286,6 +286,12 @@ class FakeMoRIIOWrapper:
     def pop_finished_write_req_ids(self):
         pass
 
+    def pop_renewed_lease_transfer_ids(self):
+        return set()
+
+    def send_lease_renewal(self, transfer_ids, host, port):
+        pass
+
     def shutdown(self):
         pass
 

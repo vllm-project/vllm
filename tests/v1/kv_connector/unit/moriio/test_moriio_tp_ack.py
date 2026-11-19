@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,6 +10,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOConnectorMetadata,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
@@ -251,6 +252,9 @@ def test_worker_get_finished_counts_structured_release_fan_in():
         def pop_finished_req_ids(self):
             return self.batches.pop(0)
 
+        def pop_renewed_lease_transfer_ids(self):
+            return set()
+
         def shutdown(self):
             pass
 
@@ -263,6 +267,8 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
     worker._pending_unmapped_acks = []
+    worker._reqs_to_send = {}
+    worker._expired_read_leases = OrderedDict()
 
     assert worker.get_finished() == (set(), set())
     assert worker._consumer_notification_counts == {"tx-fanin": 1}
@@ -282,9 +288,13 @@ def test_worker_reports_unexpected_heartbeat_exit(exit_kind):
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
     worker.moriio_wrapper = SimpleNamespace(
-        pop_finished_req_ids=lambda: [], shutdown=lambda: None
+        pop_finished_req_ids=lambda: [],
+        pop_renewed_lease_transfer_ids=set,
+        shutdown=lambda: None,
     )
     worker._pending_unmapped_acks = []
+    worker._reqs_to_send = {}
+    worker._expired_read_leases = OrderedDict()
     worker._heartbeat = MoRIIOHeartbeat("tcp://127.0.0.1:1", {"type": "P"}, 0.02)
     process = worker._heartbeat._process
     try:
@@ -744,12 +754,14 @@ def test_producer_start_load_kv_posts_no_read():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.is_producer = True
+    worker.mode = MoRIIOMode.READ
     worker._reads_issued_this_step = []
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._reqs_to_send = {}
     worker.moriio_wrapper = RecordingWrapper()
 
-    worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
+    worker.start_load_kv(MoRIIOConnectorMetadata())
 
     assert worker._reads_issued_this_step == []
     assert worker.moriio_wrapper.async_waited is True

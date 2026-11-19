@@ -87,6 +87,12 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
         self._is_hma_required = False
+        self._read_leases = {}
+        self._final_read_lease_renewals = []
+        self._read_lease_tracked_at = {}
+        self._read_lease_renewed_at = {}
+        self._read_lease_lapsed = set()
+        self._unrenewed_read_leases = set()
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
