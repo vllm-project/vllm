@@ -27,6 +27,18 @@ class CPUSSUKernel(MambaSSUKernel):
     def supports_mamba_type(cls, mamba_type: MambaAttentionBackendEnum) -> bool:
         return mamba_type == MambaAttentionBackendEnum.MAMBA2
 
+    @classmethod
+    def supports_spec_decode(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_ubatching(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_pipeline_parallel(cls) -> bool:
+        return True
+
     @staticmethod
     @cache
     def _fn():

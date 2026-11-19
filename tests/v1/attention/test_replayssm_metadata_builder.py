@@ -41,7 +41,7 @@ def _make_mamba_spec(
     num_speculative_tokens: int = 0,
 ) -> MambaSpec:
     shapes = MambaStateShapeCalculator.append_replayssm_ring(
-        ((1, 1), (1, 1, 1)),
+        ((1, 1), (1, 1, 64)),
         n_groups=1,
         tp_world_size=1,
         logical_window=buffer_len,

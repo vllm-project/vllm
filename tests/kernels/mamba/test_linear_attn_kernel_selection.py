@@ -69,3 +69,22 @@ def test_no_valid_kernel_fails_with_every_reason():
         select_linear_attn_kernel(
             "op_none", [FAST, _kernel(Fake.OTHER, "needs CPU")], CFG
         )
+
+
+def test_requested_backend_uses_its_first_valid_kernel():
+    """A backend may offer several kernels for an op, e.g. by decoding mode."""
+    fast_cpu = _kernel(Fake.FAST)
+    selected = select_linear_attn_kernel(
+        "op_shared", [FAST, fast_cpu, SLOW], CFG, Fake.FAST
+    )
+    assert selected is fast_cpu
+
+
+def test_requested_backend_fails_with_each_kernels_reasons():
+    with pytest.raises(ValueError, match=r"needs SM10x \| needs CPU"):
+        select_linear_attn_kernel(
+            "op_shared_strict",
+            [FAST, _kernel(Fake.FAST, "needs CPU"), SLOW],
+            CFG,
+            Fake.FAST,
+        )
