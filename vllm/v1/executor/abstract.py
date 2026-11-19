@@ -211,14 +211,17 @@ class Executor(ABC):
             )
         return aligned
 
-    def get_attn_backend_cls_paths(self) -> list[list[str]]:
-        """Import paths of each worker's attention backends, in layer order."""
-        return self.collective_rpc("get_attn_backend_cls_paths")
-
-    def update_block_size(self, attn_backend_cls_paths: list[str]) -> list[dict]:
+    def update_block_size(self) -> None:
         """Have every worker choose the KV cache block size from the attention
-        backends of the whole model; returns the cache config fields each set."""
-        return self.collective_rpc("update_block_size", args=(attn_backend_cls_paths,))
+        backends of the layers of all workers, since a pipeline stage holds only
+        some layers. Workers reply in rank order, which follows the layer order."""
+        worker_paths = self.collective_rpc("get_attn_backend_cls_paths")
+        paths = list(dict.fromkeys(p for worker in worker_paths for p in worker))
+        choices = self.collective_rpc("update_block_size", args=(paths,))
+        if any(choice != choices[0] for choice in choices):
+            raise RuntimeError(
+                f"Workers chose different KV cache block sizes: {choices}"
+            )
 
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")

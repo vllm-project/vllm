@@ -62,11 +62,12 @@ def _importable_cls_path(cls: type) -> str:
     `subclass_attention_backend` and its variants create backend classes at run
     time that change how the backend runs, not the block sizes it accepts.
     """
-    for base in cls.__mro__:
-        module = sys.modules.get(base.__module__)
-        if getattr(module, base.__qualname__, None) is base:
-            return f"{base.__module__}.{base.__qualname__}"
-    raise ValueError(f"No base class of {cls} can be imported")
+    base = next(
+        base
+        for base in cls.__mro__
+        if getattr(sys.modules.get(base.__module__), base.__qualname__, None) is base
+    )
+    return f"{base.__module__}.{base.__qualname__}"
 
 
 class CompilationTimes(NamedTuple):
