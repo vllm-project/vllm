@@ -22,11 +22,7 @@ MODELS: list[tuple[str, list[str]]] = [
     ("vllm-project/multilingual-e5-small", []),
     (
         "Snowflake/snowflake-arctic-embed-m-v1.5",
-        [
-            "--trust_remote_code",
-            "--hf_overrides",
-            '{"matryoshka_dimensions":[256]}',
-        ],
+        ["--hf_overrides", '{"matryoshka_dimensions":[256]}'],
     ),
 ]
 
