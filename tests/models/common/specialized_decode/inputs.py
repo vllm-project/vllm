@@ -21,9 +21,9 @@ from tests.models.common.specialized_decode import reference as R
 from vllm.platforms import current_platform
 
 # "cuda" on ROCm too, since torch-hip keeps the name. Asked of the platform
-# rather than hardcoded, the way the rest of tests/ does it, so that importing
-# this file off an accelerator does not fail.
-DEV = current_platform.device_type
+# rather than hardcoded so these run wherever the test does; `or` because an
+# unspecified platform's device_type is "", which torch rejects.
+DEV = current_platform.device_type or "cpu"
 F32, I32 = torch.float32, torch.int32
 
 
@@ -128,7 +128,12 @@ def assert_bit_exact(
     assert actual.shape == expected.shape, (
         f"{helper}: got shape {tuple(actual.shape)}, want {tuple(expected.shape)}"
     )
-    bad = (actual != expected).view(len(expected), -1).any(1).nonzero().flatten()[:3]
+    differs = actual != expected
+    if actual.is_floating_point():
+        # -0.0 == +0.0, so a dropped zero sign would pass on `!=` alone, and
+        # OCP's 0x80 is a negative zero that `fp8_bytes` feeds in.
+        differs |= torch.signbit(actual) != torch.signbit(expected)
+    bad = differs.view(len(expected), -1).any(1).nonzero().flatten()[:3]
     assert bad.numel() == 0, (
         f"{helper} differs at {sent[bad].tolist()}: "
         f"got {actual[bad].tolist()}, want {expected[bad].tolist()}"
