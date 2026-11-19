@@ -8,7 +8,7 @@ Also matches a packed projection sliced into q, k and v along the last dim.
 import ast
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from torch import fx, nn
 
@@ -25,7 +25,6 @@ from vllm.model_executor.models.transformers.fx_utils import (
     is_linear,
     is_method,
     recover_forward,
-    replace_expr,
     returned_linear,
     single_self_call,
     upstream_linear,
@@ -50,8 +49,6 @@ class PackedQKVFuser(RewriteFuser):
     o_name: str | None
     q_size: int
     kv_size: int
-    form: Literal["split", "slice"] = "split"
-    """How the module separates q, k and v: `.split(...)` or three slices."""
 
     def info(self, name: str) -> str:
         return (
@@ -109,11 +106,10 @@ class PackedQKVFuser(RewriteFuser):
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "PackedQKVFuser | None":
         for node in graph.nodes:
-            form: Literal["split", "slice"]
             if (sizes := cls._split_sizes(node)) is not None:
-                form, qkv_node = "split", upstream_linear(node.args[0], module)
+                qkv_node = upstream_linear(node.args[0], module)
             elif (sizes := cls._sliced_sizes(node)) is not None:
-                form, qkv_node = "slice", node if is_linear(node, module) else None
+                qkv_node = node if is_linear(node, module) else None
             else:
                 continue
             if qkv_node is None:
@@ -136,12 +132,12 @@ class PackedQKVFuser(RewriteFuser):
                 o_name=o_name,
                 q_size=q_size,
                 kv_size=kv_size,
-                form=form,
             )
         return None
 
-    def _split_call(self, funcdef: ast.FunctionDef) -> ast.Call:
-        """The unique `self.<qkv_name>(...)....split((a, b, c), ...)` call."""
+    def _rewrite_split(self, funcdef: ast.FunctionDef) -> bool:
+        """Point the unique `self.<qkv_name>(...)....split((a, b, c), ...)` at the
+        per-rank sections."""
         calls = [
             node
             for node in ast.walk(funcdef)
@@ -157,61 +153,55 @@ class PackedQKVFuser(RewriteFuser):
             )
         ]
         if len(calls) != 1:
-            raise ValueError(f"{self.qkv_name} has {len(calls)} three-way splits")
-        return calls[0]
-
-    def _slices_to_split(self, funcdef: ast.FunctionDef) -> None:
-        """Rewrite the three `qkv[..., a:b]` slices as a `split((q, kv, kv))`."""
-        call = single_self_call(funcdef, self.qkv_name)
-        assigns = [
-            node
-            for node in ast.walk(funcdef)
-            if isinstance(node, ast.Assign) and node.value is call
-        ]
-        target = assigns[0].targets[0] if len(assigns) == 1 else None
-        if not isinstance(target, ast.Name):
-            raise ValueError(f"{self.qkv_name} output is not bound to a single name")
-        name = target.id
-        # The fx match checked the bounds; q has no lower and v no upper bound
-        position: dict[int, ast.Subscript] = {}
-        loads = 0
-        for node in ast.walk(funcdef):
-            if isinstance(node, ast.Name) and node.id == name:
-                loads += isinstance(node.ctx, ast.Load)
-            elif (
-                isinstance(node, ast.Subscript)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == name
-                and isinstance(node.slice, ast.Tuple)
-                and isinstance(part := node.slice.elts[-1], ast.Slice)
-            ):
-                pos = 0 if part.lower is None else 2 if part.upper is None else 1
-                position[pos] = node
-        if loads != 3 or len(position) != 3:
-            raise ValueError(f"{name} is not only sliced into q, k and v")
-
-        # name = self.qkv(x)  ->  name = self.qkv(x).split((q, kv, kv), dim=-1)
-        # name[..., a:b]      ->  name[0], name[1], name[2]
-        sizes = f"({self.q_size}, {self.kv_size}, {self.kv_size})"
-        assigns[0].value = ast.Call(
-            func=ast.Attribute(value=call, attr="split", ctx=ast.Load()),
-            args=[ast.parse(sizes, mode="eval").body],
-            keywords=[ast.keyword(arg="dim", value=ast.Constant(-1))],
-        )
-        for pos, subscript in position.items():
-            replace_expr(
-                funcdef, subscript, ast.parse(f"{name}[{pos}]", mode="eval").body
-            )
-
-    def update_forward(self, module: nn.Module) -> None:
-        """Rewrite the split sizes to the sharded projection's per-rank widths."""
-        funcdef, fn = recover_forward(type(module))
-        if self.form == "slice":
-            self._slices_to_split(funcdef)
-        split = self._split_call(funcdef)
+            return False
         # (q, kv, kv) -> [s // qkv.tp_size for s in qkv.output_sizes]
         sections = local_output_sizes(self.qkv_name)
-        split.args[0] = ast.parse(sections, mode="eval").body
+        calls[0].args[0] = ast.parse(sections, mode="eval").body
+        return True
+
+    def _rewrite_slices(self, funcdef: ast.FunctionDef) -> bool:
+        """Point the three `qkv[..., a:b]` slices at the per-rank sections."""
+        call = single_self_call(funcdef, self.qkv_name)
+        targets = [
+            node.target if isinstance(node, ast.AnnAssign) else node.targets[0]
+            for node in ast.walk(funcdef)
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is call
+        ]
+        target = targets[0] if len(targets) == 1 else None
+        if not isinstance(target, ast.Name):
+            return False
+        slices = [
+            part
+            for node in ast.walk(funcdef)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == target.id
+            and isinstance(node.slice, ast.Tuple)
+            and isinstance(part := node.slice.elts[-1], ast.Slice)
+        ]
+        # The fx match checked the bounds; q has no lower and v no upper bound
+        positions = [
+            0 if part.lower is None else 2 if part.upper is None else 1
+            for part in slices
+        ]
+        if sorted(positions) != [0, 1, 2]:
+            return False
+
+        qkv = f"self.{self.qkv_name}"
+        q = f"{qkv}.output_sizes[0] // {qkv}.tp_size"
+        k_end = f"{q} + {qkv}.output_sizes[1] // {qkv}.tp_size"
+        bounds = {0: (None, q), 1: (q, k_end), 2: (k_end, None)}
+        for part, pos in zip(slices, positions):
+            lower, upper = bounds[pos]
+            part.lower = None if lower is None else ast.parse(lower, mode="eval").body
+            part.upper = None if upper is None else ast.parse(upper, mode="eval").body
+        return True
+
+    def update_forward(self, module: nn.Module) -> None:
+        """Rewrite the split sizes or slice bounds to the per-rank widths."""
+        funcdef, fn = recover_forward(type(module))
+        if not (self._rewrite_split(funcdef) or self._rewrite_slices(funcdef)):
+            raise ValueError(f"{self.qkv_name} is not split or sliced into q, k and v")
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:

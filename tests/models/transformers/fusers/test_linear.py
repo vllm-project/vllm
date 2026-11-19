@@ -769,7 +769,7 @@ class TracedBoundSlicedQKVAttention(SlicedQKVAttention):
 
 
 class AnnotatedSlicedQKVAttention(SlicedQKVAttention):
-    """Traces like the plain form, but the source binds with an annotated assign."""
+    """The source binds the projection with an annotated assign."""
 
     def forward(self, hidden_states, attention_mask=None, **kwargs):
         qkv: torch.Tensor = self.qkv_proj(hidden_states)
@@ -1377,7 +1377,10 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.parametrize("attn_cls", [SlicedQKVAttention, RopeSlicedQKVAttention])
+@pytest.mark.parametrize(
+    "attn_cls",
+    [SlicedQKVAttention, RopeSlicedQKVAttention, AnnotatedSlicedQKVAttention],
+)
 @pytest.mark.parametrize("kv_heads", [1, 2])
 def test_detects_and_rewrites_sliced_qkv(kv_heads, attn_cls):
     """A projection sliced into q/k/v with global offsets must be re-sharded too.
@@ -1387,7 +1390,6 @@ def test_detects_and_rewrites_sliced_qkv(kv_heads, attn_cls):
         meta = attn_cls(kv_heads=kv_heads)
     fuser = get_fuser(meta, PackedQKVFuser)
     assert isinstance(fuser, PackedQKVFuser)
-    assert fuser.form == "slice"
     assert (fuser.qkv_name, fuser.o_name) == ("qkv_proj", "o_proj")
     assert (fuser.q_size, fuser.kv_size) == (32, 8 * kv_heads)
     names = fuser.fused_forward.__code__.co_names
@@ -1412,7 +1414,7 @@ def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
     with torch.device("meta"):
         meta = SlicedQKVAttention(heads=8, kv_heads=4)
     fuser = get_fuser(meta, PackedQKVFuser)
-    assert fuser is not None and fuser.form == "slice"
+    assert fuser is not None
 
     real: nn.Module = SlicedQKVAttention(heads=8, kv_heads=4)
     q_size, kv_size = fuser.q_size, fuser.kv_size
@@ -1453,7 +1455,6 @@ def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
         GapSlicedQKVAttention,
         ReusedSlicedQKVAttention,
         TracedBoundSlicedQKVAttention,
-        AnnotatedSlicedQKVAttention,
     ],
 )
 def test_irregular_slices_are_not_packed_qkv(attn_cls):
