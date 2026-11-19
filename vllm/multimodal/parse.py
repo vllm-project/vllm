@@ -776,6 +776,14 @@ class MultiModalDataParser:
             for item in data_items
         ]
 
+        data_items = [
+            np.ascontiguousarray(item)
+            if isinstance(item, np.ndarray)
+            and any(stride < 0 for stride in item.strides)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
