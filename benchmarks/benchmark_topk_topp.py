@@ -25,7 +25,6 @@ import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
 
-from vllm.v1.sample.ops import topk_topp_triton_gpu
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
@@ -117,7 +116,6 @@ def apply_top_k_top_p_flashinfer_mask(logits, k, p):
 
 
 IMPLEMENTATIONS = {
-    "triton-gpu": topk_topp_triton_gpu.apply_top_k_top_p_triton,
     "triton": apply_top_k_top_p_triton,
     "flashinfer-mask": apply_top_k_top_p_flashinfer_mask,
     "pytorch": apply_top_k_top_p_pytorch,
@@ -136,7 +134,6 @@ def measure_memory() -> tuple[int, int]:
 def reset_memory_stats():
     """Reset peak memory statistics."""
     reset_buffer_cache()
-    topk_topp_triton_gpu.reset_buffer_cache()
     torch.accelerator.reset_peak_memory_stats()
     torch.accelerator.empty_cache()
     gc.collect()
