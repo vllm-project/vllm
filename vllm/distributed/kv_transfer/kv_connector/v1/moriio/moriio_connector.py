@@ -296,12 +296,6 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         # when the attention prefix is already present locally.
         return self.mode == MoRIIOMode.READ and self._transfers_mamba_state
 
-    def set_xfer_handshake_metadata_pp_aware(self, metadata: dict) -> None:
-        # MoRIIO handshakes with every PP stage over its own side channel and
-        # reports no handshake metadata. Any metadata here belongs to another
-        # connector under MultiConnector (e.g. UMBP), keyed by every PP stage.
-        return None
-
     def __init__(
         self,
         vllm_config: VllmConfig,

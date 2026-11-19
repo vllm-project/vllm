@@ -678,6 +678,32 @@ def test_pp_configured_namespace_skips_gather(monkeypatch):
         worker.shutdown()
 
 
+def test_pp_stage_without_a_cache_group_is_rejected(monkeypatch):
+    """A PP stage may hold no layers of a global cache group (e.g. an indexer
+    group only on the last stage). UMBP assumes every stage holds every group,
+    so such a worker fails at startup rather than on its first save."""
+    runtime = MemoryRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "standalone", lambda _: runtime)
+    monkeypatch.setattr(
+        umbp_connector, "_gather_pp_stage_namespaces", lambda local: [local.value]
+    )
+    config = _pp_stage_kv_cache_config("layer0")
+    config.kv_cache_groups.append(
+        new_kv_cache_group(
+            [],
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+            ),
+        )
+    )
+    with pytest.raises(NotImplementedError, match=r"cache groups \[1\]"):
+        UMBPStoreConnector(
+            _pp_vllm_config({"mode": "standalone"}, rank=0),
+            KVConnectorRole.WORKER,
+            config,
+        )
+
+
 def test_layout_planner_builds_scatter_gather_ranges():
     planner = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
     plan = planner.plan_for_block(

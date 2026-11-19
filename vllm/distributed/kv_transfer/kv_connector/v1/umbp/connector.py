@@ -99,6 +99,22 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
         self._num_workers = 1
 
 
+def _reject_stage_missing_groups(kv_cache_config: KVCacheConfig) -> None:
+    """Under PP a stage may hold no layers of a global cache group. Saving,
+    restoring and looking up keys all assume every stage holds every group,
+    so refuse such a layout at startup instead of failing on the first save."""
+    missing = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if not group.layer_names
+    ]
+    if missing:
+        raise NotImplementedError(
+            "UMBP with pipeline parallelism needs every KV cache group on every "
+            f"stage, but this stage holds no layers of cache groups {missing}"
+        )
+
+
 def _gather_pp_stage_namespaces(local: UMBPNamespace) -> list[str]:
     """All-gather the namespace each pipeline stage derived, in stage order."""
     from vllm.distributed.parallel_state import get_pp_group
@@ -190,6 +206,9 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._namespace = UMBPNamespace.for_pipeline(
                     _gather_pp_stage_namespaces(self._namespace)
                 )
+            if topology.pp_size > 1:
+                # After the collective, so that no stage is left waiting in it.
+                _reject_stage_missing_groups(kv_cache_config)
             layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
             if self._dedup_tp_replicated:
                 self._replicated_groups = tp_replicated_group_ids(
