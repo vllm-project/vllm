@@ -180,13 +180,10 @@ def _group_range_objects(
     """One Store object per layer range holding some of the group's layers,
     or None if the group has no layers on this stage.
 
-    KV cache groups are formed over the whole model, and the draft model runs
-    on the last PP stage, whose last range holds its layers, so an object holds
-    the same layers at any PP size. Within an object, layers are ordered by KV
-    cache spec, in order of first appearance, then in group order: this is how
-    a block-outermost buffer places a group's layers, so the layers of one spec
-    in a range are one segment. `range_namespace` maps the specs of a range's
-    layers to its namespace; by default every range uses `metadata`'s.
+    Draft layers belong to the last range. Within an object, layers are
+    ordered by KV cache spec in order of first appearance, then in group
+    order. `range_namespace` maps a range's layer specs to its namespace; by
+    default every range uses `metadata`'s.
     """
     names = group.layer_names
     if not names:
@@ -1889,15 +1886,6 @@ class MooncakeStoreWorker:
                 if rank_local_format
                 else ""
             ),
-            layer_range=(
-                get_pp_indices(
-                    model_config.get_total_num_hidden_layers(),
-                    self.pp_rank,
-                    self.pp_size,
-                )
-                if self.pp_size > 1
-                else None
-            ),
         )
         self.token_dbs = self._build_token_databases(
             metadata,
@@ -2072,14 +2060,9 @@ class MooncakeStoreWorker:
         num_layers: int,
         plans: tuple[_StoreGroupPlan | None, ...] | None = None,
     ) -> tuple[tuple[int, int], ...] | None:
-        """Layer ranges this PP stage stores per object, or None for one object.
-
-        `pp_sizes` lists the PP partitions of the instances sharing the Store:
-        a PP size with the default partition, or the layer count of each
-        stage. The stage's layers are split at every stage boundary of those
-        partitions, so each instance writes and reads the same objects for the
-        layers it holds.
-        """
+        """Layer ranges this PP stage stores as separate objects: its layers
+        split at every stage boundary of the `pp_sizes` partitions. None when
+        `pp_sizes` is unset or ignored."""
         pp_sizes = extra_config.get("pp_sizes")
         if pp_sizes is None:
             return None
@@ -2147,17 +2130,6 @@ class MooncakeStoreWorker:
         draft_layers: frozenset[str] = frozenset(),
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
-        # Rank-local keys naming a layer range always hold that range's layers
-        # in Store object order, with or without pp_sizes. Within a layer the
-        # bytes follow the KV cache layout, so the same key holds the same bytes
-        # for layouts with the same order inside a layer (e.g. BLHNC and LBHNC).
-        rank_local_ranges = layer_ranges
-        if (
-            rank_local_ranges is None
-            and metadata.layer_range is not None
-            and self._kv_cache_config.hisparse_host_num_blocks is None
-        ):
-            rank_local_ranges = (metadata.layer_range,)
         token_dbs: list[ChunkedTokenDatabase] = []
         for group_idx, group in enumerate(self._kv_cache_groups):
             hash_block_size = (
@@ -2174,9 +2146,9 @@ class MooncakeStoreWorker:
                 )
                 range_objects = (
                     _group_range_objects(
-                        group_metadata, group, rank_local_ranges, draft_layers
+                        group_metadata, group, layer_ranges, draft_layers
                     )
-                    if rank_local_ranges is not None
+                    if layer_ranges is not None
                     else None
                 )
                 token_dbs.append(

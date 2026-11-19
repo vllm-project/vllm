@@ -3539,8 +3539,8 @@ def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
         layout = w.token_dbs[0].store_layout
         keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
 
-    assert "@layers:0-1@" in keys[0]
-    assert "@layers:1-2@" in keys[1]
+    assert "@pp_rank:0@" in keys[0]
+    assert "@pp_rank:1@" in keys[1]
 
 
 _PP_ATTENTION = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
@@ -3627,18 +3627,19 @@ def _layout_keys(layout) -> list[str]:
 
 
 @pytest.mark.cpu_test
-def test_pp_stage_keys_name_their_layers(pp_stage_layouts):
-    """A PP stage's keys name the layers it holds instead of its PP rank, so
-    an object holding every layer and a stage object holding some of them
-    never share a key, while PP=1 keys stay unchanged."""
-    keys = [
-        _layout_keys(pp_stage_layouts(pp_size, rank)[0])
-        for pp_size, rank in ((1, 0), (2, 0), (2, 1))
-    ]
+def test_pp_stage_keys_name_their_layers_only_with_pp_sizes(pp_stage_layouts):
+    """Without pp_sizes, PP stage keys keep the historical rank-local format.
+    With pp_sizes, they name the layers each object holds."""
+    default = [pp_stage_layouts(2, rank)[0] for rank in (0, 1)]
+    shared = [pp_stage_layouts(2, rank, {"pp_sizes": [2]})[0] for rank in (0, 1)]
 
-    assert keys[0] == [f"test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@{b'h'.hex()}"]
-    assert "@layers:0-1@" in keys[1][0]
-    assert "@layers:1-2@" in keys[2][0]
+    assert all(type(layout) is RankLocalStoreLayout for layout in default)
+    assert [_layout_keys(layout) for layout in default] == [
+        [f"test-model@tp_rank:0@pcp0@dcp0@pp_rank:{rank}@group:0@{b'h'.hex()}"]
+        for rank in (0, 1)
+    ]
+    assert "@layers:0-1@" in _layout_keys(shared[0])[0]
+    assert "@layers:1-2@" in _layout_keys(shared[1])[0]
 
 
 @pytest.mark.cpu_test
@@ -3758,7 +3759,7 @@ def test_pp_sizes_is_ignored_when_a_stage_lacks_a_group(pp_stage_layouts, caplog
 
     assert "ignores pp_sizes" in caplog.text
     assert ignored == keys(None)
-    assert len(ignored) == 1 and "@layers:4-8@" in ignored[0]
+    assert len(ignored) == 1 and "@pp_rank:1@" in ignored[0]
 
 
 @pytest.mark.cpu_test

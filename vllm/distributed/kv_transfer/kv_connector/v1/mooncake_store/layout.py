@@ -62,9 +62,9 @@ class KeyMetadata:
     # Complete namespace for an opt-in Store payload format. Empty keeps
     # historical keys byte-identical.
     store_namespace: str = ""
-    # Global layer range [start, end) of the KV a key holds. Keys name it
-    # instead of the PP rank, so objects holding different layers never share
-    # a key across PP sizes. None keeps the historical `@pp_rank:` keys.
+    # Global layer range [start, end) of the KV a key holds, named instead of
+    # the PP rank when `pp_sizes` is set. None keeps historical keys
+    # byte-identical.
     layer_range: tuple[int, int] | None = None
 
 
@@ -394,13 +394,9 @@ class RankLocalStoreLayout(StoreLayout):
 
 
 class LayerRangeStoreLayout(RankLocalStoreLayout):
-    """Rank-local Store payload stored as one object per layer range.
-
-    An object holds its layers' bytes in Store object order, without the
-    padding between layers, so instances whose PP stages split the layers at
-    the same points share it if their KV cache layouts order a layer's block
-    the same way.
-    """
+    """Rank-local Store payload stored as one object per layer range, holding
+    its layers' blocks in Store object order without the padding between
+    layers."""
 
     def __init__(
         self,
@@ -445,9 +441,8 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
         num_blocks: int,
         layer_names: Sequence[str] | None = None,
     ) -> None:
-        """A range's object is the byte runs of its layers in Store object
-        order. Runs that follow each other in one buffer, such as the layers
-        of one KV cache spec in a block-outermost buffer, form one segment."""
+        """Adjacent byte runs in one buffer, such as the layers of one KV cache
+        spec in a block-outermost buffer, form one segment."""
         # Segments as [address, block stride, length, buffer address].
         ranges: list[list[list[int]]] = [[] for _ in self._key_prefixes]
         for cache_index, range_index in _object_order(
@@ -493,10 +488,7 @@ class LayerRangeStoreLayout(RankLocalStoreLayout):
         starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
         spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
         assert np.all(spans % self.hash_block_size == 0)
-        # Other ranges' layers can lie between a range's blocks, so a chunk
-        # cannot run from one block into the next.
-        if np.any(spans > self.block_size):
-            raise ValueError("A Store layer range chunk cannot span blocks")
+        assert np.all(spans <= self.block_size)
         bids = np.fromiter(
             (block_ids[i] for i in (starts // self.block_size).tolist()),
             dtype=np.int64,

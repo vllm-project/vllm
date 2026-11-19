@@ -250,13 +250,14 @@ When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
 
 #### Sharing one Store across PP sizes
 
-By default, instances with different PP sizes do not reuse each other's
-entries. A PP = 1 instance stores each block as one object holding every
-layer, while each stage of a PP > 1 instance stores one object holding only
-its own layers, keyed by their global layer range (`@layers:<start>-<end>`).
+By default, each PP stage stores one object per block holding only its own
+layers, keyed by its PP rank. Instances with different PP sizes or layer
+partitions then write different layers under the same key, so they must not
+share a Store.
 
 To share entries, set `pp_sizes` to the PP sizes of all instances that use the
-Store:
+Store. Keys then name the global layer range each object holds
+(`@layers:<start>-<end>`):
 
 ```json
 {
@@ -309,8 +310,7 @@ The connector logs a warning and ignores `pp_sizes` when:
 - Store TP sharing is used with several KV cache groups, Mamba layers, or
   attention layers with different KV cache specs.
 
-An instance that ignores `pp_sizes` shares entries only with instances that use
-the same PP partition.
+An instance that ignores `pp_sizes` uses the default keys.
 
 **Proxy:**
 

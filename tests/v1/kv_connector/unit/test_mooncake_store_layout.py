@@ -423,9 +423,6 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
         [cache.data_ptr() + block_bytes for cache in caches[:2]],
     ]
     assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
-    # Other ranges' layers can lie between the blocks of a range.
-    with pytest.raises(ValueError, match="cannot span blocks"):
-        layout.prepare_values([(0, 2 * BLOCK_SIZE)], [1, 2], [0])
 
 
 @pytest.mark.parametrize(
