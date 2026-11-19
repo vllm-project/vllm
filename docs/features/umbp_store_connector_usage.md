@@ -141,7 +141,7 @@ With `kv_role: "kv_consumer"` the connector only restores and never stores.
 - Pipeline parallelism is rejected.
 - Stores are submitted once per step after the forward pass.
 
-### MiniMax M3 monokernel
+### MiniMax M3 and M3.1 monokernels
 
 The ROCm MiniMax M3 `--monokernel` accepts `UMBPStoreConnector` because it
 restores whole KV blocks produced with the same cache layout. Connectors that
@@ -154,6 +154,23 @@ and block size 128. Keep prefix caching, asynchronous UMBP loading, and the
 hybrid KV cache manager enabled so attention and indexer state are restored
 together. A connector capability declaration does not make an unsupported
 checkpoint weight layout compatible with the monokernel.
+
+MiniMax M3.1-Flash's all-sparse layout uses the existing whole-layer decode
+path, enabled by `VLLM_ROCM_MINIMAX_M3_MONO=1`. That path accepts UMBP in
+embedded and standalone modes under the same canonical-KV contract. It reads
+shared-expert fusion support from the MoE layers. Unlike M3's specialized
+path, whole-layer decode needs matching attention/indexer block IDs: use
+`--disable-hybrid-kv-cache-manager` and eager execution or full-decode CUDA
+graphs. Prefill and ineligible decode steps still use normal execution.
+
+On ROCm, the original `MiniMaxAI/MiniMax-M3.1-Flash` checkpoint needs the
+existing `--quantization-config.moe mxfp4` option to convert its NVFP4 routed
+experts to the kernel's supported format, or use a compatible Quark MXFP4
+checkpoint. Attention/dense weights retain their checkpoint format. The
+environment switch can fall back on unsupported configurations; verify the
+`MiniMax-M3 mono decode on: shared expert ...` log and check for later
+`mono decode off` messages. These setup logs do not prove every step used the
+monokernel. M3.1 routing through `--monokernel` is a separate change.
 
 With KV events enabled, the scheduler verifies residency on every rank before
 publishing a stored-object event. It periodically rechecks tracked objects

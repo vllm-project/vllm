@@ -454,6 +454,91 @@ def _mono_coverage(worker):
     return decode.mono_steps, decode.health().failed
 
 
+def _whole_layer_decode_active(worker):
+    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
+
+    backbone = next(
+        m for m in worker.get_model().modules() if isinstance(m, MiniMaxM3Model)
+    )
+    mono = backbone._mono
+    return (
+        mono is not None
+        and mono._enabled
+        and mono._runner is not None
+        and mono._slots_verified
+    )
+
+
+def test_m31_umbp_restore_keeps_whole_layer_decode(vllm_runner, monkeypatch, tmp_path):
+    """M3.1 keeps its whole-layer runner after an external prefix restore."""
+    from tests.models.utils import check_logprobs_close
+    from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
+        _external_tokens,
+        _reset_gpu_prefix_cache,
+    )
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_ROCM_MINIMAX_M3_MONO", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+    with vllm_runner(
+        "MiniMaxAI/MiniMax-M3.1-Flash",
+        skip_tokenizer_init=True,
+        tensor_parallel_size=4,
+        quantization_config={"moe": "mxfp4"},
+        kernel_config={"moe_backend": "aiter"},
+        kv_cache_dtype="fp8",
+        block_size=128,
+        attention_backend="ROCM_AITER_FA",
+        attention_config={"indexer_kv_dtype": "fp8"},
+        enforce_eager=True,
+        disable_hybrid_kv_cache_manager=True,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        language_model_only=True,
+        max_model_len=4096,
+        max_num_seqs=1,
+        kv_transfer_config={
+            "kv_connector": "UMBPStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "mode": "embedded",
+                "capacity_bytes": 1 << 30,
+                "lookup_dir": str(tmp_path),
+                "dram_prefault": False,
+                "load_async": True,
+            },
+        },
+    ) as runner:
+        llm = runner.llm
+        prompt = {"prompt_token_ids": [1 + (i * 37) % (VOCAB - 1) for i in range(2307)]}
+        params = SamplingParams(
+            temperature=0,
+            max_tokens=STEPS,
+            logprobs=5,
+            detokenize=False,
+            ignore_eos=True,
+        )
+        expected = llm.generate(prompt, params, use_tqdm=False)
+        assert all(llm.collective_rpc(_whole_layer_decode_active))
+        _reset_gpu_prefix_cache(llm)
+        before = _external_tokens(llm)
+        restored = llm.generate(prompt, params, use_tqdm=False)
+        assert _external_tokens(llm) - before == 2304
+        assert restored[0].num_cached_tokens == 2304
+        assert all(llm.collective_rpc(_whole_layer_decode_active))
+        check_logprobs_close(
+            outputs_0_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in expected
+            ],
+            outputs_1_lst=[
+                (o.outputs[0].token_ids, "", o.outputs[0].logprobs) for o in restored
+            ],
+            name_0="M3.1 recompute",
+            name_1="M3.1 UMBP restore",
+            always_check_logprobs=True,
+        )
+
+
 @pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full_graphs"])
 def test_umbp_restore_keeps_monokernel(vllm_runner, model_dir, tmp_path, graphs):
     """Restore attention and indexer KV, then decode through the fused FFN."""

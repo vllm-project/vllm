@@ -1,5 +1,11 @@
 # MiniMax M3 specialized decode
 
+M3.1-Flash's all-sparse attention layout uses the separate `amd/mono`
+whole-layer path via `VLLM_ROCM_MINIMAX_M3_MONO=1`. Both paths accept UMBP's
+canonical KV blocks. Whole-layer decode needs
+`--disable-hybrid-kv-cache-manager` to share attention/indexer block IDs;
+the specialized path below keeps the hybrid manager enabled.
+
 `--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
 norm and attention followed by one persistent FlyDSL launch for the rest of the
 layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
