@@ -611,7 +611,7 @@ def _new_req_ids(output: SchedulerOutput) -> list[str]:
 
 def test_prompt_embeds_admission_waits_for_gpu_budget():
     """A prompt_embeds request waits while its rows would push the rows held on
-    the GPU past max_num_prompt_embeds_tokens (here max_model_len). Requests
+    the GPU past the budget, max_model_len. Requests
     without embeds are admitted past it, and it is admitted once a held prompt
     is fully computed, before that request finishes."""
     scheduler = create_scheduler(max_model_len=64, enable_prompt_embeds=True)

@@ -175,7 +175,7 @@ def test_index_reuse_clears_stale_entry():
 def test_drops_embeds_after_last_prompt_step():
     """A request's GPU embeddings are freed after the step that computes its
     last prompt position, and only then; the scheduler counts them against
-    max_num_prompt_embeds_tokens until that step."""
+    the max_model_len budget until that step."""
     state = _make_state()
     embeds = torch.randn(6, HIDDEN, dtype=torch.float32)
     state.add_request(0, _NewReqData("a", embeds))
@@ -210,7 +210,7 @@ def test_rows_over_budget_fail_loudly():
     it means the scheduler and workers disagree on when rows are freed."""
     state = _make_state()
     state.add_request(0, _NewReqData("a", torch.randn(10, HIDDEN)))
-    with pytest.raises(AssertionError, match="max_num_prompt_embeds_tokens"):
+    with pytest.raises(AssertionError, match="max_model_len budget"):
         state.add_request(1, _NewReqData("b", torch.randn(7, HIDDEN)))
 
     state.remove_request("a")

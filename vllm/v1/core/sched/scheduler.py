@@ -224,12 +224,11 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
 
-        # Prompt-embeds rows the workers hold on the GPU, per request, until
-        # its prompt is computed (or it finishes, see the helper). None without
-        # enable_prompt_embeds, when no request carries prompt_embeds.
-        self.max_num_prompt_embeds_tokens = (
-            self.scheduler_config.max_num_prompt_embeds_tokens or 0
-        )
+        # Prompt-embeds rows the workers may hold on the GPU, summed over the
+        # requests whose prompts are not computed yet: one max-length prompt, so
+        # any request fits. Memory profiling reserves it. With
+        # kv_load_failure_policy="recompute", rows stay until a request finishes.
+        self.max_num_prompt_embeds_tokens = self.max_model_len
         self.prompt_embeds_rows: dict[str, int] = {}
         self.num_prompt_embeds_rows = 0
         self.keep_prompt_embeds_until_finished = keep_prompt_embeds_until_finished(

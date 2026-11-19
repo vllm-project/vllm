@@ -22,8 +22,8 @@ class PromptEmbedsState:
 
     A request's embeddings are dropped after the step that computes its last
     prompt position, unless `keep_until_finished`. The scheduler admits
-    requests so that the rows held here stay within
-    `max_num_prompt_embeds_tokens`, which memory profiling reserves.
+    requests so that the rows held here stay within `max_model_len`, which
+    memory profiling reserves.
     """
 
     def __init__(
@@ -65,7 +65,7 @@ class PromptEmbedsState:
         # requests before adding new ones.
         num_rows = prompt_embeds.shape[0]
         assert self.num_rows + num_rows <= self.max_num_rows, (
-            f"prompt_embeds rows exceed max_num_prompt_embeds_tokens "
+            f"prompt_embeds rows exceed the max_model_len budget "
             f"({self.num_rows} held + {num_rows} > {self.max_num_rows})"
         )
         self.num_rows += num_rows
