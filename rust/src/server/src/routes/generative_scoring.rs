@@ -184,25 +184,18 @@ pub async fn generative_scoring(
 /// One sampling step that returns the full-vocabulary logprobs of the label
 /// tokens.
 ///
-/// Like Python, every other parameter is the plain `SamplingParams` default,
-/// not the model's generation config: under `--logprobs-mode
-/// processed_logprobs` the logprobs are taken after temperature and top-k/p,
-/// and the scored distribution must not depend on the model's sampling
-/// defaults.
+/// Like Python, every other parameter is vLLM's neutral default
+/// ([`SamplingParams::neutral`]), not the model's generation config: under
+/// `--logprobs-mode processed_logprobs` the logprobs are taken after
+/// temperature and top-k/p, and the scored distribution must not depend on
+/// the model's sampling defaults.
 fn label_read_sampling_params(label_token_ids: &[u32]) -> SamplingParams {
     SamplingParams {
-        temperature: Some(1.0),
-        top_p: Some(1.0),
-        top_k: Some(0),
-        min_p: Some(0.0),
-        frequency_penalty: Some(0.0),
-        presence_penalty: Some(0.0),
-        repetition_penalty: Some(1.0),
         watermarking: Some(false),
         max_tokens: Some(1),
         logprobs: Some(i32::try_from(label_token_ids.len()).unwrap_or(i32::MAX)),
         logprob_token_ids: Some(label_token_ids.to_vec()),
-        ..SamplingParams::default()
+        ..SamplingParams::neutral()
     }
 }
 
