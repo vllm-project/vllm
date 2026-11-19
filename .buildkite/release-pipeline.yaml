@@ -516,7 +516,7 @@ steps:
 
       - label: "Publish nightly Rust frontend to Docker Hub"
         key: publish-nightly-rust-frontend
-        depends_on: [build-rust-frontend-x86, build-rust-frontend-arm64, publish-nightly-engine-dockerhub]
+        depends_on: [build-rust-frontend-x86, build-rust-frontend-arm64]
         if: build.env("NIGHTLY") == "1"
         agents: {queue: small_cpu_queue_release}
         concurrency: 1
@@ -532,7 +532,6 @@ steps:
         env: {DOCKERHUB_USERNAME: vllm}
 
       - label: "Publish nightly multi-arch image to DockerHub"
-        key: publish-nightly-engine-dockerhub
         depends_on:
           - create-multi-arch-manifest
         if: build.env("NIGHTLY") == "1"
@@ -795,9 +794,6 @@ steps:
       - block-publish-release-images
       - build-rust-frontend-x86
       - build-rust-frontend-arm64
-      # Check the published default engine even if another matrix entry failed.
-      - step: publish-release-images-dockerhub
-        allow_failure: true
     agents: {queue: small_cpu_queue_release}
     concurrency: 1
     concurrency_group: rust-frontend-release-publish

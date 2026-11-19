@@ -10,7 +10,7 @@ manifest_digest() {
 sources=()
 for arch in x86_64 aarch64; do
     digest=$(buildkite-agent meta-data get "rust-frontend-$arch")
-    [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+    [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid staged digest for $arch" >&2; exit 1; }
     sources+=("$staging@$digest")
 done
 case "${1:-}" in
@@ -21,10 +21,6 @@ case "${1:-}" in
         moving=latest ;;
     *) echo "Usage: $0 {nightly|release}" >&2; exit 2 ;;
 esac
-engine=vllm/vllm-openai
-engine_pinned=$(manifest_digest "$engine:$tag")
-docker buildx imagetools inspect "$engine@$engine_pinned" --format '{{json .Image}}' | jq -e \
-    --arg commit "$BUILDKITE_COMMIT" 'all(."linux/amd64", ."linux/arm64"; .config.Labels["org.opencontainers.image.revision"] == $commit)'
 
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${staging%/*}"
 index="$staging:$BUILDKITE_BUILD_ID-$moving-rust-frontend"
@@ -54,7 +50,4 @@ if [[ $moving == latest ]]; then
     # Release candidates get a versioned tag only.
     [[ $tag =~ ^v[0-9]+(\.[0-9]+){2,}(\.post[0-9]+)?$ ]] || exit 0
 fi
-# Only advance the alias while the engine still advertises the matching build.
-engine_current=$(manifest_digest "$engine:$moving")
-[[ $engine_pinned == "$engine_current" ]] || exit 0
 docker buildx imagetools create -t "$hub:$moving" -t "vllm/vllm:$moving-rust-frontend" "$hub@$digest"
