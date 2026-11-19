@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import functools
 import itertools
 import os
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.mamba.abstract import get_mamba_prefill_checkpoint_grid
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -41,9 +43,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
-)
-from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
-    gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
     chunk_gdn_hip_fwd,
@@ -73,6 +72,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
     fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -82,6 +82,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import (
+    FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -841,7 +842,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.conv1d.weight.new_zeros(self.conv1d.weight.shape[0]),
                 persistent=False,
             )
-        self._init_prefill_checkpointing()
+        checkpoint_alignment = None
+        if self.gdn_prefill_backend == "flashinfer":
+            checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+        elif (
+            self.gdn_prefill_backend in ("triton", "aiter_flydsl")
+            and current_platform.is_cuda_alike()
+        ):
+            checkpoint_alignment = FLA_CHUNK_SIZE
+        self._init_prefill_checkpointing(checkpoint_alignment)
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -905,6 +914,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 "state, an unquantized out_proj and no speculative decoding"
             )
         return None
+
+    @functools.cached_property
+    def _checkpoint_buffer_spec(self) -> tuple[tuple[int, ...], torch.dtype]:
+        if self.gdn_prefill_backend != "flashinfer":
+            return super()._checkpoint_buffer_spec
+        return (
+            (
+                cdiv(
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                    get_mamba_prefill_checkpoint_grid(self.vllm_config),
+                ),
+                *self.get_state_shape()[1],
+            ),
+            torch.float32,
+        )
 
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
@@ -1879,7 +1903,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_qk_l2norm_in_kernel=True,
         )
 
-    def _forward_chunk_prefill(
+    def _forward_prefill(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -1888,52 +1912,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=attn_metadata.prefill_query_start_loc,
-            chunk_indices=attn_metadata.chunk_indices,
-            chunk_offsets=attn_metadata.chunk_offsets,
-            use_qk_l2norm_in_kernel=False,
-            aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
-        )
-
-    def _forward_flashinfer_prefill(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        attn_metadata: GDNAttentionMetadata,
         *,
-        ssm_state: torch.Tensor,
-        conv_state: torch.Tensor,
         conv_input: torch.Tensor | None,
-        output: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """FlashInfer chunked prefill of the batch's prefill rows.
-
-        Writes the output into `output` when given and exports the
-        batch's internal prefill checkpoints. Returns the output and the
-        rows' final states.
-        """
-        has_initial_state = attn_metadata.prefill_has_initial_state
-        state_indices = attn_metadata.prefill_state_indices
-        assert has_initial_state is not None
-        assert state_indices is not None
-        initial_state = gather_initial_states(
-            ssm_state, state_indices, has_initial_state
-        )
-        plan = attn_metadata.flashinfer_checkpoint_plan
-        if plan is None:
-            return fi_chunk_gated_delta_rule(
+        output: torch.Tensor,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        if self.gdn_prefill_backend != "flashinfer":
+            if attn_metadata.checkpoint is not None:
+                return super()._forward_prefill(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    initial_state,
+                    attn_metadata,
+                    conv_input=conv_input,
+                    output=output,
+                    use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                )
+            return self.chunk_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -1942,14 +1940,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
-                use_qk_l2norm_in_kernel=False,
-                output=output,
+                chunk_indices=attn_metadata.chunk_indices,
+                chunk_offsets=attn_metadata.chunk_offsets,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
             )
 
-        (state_checkpoints,) = current_workspace_manager().get_simultaneous(
-            self._checkpoint_buffer_spec
-        )
-        state_checkpoints = state_checkpoints[: plan.num_checkpoints]
+        prefill_out = None
+        if attn_metadata.spec_sequence_masks is None:
+            prefill_out = output[
+                attn_metadata.num_decode_tokens : attn_metadata.num_actual_tokens
+            ]
+        plan = attn_metadata.flashinfer_checkpoint_plan
+        state_checkpoints = None
+        if plan is not None:
+            (state_checkpoints,) = current_workspace_manager().get_simultaneous(
+                self._checkpoint_buffer_spec
+            )
+            state_checkpoints = state_checkpoints[: plan.num_checkpoints]
         core_out, final_state = fi_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -1959,25 +1967,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state=initial_state,
             output_final_state=True,
             cu_seqlens=attn_metadata.prefill_query_start_loc,
-            use_qk_l2norm_in_kernel=False,
-            output=output,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            output=prefill_out,
             state_checkpoints=state_checkpoints,
-            checkpoint_cu_starts=plan.cu_starts,
-            checkpoint_every_n_tokens=plan.every_n_tokens,
+            checkpoint_cu_starts=plan.cu_starts if plan is not None else None,
+            checkpoint_every_n_tokens=plan.every_n_tokens if plan is not None else 0,
         )
-        assert attn_metadata.checkpoint is not None
-        assert attn_metadata.non_spec_query_start_loc is not None
-        assert conv_input is not None
-        self._checkpoint_exporter.export(
-            attn_metadata.checkpoint,
-            raw_qkv=conv_input,
-            conv_state=conv_state,
-            recurrent_checkpoint=state_checkpoints,
-            recurrent_state=ssm_state,
-            cu_seqlens=attn_metadata.non_spec_query_start_loc,
-            recurrent_rows=plan.rows,
-        )
-        return core_out, final_state
+        if plan is not None:
+            assert attn_metadata.checkpoint is not None
+            assert attn_metadata.non_spec_query_start_loc is not None
+            assert conv_input is not None
+            self._checkpoint_exporter.export(
+                attn_metadata.checkpoint,
+                raw_qkv=conv_input,
+                conv_state=self._get_conv_state(),
+                recurrent_checkpoint=state_checkpoints,
+                recurrent_state=self.kv_cache[1],
+                cu_seqlens=attn_metadata.non_spec_query_start_loc,
+                recurrent_rows=plan.rows,
+            )
+        return (None if prefill_out is not None else core_out), final_state
 
     def _forward_core_decode_aiter(
         self,
@@ -1989,15 +1998,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ):
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache
-        # conv_state must be (..., dim, width-1) for the conv kernels.
-        # DS layout stores it that way directly; SD layout needs a transpose.
-        conv_state = (
-            self_kv_cache[0]
-            if is_conv_state_dim_first()
-            else self_kv_cache[0].transpose(-1, -2)
-        )
-        ssm_state = self_kv_cache[1]
+        conv_state = self._get_conv_state()
+        ssm_state = self.kv_cache[1]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -2100,15 +2102,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ):
         """Core attention computation with a packed non-spec decode fast path."""
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache
-        # conv_state must be (..., dim, width-1) for the conv kernels.
-        # DS layout stores it that way directly; SD layout needs a transpose.
-        conv_state = (
-            self_kv_cache[0]
-            if is_conv_state_dim_first()
-            else self_kv_cache[0].transpose(-1, -2)
-        )
-        ssm_state = self_kv_cache[1]
+        conv_state = self._get_conv_state()
+        ssm_state = self.kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -2160,11 +2155,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         num_requests = attn_metadata.num_spec_decodes
         num_actual_tokens = attn_metadata.num_actual_tokens
-        conv_state = (
-            self.kv_cache[0]
-            if is_conv_state_dim_first()
-            else self.kv_cache[0].transpose(-1, -2)
-        )
+        conv_state = self._get_conv_state()
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )

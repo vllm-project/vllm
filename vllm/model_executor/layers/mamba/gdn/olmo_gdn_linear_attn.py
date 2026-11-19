@@ -30,7 +30,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -75,7 +78,9 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         _log_gdn_backend_decision(vllm_config, requested_backend, "triton")
         self.gdn_prefill_backend = "triton"
-        self._init_prefill_checkpointing()
+        self._init_prefill_checkpointing(
+            FLA_CHUNK_SIZE if current_platform.is_cuda_alike() else None
+        )
         self._prefill_kernels_warmed_up = False
 
         # Fused QKVG projection: 1 matmul instead of 4
@@ -363,6 +368,43 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             g.squeeze(0),
             core_attn_out,
             attn_metadata,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    def _prepare_prefill_inputs(
+        self,
+        conv_output: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = self.rearrange_mixed_qkv(conv_output)
+        assert q is not None and k is not None and v is not None
+        return q, k, v, a.unsqueeze(0), b.unsqueeze(0)
+
+    def _recurrent_update(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        initial_state: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=a.unsqueeze(0),
+            beta=b.unsqueeze(0),
+            initial_state=initial_state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
         )
 

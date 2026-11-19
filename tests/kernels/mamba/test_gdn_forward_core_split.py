@@ -46,7 +46,7 @@ BLOCK_SIZE = 16
 PREFIX = "model.layers.0.linear_attn"
 
 
-def _make_vllm_config(model):
+def _make_vllm_config(model, backend):
     cfg = create_vllm_config(
         model_name=(
             "Qwen/Qwen3.5-0.8B" if model == "qwen" else "allenai/Olmo-Hybrid-7B"
@@ -54,7 +54,7 @@ def _make_vllm_config(model):
         block_size=BLOCK_SIZE,
         dtype="bfloat16",
     )
-    cfg.cache_config.mamba_cache_mode = "none"
+    cfg.cache_config.enable_prefix_caching = False
     cfg.model_config.hf_text_config.update(
         {
             "hidden_size": 64,
@@ -65,11 +65,12 @@ def _make_vllm_config(model):
             "linear_conv_kernel_dim": 4,
         }
     )
-    backend = (
-        "cutedsl"
-        if model == "qwen" and current_platform.is_device_capability_family(100)
-        else "triton"
-    )
+    if backend is None:
+        backend = (
+            "cutedsl"
+            if model == "qwen" and current_platform.is_device_capability_family(100)
+            else "triton"
+        )
     cfg.additional_config = {"gdn_prefill_backend": backend}
     return cfg
 
@@ -114,7 +115,31 @@ def _run_forward_core(layer, cfg, meta, mixed_qkv, b, a):
     return out
 
 
-@pytest.mark.parametrize("model", ["qwen", "olmo"])
+@pytest.mark.parametrize(
+    "model,backend",
+    [
+        ("qwen", None),
+        ("olmo", None),
+        pytest.param(
+            "qwen",
+            "flashinfer",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda()
+                or not (
+                    current_platform.is_device_capability(90)
+                    or (
+                        current_platform.get_cuda_runtime_major() >= 13
+                        and (
+                            current_platform.is_device_capability_family(100)
+                            or current_platform.is_device_capability_family(120)
+                        )
+                    )
+                ),
+                reason="FlashInfer GDN needs SM90, or SM100/SM120 with CUDA 13.",
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
 @pytest.mark.parametrize("fresh_prefill", [False, True])
@@ -122,6 +147,7 @@ def _run_forward_core(layer, cfg, meta, mixed_qkv, b, a):
 def test_forward_core_split_matches_unified(
     dist_init,
     model,
+    backend,
     state_dtype,
     num_decodes,
     prefill_lens,
@@ -129,7 +155,7 @@ def test_forward_core_split_matches_unified(
 ):
     torch.manual_seed(0)
     device = torch.device("cuda")
-    cfg = _make_vllm_config(model)
+    cfg = _make_vllm_config(model, backend)
     config = cfg.model_config.hf_text_config
     h, hv = config.linear_num_key_heads, config.linear_num_value_heads
     k, v = config.linear_key_head_dim, config.linear_value_head_dim
@@ -165,6 +191,8 @@ def test_forward_core_split_matches_unified(
     common = common.replace(block_table_tensor=common.block_table_tensor + 1)
     with set_current_vllm_config(cfg):
         meta_split = builder.build(0, common)
+    if backend == "flashinfer":
+        assert builder.gdn_prefill_backend == "flashinfer"
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.spec_sequence_masks is None
