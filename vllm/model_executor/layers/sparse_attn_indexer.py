@@ -85,6 +85,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.attention.ops.pcp_dcp_overlap import pop_indexer_overlap
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -614,6 +615,7 @@ def sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
+    overlap = pop_indexer_overlap()
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -769,12 +771,21 @@ def sparse_attn_indexer(
 
     if not skip_k_cache_insert:
         assert k is not None
-        k, slot_mapping_for_cache = maybe_gather_indexer_k(
-            k,
-            slot_mapping,
-            num_decode_tokens,
-            use_pcp,
-            pcp_shard_decode_requests=pcp_shard_decode_requests,
+        gathered_new_k = (
+            overlap.gathered_index_k(slot_mapping, num_decode_tokens)
+            if overlap is not None
+            else None
+        )
+        k, slot_mapping_for_cache = (
+            gathered_new_k
+            if gathered_new_k is not None
+            else maybe_gather_indexer_k(
+                k,
+                slot_mapping,
+                num_decode_tokens,
+                use_pcp,
+                pcp_shard_decode_requests=pcp_shard_decode_requests,
+            )
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
@@ -855,7 +866,20 @@ def sparse_attn_indexer(
             assert chunk.local_cu_seq_lens is not None
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
-            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+            replica_k = None
+            if overlap is not None and not skip_k_cache_insert:
+                assert scale_fmt is not None
+                replica_k = overlap.take_k(
+                    chunk,
+                    k,
+                    quant_block_size,
+                    "mxfp8" if mqa_logits_use_mx_scales() else scale_fmt,
+                )
+            if (
+                replica_k is None
+                and not chunk.skip_kv_gather
+                and chunk.local_total_seq_lens > 0
+            ):
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
                     k_quant,
@@ -868,7 +892,11 @@ def sparse_attn_indexer(
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
-            if deinterleave_idx is not None:
+            if deinterleave_idx is not None and replica_k is not None:
+                # The layer's K replica holds the whole context in token order,
+                # this chunk's rows included.
+                k_quant, k_scale = replica_k
+            elif deinterleave_idx is not None:
                 # local_total_seq_lens is the PCP-padded extent here, so every
                 # rank contributes an identically shaped shard.
                 gathered_values, gathered_scales, out_values, out_scales = gather_bufs

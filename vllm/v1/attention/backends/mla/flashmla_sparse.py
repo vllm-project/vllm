@@ -12,6 +12,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -54,6 +55,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
+from vllm.v1.attention.ops.kv_ce_overlap import get_kv_ce_overlap
 from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -330,6 +332,8 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
                 workspace_starts: torch.Tensor
                 chunk_tot_seqlen: int
                 seq_lens: torch.Tensor | None = None
+                # PCP+DCP, one request: tokens computed before this step.
+                context_start: int | None = None
 
             chunks: list[Chunk]
 
@@ -343,6 +347,38 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
 
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
+
+
+def _kv_ce_overlap_metadata(layer_name: str) -> "FlashMLASparseMetadata | None":
+    """The metadata another layer of this step will attend with, when it has
+    prefill metadata the PCP + DCP KV prefetch can use."""
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        return None
+    metadata = attn_metadata.get(layer_name)
+    if (
+        not isinstance(metadata, FlashMLASparseMetadata)
+        or metadata.shardq is not None
+        or not isinstance(
+            metadata.fp8_extra_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        )
+        or metadata.fp8_extra_metadata.prefill is None
+    ):
+        return None
+    return metadata
+
+
+def _kv_ce_overlap_prefill(
+    layer_name: str,
+) -> "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill | None":
+    """The prefill metadata another layer of this step will attend with, for the
+    PCP + DCP KV prefetch."""
+    metadata = _kv_ce_overlap_metadata(layer_name)
+    if metadata is None:
+        return None
+    fp8_metadata = metadata.fp8_extra_metadata
+    assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
+    return fp8_metadata.prefill
 
 
 def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -573,7 +609,9 @@ class FlashMLASparseMetadataBuilder(
             row_bounds = np.arange(num_prefills + 1)
             prefill_block_table = common_attn_metadata.block_table_tensor[num_decodes:]
             prefill_seq_lens = common_attn_metadata.seq_lens[num_decodes:]
+            context_starts = None
             if self.pcp_dcp_kv_gather:
+                context_starts = common_attn_metadata.dcp_request_context_starts_cpu
                 # One entry per request, holding this rank's KV shard: the
                 # all-gather of every rank's shard is the whole context.
                 # A dummy batch bypasses the PCP manager: one row per request,
@@ -653,6 +691,10 @@ class FlashMLASparseMetadataBuilder(
                 chunk_workspace_starts = prefill_workspace_starts[chunk_start:chunk_end]
                 chunk_block_table = prefill_block_table[chunk_start:chunk_end]
                 chunk_seq_lens = prefill_seq_lens[chunk_start:chunk_end]
+                context_start = None
+                if context_starts is not None and chunk_end - chunk_start == 1:
+                    first_row = num_decodes + int(row_bounds[chunk_start])
+                    context_start = int(context_starts[first_row])
 
                 prefill_chunks.append(
                     FP8Meta.Prefill.Chunk(
@@ -662,6 +704,7 @@ class FlashMLASparseMetadataBuilder(
                         workspace_starts=chunk_workspace_starts,
                         chunk_tot_seqlen=chunk_tot_seqlen,
                         seq_lens=chunk_seq_lens,
+                        context_start=context_start,
                     )
                 )
 
@@ -813,6 +856,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
 
         self.pcp_dcp_kv_gather = False
+        self.kv_ce_overlap = None
         self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             (q_concat_shape, torch.bfloat16)
         ]
@@ -831,10 +875,40 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # shards into a workspace of the full prefill size.
                 shard_rows //= parallel_config.decode_context_parallel_size
             self.prefill_workspace_shape = (shard_rows, self.q_head_size)
-            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
+            gathered_rows = prefill_workspace_size
+            if self.pcp_dcp_kv_gather and parallel_config.pcp_dcp_kv_prefetch:
+                if kv_cache_dtype == "fp8_ds_mla":
+                    self.kv_ce_overlap = get_kv_ce_overlap(
+                        get_dcp_group(),
+                        torch.device("cuda", torch.accelerator.current_device_index()),
+                        shard_rows,
+                        gathered_rows,
+                        self.q_head_size,
+                        parallel_config.num_ubatches,
+                        vllm_config.cache_config.block_size,
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                    )
+                if self.kv_ce_overlap is None:
+                    logger.warning_once(
+                        "pcp_dcp_kv_prefetch needs the fp8_ds_mla KV cache, "
+                        "symmetric memory across the DCP group and a single "
+                        "micro-batch; using the serial KV all-gather."
+                    )
+            if self.kv_ce_overlap is not None:
+                topk_buffer = self.topk_indices_buffer
+                if self.index_group_index > 0 and topk_buffer is not None:
+                    # This layer reuses its index group's top-k: its prefetch can
+                    # carry only the rows that top-k selects.
+                    self.kv_ce_overlap.enable_union(tuple(topk_buffer.shape))
+                # Its own buffers replace both views. They cannot alias other
+                # scratch, so they add memory where the workspace is shared.
+                shard_rows = gathered_rows = 1
+            self.workspace_specs.append(
+                ((shard_rows, self.q_head_size), torch.bfloat16)
+            )
             if self.pcp_dcp_kv_gather:
                 self.workspace_specs.append(
-                    ((prefill_workspace_size, self.q_head_size), torch.bfloat16)
+                    ((gathered_rows, self.q_head_size), torch.bfloat16)
                 )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
@@ -985,20 +1059,49 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
+        joined_kv: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
-        the whole context, and map their top-k onto the rank-major result."""
-        shard_rows = int(chunk.chunk_tot_seqlen)
-        _, _, gathered_kv_workspace, *_ = current_workspace_manager().get_simultaneous(
-            *self.workspace_specs
-        )
-        gathered_kv = gathered_kv_workspace[: self.dcp_world_size * shard_rows]
-        dist.all_gather_into_tensor(
-            gathered_kv, shard, group=get_dcp_group().device_group
-        )
+        the whole context, and map their top-k onto the rank-major result.
 
+        `joined_kv` is the context the KV prefetch already gathered.
+        """
+        shard_rows = int(chunk.chunk_tot_seqlen)
+        gathered_kv = joined_kv
+        if gathered_kv is None:
+            if self.kv_ce_overlap is not None:
+                gathered_kv = self.kv_ce_overlap.serial_region(chunk)
+            else:
+                _, _, gathered_kv_workspace, *_ = (
+                    current_workspace_manager().get_simultaneous(*self.workspace_specs)
+                )
+                gathered_kv = gathered_kv_workspace[: self.dcp_world_size * shard_rows]
+            dist.all_gather_into_tensor(
+                gathered_kv, shard, group=get_dcp_group().device_group
+            )
+        elif self.kv_ce_overlap is not None:
+            # A layer that reuses the previous layer's top-k got only its selected
+            # rows, compacted; its top-k was remapped onto them.
+            compact = self.kv_ce_overlap.take_joined_topk()
+            if compact is not None:
+                assert compact[0].shape == topk_indices.shape
+                return gathered_kv, compact[0], compact[1]
+
+        topk_indices, topk_length = self._convert_prefill_topk(
+            chunk, topk_indices, attn_metadata, prefill_meta
+        )
+        return gathered_kv, topk_indices, topk_length
+
+    def _convert_prefill_topk(
+        self,
+        chunk: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk",
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map a PCP+DCP chunk's top-k onto its rank-major gathered context."""
         tokens = chunk.tokens_slice
-        topk_indices, topk_length = triton_convert_req_index_to_global_index(
+        return triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[tokens],
             attn_metadata.block_table,
             topk_indices,
@@ -1007,13 +1110,33 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             HAS_PREFILL_WORKSPACE=True,
             prefill_workspace_request_ids=prefill_meta.request_ids[tokens],
             prefill_workspace_starts=prefill_meta.workspace_starts,
-            prefill_workspace_rank_stride=shard_rows,
+            prefill_workspace_rank_stride=int(chunk.chunk_tot_seqlen),
             dcp_size=self.dcp_world_size,
             dcp_rank=self.dcp_rank,
             cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
             return_valid_counts=True,
         )
-        return gathered_kv, topk_indices, topk_length
+
+    def _kv_ce_overlap_convert(
+        self, layer_name: str, topk_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert `topk_indices` as layer `layer_name` will in this step, on the
+        current stream."""
+        metadata = _kv_ce_overlap_metadata(layer_name)
+        prefill = _kv_ce_overlap_prefill(layer_name)
+        assert metadata is not None and prefill is not None
+        stream = current_stream()
+        # The step's metadata may be freed before the main stream joins.
+        for tensor in (
+            metadata.req_id_per_token,
+            metadata.block_table,
+            prefill.request_ids,
+            prefill.workspace_starts,
+        ):
+            tensor.record_stream(stream)
+        return self._convert_prefill_topk(
+            prefill.chunks[0], topk_indices, metadata, prefill
+        )
 
     def _forward_fp8_kv_separate_prefill_decode(
         self,
@@ -1021,6 +1144,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """The lse covers the decode rows and is only returned under PCP+DCP."""
         fp8_metadata = attn_metadata.fp8_extra_metadata
@@ -1036,6 +1160,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         decode_topk: torch.Tensor | None = None
         index_group = self.index_group
         uses_host_cache = isinstance(index_group, HiSparseMLAIndexGroup)
+        if uses_host_cache and self.kv_ce_overlap is not None:
+            raise ValueError("pcp_dcp_kv_prefetch does not support HiSparse.")
         if uses_host_cache and num_decode_tokens > 0:
             decode_topk = topk_indices[:num_decode_tokens]
 
@@ -1168,8 +1294,23 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 )
 
             assert fp8_metadata.prefill is not None
+            overlap = self.kv_ce_overlap
+            if overlap is not None:
+                assert layer is not None
+                overlap.begin_layer(
+                    layer,
+                    get_forward_context(),
+                    _kv_ce_overlap_prefill,
+                    num_decode_tokens,
+                    attn_metadata.cp_kv_cache_interleave_size,
+                    _kv_ce_overlap_metadata,
+                )
             for chunk_index, chunk in enumerate(fp8_metadata.prefill.chunks):
                 chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
+                joined_kv = None
+                if overlap is not None:
+                    chunk_workspace = overlap.shard_view(chunk.chunk_tot_seqlen)
+                    joined_kv = overlap.join(chunk)
                 if uses_host_cache and chunk_index > 0:
                     assert isinstance(index_group, HiSparseMLAIndexGroup)
                     prefill_ready = index_group.gather_fp8_prefill(
@@ -1182,7 +1323,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                         attn_metadata,
                         chunk.req_start_idx,
                     )
-                if uses_host_cache:
+                if joined_kv is not None:
+                    # The KV prefetch already holds the gathered context.
+                    pass
+                elif uses_host_cache:
                     assert prefill_ready is not None
                     current_stream().wait_event(prefill_ready)
                 elif self.kv_cache_dtype == "fp8_ds_mla":
@@ -1211,6 +1355,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                             topk_indices[chunk.tokens_slice],
                             attn_metadata,
                             fp8_metadata.prefill,
+                            joined_kv,
                         )
                     )
                 else:
@@ -1218,6 +1363,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     assert topk_length is not None
                     chunk_topk_length = topk_length[chunk.tokens_slice]
 
+                if overlap is not None:
+                    overlap.start_next(
+                        _kv_ce_overlap_prefill,
+                        topk_indices[chunk.tokens_slice],
+                        self._kv_ce_overlap_convert,
+                    )
                 chunk_out, chunk_lse = self._bf16_flash_mla_kernel(
                     chunk_q,
                     chunk_workspace,
@@ -1548,7 +1699,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
         else:
             attn_out, lse = self._forward_fp8_kv_separate_prefill_decode(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata, layer
             )
 
         return attn_out, lse
