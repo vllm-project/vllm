@@ -40,7 +40,6 @@ from .compilation import (
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
-from .direct_reload import direct_reload_applies, uses_online_quantization
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
@@ -591,9 +590,6 @@ class VllmConfig:
             "ec_transfer": get_factors(self.ec_transfer_config),
             "aux_output": get_factors(self.aux_output_config),
         }
-        # direct reload swaps online methods for checkpoint methods
-        if uses_online_quantization(self) and direct_reload_applies(self):
-            factors["direct_reload"] = True
         if include_version:
             from vllm import __version__
 
@@ -1320,6 +1316,20 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
+    def _verify_direct_reload_compat(self) -> None:
+        """Reject configurations that direct weight reload cannot support."""
+        if envs.VLLM_RELOAD_MODE != "direct":
+            return
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_refusal,
+        )
+
+        if reason := direct_reload_refusal(self):
+            raise ValueError(
+                f"Direct reload does not support {reason}. Use "
+                "VLLM_RELOAD_MODE=auto or layerwise."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -1674,6 +1684,7 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+        self._verify_direct_reload_compat()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.

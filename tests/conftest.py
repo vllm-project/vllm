@@ -262,26 +262,6 @@ def default_vllm_config():
         yield config
 
 
-@pytest.fixture
-def weight_updates(monkeypatch) -> dict[str, Any]:
-    """Enable runtime weight updates (so direct reload by default) in-process;
-    returns the matching engine kwargs for `vllm_runner`/`LLM`."""
-    import copy
-
-    from vllm.config import VllmConfig, WeightTransferConfig
-    from vllm.model_executor.model_loader.reload import direct
-
-    current, default = direct.get_current_vllm_config_or_none, VllmConfig()
-
-    def with_updates():
-        config = copy.copy(current() or default)
-        config.weight_transfer_config = WeightTransferConfig(backend="ipc")
-        return config
-
-    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", with_updates)
-    return {"weight_transfer_config": {"backend": "ipc"}}
-
-
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.

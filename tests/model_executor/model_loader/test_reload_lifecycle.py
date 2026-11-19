@@ -23,9 +23,6 @@ _MODEL_CONFIG = SimpleNamespace(
 )
 _DEVICE = torch.device("cpu")
 
-# with weight updates enabled, VLLM_RELOAD_MODE picks the mode
-pytestmark = pytest.mark.usefixtures("weight_updates")
-
 
 class _TinyModel(torch.nn.Module):
     """Records `weight_update_active` at every weight it loads."""

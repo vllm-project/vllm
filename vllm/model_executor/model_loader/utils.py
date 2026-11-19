@@ -171,12 +171,8 @@ def process_weights_after_loading(
 
     maybe_retie_word_embeddings(model, model_config)
 
-    # the first call is cold start, which fixes the model's reload mode
-    if "_reloads_directly" not in model.__dict__:
-        if direct_reload_enabled():
-            record_checkpoint_layout(model)
-        else:
-            model._reloads_directly = False
+    if direct_reload_enabled():
+        record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
     for name, module in model.__dict__.get("_ckpt_modules") or model.named_modules():
         quant_method = getattr(module, "quant_method", None)

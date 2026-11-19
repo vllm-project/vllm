@@ -110,7 +110,7 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     """Dense backend only: write received tensors of the target model through a
     load plan built from `metadata` at the first weight update (see
     `NCCLTrainerInitInfo.use_load_plan`). The server must run with
-    direct reload and without EPLB; init refuses otherwise."""
+    `VLLM_RELOAD_MODE=direct` and without EPLB; init refuses otherwise."""
     metadata: list[tuple[str, str, list[int]]] | None = None
     """(name, dtype name, shape) of every tensor the trainer sends; required
     with `use_load_plan`."""

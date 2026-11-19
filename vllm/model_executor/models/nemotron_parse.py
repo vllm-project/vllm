@@ -32,9 +32,6 @@ from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.online.loading import (
-    writes_outside_weight_loaders,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -553,14 +550,12 @@ class RadioWithNeck(nn.Module):
         self.layer_norm2 = nn.LayerNorm(
             last_hidden_state, eps=1e-06, elementwise_affine=True
         )
-        # `RadioWithNeck.load_weights` loads it with `default_weight_loader`
-        with writes_outside_weight_loaders():
-            self.sum_proj = ColumnParallelLinear(
-                3840,
-                last_hidden_state,
-                quant_config=quant_config,
-                prefix=f"{prefix}.sum_proj",
-            )
+        self.sum_proj = ColumnParallelLinear(
+            3840,
+            last_hidden_state,
+            quant_config=quant_config,
+            prefix=f"{prefix}.sum_proj",
+        )
         self.layer_norm3 = nn.LayerNorm(
             last_hidden_state, eps=1e-06, elementwise_affine=True
         )

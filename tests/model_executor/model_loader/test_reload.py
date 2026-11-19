@@ -1480,13 +1480,12 @@ def _lm_head_state(worker) -> tuple[bool, bool]:
     return lm_head.data_ptr() == embed.data_ptr(), torch.equal(lm_head, -embed)
 
 
-def test_direct_reload_keeps_lm_head_untied(
-    vllm_runner, monkeypatch, tmp_path, weight_updates
-):
+def test_direct_reload_keeps_lm_head_untied(vllm_runner, monkeypatch, tmp_path):
     """An update whose lm_head equals the input embeddings must not tie them,
     or every later update's lm_head is dropped."""
     from safetensors.torch import load_file, save_file
 
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     src = Path(hf_api().snapshot_download("Qwen/Qwen3-0.6B"))
     weights = load_file(src / "model.safetensors")
@@ -1512,7 +1511,6 @@ def test_direct_reload_keeps_lm_head_untied(
         max_model_len=16,
         max_num_seqs=1,
         gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
-        **weight_updates,
     ) as llm:
         assert llm.collective_rpc(_lm_head_state) == [(False, True)]
         for path in (tied, untied):
@@ -1541,9 +1539,7 @@ def _reload_with_lora_expert_names(worker) -> None:
     not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
 )
 @pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
-def test_reload_weights_with_lora_moe(
-    vllm_runner, monkeypatch, weight_updates, reload_mode
-):
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch, reload_mode):
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -1581,7 +1577,6 @@ def test_reload_weights_with_lora_moe(
         max_num_seqs=1,
         # Reloading without a pause that empties the KV cache needs headroom.
         gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
-        **weight_updates,
     ) as llm:
         before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
         assert before[0] != before[1]

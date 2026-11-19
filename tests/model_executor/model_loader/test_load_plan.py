@@ -46,7 +46,8 @@ BF16 = torch.bfloat16
 
 
 @pytest.fixture(autouse=True)
-def _direct_mode(monkeypatch, weight_updates):
+def _direct_mode(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     # several tests start a reload they never finish; restore the flag after each
     monkeypatch.setattr(lifecycle, "_weight_update_active", False)
 
@@ -770,8 +771,8 @@ def test_overlapping_writes_fall_back():
 
 def test_layerwise_mode_is_refused(monkeypatch):
     make, shapes = _single(None)
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     model = _cold_start(make, _checkpoint(shapes, 0))
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
         plan_loads(model, _metadata(shapes))
 

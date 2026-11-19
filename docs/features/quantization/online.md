@@ -72,8 +72,8 @@ vllm serve Qwen/Qwen3.6-35B-A3B --quantization lut_b_moe
 
 Online-quantized models accept in-place weight updates (`reload_weights`, RL
 weight sync): the trainer sends BF16 weights under their checkpoint names.
-With direct reload (the default when runtime weight updates are enabled),
-each tensor is quantized as it is loaded, at cold start and on updates;
+With the `VLLM_RELOAD_MODE` environment variable set to `direct`, each tensor
+is quantized as it is loaded;
 `fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel` and `mxfp8` are supported
 on linear and MoE layers, and `mxfp4` (`--quantization-config.moe mxfp4`)
 and `nvfp4_per_token` on MoE layers. See

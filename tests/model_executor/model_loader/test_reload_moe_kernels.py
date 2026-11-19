@@ -62,8 +62,9 @@ def _model_tensor_ptrs(worker) -> dict[str, int]:
     ],
 )
 def test_reload_keeps_moe_output(
-    model: str, moe_backend: str, vllm_runner, monkeypatch, weight_updates
+    model: str, moe_backend: str, vllm_runner, monkeypatch
 ) -> None:
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
         model,
@@ -71,7 +72,6 @@ def test_reload_keeps_moe_output(
         max_num_seqs=4,
         enable_prefix_caching=False,
         kernel_config={"enable_jit_warmup": False, "moe_backend": moe_backend},
-        **weight_updates,
     ) as llm:
         ptrs = llm.collective_rpc(_model_tensor_ptrs)
         llm.collective_rpc("reload_weights")  # the served checkpoint

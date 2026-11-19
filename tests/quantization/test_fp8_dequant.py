@@ -193,9 +193,7 @@ def test_mla_cold_start_separate_calls(model_config, scheme, scales_first):
 
 @pytest.mark.parametrize("scheme", list(_SCALE))
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_mla_reload_equals_cold_start(
-    monkeypatch, model_config, weight_updates, scheme, mode
-):
+def test_mla_reload_equals_cold_start(monkeypatch, model_config, scheme, mode):
     """Direct reload views the BF16 storage back to the FP8 checkpoint layout
     (a dtype and size change); layerwise reload restages the FP8 layer. Both
     dequantize the new tensors at the cold-start addresses. An update may
@@ -367,9 +365,7 @@ def test_indexer_fused_weight(model_config, layout, scales_first):
     ],
 )
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_indexer_reload_fp8_or_bf16(
-    monkeypatch, model_config, weight_updates, layout, cold, mode
-):
+def test_indexer_reload_fp8_or_bf16(monkeypatch, model_config, layout, cold, mode):
     """Each load sends `wk` whole, either in the checkpoint's FP8 layout or
     in BF16 without a scale (as RL trainers do). Every reload ends with the
     dequantized weight in the fused rows, at the cold-start addresses."""

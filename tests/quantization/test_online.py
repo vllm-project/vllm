@@ -36,7 +36,6 @@ from vllm.config.quantization import (
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
-from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels import linear as linear_kernels
 from vllm.model_executor.kernels.linear import LinearKernelOracle
@@ -759,31 +758,21 @@ def _write_minimal_llama_config(
 
 
 @pytest.mark.parametrize(
-    "checkpoint_config_factory,raises_requantization_error,with_updates",
+    "checkpoint_config_factory,raises_requantization_error",
     [
-        pytest.param(_fully_quantized_quark_config, True, False, id="quark"),
+        pytest.param(_fully_quantized_quark_config, True, id="quark"),
         pytest.param(
             _fully_quantized_modelopt_config,
             True,
-            False,
             id="modelopt",
         ),
         pytest.param(
             _fully_quantized_modelopt_mxfp8_config,
             False,
-            False,
             id="modelopt_mxfp8",
-        ),
-        # direct reload keeps the online method for requantization
-        pytest.param(
-            _fully_quantized_modelopt_mxfp8_config,
-            False,
-            True,
-            id="modelopt_mxfp8-weight-updates",
         ),
         pytest.param(
             _moe_only_compressed_tensors_config,
-            False,
             False,
             id="compressed_tensors",
         ),
@@ -798,13 +787,10 @@ def _write_minimal_llama_config(
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
     raises_requantization_error: bool,
-    with_updates: bool,
     default_vllm_config,
 ) -> None:
     """Online weights replace only layers left unquantized by a checkpoint."""
     default_vllm_config.model_config = ModelConfig()
-    if with_updates:
-        default_vllm_config.weight_transfer_config = WeightTransferConfig()
     checkpoint_config = checkpoint_config_factory()
 
     checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
@@ -2720,28 +2706,6 @@ def test_online_resolve_quant_method_lm_head(default_vllm_config) -> None:
     default_vllm_config.model_config.convert_type = "classify"
     with pytest.raises(NotImplementedError, match="sequence classification"):
         resolve_quant_method(quant_config, _TestLMHead(), "lm_head")
-
-
-@pytest.mark.parametrize("offload", [False, True], ids=["direct", "offload"])
-def test_weight_updates_quantize_on_load_unless_refused(
-    default_vllm_config, offload: bool
-) -> None:
-    """With weight updates, online FP8 quantizes on load through the checkpoint
-    method, unless the configuration refuses direct reload."""
-    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-
-    default_vllm_config.model_config = SimpleNamespace(
-        dtype=torch.bfloat16, quantization=None
-    )
-    default_vllm_config.weight_transfer_config = WeightTransferConfig()
-    if offload:
-        default_vllm_config.offload_config.uva.cpu_offload_gb = 1
-    config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear=QuantSpec(weight=kFp8StaticTensorSym))
-    )
-    method = config.get_quant_method(_TestLinear(), "linear")
-    expected = Fp8PerTensorOnlineLinearMethod if offload else Fp8LinearMethod
-    assert type(method) is expected
 
 
 def test_online_ptpc_activation_override(default_vllm_config) -> None:

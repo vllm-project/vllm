@@ -305,6 +305,7 @@ class TestNCCLEngineParsing:
         import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
         import vllm.model_executor.model_loader.reload as reload_mod
 
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
         monkeypatch.setattr(
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
         )
@@ -319,7 +320,7 @@ class TestNCCLEngineParsing:
 
         monkeypatch.setattr(reload_mod, "plan_loads", logged_plan_loads)
         engine = self._make_engine()
-        engine.model._reloads_directly = True  # as a direct cold start fixes
+        engine.model._ckpt_param_names = frozenset()  # as a direct cold start records
         engine.init_transfer_engine(
             NCCLWeightTransferInitInfo(
                 master_address="127.0.0.1",
@@ -332,7 +333,6 @@ class TestNCCLEngineParsing:
         )
         return engine, calls
 
-    @pytest.mark.usefixtures("weight_updates")
     def test_use_load_plan_plans_at_the_first_target_update(self, monkeypatch):
         """Not at init: after `start_reload`, once, and not for a draft."""
         engine, calls = self._planning_engine(monkeypatch, lambda m, metas: "plan")
@@ -351,7 +351,6 @@ class TestNCCLEngineParsing:
         ]
         assert engine._plan == "plan"
 
-    @pytest.mark.usefixtures("weight_updates")
     def test_use_load_plan_failure_falls_back_to_load_weights(self, monkeypatch):
         """A plan failure at the first update raises with a note; later
         updates skip planning (load_weights repairs the model)."""
@@ -368,9 +367,7 @@ class TestNCCLEngineParsing:
         assert engine._plan is None
 
     @pytest.mark.parametrize("refusal", ["layerwise", "eplb"])
-    def test_use_load_plan_refusal_at_init_leaves_the_model(
-        self, monkeypatch, weight_updates, refusal
-    ):
+    def test_use_load_plan_refusal_at_init_leaves_the_model(self, monkeypatch, refusal):
         """A configuration no plan supports is refused at init, after the
         group forms (then destroyed) and before any `start_reload` changes the
         model."""
@@ -379,15 +376,15 @@ class TestNCCLEngineParsing:
             record_checkpoint_layout,
         )
 
+        monkeypatch.setenv(
+            "VLLM_RELOAD_MODE", "layerwise" if refusal == "layerwise" else "direct"
+        )
         group = MagicMock()
         monkeypatch.setattr(
             nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
         )
         model = _module_with(("w", torch.arange(6.0).view(2, 3)))
-        if refusal == "layerwise":
-            model._reloads_directly = False  # as a layerwise cold start fixes
-        else:
-            record_checkpoint_layout(model)
+        record_checkpoint_layout(model)
         model.w.data = model.w.data.t()  # post-load processing re-laid it out
         if refusal == "eplb":
             parallel = SimpleNamespace(enable_eplb=True)

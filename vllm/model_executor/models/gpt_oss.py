@@ -34,9 +34,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.online.loading import (
-    writes_outside_weight_loaders,
-)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
@@ -374,22 +371,20 @@ class MLPBlock(torch.nn.Module):
             return_bias=False,
         )
         assert config.intermediate_size % self.world_size == 0
-        # `GptOssModel.load_weights` writes experts with `param.copy_`
-        with writes_outside_weight_loaders():
-            self.experts = FusedMoEFactory(
-                num_experts=config.num_local_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                renormalize=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.experts",
-                apply_router_weight_on_input=False,
-                has_bias=True,
-                activation="swigluoai",
-                is_sequence_parallel=self.is_sequence_parallel,
-                routed_experts_cls=GptOssRoutedExperts,
-            )
+        self.experts = FusedMoEFactory(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            renormalize=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            apply_router_weight_on_input=False,
+            has_bias=True,
+            activation="swigluoai",
+            is_sequence_parallel=self.is_sequence_parallel,
+            routed_experts_cls=GptOssRoutedExperts,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         num_tokens = x.shape[0]
@@ -487,6 +482,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        # its expert loading writes BF16 into the experts outside their loaders
+        if any(getattr(m, "quantizes_on_load", False) for m in self.modules()):
+            raise NotImplementedError(
+                "gpt-oss does not support online quantization with "
+                "VLLM_RELOAD_MODE=direct"
+            )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )

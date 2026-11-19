@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -110,72 +107,6 @@ def _nvfp4_on_load(layer: torch.nn.Module, method: Any) -> None:
     method.process_weights_after_loading = process_weights_after_loading
 
 
-_writes_outside_loaders: ContextVar[bool] = ContextVar(
-    "writes_outside_weight_loaders", default=False
-)
-
-
-@contextmanager
-def writes_outside_weight_loaders() -> Iterator[None]:
-    """Build layers whose weights the model writes without their weight loaders,
-    so direct reload keeps their online quantization method."""
-    token = _writes_outside_loaders.set(True)
-    try:
-        yield
-    finally:
-        _writes_outside_loaders.reset(token)
-
-
-_FP8_BLOCK = (128, 128)  # the block size of the block FP8 online scheme
-
-
-def _block_shapes_fit(layer: torch.nn.Module) -> bool:
-    """Whether the block FP8 checkpoint linear method accepts this layer's
-    tensor-parallel shards."""
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        validate_fp8_block_shape,
-    )
-
-    # A replicated layer may not have set its partition sizes yet.
-    try:
-        validate_fp8_block_shape(
-            layer,
-            layer.input_size,
-            layer.output_size,
-            getattr(layer, "input_size_per_partition", layer.input_size),
-            getattr(layer, "output_partition_sizes", [layer.output_size]),
-            list(_FP8_BLOCK),
-        )
-    except ValueError:
-        return False
-    return True
-
-
-def _moe_block_shapes_fit(moe: Any) -> bool:
-    """Whether the block FP8 checkpoint MoE method accepts these experts'
-    tensor-parallel shards, refining its scale blocks or padding them as it
-    would."""
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        resolve_fp8_moe_weight_block_shape,
-    )
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        validate_fp8_block_shape_moe,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kFp8Dynamic128Sym,
-    )
-
-    trial = copy.copy(moe)  # padding the shards resizes the config
-    try:
-        block, _ = resolve_fp8_moe_weight_block_shape(
-            trial, list(_FP8_BLOCK), kFp8Dynamic128Sym, True
-        )
-        validate_fp8_block_shape_moe(trial.intermediate_size_per_partition, block)
-    except ValueError:
-        return False
-    return True
-
-
 def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     """The pre-quantized checkpoint method that `spec` stands for, if any."""
     from compressed_tensors.quantization import QuantizationArgs
@@ -190,8 +121,6 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
     from vllm.model_executor.layers.quantization.utils import quant_utils as qu
     from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
-    if _writes_outside_loaders.get():
-        return None  # its loads bypass the loaders that would quantize them
     is_moe = isinstance(layer, RoutedExperts)
     moe: Any = getattr(layer, "moe_config", None)
     method: Any  # the checkpoint method of the matching pre-quantized scheme
@@ -202,12 +131,8 @@ def checkpoint_method(layer: torch.nn.Module, spec: Any, default: Any) -> Any:
         return None
     weight, ckpt = spec.weight, modelopt.CkptCtx()
     block = weight == qu.kFp8Static128BlockSym
-    if block and not (
-        _moe_block_shapes_fit(moe) if is_moe else _block_shapes_fit(layer)
-    ):
-        return None  # the block checkpoint method would refuse these shapes
     if weight in (qu.kFp8StaticTensorSym, qu.kFp8Static128BlockSym):
-        cfg = fp8.Fp8Config(weight_block_size=list(_FP8_BLOCK) if block else None)
+        cfg = fp8.Fp8Config(weight_block_size=[128, 128] if block else None)
         method = fp8.Fp8MoEMethod(cfg, layer) if is_moe else fp8.Fp8LinearMethod(cfg)
         quantize = per_block_cast_to_fp8 if block else ops.scaled_fp8_quant
     elif weight == qu.kFp8StaticChannelSym and is_moe:

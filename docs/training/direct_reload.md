@@ -1,13 +1,19 @@
 # Direct Weight Reload
 
 Direct reload updates a running model's weights in place. It is the default
-when runtime weight updates are enabled (`--weight-transfer-config`, any
-backend but `sharded_rdt`). Without them, a model loads and reloads as with
-[Layerwise (Re)loading](layerwise.md).
+(`VLLM_RELOAD_MODE=auto`) for engines with runtime weight updates
+(`--weight-transfer-config`), except for the configurations below and online
+quantization, which reload layerwise (see [Layerwise (Re)loading](layerwise.md)).
+`VLLM_RELOAD_MODE=direct` also enables it for online quantization and disk
+`reload_weights`; `layerwise` disables it.
 
-Set `VLLM_RELOAD_MODE=layerwise` to update weights layerwise instead, for
-example for the configurations direct reload refuses (see below). The mode is
-fixed when the model loads; every later update of that model uses it.
+!!! tip
+    Prefer direct reload for RL weight updates. Use layerwise reload only for
+    the configurations direct reload refuses (see below).
+
+```bash
+VLLM_RELOAD_MODE=direct vllm serve <model>
+```
 
 ## How It Works
 
@@ -30,8 +36,7 @@ matching pre-quantized checkpoint; the trainer keeps sending BF16 weights under
 their checkpoint names.
 
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block \
-    --weight-transfer-config '{"backend": "nccl"}'
+VLLM_RELOAD_MODE=direct vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block
 ```
 
 | `--quantization` | Linear layers | MoE layers |
@@ -48,18 +53,17 @@ arrives, and an update that delivers only one of them fails at finish.
 
 ## Refused Configurations
 
-These configurations serve as usual, but direct reload refuses to update them;
-use `VLLM_RELOAD_MODE=layerwise` to update them. The error is raised at the
-start of the first weight update, leaving the model unchanged.
+In `auto` mode the following reload layerwise. With `VLLM_RELOAD_MODE=direct`,
+the configurations raise an error at startup and the modules reload layerwise:
 
-- Online quantization not in the table above, or of layers loaded outside
-  their weight loaders (e.g. gpt-oss experts).
-- `fp8_per_block` layers whose tensor-parallel shards do not fit its blocks.
+- Online quantization not in the table above: `mxfp4` and `mxfp4_hadamard32`
+  linear layers, `int8_per_channel_weight_only`, `lut_b_moe`, a quantized
+  lm_head, activation overrides, `hadamard_size`, and re-quantization of
+  checkpoint-quantized layers.
+- gpt-oss models with online quantization.
+- `fp8_per_block` linear layers whose tensor-parallel shards are not
+  multiples of 128.
 - The NCCL weight transfer load plan (`use_load_plan`) with online
   quantization.
-- `torchao` quantization, Humming kernels, weight offloading, and
-  `draft_lm_head_quantization`.
-- Weights loaded pre-processed from the weight cache.
-- A draft model sharing tensors with a refused target model.
-
-LoRA adapters are supported.
+- `torchao` quantization, Humming kernels, weight offloading,
+  `draft_lm_head_quantization`, and the `sharded_rdt` weight transfer backend.

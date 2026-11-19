@@ -44,7 +44,6 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
     WatermarkConfig,
-    WeightTransferConfig,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -3314,19 +3313,6 @@ class _TestConfigFields:
     a: int
     b: dict = field(default_factory=dict)
     c: str = "default"
-
-
-@pytest.mark.parametrize("quantization", [None, "fp8_per_tensor"])
-def test_direct_reload_is_compile_factor_with_online_quantization(
-    monkeypatch, quantization
-):
-    # direct reload swaps online methods for checkpoint methods
-    monkeypatch.delenv("VLLM_RELOAD_MODE", raising=False)
-    model_config = ModelConfig("Qwen/Qwen3-0.6B", quantization=quantization)
-    config = VllmConfig(
-        model_config=model_config, weight_transfer_config=WeightTransferConfig()
-    )
-    assert ("direct_reload" in config.compile_factors()) == (quantization is not None)
 
 
 def test_get_field():

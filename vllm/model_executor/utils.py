@@ -240,7 +240,7 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            # with a recorded checkpoint layout, reloads must keep its storage
+            # a recorded checkpoint layout must keep its storage across reloads
             old_param.data = _in_own_storage(
                 old_param, new_tensor, whole_storage=hasattr(old_param, "_ckpt")
             )

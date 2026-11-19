@@ -1861,7 +1861,7 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                if reloads_directly(self.weight_transfer_engine.model):
+                if reloads_directly(self.model_runner.get_model()):
                     # a failed direct finish cannot be retried: end the
                     # session so that a new full update can start
                     self._end_weight_update(refresh=False)

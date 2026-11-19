@@ -39,7 +39,7 @@ def _update_draft_weights(worker) -> None:
 
 @pytest.mark.parametrize("reload_mode", ["direct", "layerwise"])
 def test_draft_weight_update_keeps_draft_tensor_addresses(
-    reload_mode: str, vllm_runner, monkeypatch, weight_updates
+    reload_mode: str, vllm_runner, monkeypatch
 ) -> None:
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -52,7 +52,6 @@ def test_draft_weight_update_keeps_draft_tensor_addresses(
         },
         max_model_len=1024,
         max_num_seqs=4,
-        **weight_updates,
     ) as llm:
         # serve first, so the speculator's CUDA graphs are captured
         llm.generate_greedy(PROMPTS, max_tokens=32)

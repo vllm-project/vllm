@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload on a toy model whose
+"""Direct weight reload (`VLLM_RELOAD_MODE=direct`) on a toy model whose
 post-load processing has the hazards found on real models:
 
 (a) a parent derives a separate tensor from a child's weight (MLA W_UK/W_UV
@@ -19,12 +19,12 @@ Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
 """
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -34,10 +34,10 @@ from vllm.model_executor.layers.quantization.online.loading import quantize_on_l
 from vllm.model_executor.model_loader.reload import direct, finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
-    check_direct_reload,
     direct_reload_enabled,
     finish_direct_reload,
     record_checkpoint_layout,
+    reloads_directly,
     track_loaded_params,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -279,7 +279,9 @@ def _runs(model: _ToyModel) -> dict[str, int]:
     }
 
 
-pytestmark = pytest.mark.usefixtures("weight_updates")
+@pytest.fixture(autouse=True)
+def _direct_mode(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
 
 
 class TestReloadEqualsColdStart:
@@ -377,15 +379,6 @@ class TestUnsent:
         _assert_same(after, _state(_cold_start(expected)))
 
 
-def _assert_refused_at_update(model: _ToyModel, match: str) -> None:
-    """Cold start succeeded; the update is refused before it changes the model."""
-    before = _state(model)
-    with pytest.raises(RuntimeError, match=match):
-        start_reload(model)
-    _assert_same(_state(model), before, addresses=True)
-    assert "_direct_reload_begun" not in model.__dict__
-
-
 class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
@@ -402,17 +395,6 @@ class TestRefusals:
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        # cold start serves it; only the update is refused
-        monkeypatch.setattr(
-            Fp8PerTensorOnlineLinearMethod,
-            "process_weights_after_loading",
-            lambda self, layer: None,
-        )
-        from vllm.model_executor.model_loader import utils as loader_utils
-
-        monkeypatch.setattr(
-            loader_utils, "online_quantization_timing_context", lambda *a: nullcontext()
-        )
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -420,7 +402,9 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        _assert_refused_at_update(_cold_start(_checkpoint()), "online quantization")
+        model = _ToyModel()
+        record_checkpoint_layout(model)
+        assert not reloads_directly(model)  # reloads layerwise
 
     def test_online_shared_experts_refused(self, monkeypatch):
         # post-load processing deletes the staging parameters a reload loads
@@ -428,22 +412,19 @@ class TestRefusals:
 
         def with_online_shared_experts(self):
             init(self)
-            self.proj.shared_expert_online_loader = SimpleNamespace(
-                finalize=lambda module: None
-            )
+            self.proj.shared_expert_online_loader = object()
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        _assert_refused_at_update(_cold_start(_checkpoint()), "online quantization")
+        model = _ToyModel()
+        record_checkpoint_layout(model)
+        assert not reloads_directly(model)  # reloads layerwise
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
     def test_humming_refused(self, monkeypatch, method_cls):
         # its post-load processing runs only once per quant method
         from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        cls = getattr(humming_mod, method_cls)
-        humming = object.__new__(cls)
-        # cold start serves it; only the update is refused
-        monkeypatch.setattr(cls, "process_weights_after_loading", lambda s, layer: None)
+        humming = object.__new__(getattr(humming_mod, method_cls))
         init = _ToyModel.__init__
 
         def with_humming_layer(self):
@@ -451,7 +432,9 @@ class TestRefusals:
             self.proj.quant_method = humming
 
         monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        _assert_refused_at_update(_cold_start(_checkpoint()), "humming")
+        model = _ToyModel()
+        record_checkpoint_layout(model)
+        assert not reloads_directly(model)  # reloads layerwise
 
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
@@ -687,53 +670,139 @@ def _config(**overrides) -> SimpleNamespace:
         quant_config=None,
         lora_config=None,
         speculative_config=None,
-        weight_transfer_config=SimpleNamespace(backend="nccl"),
+        weight_transfer_config=None,
     )
     return SimpleNamespace(**(fields | overrides))
 
 
-_OFFLOAD = SimpleNamespace(
-    offload_backend="auto",
-    prefetch=SimpleNamespace(offload_group_size=0),
-    uva=SimpleNamespace(cpu_offload_gb=1),
-)
-
-
 @pytest.mark.parametrize(
-    "overrides,match",
+    "mode,overrides,match",
     [
-        ({"model_config": SimpleNamespace(quantization="torchao")}, "torchao"),
-        ({"offload_config": _OFFLOAD}, "weight offloading"),
+        ("direct", {}, None),
+        ("direct", {"lora_config": object()}, None),
         (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="uva",
+                    prefetch=SimpleNamespace(offload_group_size=0),
+                    uva=SimpleNamespace(cpu_offload_gb=0),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="auto",
+                    prefetch=SimpleNamespace(offload_group_size=2),
+                    uva=SimpleNamespace(cpu_offload_gb=0),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="auto",
+                    prefetch=SimpleNamespace(offload_group_size=0),
+                    uva=SimpleNamespace(cpu_offload_gb=1),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {"model_config": SimpleNamespace(quantization="torchao")},
+            "torchao",
+        ),
+        (
+            "direct",
             {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
             "draft_lm_head_quantization",
         ),
-        ({"load_config": SimpleNamespace(load_format="ipc_cache")}, "pre-processed"),
-        # without weight updates, reloads are layerwise
-        ({"weight_transfer_config": None}, None),
+        (
+            "direct",
+            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            "sharded_rdt",
+        ),
     ],
-    ids=["torchao", "offload", "draft-lm-head", "pre-processed", "no-updates"],
+    ids=[
+        "defaults",
+        "lora",
+        "offload-backend",
+        "offload-prefetch",
+        "offload-uva",
+        "torchao",
+        "draft-lm-head-quant",
+        "sharded-rdt",
+    ],
 )
-def test_config_refusals(monkeypatch, overrides, match):
-    # recorded at cold start, raised when an update starts
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    config = _config(**overrides)
+    if match is None:
+        VllmConfig._verify_direct_reload_compat(config)
+    else:
+        with pytest.raises(ValueError, match=match):
+            VllmConfig._verify_direct_reload_compat(config)
+
+
+_IPC = SimpleNamespace(backend="ipc")
+_TORCHAO = SimpleNamespace(quantization="torchao")
+_ONLINE = SimpleNamespace(quantization="fp8_per_tensor", quantization_config={})
+
+
+@pytest.mark.parametrize(
+    "mode,overrides,expected",
+    [
+        ("auto", {"weight_transfer_config": _IPC}, True),
+        ("auto", {}, False),
+        (
+            "auto",
+            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            False,
+        ),
+        ("auto", {"weight_transfer_config": _IPC, "model_config": _TORCHAO}, False),
+        ("auto", {"weight_transfer_config": _IPC, "model_config": _ONLINE}, False),
+        ("direct", {}, True),
+        ("layerwise", {"weight_transfer_config": _IPC}, False),
+    ],
+    ids=[
+        "updates",
+        "no-updates",
+        "sharded-rdt",
+        "torchao",
+        "online",
+        "direct",
+        "layerwise",
+    ],
+)
+def test_direct_reload_enabled(monkeypatch, mode, overrides, expected):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     config = _config(**overrides)
     monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+    assert direct_reload_enabled() is expected
+
+
+def test_refused_module_reloads_layerwise(monkeypatch):
+    """A refused module leaves no layout, so updates reload layerwise."""
+    from vllm.model_executor.model_loader.reload import lifecycle
+
     model = _cold_start(_checkpoint())
-    if match is None:
-        assert not direct_reload_enabled()
-        assert not hasattr(model, "_direct_reload_refusals")
-        return
-    assert not hasattr(model, "_ckpt_param_names")
-    with pytest.raises(RuntimeError, match=match) as err:
-        start_reload(model)
-    assert "VLLM_RELOAD_MODE=layerwise" in str(err.value)
-    # a draft sharing its tensors (e.g. the lm_head) is refused too, though
-    # they are shared in after its cold start
-    monkeypatch.setattr(direct, "get_current_vllm_config_or_none", _config)
-    with _DEVICE:
-        draft = _ToyModel()
-    record_checkpoint_layout(draft)
-    draft.proj = model.proj
-    with pytest.raises(RuntimeError, match="shared with a model"):
-        check_direct_reload(draft)
+    del model._ckpt_param_names
+    model.shared_expert_online_loader = object()  # fused shared experts refuse
+    record_checkpoint_layout(model)
+    assert not reloads_directly(model)
+    calls = []
+    monkeypatch.setattr(
+        lifecycle, "initialize_layerwise_reload", lambda m: calls.append("init")
+    )
+    monkeypatch.setattr(
+        lifecycle, "finalize_layerwise_reload", lambda m, c: calls.append("finalize")
+    )
+    start_reload(model)
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+    assert calls == ["init", "finalize"]

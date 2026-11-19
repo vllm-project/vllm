@@ -31,7 +31,6 @@ class _RecordingEngine:
         self.closed = False
         self.reset_count = 0
         self.supports_draft_weight_update = False
-        self.model = nn.Module()
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
 
@@ -70,7 +69,9 @@ class _RecordingModelRunner:
         self.seen_config = get_current_vllm_config()
 
     def get_model(self) -> nn.Module:
-        return nn.Module()
+        model = nn.Module()
+        model._ckpt_param_names = frozenset()  # as a direct cold start records
+        return model
 
     def on_target_weights_replaced(self) -> None:
         self.target_hook_calls += 1
@@ -307,8 +308,8 @@ def test_update_resets_active_on_error():
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
 def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     engine = _RecordingEngine(raise_on_finish=True)
-    engine.model._reloads_directly = mode == "direct"  # as cold start fixed it
     worker = _make_worker(engine)
     Worker.start_weight_update(worker)
 

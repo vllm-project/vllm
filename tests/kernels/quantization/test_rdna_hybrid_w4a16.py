@@ -550,7 +550,7 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
 @pytest.mark.skipif(not on_gfx1151(), reason="The carrier is gfx1151 only")
 @pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
 def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(
-    reload_mode, default_vllm_config, dist_init, monkeypatch, weight_updates
+    reload_mode, default_vllm_config, dist_init, monkeypatch
 ):
     """A weight reload rebuilds the carrier from the new scales and zero-points
     in its original storage, which captured graphs point at."""

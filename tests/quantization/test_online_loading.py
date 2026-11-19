@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.quantization.online import loading
 
 
@@ -103,92 +102,3 @@ def test_quantizer_gets_contiguous_tensor():
     layer.weight.weight_loader(layer.weight, transposed)
     assert torch.equal(layer.weight, transposed.to(torch.int8))
     assert layer.weight_scale.item() == 23
-
-
-@override_parallel_groups(SingleRankGroup())
-def test_model_writing_outside_its_loaders_keeps_the_online_method(
-    default_vllm_config,
-):
-    # Step3TextModel.load_weights writes q/k/v with `narrow().copy_`: a
-    # quantize-on-load checkpoint method would hold unscaled FP8 casts
-    from vllm.config import WeightTransferConfig
-    from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
-    from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.quantization.online.base import (
-        OnlineQuantizationConfig,
-    )
-    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-    from vllm.model_executor.layers.quantization.utils import quant_utils as qu
-
-    default_vllm_config.model_config = SimpleNamespace(
-        dtype=torch.bfloat16, quantization=None
-    )
-    default_vllm_config.weight_transfer_config = WeightTransferConfig()
-    spec = QuantSpec(weight=qu.kFp8StaticTensorSym)
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear=spec))
-    with loading.writes_outside_weight_loaders():
-        layer = ReplicatedLinear(64, 96, bias=False, quant_config=config)
-    assert type(layer) is ReplicatedLinear
-    assert isinstance(layer.quant_method, OnlineLinearBase)
-    layer = ReplicatedLinear(64, 96, bias=False, quant_config=config)
-    assert not isinstance(layer.quant_method, OnlineLinearBase)
-
-
-@pytest.fixture
-def tp2(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.get_tensor_model_parallel_world_size", lambda: 2
-    )
-
-
-@pytest.mark.parametrize(
-    "sizes,fits",
-    [
-        # a replicated layer picks its method before it sets its partition sizes
-        ({"input_size": 200, "output_size": 300}, True),
-        (
-            {
-                "input_size": 256,
-                "output_size": 384,
-                "input_size_per_partition": 256,
-                "output_partition_sizes": [192],  # not a multiple of 128
-            },
-            False,
-        ),
-    ],
-    ids=["replicated", "unaligned-tp-shard"],
-)
-def test_block_method_fits_only_aligned_shards(tp2, sizes, fits):
-    layer = SimpleNamespace(tp_size=2, **sizes)
-    assert loading._block_shapes_fit(layer) is fits
-
-
-@pytest.mark.parametrize(
-    "ispp,backend,lora,fits",
-    [
-        (256, "auto", False, True),
-        (192, "auto", False, True),
-        (48, "auto", False, False),
-        # DeepGEMM needs whole 128 blocks: the shards are padded to them
-        (192, "deep_gemm", False, True),
-        # padding is unsupported with LoRA, so the method would raise
-        (192, "deep_gemm", True, False),
-    ],
-    ids=["aligned", "refined-scales", "unrefinable", "padded", "unpaddable"],
-)
-def test_block_moe_method_fits_like_the_checkpoint_method(
-    tp2, ispp, backend, lora, fits
-):
-    # e.g. Qwen3-30B-A3B at TP4 (192) refines its scale blocks to 64x64
-    moe = SimpleNamespace(
-        intermediate_size_per_partition=ispp,
-        intermediate_size=ispp * 2,
-        tp_size=2,
-        ep_size=1,
-        hidden_dim=2048,
-        moe_backend=backend,
-        is_lora_enabled=lora,
-        has_bias=False,
-    )
-    assert loading._moe_block_shapes_fit(moe) is fits
-    assert moe.intermediate_size_per_partition == ispp  # left unpadded

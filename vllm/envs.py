@@ -334,7 +334,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
-    VLLM_RELOAD_MODE: Literal["direct", "layerwise"] = "direct"
+    VLLM_RELOAD_MODE: Literal["auto", "layerwise", "direct"] = "auto"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -2353,10 +2353,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
-    # How weight updates reload the model. "direct" applies only with runtime
-    # weight updates (`weight_transfer_config`); otherwise reloads are layerwise.
+    # How weight updates reload the model: "layerwise" rebuilds each layer
+    # from the checkpoint tensors; "direct" writes them into the live
+    # tensors and reruns post-load processing in place; "auto" reloads
+    # directly with runtime weight updates where supported, else layerwise.
     "VLLM_RELOAD_MODE": env_with_choices(
-        "VLLM_RELOAD_MODE", "direct", ["direct", "layerwise"]
+        "VLLM_RELOAD_MODE", "auto", ["auto", "layerwise", "direct"]
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
