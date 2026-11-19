@@ -46,7 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 MODE_DIMS = {"TP8": (1, 8), "DP8EP": (8, 1)}  # (dp_size, tp_size), 8 GPUs/node
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PDConfig:
     name: str
     p_mode: str

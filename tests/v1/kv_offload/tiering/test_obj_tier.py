@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -75,6 +76,7 @@ def _make_offloading_config(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
@@ -612,9 +614,13 @@ class TestMockObjTierFailures:
         )
 
         keys = [key(1)]
-        primary_result = primary_tier.prepare_store(keys, _CTX)
+        primary_result = primary_tier.prepare_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert primary_result is not None
-        primary_tier.complete_store(keys, _CTX, success=True)
+        primary_tier.complete_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
         job = manager.create_store_job(keys, _CTX)
         obj_tier.submit_store(job)
 

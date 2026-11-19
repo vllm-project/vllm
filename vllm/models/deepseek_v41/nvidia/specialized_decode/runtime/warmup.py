@@ -9,7 +9,7 @@ timings over the TP group, so every rank makes the same calls in the same
 order.
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -112,7 +112,7 @@ def _decode_topk_variants(steps: list[AttentionStep]) -> set[tuple[int, int, boo
 
 
 @contextmanager
-def _tuning() -> Iterator[None]:
+def _tuning() -> Generator[None]:
     """FlashInfer's tuning context, its timings reduced over the TP group."""
     from flashinfer.autotuner import set_autotune_process_group
 
