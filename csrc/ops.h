@@ -249,6 +249,14 @@ void rotary_embedding(torch::stable::Tensor& positions,
                       int64_t head_size, torch::stable::Tensor& cos_sin_cache,
                       bool is_neox, int64_t rope_dim_offset, bool inverse);
 
+void rotary_embedding_out(torch::stable::Tensor& positions,
+                          torch::stable::Tensor& query,
+                          std::optional<torch::stable::Tensor> key,
+                          torch::stable::Tensor& query_out,
+                          std::optional<torch::stable::Tensor> key_out,
+                          int64_t head_size,
+                          torch::stable::Tensor& cos_sin_cache, bool is_neox);
+
 void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
                         int64_t head_dim, double eps,
@@ -506,6 +514,67 @@ void beam_allreduce(torch::stable::Tensor const& input,
                     torch::stable::Tensor& output, int64_t buffer_ptrs,
                     torch::stable::Tensor& flags, int64_t multicast_ptr,
                     int64_t world, int64_t rank);
+#endif
+
+#ifdef VLLM_ENABLE_INKLING2_KERNELS
+void inkling2_allreduce_conv_mix(
+    std::optional<torch::stable::Tensor> x,
+    std::optional<torch::stable::Tensor> down,
+    std::optional<torch::stable::Tensor> src2dst, bool two_shot,
+    int64_t multicast_ptr, int64_t local_ptr, int64_t buffer_ptrs,
+    torch::stable::Tensor& flags, int64_t rank, int64_t world,
+    torch::stable::Tensor& cache, torch::stable::Tensor const& conv_weight,
+    torch::stable::Tensor const& positions,
+    torch::stable::Tensor const& seq_idx, torch::stable::Tensor const& slots,
+    torch::stable::Tensor const& block_table,
+    torch::stable::Tensor const& query_start, int64_t stream_offset,
+    int64_t stream_width, double conv_scale,
+    std::optional<torch::stable::Tensor> residual,
+    std::optional<torch::stable::Tensor> addend,
+    torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
+    std::optional<torch::stable::Tensor> last,
+    torch::stable::Tensor const& queries,
+    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
+    torch::stable::Tensor& out);
+
+void inkling2_conv_mix(
+    torch::stable::Tensor const& x, torch::stable::Tensor& cache,
+    torch::stable::Tensor const& conv_weight,
+    torch::stable::Tensor const& positions,
+    torch::stable::Tensor const& seq_idx, torch::stable::Tensor const& slots,
+    torch::stable::Tensor const& block_table,
+    torch::stable::Tensor const& query_start, int64_t stream_offset,
+    int64_t stream_width, double conv_scale,
+    std::optional<torch::stable::Tensor> residual,
+    std::optional<torch::stable::Tensor> addend,
+    torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
+    std::optional<torch::stable::Tensor> last,
+    torch::stable::Tensor const& queries,
+    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
+    torch::stable::Tensor& out);
+
+void inkling2_seq_parallel_conv_mix(
+    torch::stable::Tensor const& x, torch::stable::Tensor& cache,
+    torch::stable::Tensor const& conv_weight,
+    torch::stable::Tensor const& positions,
+    torch::stable::Tensor const& seq_idx, torch::stable::Tensor const& slots,
+    torch::stable::Tensor const& block_table,
+    torch::stable::Tensor const& query_start, int64_t stream_offset,
+    int64_t stream_width, double conv_scale,
+    std::optional<torch::stable::Tensor> residual,
+    std::optional<torch::stable::Tensor> addend,
+    torch::stable::Tensor& conv_out, torch::stable::Tensor const& stack,
+    std::optional<torch::stable::Tensor> last,
+    torch::stable::Tensor const& queries,
+    torch::stable::Tensor const& norm_weight, double eps, double norm_eps,
+    int64_t token_base, int64_t halo_rows, int64_t out_bases,
+    int64_t out_offset, int64_t world, int64_t out_tokens, int64_t rank,
+    int64_t gather_slot, torch::stable::Tensor& epochs, int64_t staging_offset,
+    int64_t tail_rows, int64_t align);
+
+void inkling2_reduce_scatter(int64_t bases, torch::stable::Tensor& epochs,
+                             int64_t rank, int64_t world, int64_t src_offset,
+                             int64_t first, torch::stable::Tensor& out);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
