@@ -280,16 +280,20 @@ class DeepseekV32Model(torch.nn.Module):
                 param.weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                loader = getattr(param, "weight_loader", default_weight_loader)
-                loader(param, loaded_weight)
+                # TODO: de-indent. Nested as before expert tensors were moved out
+                # of this branch, to keep the diff small.
+                if True:
+                    if True:
+                        if name.endswith(".bias") and name not in params_dict:
+                            continue
+                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                        if name is None:
+                            continue
+                        if is_pp_missing_parameter(name, self):
+                            continue
+                        param = params_dict[name]
+                        loader = getattr(param, "weight_loader", default_weight_loader)
+                        loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

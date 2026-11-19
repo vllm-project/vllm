@@ -886,22 +886,28 @@ class AXK1Model(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
+                # TODO: de-indent. Nested as before expert tensors were moved out
+                # of this branch, to keep the diff small.
+                if True:
+                    if True:
+                        # Skip loading extra bias for GPTQ models.
+                        if name.endswith(".bias") and name not in params_dict:
+                            continue
 
-                # Remapping the name of FP8 kv-scale.
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
-                    continue
-                name = remapped_name
+                        # Remapping the name of FP8 kv-scale.
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
+                            continue
+                        name = remapped_name
 
-                if is_pp_missing_parameter(name, self):
-                    continue
+                        if is_pp_missing_parameter(name, self):
+                            continue
 
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params
