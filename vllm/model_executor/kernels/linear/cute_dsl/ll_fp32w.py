@@ -7,6 +7,7 @@ import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import torch
@@ -31,6 +32,50 @@ def is_available() -> bool:
 
 _DEFAULT_DOTPROD_CONFIG = (192, 1, 1)
 _DEFAULT_DOTPROD_GROUPED_CONFIG = (192, 2, 1)
+
+
+def _legacy_default_config(M: int, N: int) -> tuple[int, int, int]:
+    if N <= 128 and M >= 12 and M % 2 == 0:
+        return _DEFAULT_DOTPROD_GROUPED_CONFIG
+    return _DEFAULT_DOTPROD_CONFIG
+
+
+def _sm100f_default_config(M: int, N: int) -> tuple[int, int, int]:
+    """`(bs, token_groups, epb)` for any `(K, N)` without a tuned entry.
+
+    Fit on B300 over K in [2048, 8192] and N in [96, 296], expert-pruned
+    shapes included. Small M wants wide blocks, even M splits tokens into
+    two groups to cut accumulator registers, and once N > 128 keeps half
+    the grid busy two experts per block reuse each activation load.
+    """
+    wide_grid = N > 128
+    even = M % 2 == 0
+    if M <= 8:
+        bs = 384 if M <= 4 and wide_grid else 256
+        return bs, 2 if even and not wide_grid else 1, 1
+    if not even:
+        return 256, 1, 2 if wide_grid else 1
+    if wide_grid:
+        return (128, 2, 1) if M <= 16 else (192, 2, 2)
+    return (256, 2, 1) if M <= 16 else (128, 2, 1)
+
+
+def _sm90_default_config(M: int, N: int) -> tuple[int, int, int]:
+    """SM100f's rule refit on H200: even M > 8 wants smaller blocks."""
+    if M <= 8 or M % 2:
+        return _sm100f_default_config(M, N)
+    return 128, 2, 2 if N > 128 else 1
+
+
+@cache
+def _default_config_fn():
+    from vllm.platforms import current_platform
+
+    if current_platform.is_device_capability_family(100):
+        return _sm100f_default_config
+    if current_platform.is_device_capability(90):
+        return _sm90_default_config
+    return _legacy_default_config
 
 
 _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] = {
@@ -58,6 +103,11 @@ _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] =
     },
 }
 _SUPPORTED_ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _dotprod_config(M: int, K: int, N: int) -> tuple[int, int, int]:
+    tuned = _TUNED_DOTPROD_CONFIGS.get((K, N), {}).get(M)
+    return tuned if tuned is not None else _default_config_fn()(M, N)
 
 
 class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
@@ -92,15 +142,7 @@ class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
         N: int,
         a_dtype: torch.dtype,
     ) -> CompileKey:
-        default_config = (
-            _DEFAULT_DOTPROD_GROUPED_CONFIG
-            if N <= 128 and M >= 12 and M % 2 == 0
-            else _DEFAULT_DOTPROD_CONFIG
-        )
-        tuned_configs = _TUNED_DOTPROD_CONFIGS.get((K, N))
-        config = (
-            tuned_configs.get(M, default_config) if tuned_configs else default_config
-        )
+        config = _dotprod_config(M, K, N)
         return self.CompileKey(
             m=M,
             k=K,

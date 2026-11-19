@@ -7,9 +7,12 @@ import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Literal
 
 import torch
+
+from vllm.utils.platform_utils import num_compute_units
 
 from ._ll_router_common import (
     current_cuda_stream,
@@ -38,19 +41,24 @@ _DEFAULT_SPLITK_CONFIG = (6, 4)
 # (7168, 256)  # DSV3.2
 # (7168, 384)  # DSV4-Pro
 
+# Dot-product launches one CTA per column. While those fit in about two
+# waves it beats split-K well past M=4: up to the per-arch M below for
+# K >= 4096 and up to M=16 below that, on stock and expert-pruned routers.
+_SM100F_DOTPROD_MAX_M = 9
+_SM90_DOTPROD_MAX_M = 6
+_SMALL_K_DOTPROD_MAX_M = 16
+# H200 prefers wider dot-product blocks once M > 4.
+_SM90_LARGE_M_DOTPROD_BS = 256
+
 # SM100f-specific tuned configs
 _SM100F_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
     (6144, 256): {M: 256 for M in (1, 3, 4)},
 }
 _SM100F_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
-    (4096, 256): {
-        **{M: (8, 5) for M in (5, 8)},
-        9: (8, 2),
-    },
     (5120, 1792): {M: (2, 4) for M in range(5, 17)},
     (5120, 3584): {M: (2, 4) for M in range(5, 17)},
     (7168, 256): {14: (8, 2)},
-    (6144, 256): {M: (8, 2) for M in (9, 12, 16)},
+    (6144, 256): {M: (8, 2) for M in (12, 16)},
     (7168, 384): {M: (7, 5) for M in (13, 16)},
 }
 
@@ -61,7 +69,7 @@ _SM90_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
 }
 _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
     (4096, 256): {
-        **{M: (8, 2) for M in range(5, 8)},
+        7: (8, 2),
         **{M: (8, 5) for M in range(10, 12)},
         **{M: (8, 2) for M in (13, 16)},
         **{M: (8, 5) for M in (14, 15)},
@@ -75,23 +83,36 @@ _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = 
 }
 
 
+@cache
+def _arch() -> str | None:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_device_capability_family(100):
+        return "sm100f"
+    if current_platform.is_device_capability(90):
+        return "sm90"
+    return None
+
+
 def _arch_tuned_configs() -> tuple[
     dict[tuple[int, int], dict[int, int]],
     dict[tuple[int, int], dict[int, tuple[int, int]]],
 ]:
-    from vllm.platforms import current_platform
-
-    if current_platform.is_device_capability_family(100):
-        return (
-            _SM100F_TUNED_DOTPROD_BS,
-            _SM100F_TUNED_SPLITK_CONFIGS,
-        )
-    if current_platform.is_device_capability(90):
-        return (
-            _SM90_TUNED_DOTPROD_BS,
-            _SM90_TUNED_SPLITK_CONFIGS,
-        )
+    arch = _arch()
+    if arch == "sm100f":
+        return _SM100F_TUNED_DOTPROD_BS, _SM100F_TUNED_SPLITK_CONFIGS
+    if arch == "sm90":
+        return _SM90_TUNED_DOTPROD_BS, _SM90_TUNED_SPLITK_CONFIGS
     return {}, {}
+
+
+def _dotprod_max_m(K: int, N: int) -> int:
+    arch = _arch()
+    if arch is None or 2 * num_compute_units() < N:
+        return _DEFAULT_DOTPROD_MAX_M
+    if K < 4096:
+        return _SMALL_K_DOTPROD_MAX_M
+    return _SM100F_DOTPROD_MAX_M if arch == "sm100f" else _SM90_DOTPROD_MAX_M
 
 
 class LLBf16Gemm:
@@ -116,8 +137,13 @@ class LLBf16Gemm:
         self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
     ) -> CompileKey:
         tuned_bs, tuned_splitk = _arch_tuned_configs()
-        if M <= _DEFAULT_DOTPROD_MAX_M or K < 2048:
-            bs = tuned_bs.get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
+        if _dotprod_max_m(K, N) >= M or K < 2048:
+            default_bs = (
+                _SM90_LARGE_M_DOTPROD_BS
+                if _arch() == "sm90" and M > _DEFAULT_DOTPROD_MAX_M
+                else _DEFAULT_DOTPROD_BS
+            )
+            bs = tuned_bs.get((K, N), {}).get(M, default_bs)
             return self.CompileKey(
                 backend="dotprod", M=M, K=K, bs=bs, output_dtype=output_dtype
             )
