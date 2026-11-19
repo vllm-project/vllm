@@ -206,9 +206,12 @@ variants:
           - "fp8"
           - "--async-scheduling"
           - "--enable-prefix-caching"
-      # gfx942 image with the Kimi-K3.1 fixes for MI325X.
+      # Outside the vllm org: main and the generic kimi-k31 ROCm image do not
+      # run fp8_ds_mla on gfx942. The image's entrypoint is `vllm`, not
+      # `vllm serve`, same as the MI355X ROCm image.
       mi325x:
         docker_image: "amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942"
+        docker_serve_command: "serve"
 
 compatible_strategies:
   - single_node_tp
@@ -2971,62 +2974,33 @@ guide: |
 
   ## MI325X (gfx942)
 
-  Use the image `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`.
+  Use `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. Its entrypoint is `vllm`, so the
+  rendered command is `vllm serve`. Main and the generic `kimi-k31` ROCm image do not run
+  this configuration.
 
-  One 8x MI325X node (256 GB per GPU) holds the MXFP4 checkpoint at TP8 after the routed experts
-  are requantized to groupwise INT4 at load. That conversion is lossy. Attention, the shared
-  experts and the vision tower stay BF16. The KV cache is `fp8_ds_mla`.
+  One 8x MI325X node, single-node TP8 with DCP8 (`a2a`). The routed experts are requantized
+  to groupwise INT4 at load, which is lossy. Attention, the shared experts and the vision
+  tower stay BF16, and the KV cache is `fp8_ds_mla`. Context is capped at 135,168 tokens.
+  Prefix caching is off. `--max-num-seqs` is 64: the default of 1024 exceeds the KDA state
+  slots (899 with prefix caching off) and startup aborts.
 
-  The command is single-node TP8 with DCP8 and `--dcp-comm-backend a2a`. Context is capped at
-  135,168 tokens, which covers the 128k RULER prompts. Prefix caching is off. `--max-num-seqs`
-  is 64: K3.1 keeps per-sequence KDA state, and vLLM's default of 1024 is more than the 899
-  state slots this configuration has, so startup aborts with `max_num_seqs (1024) exceeds
-  available Mamba cache blocks`. 64 was verified to start on this node. Prefill chunk size stays
-  at vLLM's default; the accuracy and throughput runs used `--max-num-seqs 8` and
-  `--max-num-batched-tokens 4096`. CUDA graphs are `FULL_AND_PIECEWISE`
-  with `VLLM_USE_BREAKABLE_CUDAGRAPH=1`.
-  K3.1 has no `torch.compile` submodule, so without breakable graphs vLLM captures decode only.
-  That flag, `VLLM_ROCM_USE_AITER=1`, `SAFETENSORS_FAST_GPU=1` and
-  `VLLM_ENGINE_READY_TIMEOUT_S=7200` come from the AMD profile, which also sets
-  `VLLM_ROCM_USE_AITER_MOE_SITUV2=1`. On this vLLM that is a4w4, the same as leaving
-  SiTUv2 unset. The scored runs set the first four and did not set SiTUv2. The accuracy
-  numbers below were
-  measured on checkpoint revision `6d0a0202956796543364d666ab19c6ad1a494ee1`. The following
-  revision, `d9e99b0792a5e93b78ea9bea62a68167e36ddd9e`, only changes `encoding_k3.py` and drops
-  "medium" as a thinking effort.
+  The AMD profile sets AITER, fast safetensors, breakable CUDA graphs, the ready timeout and
+  SiTUv2=1 (a4w4). This configuration adds INT6 quick all-reduce for tensor-parallel
+  all-reduces of 4 MiB and more. Decode all-reduces stay BF16. Set
+  `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=NONE` for BF16 all-reduce throughout.
 
-  **TP8 without DCP (lm-eval 0.4.13).** GSM8K, 20-shot, all 1,319 questions: 0.9735 ± 0.0044.
-  RULER NIAH, all 8 tasks, at 4k, 8k, 16k, 32k, 64k and 128k: 1.0 on every task. A smoke test of
-  chat, thinking, the reasoning parser, images, streaming and mixed load passed 24/24. Long
-  reasoning at max effort ran to about 7k tokens and was correct.
+  - **Accuracy.** INT6 matched BF16 all-reduce on GSM8K (0.977 either way, 5-shot, all 1,319
+    questions) and on passkeys (14/14 at 32k and 120k). INT4 quick all-reduce was faster but
+    lowered answer confidence at 120k, so the recipe does not use it. With the INT4 expert
+    requant, GSM8K was 0.9735 ± 0.0044 (20-shot) and RULER NIAH was 1.0 through 128k.
+  - **Performance.** Against BF16 all-reduce, INT6 cut time to first token 4.6% at 32k and
+    128k input (concurrency 1) and raised output throughput 2.8% at 32k input and 1k output,
+    concurrency 16. Decode at concurrency 1 was unchanged. DCP8 grows the KV cache from 1.49M
+    to 8.29M tokens and costs a few percent of decode speed (242 vs 264 output tok/s at 2k
+    input, concurrency 8).
 
-  **DCP8 on the same node.** `--decode-context-parallel-size 8` with `--dcp-comm-backend a2a`
-  started cleanly and served under full CUDA graphs. On a 250-question GSM8K run with thinking
-  off it scored 0.980, against 0.984 with DCP off and 0.984 with DCP8 on the default `ag_rs`
-  backend. Passkey retrieval was 12/12 from 4k through 131k tokens on all three. The KV cache
-  grew from 1.49M tokens to 8.29M. On `vllm bench serve` with 512 output tokens, `a2a` was a
-  little faster than `ag_rs` (241.8 vs 234.0 output tok/s at 2k input, concurrency 8) and both
-  were a few percent below DCP off (263.6 tok/s) at `--max-num-seqs 8`.
-
-  **INT6 QuickReduce.** `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT6` sends tensor-parallel
-  all-reduces of 4 MiB and more through QuickReduce, which casts BF16 to FP16 and quantizes to
-  6 bits. That covers the prefill all-reduces. Decode all-reduces are smaller and stay on AITER's
-  BF16 custom all-reduce. INT6 is lossy; set the variable to `NONE` for BF16 all-reduce. Against
-  `NONE`, with the command above (DCP8, `--max-num-seqs 64`) and only this variable changed:
-  - GSM8K, 5-shot, all 1,319 questions (lm-eval 0.4.13, completions API): 0.9773 ± 0.0041
-    flexible-extract and 0.9757 strict-match, vs 0.9765 and 0.9750.
-  - Passkey retrieval in wikitext-103 text at 32k and 120k tokens, at 7 depths each: 14/14 for
-    both. The mean log-probability of the answer did not drop (−0.25 and −0.066, vs −0.26 and
-    −0.073).
-  - Time to first token fell 4.6% at both 32k and 128k input (concurrency 1).
-  - At 32k input and 1k output, concurrency 16, output throughput rose 2.8%.
-  - Decode at concurrency 1 was unchanged.
-
-  INT4 roughly doubled the speedup (time to first token −9.6%), but it lowered answer
-  confidence at 120k on 6 of the 7 passkey depths, so the recipe does not use it.
-
-  Expert parallelism, multi-node TP and prefill/decode disaggregation have not been
-  tested on MI325X. Speculative decoding is off (vllm-project/vllm#64261).
+  Expert parallelism, multi-node TP and prefill/decode disaggregation have not been tested.
+  Speculative decoding is off (vllm-project/vllm#64261).
 
   ## Client usage
 
