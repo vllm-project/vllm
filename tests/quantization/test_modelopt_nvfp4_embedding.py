@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
@@ -40,7 +41,9 @@ def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
     return config
 
 
-def test_nvfp4_embedding_matches_reference_dequant(dist_init):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_nvfp4_embedding_matches_reference_dequant():
     torch.manual_seed(0)
     # The layer pads the vocabulary, so a size that is not a multiple of the
     # padding also covers the loader's narrowing.
@@ -90,7 +93,9 @@ def test_nvfp4_embedding_matches_reference_dequant(dist_init):
         layer.quant_method.apply(layer, torch.zeros(1, hidden, dtype=torch.bfloat16))
 
 
-def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_nvfp4_embedding_rejects_tied_lm_head():
     # OPT ties its word embeddings to the LM head, which would read packed bytes.
     vllm_config = VllmConfig(model_config=ModelConfig("facebook/opt-125m"))
     with (
@@ -109,7 +114,9 @@ def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton path needs a GPU")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("hidden", [64, 2080])
-def test_nvfp4_embedding_triton_matches_torch(dist_init, dtype, hidden):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_nvfp4_embedding_triton_matches_torch(dtype, hidden):
     torch.manual_seed(0)
     vocab = 300
     layer = VocabParallelEmbedding(

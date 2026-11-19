@@ -169,6 +169,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1517,6 +1518,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
+    # Share DP-shared Engram host tables (EngramConfig.dp_shared_memory) as
+    # HIP VMM host memory instead of /dev/shm. Disabled by default: on some
+    # amdgpu drivers (e.g. 6.16.6) a peer's access to the imported memory
+    # keeps it allocated after every process exits (ROCm/rocm-systems#13573).
+    "VLLM_ROCM_ENGRAM_HIP_VMM": lambda: (
+        os.getenv("VLLM_ROCM_ENGRAM_HIP_VMM", "False").lower() in ("true", "1")
+    ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
@@ -2630,6 +2638,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
+        # Where Engram host tables live; the GPU views and graphs are the same.
+        "VLLM_ROCM_ENGRAM_HIP_VMM",
     }
 
     from vllm.config.utils import normalize_value
