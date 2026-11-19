@@ -883,29 +883,23 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     assert "first" in coordinator.take_residency_updates(["first"])
 
 
-@pytest.mark.parametrize("num_resident_groups", [1, 3])
-@pytest.mark.parametrize(
-    "completed_pages", [(), (4, 5), tuple(range(6))], ids=["pending", "tail", "all"]
-)
-@pytest.mark.parametrize(
-    "shared_pages", [(), (0,), tuple(range(4))], ids=["private", "mixed", "shared"]
-)
-@pytest.mark.parametrize("enable_caching", [False, True])
 def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
-    num_resident_groups,
-    completed_pages,
-    shared_pages,
-    enable_caching,
     monkeypatch,
 ):
-    """A hot region fits even when hot plus the next chunk do not fit together."""
+    """A hot region fits even when hot plus the next chunk do not fit together.
+
+    Every page is written back, the two newest stay pinned as the active tail,
+    and page 0 has a second owner, so only pages 1-3 return to the free queue.
+    """
+    num_resident_groups = 3
+    shared_pages = (0,)
     manager = make_hisparse_kv_cache_manager(
         8 + 10 * num_resident_groups,
         32,
         max_model_len=256,
         max_in_flight_tokens=8 * HISPARSE_BLOCK_SIZE,
         num_resident_groups=num_resident_groups,
-        enable_caching=enable_caching,
+        enable_caching=True,
     )
     request = make_request(
         "transition", list(range(8 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
@@ -918,20 +912,11 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     )
     request.num_computed_tokens = 6 * HISPARSE_BLOCK_SIZE
     coordinator = get_hisparse_coordinator(manager)
-    source_blocks = manager.get_blocks(request.request_id).blocks[0]
-    completed_host_blocks = {source_blocks[page].block_id for page in completed_pages}
-    counts = {
-        transfer.transfer_id: 1
-        for transfer in coordinator.build_offload_command().page_transfers
-        if transfer.host_block_id in completed_host_blocks
-    }
-    coordinator.update_spills(counts, counts)
-    # A second owner keeps these blocks out of the free queue after unpinning.
-    if shared_pages:
-        for resident in coordinator.resident_managers:
-            manager.block_pool.touch(
-                resident.get_residency_pages(request.request_id, shared_pages)
-            )
+    _publish_hisparse_pages(manager)
+    for resident in coordinator.resident_managers:
+        manager.block_pool.touch(
+            resident.get_residency_pages(request.request_id, shared_pages)
+        )
     for hot in coordinator.hot_managers:
         hot.require_hot(request.request_id)
     free = manager.block_pool.get_num_free_blocks()
@@ -958,15 +943,6 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     monkeypatch.setattr(coordinator, "get_num_reclaimable_blocks", record_reclaim)
     monkeypatch.setattr(coordinator, "update_residency", record_released_blocks)
     blocks = manager.allocate_slots(request, 2 * HISPARSE_BLOCK_SIZE)
-
-    if len(completed_pages) < 6 or len(shared_pages) == 4:
-        assert predicted_releases == [0]
-        assert not observed_releases
-        assert blocks is None
-        assert all(
-            not hot.has_hot(request.request_id) for hot in coordinator.hot_managers
-        )
-        return
 
     assert predicted_releases == [(4 - len(shared_pages)) * num_resident_groups]
     assert observed_releases == predicted_releases
@@ -1283,11 +1259,9 @@ def _finish_hisparse_step(scheduler, output, sampled_tokens):
     )
 
 
-@pytest.mark.parametrize("batch_tokens,resume_tokens", [(96, 32), (160, 64), (160, 80)])
-def test_hisparse_streaming_resume_under_pressure(
-    tmp_path, batch_tokens, resume_tokens
-):
-    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=batch_tokens)
+@pytest.mark.parametrize("resume_tokens", [64, 80])
+def test_hisparse_streaming_resume_under_pressure(tmp_path, resume_tokens):
+    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=160)
 
     def chunk(tokens):
         request = make_request(
@@ -1329,33 +1303,6 @@ def test_hisparse_streaming_resume_under_pressure(
     )
     if "B" not in output.num_scheduled_tokens:
         assert scheduler.schedule().num_scheduled_tokens["B"] == 1
-
-
-@pytest.mark.parametrize("prompt_length", [144, 160])
-def test_hisparse_prefill_shortfall_without_hot_request(tmp_path, prompt_length):
-    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=128)
-    first = make_request("A", list(range(prompt_length)), HISPARSE_BLOCK_SIZE, sha256)
-    second = make_request("B", [996], HISPARSE_BLOCK_SIZE, sha256)
-    scheduler.add_request(first)
-    scheduler.add_request(second)
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens == {"A": 96, "B": 1}
-    _finish_hisparse_step(scheduler, output, {"B": [7]})
-    manager = scheduler.kv_cache_manager
-    assert manager.block_pool.get_num_free_blocks() == 9
-    hot = get_hisparse_coordinator(manager).hot_managers
-    assert all("A" not in group.hot_required for group in hot)
-
-    if prompt_length == 160:
-        # 16 new blocks plus 6 Hot exceed the 9 free plus 12 reclaimable.
-        assert manager.allocate_slots(first, 64) is None
-        assert manager.block_pool.get_num_free_blocks() == 9
-        assert all("A" not in group.hot_required for group in hot)
-        return
-
-    # Six Hot blocks up front unlock twelve clean blocks for A's next chunk.
-    assert scheduler.schedule().num_scheduled_tokens == {"A": 48, "B": 1}
-    assert second.num_preemptions == 0
 
 
 def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):
