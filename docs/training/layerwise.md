@@ -135,10 +135,11 @@ finalize_layerwise_processing(model, llm.model_config)
 
 ## Troubleshooting Excessive Memory Usage
 
-DeepSeek-V4.1 CPU-offloaded Engram tables are updated directly in their existing
-host storage by their original weight loaders. Layerwise reload does not stage
-these tables on the GPU, and their post-load hooks still run when the update
-finishes. This exception does not apply to GPU-resident or peer-HBM Engram tables.
+Layerwise reload updates DeepSeek-V4.1 CPU-offloaded Engram tables in their
+existing host storage. Checkpoint loaders write there directly, and the
+[`sharded_rdt` backend](weight_transfer/sharded_rdt.md) copies received slices
+straight into that storage. Post-load hooks run when the update finishes.
+GPU-resident and peer-HBM Engram tables use the standard layerwise reload path.
 
 Layerwise reloading allows users to incrementally load and process weights as they are loaded into the model. This system relies on buffering layer weights on device until all weights of a layer have been loaded. However, without offloading, this approach necessarily causes excessive buffering if weights are loaded out of order.
 
