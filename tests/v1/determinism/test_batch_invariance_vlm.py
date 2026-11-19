@@ -126,7 +126,6 @@ def _run_vlm_batch_invariance(
         max_num_seqs=16,
         max_model_len=4096,
         max_num_batched_tokens=2048,
-        gpu_memory_utilization=0.85,
         enable_prefix_caching=False,
         mm_processor_cache_gb=0,
         mm_encoder_attn_backend=mm_encoder_attn_backend,

@@ -201,9 +201,11 @@ class TestStreaming:
         "text",
         [
             '<tool_call>{"name": "get", "arguments": {"x": "hello"}}</tool_call>',
-            '<tool_call>{"name": "f", "arguments": '
-            '{"items": [1, [2, 3]], "obj": {"k": "v"}}}'
-            "</tool_call>",
+            (
+                '<tool_call>{"name": "f", "arguments": '
+                '{"items": [1, [2, 3]], "obj": {"k": "v"}}}'
+                "</tool_call>"
+            ),
         ],
         ids=["flat_args", "nested_arrays"],
     )
@@ -959,7 +961,7 @@ class TestSkipToolParsingFromMessageHeader:
 
 
 def _alias_config() -> ParserEngineConfig:
-    """``TOOL_START`` has a canonical spelling and one corrupted alias."""
+    """`TOOL_START` has a canonical spelling and one corrupted alias."""
     return ParserEngineConfig(
         name="alias_test",
         terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},

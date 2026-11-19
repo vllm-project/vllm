@@ -25,6 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -110,6 +111,18 @@ class ECConnectorBase(ABC):
         """
         return None
 
+    def reset(self) -> None:
+        """Invalidate connector-side encoder cache bookkeeping.
+
+        Called from `Scheduler.reset_encoder_cache` after the
+        EncoderCacheManager is cleared, and from the worker
+        `reset_encoder_cache` path after the local encoder cache is
+        cleared. The default is a no-op; connectors that mirror local
+        cache residency must drop that state so a later request cannot
+        skip a necessary Load or Encode.
+        """
+        return
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -168,7 +181,7 @@ class ECConnectorBase(ABC):
         """Start loading the cache from the connector into vLLM's encoder cache.
 
         This method loads the encoder cache based on metadata provided by the scheduler.
-        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        It is called before `gather_mm_embeddings` for the EC Connector. For EC,
         the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:
@@ -238,6 +251,16 @@ class ECConnectorBase(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def on_new_request(self, request: "Request") -> None:
+        """Notify the connector after a new request is queued."""
+        return
+
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        """Provide a read-only query for each input's cached embedding count."""
+        return
 
     @abstractmethod
     def has_cache_item(

@@ -74,8 +74,10 @@ def test_conf_flag_enabled(conf, key, expected):
         (
             "garbage_collection_threshold:0.9,max_split_size_mb:512",
             False,
-            "garbage_collection_threshold:0.9,max_split_size_mb:512,"
-            "expandable_segments:False",
+            (
+                "garbage_collection_threshold:0.9,max_split_size_mb:512,"
+                "expandable_segments:False"
+            ),
         ),
     ],
 )

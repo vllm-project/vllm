@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group, uniform_spec
 from tests.v1.kv_connector.umbp_test_utils import (
+    MemoryRuntime,
     _EmbeddedRuntime,
     _hybrid_kv_cache_config,
     _kv_cache_config,
@@ -18,6 +20,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     _WorkerHandle,
     make_request,
     make_scheduler_output,
+    mori_has_umbp,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
@@ -29,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
     BlockTransferPlan,
+    KVLayoutPlanner,
     LoadSpec,
     RankTopology,
     RequestTracker,
@@ -37,6 +41,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
     UMBPNamespace,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
+    EmbeddedRuntime,
+    UMBPRuntimeConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
@@ -51,14 +59,11 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    KVCacheGroupSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-    SparseCacheRole,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    SlidingWindowManager,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_interface import KVCacheTensor, MLAAttentionSpec, SparseCacheRole
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -145,8 +150,8 @@ def test_restored_hybrid_prefix_rechecks_only_positional_groups():
 def test_store_plans_store_each_groups_complete_blocks():
     config = _kv_cache_config()
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(
-            ["other"], replace(config.kv_cache_groups[0].kv_cache_spec, block_size=32)
+        new_kv_cache_group(
+            ["other"], replace(uniform_spec(config.kv_cache_groups[0]), block_size=32)
         )
     )
     scheduler = UMBPStoreConnectorScheduler(
@@ -184,32 +189,17 @@ def test_store_plans_store_each_groups_complete_blocks():
 
 def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
     config = _kv_cache_config()
-    full = config.kv_cache_groups[0].kv_cache_spec
-    sliding = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=full.num_kv_heads,
-        head_size=full.head_size,
-        dtype=full.dtype,
-        sliding_window=32,
+    sliding = SlidingWindowManager.layer_config(
+        uniform_spec(config.kv_cache_groups[0]), sliding_window=32
     )
-    config.kv_cache_groups.append(KVCacheGroupSpec(["sliding"], sliding))
-    original = KVCacheSpecRegistry.get_manager_class
+    config.kv_cache_groups.append(new_kv_cache_group(["sliding"], sliding))
 
-    class SparseStoreManager:
-        @classmethod
-        def reachable_block_mask(cls, **kwargs):
-            assert kwargs["start_block"] == 0
-            assert kwargs["end_block"] == 4
-            assert kwargs["alignment_tokens"] == 16
-            assert kwargs["reachable_boundaries"] == (63,)
-            return [False, True, False, True]
-
-    def manager_for(spec, role=None):
-        return (
-            SparseStoreManager
-            if isinstance(spec, SlidingWindowSpec)
-            else original(spec, role)
-        )
+    def reachable_block_mask(cls, **kwargs):
+        assert kwargs["start_block"] == 0
+        assert kwargs["end_block"] == 4
+        assert kwargs["alignment_tokens"] == 16
+        assert kwargs["reachable_boundaries"] == (63,)
+        return [False, True, False, True]
 
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded"}),
@@ -217,7 +207,9 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
         _SchedulerHandle({}),
         BlockIdentityCodec(UMBPNamespace("store-mask")),
     )
-    monkeypatch.setattr(KVCacheSpecRegistry, "get_manager_class", manager_for)
+    monkeypatch.setattr(
+        SlidingWindowManager, "reachable_block_mask", classmethod(reachable_block_mask)
+    )
     request = make_request(
         "masked",
         num_tokens=64,
@@ -235,13 +227,8 @@ def test_store_plans_apply_core_reachable_block_mask(monkeypatch):
 @pytest.mark.parametrize("use_eagle", [False, True])
 def test_single_sliding_window_stores_a_replayable_tail(use_eagle):
     config = _kv_cache_config()
-    full = config.kv_cache_groups[0].kv_cache_spec
-    config.kv_cache_groups[0].kv_cache_spec = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=full.num_kv_heads,
-        head_size=full.head_size,
-        dtype=full.dtype,
-        sliding_window=32,
+    config.kv_cache_groups[0].manager_config = SlidingWindowManager.config(
+        sliding_window=32
     )
     config.prefix_cache_retention_interval = 0
     vllm_config = _vllm_config({})
@@ -289,16 +276,11 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
     chunk start, so 48 external tokens are claimed and nothing loads it.
     """
     config = _kv_cache_config()
-    full = config.kv_cache_groups[0].kv_cache_spec
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["chunked"],
-            ChunkedLocalAttentionSpec(
-                block_size=16,
-                num_kv_heads=full.num_kv_heads,
-                head_size=full.head_size,
-                dtype=full.dtype,
-                attention_chunk_size=64,
+            ChunkedLocalAttentionManager.layer_config(
+                uniform_spec(config.kv_cache_groups[0]), attention_chunk_size=64
             ),
         )
     )
@@ -352,16 +334,11 @@ def test_external_chunked_local_hit_preserves_absolute_positions(
 
 def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
     config = _kv_cache_config()
-    full = config.kv_cache_groups[0].kv_cache_spec
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["sliding"],
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=full.num_kv_heads,
-                head_size=full.head_size,
-                dtype=full.dtype,
-                sliding_window=32,
+            SlidingWindowManager.layer_config(
+                uniform_spec(config.kv_cache_groups[0]), sliding_window=32
             ),
             is_eagle_group=True,
         )
@@ -407,13 +384,8 @@ def test_eagle_lookup_includes_the_aligned_prompt_proof_block():
 
 def test_chunk_boundary_hit_without_transfers_is_synchronous():
     config = _kv_cache_config()
-    full = config.kv_cache_groups[0].kv_cache_spec
-    config.kv_cache_groups[0].kv_cache_spec = ChunkedLocalAttentionSpec(
-        block_size=16,
-        num_kv_heads=full.num_kv_heads,
-        head_size=full.head_size,
-        dtype=full.dtype,
-        attention_chunk_size=64,
+    config.kv_cache_groups[0].manager_config = ChunkedLocalAttentionManager.config(
+        attention_chunk_size=64
     )
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({}),
@@ -447,9 +419,9 @@ def test_hybrid_external_hit_keeps_local_sparse_checkpoint(
     config = _hybrid_kv_cache_config()
     config.kv_cache_groups.insert(
         1,
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["untransferred"],
-            config.kv_cache_groups[0].kv_cache_spec,
+            uniform_spec(config.kv_cache_groups[0]),
             enable_kv_transfer=False,
         ),
     )
@@ -516,9 +488,9 @@ def test_draft_groups_must_be_restorable(monkeypatch):
     )
     config = _kv_cache_config()
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["draft"],
-            config.kv_cache_groups[0].kv_cache_spec,
+            uniform_spec(config.kv_cache_groups[0]),
             is_eagle_group=True,
             enable_kv_transfer=False,
         )
@@ -672,7 +644,7 @@ def test_sparse_attention_indexer_forces_async_load(indexer):
     )
     config = replace(
         _kv_cache_config(),
-        kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer1", "layer2"], spec)],
     )
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded", "load_async": False}),
@@ -889,6 +861,141 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
     assert not scheduler.has_pending_push_work()
 
 
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not mori_has_umbp(), reason="MORI was built without UMBP"
+            ),
+        ),
+    ],
+)
+def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
+    """A hash-only tail survives request cleanup, then restores byte for byte."""
+    if device == "cpu":
+        runtime = MemoryRuntime()
+    else:
+        runtime = EmbeddedRuntime.from_config(
+            UMBPRuntimeConfig(
+                "embedded", {"capacity_bytes": 16 << 20, "lookup_dir": socket_dir}
+            )
+        )
+    config = _hybrid_kv_cache_config()
+    groups = config.kv_cache_groups
+    config = replace(
+        config,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8 * group.page_size_bytes,
+                layers=group.layer_names,
+                layer_stride=8 * group.page_size_bytes,
+                block_stride=group.page_size_bytes,
+            )
+            for group in groups
+        ],
+    )
+    topology = RankTopology()
+    layout = KVLayoutPlanner.from_kv_cache_config(config)
+    descriptor = layout.describe(topology)
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"enable_partial_hash_hits": True, "load_async": True},
+            prefix_match_unit=4,
+        ),
+        config,
+        runtime.create_scheduler_handle("tail", topology, descriptor),
+        BlockIdentityCodec(UMBPNamespace("tail")),
+    )
+    worker = UMBPStoreConnectorWorker(
+        runtime.create_worker_handle("tail", topology, descriptor), layout
+    )
+    pool = BlockPool(8, True, 4)
+    scheduler.bind_gpu_block_pool(pool)
+    caches = {
+        group.layer_names[0]: torch.zeros(
+            (8, group.page_size_bytes), dtype=torch.uint8, device=device
+        )
+        for group in groups
+    }
+    # Distinct int32 words, so a K/V swap or a shifted range cannot match.
+    pages = {
+        name: torch.arange(
+            group << 16,
+            (group << 16) + cache.shape[1] // 4,
+            dtype=torch.int32,
+            device=device,
+        ).view(torch.uint8)
+        for group, (name, cache) in enumerate(caches.items())
+    }
+    for block_id, (name, cache) in enumerate(caches.items(), 1):
+        cache[block_id] = pages[name]
+    worker.register_kv_caches(caches)
+    request = make_request(
+        "tail",
+        num_tokens=13,
+        num_computed_tokens=12,
+        block_hashes=[b"a", b"b", b"c"],
+    )
+    source_ids = ([1], [2])
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
+    )
+    sources = [pool.blocks[1], pool.blocks[2]]
+    pool.touch(sources)
+    assert not scheduler.register_finished_partial_tail(
+        request, source_ids, [(1, 2, 12)]
+    )
+    assert scheduler.request_finished(request, source_ids) == (False, None)
+    pool.free_blocks(sources)
+    output = make_scheduler_output(finished={"tail"})
+    try:
+        metadata = scheduler.build_connector_meta(output)
+        assert len(metadata.store_plans) == 2
+        worker.enqueue_stores(metadata)
+        worker.wait_for_save()
+        deadline = time.monotonic() + 10
+        while scheduler.has_pending_push_work():
+            assert time.monotonic() < deadline, "store completion was not reported"
+            worker.get_finished(set())
+            scheduler.update_connector_output(
+                SimpleNamespace(
+                    kv_connector_worker_meta=worker.build_connector_worker_meta()
+                )
+            )
+            time.sleep(0.001)
+        assert [block.ref_cnt for block in sources] == [0, 0]
+        for cache in caches.values():
+            cache.zero_()
+
+        request.request_id = "replay"
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
+        scheduler.update_state_after_alloc(
+            request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
+        )
+        output.finished_req_ids = set()
+        worker.start_load_kv(None, scheduler.build_connector_meta(output))
+        deadline = time.monotonic() + 10
+        while (finished := worker.get_finished(set())) == (None, None):
+            assert time.monotonic() < deadline, "load completion was not reported"
+            time.sleep(0.001)
+        assert finished == (None, {"replay"})
+        assert worker.get_failed_recving() == set()
+        for block_id, (name, cache) in enumerate(caches.items(), 3):
+            expected = torch.zeros_like(cache)
+            expected[block_id] = pages[name]
+            assert torch.equal(cache, expected), name
+        counters = worker.get_kv_connector_stats().reduce()
+        page_bytes = sum(group.page_size_bytes for group in groups)
+        assert counters["load_num_bytes"] == page_bytes
+        assert counters["store_num_bytes"] == page_bytes
+    finally:
+        worker.close()
+        scheduler.close()
+
+
 @pytest.mark.parametrize("failure", [None, "missing-rank", "exception", "short"])
 @pytest.mark.parametrize("restored_tokens", [32, 64])
 @pytest.mark.parametrize("null_block", [False, True])
@@ -898,8 +1005,8 @@ def test_eager_restored_prefix_rechecks_residency_per_group_and_rank(
     """Only currently complete objects may skip store; fresh suffixes still store."""
     config = _kv_cache_config()
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(
-            ["other"], replace(config.kv_cache_groups[0].kv_cache_spec, block_size=32)
+        new_kv_cache_group(
+            ["other"], replace(uniform_spec(config.kv_cache_groups[0]), block_size=32)
         )
     )
     codec = BlockIdentityCodec(UMBPNamespace("eager-residency"))
@@ -979,7 +1086,7 @@ def test_eager_restored_prefix_rechecks_residency_per_group_and_rank(
 def test_several_cache_groups_load_asynchronously():
     config = _kv_cache_config()
     config.kv_cache_groups.append(
-        KVCacheGroupSpec(["other"], config.kv_cache_groups[0].kv_cache_spec)
+        new_kv_cache_group(["other"], uniform_spec(config.kv_cache_groups[0]))
     )
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config({"mode": "embedded", "load_async": False}),

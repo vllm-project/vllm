@@ -38,10 +38,10 @@ def _writable_flydsl_cache() -> None:
 
 
 class FfnRunner:
-    """``sym``: this rank's peer buffer; ``peers``: every rank's, int64 on
+    """`sym`: this rank's peer buffer; `peers`: every rank's, int64 on
     device. The kernels move the epoch on themselves, so every rank that runs
     the same launches agrees on it. Runners on one peer buffer must share
-    ``epoch``: a tag repeated over the buffer's lifetime could match a stale
+    `epoch`: a tag repeated over the buffer's lifetime could match a stale
     pair."""
 
     def __init__(
@@ -105,7 +105,7 @@ class FfnRunner:
 
     def warm(self, weights, compute_units: int | None = None) -> None:
         """Compile and load every width (a launch that returns at once); with
-        ``compute_units``, refuse a width whose grid cannot be resident."""
+        `compute_units`, refuse a width whose grid cannot be resident."""
         import flydsl.compiler as flyc
 
         dummy = torch.zeros(1, HIDDEN, dtype=torch.bfloat16, device=self.epoch.device)
@@ -131,11 +131,11 @@ class FfnRunner:
         slots: torch.Tensor,
         final: bool = False,
     ):
-        """``part``: this rank's unreduced o_proj output; ``slots``: the step's
+        """`part`: this rank's unreduced o_proj output; `slots`: the step's
         int64 slot mapping. A row with a negative slot (padding) still runs the
         seam (its residual output is unspecified) but joins no expert and its
         MoE output is zero. Returns the reduced MoE output and the residual after
-        attention. ``final``: the step's last launch, which ends in the TP
+        attention. `final`: the step's last launch, which ends in the TP
         fault handshake."""
         s = part.shape[0]
         assert part.is_contiguous() and residual.is_contiguous()

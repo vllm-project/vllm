@@ -2,12 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Model, tokenizer, and config source options mirroring Python's `model`,
-//! `--revision`, `--tokenizer`, `--tokenizer-revision`, and `--hf-config-path`,
-//! shared by the OpenAI frontend and the render server.
+//! `--revision`, `--tokenizer`, `--tokenizer-revision`, `--hf-config-path`,
+//! `--skip-tokenizer-init`, and `--hf-token`, shared by the OpenAI frontend and
+//! the render server.
+
+use std::str::FromStr;
 
 use clap::Args;
 use serde::Deserialize;
-use vllm_text::backend::hf::{ModelFileSources, ModelSource};
+use vllm_text::backend::hf::{HfToken, ModelFileSources, ModelSource};
 
 /// The model and the sources of its tokenizer and config files, mirroring
 /// Python's `ModelConfig`.
@@ -42,6 +45,68 @@ pub struct ModelArgs {
     #[arg(long)]
     #[serde(default)]
     pub hf_config_path: Option<String>,
+
+    /// Skip initialization of tokenizer and detokenizer. Expects valid
+    /// `prompt_token_ids` and `None` for prompt from the input. The generated
+    /// output will contain token ids.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub skip_tokenizer_init: bool,
+
+    /// The token to use as HTTP bearer authorization for remote files. If
+    /// `True`, will use the token generated when running `hf auth login`
+    /// (stored in `~/.cache/huggingface/token`).
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub hf_token: Option<HfTokenArg>,
+}
+
+/// `--hf-token`: Python's `bool | str`, where a bare flag (`true`) means the
+/// stored login token and any other value is the token itself.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "HfTokenJson")]
+pub enum HfTokenArg {
+    /// Use `HF_TOKEN` or the stored login token, as without the flag.
+    Login,
+    /// Use this token.
+    Token(HfToken),
+}
+
+impl From<String> for HfTokenArg {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "true" => Self::Login,
+            _ => Self::Token(HfToken(value)),
+        }
+    }
+}
+
+impl FromStr for HfTokenArg {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(value.to_string().into())
+    }
+}
+
+/// The `--args-json` form of `--hf-token`: `true` or a token string.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HfTokenJson {
+    Flag(bool),
+    Token(String),
+}
+
+impl TryFrom<HfTokenJson> for HfTokenArg {
+    type Error = &'static str;
+
+    fn try_from(value: HfTokenJson) -> Result<Self, Self::Error> {
+        match value {
+            HfTokenJson::Flag(true) => Ok(Self::Login),
+            HfTokenJson::Flag(false) => Err("hf_token=false is not supported"),
+            HfTokenJson::Token(token) => Ok(token.into()),
+        }
+    }
 }
 
 impl ModelArgs {
@@ -66,11 +131,18 @@ impl ModelArgs {
             },
             tokenizer,
             hf_config,
+            skip_tokenizer_init: self.skip_tokenizer_init,
+            hf_token: match &self.hf_token {
+                Some(HfTokenArg::Token(token)) => Some(token.clone()),
+                Some(HfTokenArg::Login) | None => None,
+            },
         }
     }
 
     /// Forward the revision and source options to the managed Python engine,
-    /// which loads the same model, tokenizer, and config.
+    /// which loads the same model, tokenizer, and config. With
+    /// `--skip-tokenizer-init` the engine skips its tokenizer too, which it
+    /// would otherwise load for structured outputs.
     pub fn python_args(&self) -> Vec<String> {
         [
             ("--revision", &self.revision),
@@ -81,6 +153,11 @@ impl ModelArgs {
         .into_iter()
         .filter_map(|(flag, value)| Some([flag.to_string(), value.clone()?]))
         .flatten()
+        .chain(self.skip_tokenizer_init.then(|| "--skip-tokenizer-init".to_string()))
+        .chain(self.hf_token.iter().flat_map(|hf_token| match hf_token {
+            HfTokenArg::Login => vec!["--hf-token".to_string()],
+            HfTokenArg::Token(HfToken(token)) => vec!["--hf-token".to_string(), token.clone()],
+        }))
         .collect()
     }
 }
