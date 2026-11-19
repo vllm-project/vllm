@@ -181,19 +181,6 @@ XPU_PORTABLE_TESTS = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _skip_cuda_specific_sparse_mla_tests(request):
-    """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
-    if current_platform.is_rocm():
-        portable_tests = ROCM_PORTABLE_TESTS
-    elif current_platform.is_xpu():
-        portable_tests = XPU_PORTABLE_TESTS
-    else:
-        return
-    if getattr(request.node, "originalname", request.node.name) not in portable_tests:
-        pytest.skip("This sparse MLA test exercises a CUDA-specific API")
-
-
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
     for name in [
@@ -765,7 +752,17 @@ def _quantize_dequantize_nvfp4_ds_mla(
     ("total_num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
     [
         pytest.param(128, 128, 64, 128, id="deepseek"),
-        pytest.param(64, 256, 0, 256, id="glm53_flash_nope"),
+        pytest.param(
+            64,
+            256,
+            0,
+            256,
+            id="glm53_flash_nope",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="NoPE sparse MLA is served by FlashMLA on SM90 only",
+            ),
+        ),
     ],
 )
 def test_sparse_backend_decode_correctness(
@@ -1964,11 +1961,25 @@ PREFILL_BATCH_SPECS = {
 }
 
 
+skip_on_rocm_dense_prefill = pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="ROCm dense prefill requires the DeepSeek MLA layout",
+)
+
+
 @pytest.mark.skipif(
     current_platform.is_cuda() and torch.cuda.get_device_capability()[0] < 10,
     reason="Sparse MLA forward_mha requires FA4 (SM100+)",
 )
-@pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
+@pytest.mark.parametrize(
+    "batch_name",
+    [
+        pytest.param(name, marks=skip_on_rocm_dense_prefill)
+        if name.startswith("masked_mha")
+        else name
+        for name in PREFILL_BATCH_SPECS
+    ],
+)
 @pytest.mark.parametrize(
     "kv_cache_dtype", (["auto", "fp8"] if current_platform.is_rocm() else ["auto"])
 )
@@ -1976,8 +1987,17 @@ PREFILL_BATCH_SPECS = {
     ("num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
     [
         pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
-        pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
-        pytest.param(64, 256, 0, 256, id="glm53_flash_nope_hd256_v256"),
+        pytest.param(
+            64, 192, 64, 256, id="glm5_hd256_v256", marks=skip_on_rocm_dense_prefill
+        ),
+        pytest.param(
+            64,
+            256,
+            0,
+            256,
+            id="glm53_flash_nope_hd256_v256",
+            marks=skip_on_rocm_dense_prefill,
+        ),
     ],
 )
 def test_sparse_backend_prefill_correctness(
@@ -1998,10 +2018,6 @@ def test_sparse_backend_prefill_correctness(
         if current_platform.is_rocm()
         else FlashMLASparseBackend
     )
-    if current_platform.is_rocm() and (
-        batch_name.startswith("masked_mha") or qk_nope_head_dim != 128
-    ):
-        pytest.skip("ROCm dense prefill requires the DeepSeek MLA layout")
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
     device = torch.device(DEVICE_TYPE)
@@ -6006,3 +6022,25 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
                 rtol=0.01,
                 atol=0.01,
             )
+
+
+def _skip_cuda_specific_sparse_mla_tests() -> None:
+    """Skip tests whose helpers exercise CUDA-only sparse MLA APIs.
+
+    Marking at import time skips before fixture setup, which an autouse
+    fixture cannot do. Must stay at the end of the module.
+    """
+    if current_platform.is_rocm():
+        portable_tests = ROCM_PORTABLE_TESTS
+    elif current_platform.is_xpu():
+        portable_tests = XPU_PORTABLE_TESTS
+    else:
+        return
+    skip = pytest.mark.skip(reason="This sparse MLA test exercises a CUDA-specific API")
+    module = globals()
+    for name, obj in list(module.items()):
+        if name.startswith("test_") and callable(obj) and name not in portable_tests:
+            module[name] = skip(obj)
+
+
+_skip_cuda_specific_sparse_mla_tests()
