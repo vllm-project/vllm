@@ -13,7 +13,7 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
 
 
 class _TestCuTeDSLKernel(VllmCuTeDSLJitKernel["_TestCuTeDSLKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         variant: int
 

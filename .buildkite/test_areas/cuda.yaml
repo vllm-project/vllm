@@ -46,6 +46,7 @@ steps:
   - vllm/v1/worker/gpu/dp_utils.py
   - vllm/v1/worker/encoder_cudagraph.py
   - vllm/v1/worker/encoder_cudagraph_defs.py
+  - vllm/model_executor/models/encoder_cudagraph_utils.py
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/ubatch_utils.py
   commands:

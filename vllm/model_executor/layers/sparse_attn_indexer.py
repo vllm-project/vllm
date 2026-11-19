@@ -3,10 +3,12 @@
 """Custom Sparse Attention Indexer layers."""
 
 import math
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+from torch import nn
 
 import vllm.envs as envs
 from vllm import _cpu_ops as cpu_ops
@@ -44,9 +46,17 @@ from vllm.model_executor.layers.indexer_topk import (
     get_indexer_topk,
     is_deep_select_supported,
 )
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
     get_fp8_min_max,
 )
+from vllm.model_executor.utils import storage_view
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -72,6 +82,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -563,7 +574,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )
@@ -1728,3 +1739,77 @@ class SparseAttnIndexer(CustomOp):
                 )
 
         return topk_indices_buffer
+
+
+def init_indexer_wk_weights_proj(
+    indexer: nn.Module,
+    hidden_size: int,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    *,
+    fused_linear_cls: type[MergedColumnParallelLinear] = MergedColumnParallelLinear,
+) -> None:
+    """Build the indexer's checkpoint layers `wk` (BF16, or FP8 as the
+    checkpoint stores it and run in BF16: `bf16_linear`) and
+    `weights_proj` (BF16), and `wk_weights_proj`, the BF16 linear that runs
+    both as one GEMM. Its weight is not a parameter: it holds `wk` and
+    `weights_proj`'s rows and is refilled after every load and every in-place
+    reload of the runtime weights (`fuse_indexer_wk_weights_proj` from the
+    indexer's post-load hook)."""
+    # wk stays exact (e.g. under online quantization): the fused GEMM is BF16
+    indexer.wk = bf16_linear(
+        partial(
+            ReplicatedLinear,
+            hidden_size,
+            indexer.head_dim,
+            bias=False,
+            prefix=f"{prefix}.wk",
+        ),
+        quant_config,
+    )
+    indexer.refresh_derived_weights = indexer.process_weights_after_loading
+    indexer.weights_proj = ReplicatedLinear(
+        hidden_size, indexer.n_head, bias=False, prefix=f"{prefix}.weights_proj"
+    )
+    fused = fused_linear_cls(
+        hidden_size,
+        [indexer.head_dim, indexer.n_head],
+        bias=False,
+        disable_tp=True,
+        prefix=f"{prefix}.wk_weights_proj",
+    )
+    weight = fused.weight.data
+    del fused.weight
+    fused.weight = weight  # a plain attribute: loaders and reloads skip it
+    indexer.wk_weights_proj = fused
+    # wk and weights_proj own no storage: their weights are views of the fused
+    # one. weights_proj's is its rows after wk's. wk's starts at offset 0 in
+    # the dtype it loads: FP8 bytes occupy the first half of wk's rows until
+    # post-load processing dequantizes them (through a temporary) into those
+    # rows; a direct reload views them back to FP8 at the same address.
+    indexer.weights_proj.weight.data = weight[indexer.head_dim :]
+    wk_weight = indexer.wk.weight
+    indexer.wk.weight.data = storage_view(
+        weight.untyped_storage(),
+        0,
+        wk_weight.shape,
+        wk_weight.stride(),
+        wk_weight.dtype,
+    )
+
+
+def fuse_indexer_wk_weights_proj(indexer: nn.Module) -> None:
+    """Fill the fused BF16 `wk_weights_proj` weight in place (captured CUDA
+    graphs keep its address) from `wk` and `weights_proj`, copying only a
+    part that is not already a view of its rows (e.g. dots3's own
+    `weights_proj`)."""
+    proj = indexer.wk_weights_proj
+    if proj.weight.is_meta:  # weight cache IPC load: only parameters arrive
+        proj.weight = torch.empty_like(proj.weight, device=indexer.wk.weight.device)
+    row = 0
+    for layer in (indexer.wk, indexer.weights_proj):
+        part = get_and_maybe_dequant_weights(layer, out_dtype=proj.weight.dtype)
+        rows = proj.weight[row : row + part.shape[0]]
+        row += part.shape[0]
+        if part.data_ptr() != rows.data_ptr() or part.stride() != rows.stride():
+            rows.copy_(part)
