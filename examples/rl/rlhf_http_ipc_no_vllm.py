@@ -58,8 +58,6 @@ parser.add_argument("--num-gpus", type=int, default=1)
 parser.add_argument("--packed", action="store_true")
 parser.add_argument("--packed-buffer-size-bytes", type=int, default=512 << 20)
 args = parser.parse_args()
-if args.packed and args.packed_buffer_size_bytes < 16:
-    parser.error("--packed-buffer-size-bytes must be at least 16")
 
 
 def post(path: str, body: dict | None = None) -> dict:

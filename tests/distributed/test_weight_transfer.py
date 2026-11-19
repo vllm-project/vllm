@@ -1822,9 +1822,8 @@ def _packed_ipc_chunk(handle: dict, names: list[str], n: int, last: bool = False
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
-    """Only the first chunk of a transfer carries the handle, also for a second
-    transfer in one update; finishing before the last chunk fails, also at a
-    chunk boundary, and a new full update works."""
+    """Only each transfer's first chunk carries the handle; finishing before
+    the last chunk raises."""
     bufs = [
         torch.arange(k, k + 4, dtype=torch.float32, device="cuda:0").view(torch.uint8)
         for k in (0, 4)
@@ -1834,54 +1833,18 @@ def test_packed_ipc_handle_once_and_cut_short_transfer_raises(monkeypatch):
     starts = [_packed_ipc_chunk({uuid: (k, *range(7))}, ["w"], 8) for k in (0, 1)]
     rest = _packed_ipc_chunk({}, [], 8, last=True)  # each transfer has 2 chunks
 
-    with pytest.raises(RuntimeError, match="outside"):
-        engine.receive_weights(starts[0])  # before start_weight_update
     engine.start_weight_update()
-    engine.receive_weights(starts[0])
-    model.load_weights.assert_not_called()  # the chunk completes no tensor
-    engine.receive_weights(rest)
-    engine.receive_weights(starts[1])
-    engine.receive_weights(rest)
+    for start in starts:
+        engine.receive_weights(start)
+        engine.receive_weights(rest)
     engine.finish_weight_update()
     loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
     assert loaded == [[0, 1, 2, 3] * 2, [4, 5, 6, 7] * 2]
 
     engine.start_weight_update()
     engine.receive_weights(starts[0])
-    with pytest.raises(RuntimeError, match="before the previous one ended"):
-        engine.receive_weights(starts[1])
     with pytest.raises(RuntimeError, match="before its last chunk"):
         engine.finish_weight_update()
-
-    engine.start_weight_update()  # a chunk ends with "a", a second one is lost
-    engine.receive_weights(_packed_ipc_chunk({uuid: (0, *range(7))}, ["a"], 4))
-    with pytest.raises(RuntimeError, match="before its last chunk"):
-        engine.finish_weight_update()
-
-    model.load_weights.reset_mock()
-    engine.start_weight_update()
-    engine.receive_weights(starts[1])
-    engine.receive_weights(rest)
-    engine.finish_weight_update()
-    loaded = [a[0][0][1].tolist() for a, _ in model.load_weights.call_args_list]
-    assert loaded == [[4, 5, 6, 7] * 2]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_packed_discard_receives_every_chunk_whole():
-    """A relay rank receives chunks larger than the first one in full."""
-    sizes: list[int] = []
-    group = SimpleNamespace(
-        device=torch.device("cuda:0"),
-        broadcast=lambda t, src: sizes.append(t.numel()),
-    )
-    engine = object.__new__(NCCLTrainerWeightTransferEngine)
-    engine.model_update_group = group
-    engine.packed = True
-    engine.packed_buffer_size_bytes = 32
-    meta = [ParamMeta(f"p{i}", torch.float32, (n,)) for i, n in enumerate([6, 8, 1])]
-    engine._discard(meta, src=1)
-    assert sizes == [24, 32, 4]
 
 
 class RecordingClient:

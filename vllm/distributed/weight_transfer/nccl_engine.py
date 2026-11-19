@@ -37,10 +37,7 @@ from vllm.distributed.weight_transfer.nccl_common import (
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    chunk_capacity,
-    chunks,
     dtype_name,
-    grow_buffer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -650,15 +647,15 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         assert self.model_update_group is not None
         device = self.model_update_group.device
         if self.packed:
-            # Nothing is kept: receive every chunk into one reused buffer.
-            capacity = chunk_capacity(self.packed_buffer_size_bytes)
-            buf: torch.Tensor | None = None
-            specs = ((m.shape, m.dtype) for m in meta)
-            for chunk in chunks(specs, self.packed_buffer_size_bytes):
-                if chunk.sent:
-                    buf = grow_buffer(buf, chunk.nbytes, capacity, device)
-                    self.model_update_group.broadcast(buf[: chunk.nbytes], src=src)
-            torch.accelerator.current_stream().synchronize()
+            packed_nccl_broadcast_consumer(
+                iterator=((m.name, (list(m.shape), m.dtype)) for m in meta),
+                group=self.model_update_group,
+                src=src,
+                post_unpack_func=lambda weights: None,
+                buffer_size_bytes=self.packed_buffer_size_bytes,
+                num_buffers=self.packed_num_buffers,
+                device=device,
+            )
         else:
             stream = torch.cuda.current_stream()
             for m in meta:

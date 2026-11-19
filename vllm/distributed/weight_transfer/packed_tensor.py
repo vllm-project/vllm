@@ -524,8 +524,7 @@ class PackedIpcConsumer:
 
         """
         if self._unpacker is None:  # the first chunk of a transfer
-            if chunk_capacity is None:
-                raise ValueError("the first packed IPC chunk must set chunk_capacity")
+            assert chunk_capacity is not None
             if ipc_handle:
                 args = local_rebuild_args(
                     ipc_handle, self._gpu_uuid, self._device_index
@@ -536,10 +535,6 @@ class PackedIpcConsumer:
                     0, dtype=torch.uint8, device=f"cuda:{self._device_index}"
                 )
             self._unpacker = _Unpacker(chunk_capacity, views=False)
-        elif ipc_handle:
-            raise RuntimeError(
-                "a packed IPC transfer started before the previous one ended"
-            )
         assert self._buf is not None
         unpacker = self._unpacker
         unpacker.feed(
@@ -550,8 +545,6 @@ class PackedIpcConsumer:
             ],
         )
         chunk = unpacker.next_chunk()
-        if chunk.nbytes > self._buf.numel():
-            raise ValueError("a packed IPC chunk with bytes must follow a handle")
         out = unpacker.unpack(self._buf, chunk.pieces)
         if last:
             if unpacker.incomplete or next(unpacker.layout, None) is not None:

@@ -83,7 +83,7 @@ once every transfer has drained.
 | `world_size` | — | Transfer NCCL group size: the [broadcasting trainer ranks](#broadcasting-ranks) plus the inference workers (`1 + num_workers` for a single sender). Other trainer ranks are not counted |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `True` | Use packed broadcasting |
-| `packed_buffer_size_bytes` | 1 GiB | Packed buffer size, at least 16 bytes |
+| `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
 | `packed_num_buffers` | 2 | Number of rotating buffers (double/triple buffering) |
 
 `packed` defaults to `True` here. The worker-side default is `False`, but it only

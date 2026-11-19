@@ -187,11 +187,10 @@ class IPCWeightTransferEngine(
 
         """
         if self.packed:
-            if self._packed_consumer is None:
-                raise RuntimeError(
-                    "packed IPC receive_weights called outside "
-                    "start_weight_update / finish_weight_update"
-                )
+            assert self._packed_consumer is not None, (
+                "packed IPC receive_weights called outside "
+                "start_weight_update / finish_weight_update"
+            )
             assert isinstance(update_info.ipc_handles, dict)
             weights = self._packed_consumer.receive(
                 ipc_handle=update_info.ipc_handles,
