@@ -131,7 +131,7 @@ impl DefaultChatOutputProcessor {
         };
 
         if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
+            request.decode_options.skip_special_tokens = Some(false);
         }
         let tool_strict_level =
             tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
@@ -422,7 +422,6 @@ mod tests {
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                     spec_decode_metrics: None,
                     weight_versions: None,
                     routed_experts: None,
@@ -687,7 +686,7 @@ mod tests {
             reasoning,
             None,
         )?;
-        Ok(!request.decode_options.skip_special_tokens)
+        Ok(request.decode_options.skip_special_tokens == Some(false))
     }
 
     #[test]

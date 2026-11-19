@@ -48,7 +48,7 @@ def _positive_float(name: str, value: object) -> float:
     return result
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MooncakeECConfig:
     """Validated settings shared by the Scheduler and Worker roles.
 

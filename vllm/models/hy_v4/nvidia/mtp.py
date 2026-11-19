@@ -24,9 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
 from vllm.model_executor.models.utils import (
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -119,23 +117,22 @@ def _prepare_mtp_fp8_expert_scale(
     name: str,
     loaded_weight: torch.Tensor,
 ) -> tuple[str, torch.Tensor]:
-    """Normalize block-wise FP8 expert scale names and dtypes."""
+    """Normalize block scales while preserving packed MXFP4 expert bytes."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     if (
         isinstance(quant_config, Fp8Config)
         and quant_config.weight_block_size is not None
-        and ".mlp.experts." in name
         and name.endswith(".scale")
     ):
         name = name[: -len(".scale")] + ".weight_scale_inv"
-        if (
-            getattr(quant_config, "is_scale_e8m0", False)
-            and loaded_weight.dtype == torch.uint8
-        ):
-            # UE8M0 scale exponents are stored as raw uint8 bytes: reinterpret
-            # the bits instead of numerically converting them.
-            loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+        if loaded_weight.dtype == torch.uint8:
+            if getattr(quant_config, "is_scale_e8m0", False):
+                loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+            elif ".mlp.experts." not in name:
+                # Linear scales are FP32 parameters. Decode UE8M0 exponents;
+                # a numeric uint8-to-float cast would load the encoded bytes.
+                loaded_weight = loaded_weight.view(torch.float8_e8m0fnu).float()
     return name, loaded_weight
 
 
@@ -493,7 +490,10 @@ class HYV4MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = torch.where((positions == 0).unsqueeze(-1), 0, inputs_embeds)
+        token_positions = positions[0] if positions.ndim == 2 else positions
+        inputs_embeds = torch.where(
+            (token_positions == 0).unsqueeze(-1), 0, inputs_embeds
+        )
 
         current_step_idx = self.spec_step_idx % self.num_mtp_layers
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
@@ -525,8 +525,6 @@ class HYV4MTP(nn.Module):
         "gate_up_proj": ["gate_proj", "up_proj"],
         # MLA runs both latent down-projections as one GEMM.
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-        # The indexer fuses wk and weights_proj into one GEMM.
-        "wk_weights_proj": ["wk", "weights_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -719,7 +717,6 @@ class HYV4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         loaded_params: set[str] = set()
 
         mtp_start = self.config.num_hidden_layers
@@ -756,14 +753,6 @@ class HYV4MTP(nn.Module):
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
-        # Sparse DSA draft blocks build an Indexer whose wk / weights_proj are
-        # fused into a single MergedColumnParallelLinear (wk_weights_proj).
-        indexer_stacked_mapping = [
-            (".wk_weights_proj", ".wk", 0),
-            (".wk_weights_proj", ".weights_proj", 1),
-        ]
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if name in shared_weights:
@@ -819,36 +808,6 @@ class HYV4MTP(nn.Module):
             if is_loaded:
                 continue
 
-            # FP8 indexer wk: dequantize to BF16 and load into the fused
-            # wk_weights_proj. PP-aware (skips layers not held by this rank).
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
-
-            # BF16 indexer wk / weights_proj: merge into the fused param.
-            is_loaded = False
-            for param_name, weight_name, shard_id in indexer_stacked_mapping:
-                if weight_name not in name or "wk_weights" in name:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-                if name_mapped not in params_dict:
-                    if is_pp_missing_parameter(name_mapped, self):
-                        is_loaded = True
-                    break
-                param = params_dict[name_mapped]
-                param.weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name_mapped)
-                is_loaded = True
-                break
-            if is_loaded:
-                continue
-
             is_loaded = False
             if ".experts." in name:
                 is_loaded = self._load_expert_weight(
@@ -881,4 +840,37 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
+        unassigned_all = sorted(set(params_dict) - loaded_params)
+        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
+        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
+        # every Attention layer that runs on an fp8-family quant method, and
+        # its -1.0 sentinel is replaced by the runtime default (1.0) in
+        # ``process_weights_after_loading`` -- which runs *after* this method.
+        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
+        # null``); silence them only when the parameter is actually the
+        # sentinel type so a genuine mismatch on a same-named tensor still
+        # reaches the warning.
+        from vllm.model_executor.layers.quantization.kv_cache import (
+            KVCacheScaleParameter,
+        )
+
+        unassigned = [
+            name
+            for name in unassigned_all
+            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
+        ]
+        missing_scales = [name for name in unassigned if "weight_scale" in name]
+        if missing_scales:
+            raise ValueError(
+                "Missing MTP checkpoint weight scales: " + ", ".join(missing_scales)
+            )
+        if unassigned:
+            # A draft parameter with no checkpoint source keeps its sentinel
+            # init value (FP8 scales start at finfo(float32).min), which
+            # silently destroys draft quality instead of failing the load.
+            logger.warning(
+                "HYV4 MTP draft model: %d parameters received no checkpoint value: %s",
+                len(unassigned),
+                ", ".join(unassigned),
+            )
         return loaded_params

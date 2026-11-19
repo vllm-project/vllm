@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import parallel_state
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
@@ -37,6 +41,94 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+@pytest.fixture(autouse=True)
+def single_rank_tp_group(monkeypatch):
+    """In-process tests have no TP group: its broadcasts return their input."""
+    group = SimpleNamespace(
+        broadcast_object=lambda obj, src=0: obj, broadcast=lambda t, src=0: t
+    )
+    monkeypatch.setattr(adaptive_module, "get_tp_group", lambda: group)
+
+
+def tp_consensus_worker(rank: int, world_size: int, store: str) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{store}",
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=60),
+    )
+    # A real TP group, minus the device communicator so it runs on CPU.
+    parallel_state._TP = parallel_state.GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        use_message_queue_broadcaster=True,
+        group_name="tp",
+    )
+
+    # CPU stand-ins for the Triton budget kernel and the pinned H2D copy.
+    def assign_budget(probs, idx_mapping, capacities, budget, survival):
+        capacities.copy_(global_topk_budget(probs, idx_mapping, capacities, budget))
+
+    def tensor_h2d(array, *, out):
+        return out.copy_(torch.from_numpy(array))
+
+    adaptive_module.assign_draft_token_budget = assign_budget
+    adaptive_module.async_tensor_h2d = tensor_h2d
+
+    def layout(stale, current, verify_cost_ms):
+        """Each rank's batch layout for one step with one draft per request."""
+        manager = make_manager(stale, np.array(verify_cost_ms))
+        manager._confidence_probs = torch.from_numpy(current)
+        manager._batch_draft_capacity = torch.empty(2, dtype=torch.int32)
+        manager._num_non_draft_tokens = torch.empty(2, dtype=torch.int32)
+        manager._cu_num_logits = torch.empty(3, dtype=torch.int32)
+        manager.query_start_loc = torch.empty(3, dtype=torch.int32)
+        manager._draft_survival = None
+        manager._copy_admitted_drafts_to_host = False
+        num_tokens = manager.get_num_tokens(
+            {"low": 2, "high": 2}, {"low": [0], "high": [0]}
+        )
+        cu_num_logits, query_start_loc, *_ = manager.reallocate_drafts(
+            ["low", "high"], torch.arange(2)
+        )
+        layouts: list = [None] * world_size
+        dist.all_gather_object(
+            layouts, (num_tokens, cu_num_logits.tolist(), query_start_loc.tolist())
+        )
+        return layouts
+
+    # Confidences differ across ranks by one fp32 ULP around a tie.
+    up = np.nextafter(np.float32(0.5), np.float32(1))
+    down = np.nextafter(np.float32(0.5), np.float32(0))
+    # Budget: accepted/cost of 0 and 1 drafts tie at exactly 0.5.
+    stale = np.array([[up if rank == 0 else down], [0.1]], dtype=np.float32)
+    budget_layouts = layout(stale, stale, [1, 1, 1, 1.25, 100])
+    # Boundaries: same budget (1 of 2 drafts), but the requests' current
+    # confidences swap order, so each rank would admit a different draft.
+    stale = np.full((2, 1), 0.5, dtype=np.float32)
+    current = np.array([[up], [down]] if rank == 0 else [[down], [up]])
+    boundary_layouts = layout(stale, current, [1, 1, 1, 1, 100])
+
+    parallel_state._TP.destroy()
+    dist.destroy_process_group()
+    for layouts in (budget_layouts, boundary_layouts):
+        assert all(layout == layouts[0] for layout in layouts), layouts
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_tp_ranks_agree_on_batch_layout(world_size, tmp_path):
+    """TP ranks must agree on the draft budget and request boundaries even when
+    their draft confidences differ slightly."""
+    mp.spawn(
+        tp_consensus_worker,
+        args=(world_size, str(tmp_path / "store")),
+        nprocs=world_size,
+    )
 
 
 @pytest.mark.parametrize(
@@ -132,6 +224,7 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             layer_names=[layer_name],
             backend=backend,
             kv_cache_spec=None,
+            metadata_builders=[builder],
             get_metadata_builder=lambda _index: builder,
         )
 
@@ -163,6 +256,35 @@ def test_manager_checks_target_varlen_cudagraph_bound(
             additional_attn_cg_support=additional,
         )
         assert manager is created
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs an accelerator device"
+)
+def test_manager_uses_accelerator_generic_events_and_stream() -> None:
+    """The manager must not call CUDA-only APIs; NPU/XPU builds use torch.Event
+    and torch.accelerator streams."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    req_states = SimpleNamespace(
+        device=device,
+        num_speculative_steps=2,
+        max_num_reqs=2,
+    )
+    manager = AdaptiveVerificationManager(
+        req_states,
+        torch.zeros(3, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+        copy_admitted_drafts_to_host=True,
+    )
+
+    manager._copy_events[0].record()
+    manager._copy_events[0].synchronize()
+    assert manager._admitted_drafts_event is not None
+    manager._admitted_drafts_event.record()
+    manager._admitted_drafts_event.synchronize()
 
 
 def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
