@@ -917,7 +917,7 @@ steps:
   - pytest -v -s tools/test_dependency_pins.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
-  key: cpu-reasoning-renderers
+  key: cpu-reasoning-renderers-no-timings
   automatic_shard: true
   depends_on:
   - image-build-cpu
