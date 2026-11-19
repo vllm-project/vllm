@@ -61,11 +61,26 @@ class RopeState:
         model: nn.Module,
         prefill_token_ids: list[int],
         mm_features: list,
+        position_delta: int | None = None,
     ) -> None:
+        """Stage the request's prefill positions and decode delta.
+
+        `position_delta` is the delta a P/D prefill instance reported for a
+        prompt whose multimodal inputs never reached this instance. It is only
+        applied when `mm_features` is empty.
+        """
         mrope_model = cast(SupportsMRoPE, model)
         prefill_positions, delta = mrope_model.get_mrope_input_positions(
             prefill_token_ids, mm_features
         )
+        if position_delta is not None and not mm_features:
+            # Past the last media item, text positions advance by one per token
+            # from `index + delta`, so shifting the text-only positions gives
+            # the positions prefill computed for every token this instance
+            # will compute. Tokens before it arrive as KV and are never read;
+            # clamp so none index below 0.
+            prefill_positions = (prefill_positions + position_delta).clamp_(min=0)
+            delta = position_delta
         self.prefill_delta.np[req_idx] = delta
 
         for i in range(self.num_dims):
@@ -75,6 +90,9 @@ class RopeState:
     def apply_staged_writes(self) -> None:
         self.prefill_positions.apply_write()
         self.prefill_delta.copy_to_uva()
+
+    def get_prefill_delta(self, req_idx: int) -> int:
+        return int(self.prefill_delta.np[req_idx])
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -100,8 +118,9 @@ class RopeState:
         idx_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,
         prefill_lens: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
+        input_positions: torch.Tensor,
     ) -> None:
+        """Prepare M-RoPE positions from global token indices in batch order."""
         num_reqs = idx_mapping.shape[0]
         _prepare_rope_positions_kernel[(num_reqs,)](
             self.positions,
@@ -113,7 +132,7 @@ class RopeState:
             idx_mapping,
             query_start_loc,
             prefill_lens,
-            num_computed_tokens,
+            input_positions,
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
         )
@@ -152,7 +171,7 @@ def _prepare_rope_positions_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     prefill_lens_ptr,
-    num_computed_tokens_ptr,
+    input_positions_ptr,
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
 ):
@@ -160,19 +179,21 @@ def _prepare_rope_positions_kernel(
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
 
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    is_prefill = num_computed < prefill_len
 
     query_start = tl.load(query_start_loc_ptr + batch_idx)
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
+    start = tl.load(input_positions_ptr + query_start, mask=query_len > 0, other=0)
+    is_prefill = start < prefill_len
 
     delta = tl.load(prefill_delta_ptr + req_state_idx)
 
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
-        orig_pos = num_computed + block
+        orig_pos = tl.load(
+            input_positions_ptr + query_start + block, mask=mask, other=0
+        )
 
         for j in tl.static_range(NUM_DIMS):
             if is_prefill:
@@ -182,7 +203,7 @@ def _prepare_rope_positions_kernel(
                     + j * prefill_positions_stride1
                     + orig_pos,
                     mask=mask,
-                )
+                ).to(tl.int64)
             else:
                 pos = orig_pos + delta
             tl.store(
