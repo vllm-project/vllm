@@ -94,3 +94,20 @@ def test_each_node_prefetches_what_it_reads(
         assert prefetched == needed, f"node {node}"
         if ids is not None:
             assert node_bytes == len(needed), f"node {node}"
+
+
+def test_prefetch_checkpoint_sends_the_ranges(tmp_path, monkeypatch):
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(bytes(5000))
+    sent: list[tuple[int, int]] = []
+
+    def fake_sendfile(out_fd, in_fd, offset, count):
+        sent.append((offset, count))
+        return count
+
+    monkeypatch.setattr(weight_utils.os, "sendfile", fake_sendfile)
+    weight_utils._prefetch_checkpoint(str(path), ranges=[[100, 2003], [3000, 1004]])
+    assert sent == [(100, 2003), (3000, 1004)]
+    sent.clear()
+    weight_utils._prefetch_checkpoint(str(path))
+    assert sent == [(0, 5000)]

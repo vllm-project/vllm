@@ -1058,22 +1058,28 @@ def _prefetch_checkpoint(
 ) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
-    Reads the file in blocks so the kernel caches its pages before workers load
-    the same file. If *ranges* is given, reads only those [offset, length]
-    byte ranges.
+    Sends the file to /dev/null so the kernel caches its pages before workers
+    load the same file, without copying them to user space or taking the GIL
+    per block. If *ranges* is given, reads only those [offset, length] byte
+    ranges.
     """
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    with open(file_path, "rb") as f:
+    with open(file_path, "rb") as f, open(os.devnull, "wb") as null:
         if ranges is None:
-            while f.read(block_size):
-                pass
-            return
-        for offset, length in ranges:
-            f.seek(offset)
-            while length > 0 and (chunk := f.read(min(block_size, length))):
-                length -= len(chunk)
+            ranges = [[0, os.fstat(f.fileno()).st_size]]
+        for pos, length in ranges:
+            end = pos + length
+            while pos < end:
+                try:
+                    n = os.sendfile(null.fileno(), f.fileno(), pos, end - pos)
+                except OSError:  # No sendfile from this file: read it instead.
+                    f.seek(pos)
+                    n = len(f.read(min(block_size, end - pos)))
+                if n == 0:
+                    break
+                pos += n
 
 
 def _prefetch_all_checkpoints(
