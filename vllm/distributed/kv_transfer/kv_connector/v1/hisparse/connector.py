@@ -225,7 +225,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str:
-        return "BLHNC"
+        return "BLHNC" if vllm_config.model_config.use_mla else "BLNHC"
 
     def __init__(
         self,

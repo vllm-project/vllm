@@ -136,6 +136,7 @@ _TEXT_GENERATION_MODELS = {
     "HrmTextForCausalLM": ("hrm_text", "HrmTextForCausalLM"),
     "HYV3ForCausalLM": ("hy_v3", "HYV3ForCausalLM"),
     "HYV4ForCausalLM": ("vllm.models.hy_v4", "HYV4ForCausalLM"),
+    "HYV4FlashForCausalLM": ("vllm.models.hy_v4_flash", "HYV4FlashForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
@@ -445,6 +446,14 @@ _MULTIMODAL_MODELS = {
         "Granite4VisionForConditionalGeneration",
     ),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
+    "HYV4VLForConditionalGeneration": (
+        "vllm.models.hy_v4",
+        "HYV4VLForConditionalGeneration",
+    ),
+    "HYV4FlashVLForConditionalGeneration": (
+        "vllm.models.hy_v4_flash",
+        "HYV4FlashVLForConditionalGeneration",
+    ),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": (
         "interns1",
@@ -477,6 +486,10 @@ _MULTIMODAL_MODELS = {
     "KimiK3ForConditionalGeneration": (
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
+    ),
+    "Inkling2ForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2ForConditionalGeneration",
     ),
     "KimiK31ForConditionalGeneration": (
         "vllm.models.kimi_k3",
@@ -709,6 +722,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
+    "Inkling2DSparkModel": ("vllm.models.inkling2", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
@@ -766,6 +780,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "HYV4MTPModel": ("vllm.models.hy_v4", "HYV4MTP"),
+    "HYV4DFlyModel": ("vllm.models.hy_v4", "HYV4DFlyForCausalLM"),
     "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
 }
 

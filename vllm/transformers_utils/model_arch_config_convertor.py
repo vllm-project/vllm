@@ -321,7 +321,9 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
             "hy_v4",
+            "hy_v4_flash",
             "hy_v4_mtp",
+            "hy_v4_dfly",
         ):
             # check is deepseek_v4 model
             if get_compress_ratios(self.hf_text_config):

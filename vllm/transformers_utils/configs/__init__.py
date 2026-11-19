@@ -35,6 +35,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FunAudioChatConfig": "vllm.transformers_utils.configs.funaudiochat",
     "FunAudioChatAudioEncoderConfig": "vllm.transformers_utils.configs.funaudiochat",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4FlashConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4FlashVLConfig": "vllm.models.hy_v4_flash.configs",
+    "HYV4VLConfig": "vllm.transformers_utils.configs.hy_v4",
+    "HYV4VLVisionConfig": "vllm.transformers_utils.configs.hy_v4",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -86,6 +90,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "InklingAudioConfig": "vllm.models.inkling.configs",
     "InklingVisionConfig": "vllm.models.inkling.configs",
     "InklingMMConfig": "vllm.models.inkling.configs",
+    "Inkling2ModelConfig": "vllm.models.inkling2.configs",
+    "Inkling2MMConfig": "vllm.models.inkling2.configs",
     # Upstream Transformers classes registered in _CONFIG_REGISTRY
     "DeepseekV3Config": "transformers",
     "HyperCLOVAXConfig": "transformers",
@@ -164,6 +170,8 @@ __all__ = [
     "InklingAudioConfig",
     "InklingVisionConfig",
     "InklingMMConfig",
+    "Inkling2ModelConfig",
+    "Inkling2MMConfig",
 ]
 
 

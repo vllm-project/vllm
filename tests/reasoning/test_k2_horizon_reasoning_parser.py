@@ -164,8 +164,7 @@ def test_latest_boundary_controls_reasoning_state():
     assert not parser.is_reasoning_end([vocab[TOOL_CALLS_START], vocab["<ifm|think>"]])
 
 
-def test_composed_streaming_reasoning_to_tool_handoff():
-    tokenizer = _k2_tokenizer()
+def _composed_parser(tokenizer: TokenizerLike):
     tools = [
         {
             "type": "function",
@@ -187,6 +186,12 @@ def test_composed_streaming_reasoning_to_tool_handoff():
         request.tools,
         chat_template_kwargs={"reasoning_effort": "high"},
     )
+    return parser, request
+
+
+def test_composed_streaming_reasoning_to_tool_handoff():
+    tokenizer = _k2_tokenizer()
+    parser, request = _composed_parser(tokenizer)
     output = "plan<ifm|tool_calls><ifm|tool_call>ping</ifm|tool_call></ifm|tool_calls>"
     reasoning_parts: list[str] = []
     tool_names: list[str] = []
@@ -210,6 +215,41 @@ def test_composed_streaming_reasoning_to_tool_handoff():
             )
 
     assert "".join(reasoning_parts) == "plan"
+    assert tool_names == ["ping"]
+
+
+def test_composed_streaming_empty_reasoning_before_tool_call():
+    """An empty think block streamed token by token before a tool call must
+    surface as reasoning="" so the Responses output keeps a reasoning item."""
+    tokenizer = _k2_tokenizer()
+    parser, request = _composed_parser(tokenizer)
+    output = (
+        "<ifm|think></ifm|think>"
+        "<ifm|tool_calls><ifm|tool_call>ping</ifm|tool_call></ifm|tool_calls>"
+    )
+    token_ids = tokenizer.encode(output)
+    reasoning_parts: list[str] = []
+    tool_names: list[str] = []
+
+    for index, token_id in enumerate(token_ids):
+        delta = parser.parse_delta(
+            delta_text=tokenizer.decode([token_id]),
+            delta_token_ids=[token_id],
+            request=request,
+            prompt_token_ids=[] if index == 0 else None,
+            finished=index == len(token_ids) - 1,
+        )
+        if delta is not None:
+            if delta.reasoning is not None:
+                reasoning_parts.append(delta.reasoning)
+            tool_names.extend(
+                tool_call.function.name
+                for tool_call in delta.tool_calls
+                if tool_call.function is not None
+                and tool_call.function.name is not None
+            )
+
+    assert reasoning_parts == [""]
     assert tool_names == ["ping"]
 
 

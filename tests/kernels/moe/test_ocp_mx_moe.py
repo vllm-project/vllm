@@ -2757,25 +2757,28 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
-# With at most a quarter as many top-k slots as local experts, the emulation
-# dequantizes one expert per slot instead of every expert. It must give the
-# same output as the full dequantization, sync with the host on neither path,
-# and stay correct when a CUDA graph captured on one routing replays another.
+# The emulation dequantizes only the batch's distinct experts, one per slot:
+# with the fused MXFP4 kernel (bf16) for any batch, else by gathering them when
+# the batch has at most a quarter as many top-k slots as experts. It must give
+# the same output as the full dequantization, never read an unused slot, sync
+# with the host on no path, and stay correct when a CUDA graph captured on one
+# routing replays another.
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "topk_ids, num_routed",
+    "topk_ids",
     [
-        # 8 slots of 32 experts, with repeated experts: one per slot.
-        ([[30, 2], [2, 17], [9, 30], [17, 4]], 8),
-        # 10 slots, past a quarter: every expert is dequantized.
-        ([[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]], 32),
+        # 5 distinct experts of 32 in 8 slots.
+        [[30, 2], [2, 17], [9, 30], [17, 4]],
+        # 10 slots, past a quarter of the experts.
+        [[0, 1], [2, 3], [4, 5], [6, 7], [8, 0]],
         # One token.
-        ([[30, 2]], 2),
+        [[30, 2]],
     ],
 )
 @torch.inference_mode()
 def test_emulation_routed_dequant_moe_forward_is_bit_identical(
-    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], num_routed: int
+    monkeypatch: pytest.MonkeyPatch, topk_ids: list[list[int]], dtype: torch.dtype
 ):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import FusedMoEConfig
@@ -2785,6 +2788,7 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         RoutingMethodType,
         mxfp4_w4a16_moe_quant_config,
     )
+    from vllm.model_executor.layers.fused_moe.experts import ocp_mx_emulation_moe
     from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
         OCP_MXQuantizationEmulationTritonExperts,
     )
@@ -2801,18 +2805,26 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
 
     num_experts, topk = 32, 2
     hidden_size, intermediate_size = 256, 256
-    dtype, device = torch.bfloat16, "cuda:0"
+    device = "cuda:0"
 
     torch.manual_seed(0)
     w13, w13_scale = mxfp4_quantize(
         torch.randn(
-            num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
+            num_experts,
+            2 * intermediate_size,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
         )
         / 8
     )
     w2, w2_scale = mxfp4_quantize(
         torch.randn(
-            num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
+            num_experts,
+            hidden_size,
+            intermediate_size,
+            dtype=torch.bfloat16,
+            device=device,
         )
         / 8
     )
@@ -2821,6 +2833,10 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
 
     topk_ids_t = torch.tensor(topk_ids, dtype=torch.int32, device=device)
     num_tokens = topk_ids_t.size(0)
+    num_slots = min(topk_ids_t.numel(), num_experts)
+    fused = dtype == torch.bfloat16
+    routed_path = fused or num_slots <= num_experts // 4
+    num_routed = num_slots if routed_path else num_experts
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     topk_weights = torch.softmax(
         torch.randn(num_tokens, topk, device=device), dim=-1
@@ -2837,6 +2853,17 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         OCP_MXQuantizationEmulationTritonExperts,
         "_dequantize_weights",
         recording_dequantize,
+    )
+    dequant_routed = ocp_mx_emulation_moe.dequant_routed_mxfp4
+
+    def poisoning_dequant_routed(w, w_scale, used):
+        out = dequant_routed(w, w_scale, used)
+        dequantized.append(used.numel())
+        unused = (used < 0).view(-1, *[1] * (out.dim() - 1))
+        return out.masked_fill_(unused, float("nan"))
+
+    monkeypatch.setattr(
+        ocp_mx_emulation_moe, "dequant_routed_mxfp4", poisoning_dequant_routed
     )
 
     def make_kernel():
@@ -2887,7 +2914,10 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
         finally:
             torch.cuda.set_sync_debug_mode(0)
 
-    # The first dequantization imports quark, which copies lookup tables once.
+    # Importing quark copies lookup tables to the GPU once; warm up outside the
+    # sync check.
+    import quark.torch.kernel.mx  # noqa: F401
+
     apply(make_kernel(), topk_ids_t)
     dequantized.clear()
     routed = run()
@@ -2912,14 +2942,68 @@ def test_emulation_routed_dequant_moe_forward_is_bit_identical(
     # Full-dequant references.
     monkeypatch.setattr(
         OCP_MXQuantizationEmulationTritonExperts,
-        "_routed_experts",
-        staticmethod(lambda topk_ids, num_experts: None),
+        "_dequantize_routed",
+        lambda *args: None,
     )
     dequantized.clear()
     full = run()
     assert dequantized == [num_experts, num_experts]
     assert torch.equal(routed, full)
     assert torch.equal(replayed, run(replay_ids))
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+def test_dequant_routed_mxfp4_matches_quark_on_every_code_and_scale():
+    """Every packed byte under every e8m0 scale, incl. 0 (subnormal) and 255."""
+    from quark.torch.kernel import mx
+
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
+        dequant_routed_mxfp4,
+    )
+
+    # Row r holds all 256 packed bytes under scale r (16 bytes per scale).
+    codes = torch.arange(256, dtype=torch.uint8, device="cuda").repeat(256, 1)
+    scales = codes[0].view(-1, 1).expand(256, 16).contiguous()
+    w = torch.stack([codes, codes.flip(0)])
+    scale = torch.stack([scales, scales.flip(0)])
+    used = torch.tensor([1, -1, 0], dtype=torch.int32, device="cuda")
+    out = dequant_routed_mxfp4(w, scale, used)
+    ref = mx.dq_mxfp4(w, scale, torch.bfloat16)
+    for got, want in ((out[0], ref[1]), (out[2], ref[0])):
+        # NaN payloads (0 * inf under scale 255) differ by GPU; bits elsewhere.
+        nan = want.isnan()
+        assert torch.equal(got.isnan(), nan)
+        assert torch.equal(got.view(torch.int16)[~nan], want.view(torch.int16)[~nan])
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "topk_ids, num_experts, used, local_ids",
+    [
+        # One top-1 token.
+        ([[5]], 8, [5], [[0]]),
+        # Repeats and a -1 padding row.
+        (
+            [[7, 0], [0, 2], [-1, -1]],
+            8,
+            [0, 2, 7, -1, -1, -1],
+            [[2, 0], [0, 1], [-1, -1]],
+        ),
+        # An id past the experts is dropped like -1.
+        ([[1, 2, 3, 4]], 4, [1, 2, 3, -1], [[0, 1, 2, -1]]),
+    ],
+)
+def test_dedup_routed_experts(topk_ids, num_experts, used, local_ids, ids_dtype):
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
+        dedup_routed_experts,
+    )
+
+    got_used, got_local = dedup_routed_experts(
+        torch.tensor(topk_ids, dtype=ids_dtype, device="cuda"), num_experts
+    )
+    assert got_used.tolist() == used
+    assert got_local.tolist() == local_ids and got_local.dtype == ids_dtype
 
 
 # (backend, activation, hidden_in, inter_in, hidden_out, inter_out)

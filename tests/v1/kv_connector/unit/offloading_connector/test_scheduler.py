@@ -72,6 +72,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
@@ -84,18 +85,22 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    HiSparseSourceManager,
     SlidingWindowManager,
 )
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroup,
+    KVCacheGroupRole,
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
@@ -389,18 +394,203 @@ def _make_partial_tail_request(
 
 
 def _make_real_partial_tail_request(
-    scheduler: OffloadingConnectorScheduler, request_id: str
+    scheduler: OffloadingConnectorScheduler, request_id: str, num_tokens: int = 30
 ) -> Request:
     init_none_hash(sha256)
     request = Request(
         request_id=request_id,
-        prompt_token_ids=list(range(30)),
+        prompt_token_ids=list(range(num_tokens)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_block_hasher(4, sha256),
     )
     scheduler.on_new_request(request)
     return request
+
+
+FINAL_SWA_TAIL_FULL_BLOCK = 36
+FINAL_SWA_TAIL_SWA_BLOCK = 4
+FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE = 1001
+FINAL_SWA_TAIL_WINDOW = 16
+
+
+def _make_final_swa_tail_scheduler(
+    blocks_per_chunk: int = 1, **parallel_kwargs: int
+) -> OffloadingConnectorScheduler:
+    """Full attention with 36-token blocks next to a 4-token SWA group with a
+    16-token window: the final SWA tail is aligned to 9-block segments."""
+    vllm_config = _make_vllm_config(
+        extra_config={
+            "blocks_per_chunk": blocks_per_chunk,
+            "offload_prompt_only": False,
+        },
+        **parallel_kwargs,
+    )
+    vllm_config.speculative_config = None
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=FINAL_SWA_TAIL_FULL_BLOCK,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            make_kv_cache_group(
+                ["swa"],
+                sliding_window_layer(
+                    block_size=FINAL_SWA_TAIL_SWA_BLOCK,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=FINAL_SWA_TAIL_WINDOW,
+                ),
+            ),
+        ],
+    )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+    return scheduler
+
+
+def _schedule_new_request(
+    output: SchedulerOutput,
+    request: Request,
+    block_ids: tuple[list[int], ...],
+    num_tokens: int,
+) -> None:
+    output.scheduled_new_reqs.append(
+        NewRequestData(
+            req_id=request.request_id,
+            prompt_token_ids=request.prompt_token_ids,
+            mm_features=[],
+            sampling_params=request.sampling_params,
+            pooling_params=None,
+            block_ids=block_ids,
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=request.prompt_token_ids,
+        )
+    )
+    output.num_scheduled_tokens[request.request_id] = num_tokens
+    output.total_num_scheduled_tokens += num_tokens
+
+
+def _final_swa_tail_store_block_ids(
+    blocks_per_chunk: int,
+    parallel_kwargs: dict[str, int],
+    finish_status: RequestStatus,
+    num_computed_tokens: int,
+    reuse_while_running: bool,
+    reuse: bool,
+) -> tuple[list[int], list[int]]:
+    """Run a 1200-token request until it computed num_computed_tokens, and
+    finish it.
+
+    The reuse step is the finish step, where the core frees every SWA block of
+    the request. With reuse_while_running, it is the last decode step, where
+    the core frees only the SWA blocks outside the window.
+
+    Returns:
+        The SWA block ids that the core can give away in the reuse step (with
+        reuse, a new request gets them), and the SWA block ids that the request
+        stores from the reuse step on.
+
+    """
+    prompt_tokens = 1200
+    scheduler = _make_final_swa_tail_scheduler(blocks_per_chunk, **parallel_kwargs)
+    full_config, swa_config = scheduler.config.kv_group_configs
+    request = _make_real_partial_tail_request(scheduler, "req", prompt_tokens)
+    num_tokens = max(prompt_tokens, num_computed_tokens + 1)
+    full_block_ids = list(range(1, cdiv(num_tokens, full_config.tokens_per_block) + 1))
+    swa_block_ids = list(
+        range(
+            FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE,
+            FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE
+            + cdiv(num_tokens, swa_config.tokens_per_block),
+        )
+    )
+
+    def give_away(output: SchedulerOutput, block_ids: list[int]) -> None:
+        if not reuse:
+            return
+        other = _make_real_partial_tail_request(
+            scheduler, "other", swa_config.tokens_per_block * len(block_ids)
+        )
+        _schedule_new_request(
+            output, other, ([900], block_ids), other.num_prompt_tokens
+        )
+
+    def stored_swa_block_ids(output: SchedulerOutput) -> list[int]:
+        meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        return [
+            block_id
+            for job_id, job in meta.store_jobs.items()
+            if scheduler._job_statuses[job_id].req_id == request.request_id
+            and isinstance(job.src_spec, GPULoadStoreSpec)
+            for block_id in job.src_spec.block_ids.tolist()
+            if block_id >= FINAL_SWA_TAIL_SWA_BLOCK_ID_BASE
+        ]
+
+    prefill = SchedulerOutput.make_empty()
+    num_prefill_tokens = min(prompt_tokens, num_computed_tokens)
+    _schedule_new_request(
+        prefill, request, (full_block_ids, swa_block_ids), num_prefill_tokens
+    )
+    scheduler.build_connector_meta(prefill)
+    request.num_computed_tokens = num_prefill_tokens
+    if num_prefill_tokens == prompt_tokens:
+        request.append_output_token_ids(0)
+
+    reusable: list[int] = []
+    stores: list[int] = []
+    while request.num_computed_tokens < num_computed_tokens:
+        decode = SchedulerOutput.make_empty()
+        decode.scheduled_cached_reqs = CachedRequestData(
+            req_ids=[request.request_id],
+            new_token_ids=[[]],
+            new_block_ids=[None],
+            num_computed_tokens=[request.num_computed_tokens],
+            num_output_tokens=[request.num_output_tokens],
+        )
+        decode.num_scheduled_tokens = {request.request_id: 1}
+        decode.total_num_scheduled_tokens = 1
+        if reuse_while_running and request.num_computed_tokens == (
+            num_computed_tokens - 1
+        ):
+            window_start = request.num_computed_tokens - FINAL_SWA_TAIL_WINDOW
+            reusable = [
+                block_id
+                for block_idx, block_id in enumerate(swa_block_ids)
+                if (block_idx + 1) * swa_config.tokens_per_block <= window_start
+            ]
+            give_away(decode, reusable)
+            stores += stored_swa_block_ids(decode)
+        else:
+            scheduler.build_connector_meta(decode)
+        request.num_computed_tokens += 1
+        request.append_output_token_ids(0)
+
+    request.status = finish_status
+    scheduler.request_finished(request)
+    finish = SchedulerOutput.make_empty()
+    finish.finished_req_ids = {request.request_id}
+    if not reuse_while_running:
+        reusable = swa_block_ids
+        give_away(finish, reusable)
+    stores += stored_swa_block_ids(finish)
+    return reusable, stores
 
 
 def test_create_req_context_preserves_kv_hints():
@@ -716,6 +906,112 @@ def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     assert not _make_dcp_shaped_hybrid_scheduler(
         recurrent_block_size=24
     ).config.supports_partial_tail
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("with_swa_group", [False, True])
+def test_handoff_partial_tail_excludes_sliding_window_groups(with_swa_group: bool):
+    """The hand-off handler reports no live chunk: its partial tail reads the
+    request's block ids only for groups that are not CoW sources, and the
+    scheduler zeroes only sliding-window groups. A sliding-window group that is
+    not a CoW source must therefore turn the partial tail off.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.speculative_config = None
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    kv_cache_config.cache_hit_alignment_tokens = 4
+    if with_swa_group:
+        kv_cache_config.kv_cache_groups.append(
+            make_kv_cache_group(
+                ["swa_layer"],
+                sliding_window_layer(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=8,
+                    dtype=torch.float16,
+                    sliding_window=32,
+                ),
+            )
+        )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+    assert scheduler.config.supports_handoff
+    assert scheduler.config.supports_partial_tail == (not with_swa_group)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    (
+        "blocks_per_chunk",
+        "parallel_kwargs",
+        "finish_status",
+        "num_computed_tokens",
+        "reuse_while_running",
+    ),
+    [
+        # 250 of 300 prompt chunks: the final segment is 243-249.
+        pytest.param(
+            1, {}, RequestStatus.FINISHED_ABORTED, 1000, False, id="aborted-prefill"
+        ),
+        # DCP doubles the SWA block to 8 tokens: 125 of 150 prompt chunks, the
+        # final segment is 117-124.
+        pytest.param(
+            1,
+            {"tensor_parallel_size": 2, "decode_context_parallel_size": 2},
+            RequestStatus.FINISHED_ABORTED,
+            1000,
+            False,
+            id="aborted-prefill-dcp2",
+        ),
+        # 105 chunks of 12 tokens, past the 100-chunk prompt: the final
+        # segment is 99-104.
+        pytest.param(
+            3,
+            {},
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            1260,
+            False,
+            id="stopped-decode-bpc3",
+        ),
+        # A 12-token chunk of the final tail holds a 4-token block that left
+        # the 16-token window one step before the finish.
+        pytest.param(
+            3,
+            {},
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            1260,
+            True,
+            id="stopped-decode-bpc3-reuse-while-running",
+        ),
+    ],
+)
+def test_final_swa_tail_store_skips_reused_blocks(
+    blocks_per_chunk: int,
+    parallel_kwargs: dict[str, int],
+    finish_status: RequestStatus,
+    num_computed_tokens: int,
+    reuse_while_running: bool,
+):
+    """At finish, the final SWA tail of a short segment is stored again from
+    the segment start, below the stored progress. The core can give the blocks
+    of that tail to another request, at the finish or when a block leaves the
+    window. The tail store must not copy that request's KV.
+    """
+    args = (
+        blocks_per_chunk,
+        parallel_kwargs,
+        finish_status,
+        num_computed_tokens,
+        reuse_while_running,
+    )
+    reusable, clean_stores = _final_swa_tail_store_block_ids(*args, reuse=False)
+    # The tail reads blocks that the core can give away.
+    assert set(reusable) & set(clean_stores)
+
+    reused, stores = _final_swa_tail_store_block_ids(*args, reuse=True)
+    assert not set(reused) & set(stores)
 
 
 @pytest.mark.cpu_test
@@ -4776,6 +5072,79 @@ def test_full_attention_pending_store_fence(async_scheduling, shared_prefix):
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_hisparse_host_block_id_does_not_flush_gpu_store(async_scheduling):
+    """A host-pool ID matching a pending GPU store is not a GPU reuse."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    spec = AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["host"],
+                spec,
+                manager_config=HiSparseSourceManager.config(),
+                host_resident=True,
+            ),
+            make_kv_cache_group(
+                ["indexer"], spec, role=KVCacheGroupRole.HISPARSE_INDEXER
+            ),
+        ],
+        hisparse_host_num_blocks=2,
+    )
+    scheduler = create_scheduler(
+        config, kv_cache_config=kv_cache_config, hash_block_size=4
+    )
+    get_hisparse_coordinator(scheduler.kv_cache_manager)
+    offloading = scheduler.connector.scheduler
+    manager = offloading.manager
+    assert isinstance(manager, CPUOffloadingManager)
+
+    request_a = create_request(
+        request_id=1, num_tokens=4, common_prefix_len=4, block_size=4
+    )
+    scheduler.add_request(request_a)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    jobs = set(metadata.store_jobs)
+    assert jobs
+    a_blocks = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks
+    host_block_id = a_blocks[0][0].block_id
+    gpu_block_id = a_blocks[1][0].block_id
+    assert a_blocks[0][0].pool() is not a_blocks[1][0].pool()
+    assert host_block_id == gpu_block_id
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+
+    scheduler.finish_requests(request_a.request_id, RequestStatus.FINISHED_STOPPED)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
+    assert jobs <= offloading._block_id_to_pending_jobs[gpu_block_id]
+
+    request_b = create_request(
+        request_id=2, num_tokens=4, common_prefix_len=0, block_size=4
+    )
+    scheduler.add_request(request_b)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    b_blocks = scheduler.kv_cache_manager.get_blocks(request_b.request_id).blocks
+    assert b_blocks[0][0].block_id == gpu_block_id
+    assert b_blocks[1][0].block_id != gpu_block_id
+    assert not (metadata.jobs_to_flush or set()) & jobs
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("prefix_tokens", [8, 20])
 def test_full_attention_pending_store_with_bounded_replay(prefix_tokens):
     """Retained replay hits do not flush; discarded hits still fence reuse."""
@@ -6848,44 +7217,8 @@ class TestEagle:
 
     def test_dcp_abort_reconsiders_final_swa_tail(self):
         """DCP-expanded SWA blocks are not scaled twice during abort."""
-        vllm_config = _make_vllm_config(
-            extra_config={"offload_prompt_only": False},
-            tensor_parallel_size=2,
-            decode_context_parallel_size=2,
-        )
-        vllm_config.speculative_config = None
-        vllm_config.kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True, publisher="null"
-        )
-        kv_cache_config = KVCacheConfig(
-            num_blocks=0,
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                make_kv_cache_group(
-                    ["full"],
-                    AttentionSpec(
-                        block_size=36,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                    ),
-                ),
-                make_kv_cache_group(
-                    ["swa"],
-                    sliding_window_layer(
-                        block_size=4,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                        sliding_window=16,
-                    ),
-                ),
-            ],
-        )
-        spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
-        scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
-        _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, req_context, trigger: generate_store_output(keys)
+        scheduler = _make_final_swa_tail_scheduler(
+            tensor_parallel_size=2, decode_context_parallel_size=2
         )
 
         request = MagicMock()

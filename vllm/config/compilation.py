@@ -6,7 +6,7 @@ import enum
 import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import field, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -124,6 +124,42 @@ def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
     step of the largest power of two not above 0.65 * n^(2/3) (2 from 8, 4 from
     16, 8 from 48, 16 from 128, 32 from 352): 64 sizes at 1024."""
     return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
+
+
+@dataclass(frozen=True)
+class CUDAGraphCaptureDefaults:
+    """Default capture limits, separate from explicit compilation settings.
+
+    Leaving both split limits unset preserves the shared token grid. Platforms
+    opting into independent grids supply both prefill and decode limits.
+    """
+
+    legacy_max_tokens: int = 512
+    max_prefill_tokens: int | None = None
+    max_decode_requests: int | None = None
+    max_decode_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.max_prefill_tokens is None) != (self.max_decode_requests is None):
+            raise ValueError("Set both prefill and decode defaults, or neither.")
+        for name, minimum in (
+            ("legacy_max_tokens", 1),
+            ("max_prefill_tokens", 0),
+            ("max_decode_requests", 0),
+            ("max_decode_tokens", 1),
+        ):
+            value = getattr(self, name)
+            if value is None and name != "legacy_max_tokens":
+                continue
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}.")
+
+
+def validate_cudagraph_capture_grid(sizes: list[int], limit: int) -> list[int]:
+    """Normalize a platform grid, rejecting sizes outside its resolved limit."""
+    if any(type(size) is not int or not 1 <= size <= limit for size in sizes):
+        raise ValueError(f"Platform CUDA graph sizes must be integers in [1, {limit}].")
+    return sorted(set(sizes))
 
 
 class CUDAGraphMode(enum.Enum):
@@ -1113,25 +1149,10 @@ class CompilationConfig:
             )
 
         if (
-            self.pass_config.enable_qk_norm_rope_fusion
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(zhuhaoran): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
-            self.pass_config.fuse_rope_kvcache
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(Rohan138): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
             self.pass_config.fuse_qk_norm_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
         ):
+            # MRoPE is not an IR op yet; its fusion still matches the custom op.
             self.custom_ops.append("+rotary_embedding")
 
         if (
@@ -1532,6 +1553,25 @@ class CompilationConfig:
             return f"-{op}" not in self.custom_ops
 
         return f"+{op}" in self.custom_ops
+
+    def uses_rope_kernel(self) -> bool:
+        """Whether RoPE should lower to a kernel instead of Inductor codegen.
+
+        True when the RoPE custom op is enabled or a RoPE fusion pass is on, so
+        RoPE left unfused keeps the kernel. Safe before custom_ops resolution.
+        """
+        pass_config = self.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            or pass_config.fuse_rope_kvcache
+            or pass_config.fuse_qk_norm_rope_kvcache
+        ):
+            return True
+        if self.custom_ops.count("all") + self.custom_ops.count("none") != 1:
+            # custom_ops is resolved in VllmConfig; a bare CompilationConfig
+            # (e.g. platform priority defaults in tests) only has explicit ops.
+            return "+rotary_embedding" in self.custom_ops
+        return self.is_custom_op_enabled("rotary_embedding")
 
     def resolve_cudagraph_mode_and_sizes(
         self,

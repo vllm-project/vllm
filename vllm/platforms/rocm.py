@@ -795,7 +795,7 @@ class RocmPlatform(Platform):
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
             if not sel_invalid_reasons:
-                logger.info_once(
+                logger.debug_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
@@ -895,7 +895,7 @@ class RocmPlatform(Platform):
                 valid_str,
             )
         else:
-            logger.info_once(
+            logger.debug_once(
                 "Using %s backend out of potential backends: %s.",
                 selected_backend.name,
                 valid_str,
@@ -924,7 +924,7 @@ class RocmPlatform(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
         from importlib.util import find_spec
@@ -936,7 +936,7 @@ class RocmPlatform(Platform):
             and on_cdna()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using AITER Flash Attention backend for ViT model.")
+            logger.debug_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
@@ -944,10 +944,10 @@ class RocmPlatform(Platform):
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using Flash Attention backend for ViT model.")
+            logger.debug_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        logger.info_once("Using Torch SDPA backend for ViT model.")
+        logger.debug_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
@@ -1436,6 +1436,7 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
@@ -1459,11 +1460,24 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        rotary_embedding_query_only = default
+        rotary_embedding = default
+        if cc.uses_rope_kernel():
+            rotary_embedding_query_only = [
+                "vllm_c",
+                *(p for p in default if p != "vllm_c"),
+            ]
+            rotary_embedding = rotary_embedding_query_only
+            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+                rotary_embedding = ["aiter", *rotary_embedding]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["native"],
+            rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=rotary_embedding_query_only,
         )
 
     @classmethod

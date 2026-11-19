@@ -641,7 +641,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
-    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
@@ -841,6 +841,7 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -1835,6 +1836,9 @@ class EngineArgs:
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
         scheduler_group.add_argument(
+            "--async-scheduling-depth", **scheduler_kwargs["async_scheduling_depth"]
+        )
+        scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
 
@@ -2716,6 +2720,7 @@ class EngineArgs:
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
         )
 

@@ -1305,6 +1305,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -1363,6 +1364,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector

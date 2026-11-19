@@ -172,6 +172,7 @@ pub(super) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub mm_hashes: Option<MultiModalHashes>,
     pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
 }
 
@@ -191,6 +192,7 @@ pub(super) struct GenerateResponse {
     pub prompt_token_id_logprobs: Option<String>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub mm_hashes: Option<MultiModalHashes>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
     pub metrics: Option<PerRequestMetrics<SpeculativeDecodingMetrics>>,
@@ -202,6 +204,17 @@ pub(super) struct PerRequestMetrics<T> {
 }
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
+
+/// Per-modality processor cache keys, parallel to [`MultiModalPlaceholders`].
+pub(super) type MultiModalHashes = HashMap<String, Vec<String>>;
+
+/// The multimodal prompt layout a response echoes back, so a caller can send
+/// the items again as `features` without `kwargs_data`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct MmResponseInfo {
+    pub mm_placeholders: MultiModalPlaceholders,
+    pub mm_hashes: MultiModalHashes,
+}
 
 /// Mirrors the Python vLLM `PlaceholderRangeInfo` class.
 #[serde_with::skip_serializing_none]
