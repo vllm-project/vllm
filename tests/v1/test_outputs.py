@@ -151,6 +151,20 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
     assert result.to_nested_list() == [expected_token_ids]
 
 
+def test_sampling_mask_tensors_restores_opted_out_request_slots():
+    tensors = SamplingMaskTensors(
+        token_ids=torch.tensor([[1, 3], [0, 0], [4, 0]]),
+        packed_mask=torch.zeros((3, 1), dtype=torch.uint8),
+        counts=torch.tensor([2, 0, 1]),
+        vocab_size=8,
+        captured_requests=np.array([False, True, False, True, True, False]),
+    )
+
+    result = tensors.tolists()
+    assert result.to_nested_list() == [[], [1, 3], [], [], [4], []]
+    assert result.slice_request(4, 1).to_nested_list() == [[4]]
+
+
 def test_sampling_mask_tensors_uses_request_boundaries():
     logits = torch.full((6, 8), -float("inf"), device=DEVICE_TYPE)
     logits[0, [1, 3]] = 0

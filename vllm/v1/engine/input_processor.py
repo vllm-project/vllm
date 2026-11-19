@@ -178,7 +178,26 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
-            if self.model_config.return_sampling_mask:
+            sampling_mask_enabled = self.model_config.return_sampling_mask
+            if params.return_sampling_mask is True and not sampling_mask_enabled:
+                raise VLLMValidationError(
+                    "Enable --return-sampling-mask to request sampling mask capture",
+                    parameter="return_sampling_mask",
+                )
+            if (
+                sampling_mask_enabled
+                and params.return_sampling_mask is False
+                and (
+                    self.speculative_config is not None
+                    or not current_platform.is_cuda_alike()
+                )
+            ):
+                raise VLLMValidationError(
+                    "Sampling-mask opt-out requires a CUDA or ROCm model runner "
+                    "without speculative decoding",
+                    parameter="return_sampling_mask",
+                )
+            if sampling_mask_enabled and params.return_sampling_mask is not False:
                 if params.temperature <= 0:
                     raise ValueError(
                         "sampling distribution replay requires temperature > 0"

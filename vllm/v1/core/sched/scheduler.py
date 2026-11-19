@@ -2573,7 +2573,11 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
-            if self.return_sampling_mask:
+            if (
+                self.return_sampling_mask
+                and request.sampling_params is not None
+                and request.sampling_params.return_sampling_mask is not False
+            ):
                 sampling_masks = model_runner_output.sampling_masks
                 if new_token_ids and sampling_masks is not None:
                     new_sampling_mask = sampling_masks.slice_request(

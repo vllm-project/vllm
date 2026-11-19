@@ -450,6 +450,10 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    return_sampling_mask: bool | None = None
+    """Override sampling-mask capture for this request on a mask-enabled server.
+    `None` inherits the server setting. `False` skips capture while preserving
+    other requested outputs, including sampled-token logprobs."""
     trace_decode_token_ids: list[int] | None = None
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are

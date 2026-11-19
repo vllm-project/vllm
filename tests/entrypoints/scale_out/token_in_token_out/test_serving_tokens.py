@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -204,6 +205,58 @@ async def test_generate_sampling_mask(client):
         for top in entry["top_logprobs"]:
             in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND or not current_platform.is_cuda_alike(),
+    reason="sampling-mask opt-out uses the Python CUDA or ROCm serving path",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+async def test_generate_sampling_mask_opt_out_keeps_sample_logprobs(client):
+    request = {"model": MODEL_NAME, "token_ids": [1, 2, 3]}
+    rollout = {
+        **request,
+        "sampling_params": {
+            "max_tokens": 32,
+            "ignore_eos": True,
+            "top_k": 5,
+            "temperature": 1.0,
+            "seed": 0,
+        },
+    }
+    eval_request = {
+        **request,
+        "sampling_params": {
+            "max_tokens": 8,
+            "ignore_eos": True,
+            "temperature": 0.0,
+            "return_sampling_mask": False,
+            "logprobs": 0,
+        },
+    }
+    rollout_response, eval_response = await asyncio.gather(
+        client.post(GEN_ENDPOINT, json=rollout),
+        client.post(GEN_ENDPOINT, json=eval_request),
+    )
+    rollout_response.raise_for_status()
+    eval_response.raise_for_status()
+
+    rollout_choice = rollout_response.json()["choices"][0]
+    for token_id, support in zip(
+        rollout_choice["token_ids"], rollout_choice["sampling_mask"], strict=True
+    ):
+        assert token_id in support
+
+    eval_choice = eval_response.json()["choices"][0]
+    assert eval_choice.get("sampling_mask") is None
+    assert [entry["token_id"] for entry in eval_choice["logprobs"]["content"]] == (
+        eval_choice["token_ids"]
+    )
 
 
 @pytest.mark.asyncio

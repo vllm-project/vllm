@@ -155,6 +155,8 @@ class SamplingMaskTensors(NamedTuple):
     vocab_size: int
     # Fixed request-major output slots. Ordinary sampling has one slot.
     rows_per_request: int = 1
+    # Original request slots for a compacted single-position batch.
+    captured_requests: np.ndarray | None = None
 
     @classmethod
     def from_logits(
@@ -164,6 +166,8 @@ class SamplingMaskTensors(NamedTuple):
         num_sampled_tokens: torch.Tensor,
         max_num_kept: int,
         rows_per_request: int = 1,
+        *,
+        captured_requests: np.ndarray | None = None,
     ) -> SamplingMaskTensors:
         """Capture the finite-logit support of every row with a sampled token."""
         if current_platform.is_xpu():
@@ -173,13 +177,21 @@ class SamplingMaskTensors(NamedTuple):
         token_ids, packed_mask, counts = compact_sampling_mask(
             logits, cu_num_logits, num_sampled_tokens, max_num_kept, rows_per_request
         )
-        return cls(token_ids, packed_mask, counts, logits.shape[1], rows_per_request)
+        return cls(
+            token_ids,
+            packed_mask,
+            counts,
+            logits.shape[1],
+            rows_per_request,
+            captured_requests,
+        )
 
     @classmethod
     def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:
         """Join request-contiguous chunks that share one output layout."""
         first = chunks[0]
         assert len({(c.vocab_size, c.rows_per_request) for c in chunks}) == 1
+        assert all(chunk.captured_requests is None for chunk in chunks)
         return cls(
             torch.cat([chunk.token_ids for chunk in chunks]),
             torch.cat([chunk.packed_mask for chunk in chunks]),
@@ -197,6 +209,7 @@ class SamplingMaskTensors(NamedTuple):
             self.counts.to("cpu", non_blocking=True),
             self.vocab_size,
             self.rows_per_request,
+            self.captured_requests,
         )
 
     def tolists(
@@ -231,7 +244,14 @@ class SamplingMaskTensors(NamedTuple):
             return np.flatnonzero(bits).astype(np.int32, copy=False)
 
         supports = [support(row) for row in sampled_rows]
-        offsets = np.zeros(len(supports) + 1, dtype=np.int64)
-        np.cumsum([len(s) for s in supports], out=offsets[1:])
+        lengths = [len(support) for support in supports]
+        if self.captured_requests is not None:
+            assert self.rows_per_request == 1
+            offsets = np.zeros(len(self.captured_requests) + 1, dtype=np.int64)
+            offsets[1:][self.captured_requests] = lengths
+            np.cumsum(offsets[1:], out=offsets[1:])
+        else:
+            offsets = np.zeros(len(supports) + 1, dtype=np.int64)
+            np.cumsum(lengths, out=offsets[1:])
         flat = np.concatenate([np.empty(0, dtype=np.int32), *supports])
         return SamplingMaskLists(flat, offsets, cu_num_generated_tokens)
