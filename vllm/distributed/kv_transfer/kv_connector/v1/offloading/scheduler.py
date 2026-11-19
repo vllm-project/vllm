@@ -221,6 +221,8 @@ class _StoreJobSink:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
+    _offloading_enabled = True
+
     def __init__(
         self,
         spec: OffloadingSpec,
@@ -233,7 +235,24 @@ class OffloadingConnectorScheduler:
         self._group_configs_by_id = {
             config.group_idx: config for config in self.config.kv_group_configs
         }
+        # Block IDs are pool-local. Track every group sharing a pool with an
+        # offloaded group so other-pool allocations cannot trigger its fences.
+        offload_pool_kinds = {
+            kv_cache_config.kv_cache_groups[group.group_idx].host_resident
+            for group in self.config.kv_group_configs
+        }
+        self._groups_sharing_offload_pool = frozenset(
+            group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.host_resident in offload_pool_kinds
+        )
         self.manager: OffloadingManager = spec.get_manager()
+        # Under async_init the engine serves without offloading until every
+        # worker has reported ready.
+        self._offloading_enabled = not spec.async_init
+        self._ready_ranks: set[int] = set()
+        if not self._offloading_enabled:
+            logger.info("KV offloading is off until every worker is ready")
         self._connector_stats = OffloadingConnectorStats()
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         self.use_lookahead_block_hashes = self.num_hash_lookahead_tokens > 0
@@ -970,7 +989,11 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_external_kv or req_status.load_failed:
+        if (
+            request.skip_reading_external_kv
+            or req_status.load_failed
+            or not self._offloading_enabled
+        ):
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -1081,6 +1104,8 @@ class OffloadingConnectorScheduler:
         # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         for group_idx, group_blocks in enumerate(blocks.blocks):
+            if group_idx not in self._groups_sharing_offload_pool:
+                continue
             num_prefix_blocks = self._num_prefix_blocks(
                 group_idx, num_locally_computed_tokens
             )
@@ -1254,6 +1279,8 @@ class OffloadingConnectorScheduler:
                             local_prefix_tokens, req_status.req.num_computed_tokens
                         )
                 for group_idx, group_blocks in enumerate(block_id_groups):
+                    if group_idx not in self._groups_sharing_offload_pool:
+                        continue
                     num_prefix_blocks = self._num_prefix_blocks(
                         group_idx, local_prefix_tokens
                     )
@@ -1410,14 +1437,18 @@ class OffloadingConnectorScheduler:
             )
 
         store_jobs: dict[int, TransferJob] = {}
-        for handler in self._store_handlers.values():
-            sink = _StoreJobSink(self, handler.trigger)
-            handler.build_store_jobs(scheduler_output, self._req_status, sink)
-            store_jobs |= sink.jobs
+        if self._offloading_enabled:
+            # Chunks skipped while offloading was off are still offered:
+            # stored indices have not moved.
+            for handler in self._store_handlers.values():
+                sink = _StoreJobSink(self, handler.trigger)
+                handler.build_store_jobs(scheduler_output, self._req_status, sink)
+                store_jobs |= sink.jobs
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
+            offloading_enabled=self._offloading_enabled,
         )
 
         # All prepare_store calls for finished requests have been issued.
@@ -1479,6 +1510,14 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        if not self._offloading_enabled and meta.ready_ranks:
+            self._ready_ranks |= meta.ready_ranks
+            if len(self._ready_ranks) >= self.config.num_workers:
+                self._offloading_enabled = True
+                logger.info(
+                    "KV offloading enabled: all %d workers ready",
+                    self.config.num_workers,
+                )
         if not meta.transfer_stats.is_empty():
             transfer_stats = OffloadingConnectorStats()
             if not meta.transfer_stats.load.is_empty():
