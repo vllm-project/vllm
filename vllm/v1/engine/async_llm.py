@@ -575,7 +575,10 @@ class AsyncLLM(EngineClient):
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
         except BaseException:
-            await self.abort(parent_request.request_id, internal=True)
+            try:
+                await self.abort(parent_request.request_id, internal=True)
+            finally:
+                self._release_unread_aux_outputs(queue)
             raise
         return queue
 
@@ -587,16 +590,23 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        if parent_req is None and not self.output_processor.has_request(
-            request.request_id
-        ):
+        new = not self.output_processor.has_request(request.request_id)
+        if parent_req is None and new:
             self.check_admission(request_id=request.request_id)
 
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            if new:
+                try:
+                    await self.abort(request.request_id, internal=True)
+                finally:
+                    self._release_unread_aux_outputs(queue)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -866,12 +876,14 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
         finally:
             if q is not None:
-                if q.unread_aux_keys:
-                    with contextlib.suppress(EngineDeadError):
-                        self.engine_core.release_unreturned_aux_outputs(
-                            q.unread_aux_keys
-                        )
+                self._release_unread_aux_outputs(q)
                 q.close()
+
+    def _release_unread_aux_outputs(self, queue: RequestOutputCollector) -> None:
+        if queue.unread_aux_keys:
+            with contextlib.suppress(EngineDeadError):
+                self.engine_core.release_unreturned_aux_outputs(queue.unread_aux_keys)
+            queue.unread_aux_keys = {}
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""

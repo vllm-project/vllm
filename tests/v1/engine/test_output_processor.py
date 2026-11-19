@@ -2380,3 +2380,97 @@ async def test_generate_that_reads_an_error_releases_the_final_output_it_dropped
     with pytest.raises(EngineGenerateError):
         await anext(engine.generate("prompt", SamplingParams(max_tokens=2), "r-ext"))
     assert released == [{"r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+async def test_request_whose_submission_is_cancelled_is_aborted(finished):
+    engine, queue, released, aborted = _session_engine()
+    engine.output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    sending = asyncio.Event()
+
+    async def add_request_async(request):
+        sending.set()
+        await asyncio.Event().wait()
+
+    engine.engine_core.add_request_async = add_request_async
+    engine.check_admission = lambda request_id=None: None
+    request = EngineCoreRequest(
+        request_id="r",
+        external_req_id="r-ext",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, max_tokens=2),
+        pooling_params=None,
+    )
+    task = asyncio.ensure_future(engine._add_request(request, None, None, 0, queue))
+    await sending.wait()
+    if finished:
+        engine.output_processor.process_outputs([_final_output("r")])
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not engine.output_processor.has_request("r")
+    if finished:
+        assert not aborted
+        assert released == [{"r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]
+    else:
+        assert aborted == ["r"] and not released
+
+
+@pytest.mark.asyncio
+async def test_submission_cancelled_again_while_aborting_releases_finished_children():
+    engine, _, released, _ = _session_engine()
+    engine.output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    sending = asyncio.Event()
+    aborting = asyncio.Event()
+
+    async def add_request_async(request):
+        if request.request_id == "1_r":
+            sending.set()
+            await asyncio.Event().wait()
+
+    async def abort_requests_async(request_ids):
+        aborting.set()
+        await asyncio.Event().wait()
+
+    engine.engine_core.add_request_async = add_request_async
+    engine.engine_core.abort_requests_async = abort_requests_async
+    engine.engine_core.resources = SimpleNamespace(engine_dead=False)
+    engine.output_handler = SimpleNamespace(done=lambda: False)
+    engine.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+    )
+    engine.input_processor = SimpleNamespace(
+        apply_watermarking=lambda params, watermarking: None,
+        resolve_watermarking=lambda params: None,
+        assign_request_id=lambda request: None,
+    )
+    engine.check_admission = lambda n=1, request_id=None: None
+    params = SamplingParams(detokenize=False, max_tokens=2, n=2)
+    request = EngineCoreRequest(
+        request_id="r",
+        external_req_id="r-ext",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=params,
+        pooling_params=None,
+    )
+    task = asyncio.ensure_future(AsyncLLM.add_request(engine, "r", request, params))
+    await sending.wait()
+    engine.output_processor.process_outputs([_final_output("0_r")])
+    task.cancel()
+    await aborting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    engine.output_handler = None
+    assert released == [{"0_r": ["job/s/a", "job/s/b", "job/s/tail/t"]}]
