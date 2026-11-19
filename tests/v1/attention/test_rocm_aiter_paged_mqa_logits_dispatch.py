@@ -44,7 +44,7 @@ def test_rocm_fp8_paged_mqa_logits_keeps_gluon_for_mtp_with_dcp(
         calls.append(("dispatch", args, kwargs))
 
     fake_aiter_module = ModuleType("aiter.paged_mqa_logits")
-    fake_aiter_module.paged_mqa_logits = fake_dispatch
+    fake_aiter_module.paged_mqa_logits = fake_dispatch  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "aiter.paged_mqa_logits", fake_aiter_module)
     monkeypatch.setattr(sparse_mod, "_USE_FUSED_PAGED_MQA_LOGITS", True)
     monkeypatch.setattr(sparse_mod, "_ON_RDNA", False)
