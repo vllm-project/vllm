@@ -481,7 +481,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 3, [11]
     )
 
@@ -513,7 +513,7 @@ def test_derender_text_choices_drops_tool_calls_without_tool_choice(
     )
     output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
 
-    ((message, finish_reason),) = derenderer._derender_text_choices(
+    ((message, finish_reason),), _ = derenderer._derender_text_choices(
         [output], parse_context.to_chat_request(), 0, None
     )
 
@@ -1877,7 +1877,7 @@ def harmony_encode():
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
     pytest.importorskip("openai_harmony")
-    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+    return get_tokenizer(HARMONY_MODEL)
 
 
 @pytest.fixture(scope="module")

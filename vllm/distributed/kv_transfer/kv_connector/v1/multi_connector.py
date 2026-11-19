@@ -4,7 +4,7 @@ import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+_K = TypeVar("_K")
 
 
 @dataclass
@@ -394,6 +396,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.reset_capture_state()
 
+    def on_kv_cache_ready(self) -> None:
+        for c in self._connectors:
+            c.on_kv_cache_ready()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         for c in self._connectors:
             c.wait_for_layer_load(layer_name)
@@ -592,15 +598,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return MultiKVConnectorHandshakeMetadata(metadata=metadata)
 
     def _sub_connector_handshake_metadata(
-        self, metadata: dict[Any, KVConnectorHandshakeMetadata], index: int
-    ) -> dict[Any, KVConnectorHandshakeMetadata]:
+        self, metadata: dict[_K, KVConnectorHandshakeMetadata], index: int
+    ) -> dict[_K, KVConnectorHandshakeMetadata]:
         """Return the entries of `metadata` that sub-connector `index` reported.
 
         If a subclass overrides `get_handshake_metadata` to report a single
         sub-connector's metadata (e.g. Dynamo's `PdConnector`), every
         sub-connector receives `metadata` unchanged.
         """
-        selected = {}
+        selected: dict[_K, KVConnectorHandshakeMetadata] = {}
         for key, multi_metadata in metadata.items():
             if not isinstance(multi_metadata, MultiKVConnectorHandshakeMetadata):
                 return metadata
