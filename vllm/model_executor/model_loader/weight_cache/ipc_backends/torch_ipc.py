@@ -31,7 +31,7 @@ class TensorEntry:
             return cls(ipc_args=ipc_args)
         return cls(cpu_tensor=buffer.cpu())
 
-    def rebuild(self, device_index: int) -> StorageRecord:
+    def rebuild(self, device_index: int, cache: dict | None = None) -> StorageRecord:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             buffer = self.cpu_tensor

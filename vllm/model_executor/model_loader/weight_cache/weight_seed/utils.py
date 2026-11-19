@@ -114,8 +114,9 @@ def rebuild_tensors(
         dtype = manifest_dtype(view["dtype"])
         if _view_extent(view, dtype.itemsize) > buffer.nbytes:
             raise RuntimeError(f"Seed manifest entry {name!r} overruns its storage")
+        offset = view["offset"] + buffer.storage_offset() // dtype.itemsize
         tensors[name] = torch.empty(0, dtype=dtype, device=buffer.device).set_(
-            buffer.untyped_storage(), view["offset"], view["shape"], view["stride"]
+            buffer.untyped_storage(), offset, view["shape"], view["stride"]
         )
     return tensors
 

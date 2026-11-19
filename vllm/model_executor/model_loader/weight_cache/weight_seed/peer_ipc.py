@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    storage_bytes,
+    rebuild_entries,
+    record_bytes,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
     TorchIPCBackend,
@@ -84,10 +85,9 @@ class PeerIpcMover(WeightMover):
             raise RuntimeError("Source daemon omitted manifest storages")
         sources = []
         try:
-            for entry, buffer in zip(entries, buffers):
-                source = entry.rebuild(source_index)
-                sources.append(source)
-                source_bytes = storage_bytes(source.storage)
-                buffer.copy_(source_bytes[: buffer.nbytes], non_blocking=True)
+            sources.extend(rebuild_entries(entries, source_index))
+            for source, buffer in zip(sources, buffers, strict=True):
+                source_bytes = record_bytes(source, buffer.nbytes)
+                buffer.copy_(source_bytes, non_blocking=True)
         finally:
             torch.accelerator.synchronize()

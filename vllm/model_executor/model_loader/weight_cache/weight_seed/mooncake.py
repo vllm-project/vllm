@@ -43,7 +43,7 @@ class MooncakeMover(WeightMover):
         self.protocol = protocol
         self._engine = None
         self._source_session: str | None = None
-        # Mooncake refuses to register memory twice, so each storage is
+        # Mooncake refuses to register memory twice, so each allocation is
         # registered once and serves every later mirror.
         self._registered: dict[int, int] = {}
 
@@ -61,11 +61,18 @@ class MooncakeMover(WeightMover):
     def prepare_seed(self, storages: list["StorageRecord"]) -> dict:
         engine = self._get_engine()
         regions = [
-            [record.storage.data_ptr(), record.storage.nbytes()] for record in storages
+            [
+                record.storage.data_ptr() + record.byte_offset,
+                record.storage.nbytes() - record.byte_offset,
+            ]
+            for record in storages
         ]
+        allocations = {
+            record.storage.data_ptr(): record.storage.nbytes() for record in storages
+        }
         new = [
             (pointer, nbytes)
-            for pointer, nbytes in regions
+            for pointer, nbytes in allocations.items()
             if nbytes and pointer not in self._registered
         ]
         if new:

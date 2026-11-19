@@ -11,7 +11,6 @@ import gc
 import json
 import multiprocessing
 import os
-import select
 import shutil
 import signal
 import socket
@@ -79,6 +78,7 @@ def _export_vmm_test_model(connection):
     with connection:
         model = torch.nn.Module()
         storage = torch.arange(48, dtype=torch.float32, device="cuda:0").reshape(6, 8)
+        other = torch.arange(1024, dtype=torch.float32, device="cuda:0").reshape(32, 32)
         model.register_parameter("weight", torch.nn.Parameter(storage))
         model.register_parameter("tied", model.weight)
         model.register_buffer("transposed", storage.T)
@@ -86,6 +86,8 @@ def _export_vmm_test_model(connection):
         model.register_buffer("bytes_view", storage.view(torch.uint8))
         model.register_buffer("host_table", torch.arange(3))
         model.register_buffer("empty", torch.empty(0, device="cuda:0"))
+        model.register_buffer("other", other)
+        model.register_buffer("other_view", other[2:5, ::3])
         state, backend = _state_for_model(model, "vmm_ipc")
         entries = [backend.export_storage(record) for record in state.storages]
         serial_utils.send_msg(
@@ -100,12 +102,16 @@ def _export_vmm_test_model(connection):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="VMM backend requires CUDA")
 def test_vmm_weights_survive_producer_exit_and_preserve_views():
-    """The FD holder imports after the producer exits; tensor views own the mapping."""
+    """Packed FD imports share one owner while logical tensor views stay independent."""
     from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
     from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        storage_bytes,
+        rebuild_entries,
+        record_bytes,
     )
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        exported_weight_bytes,
+    )
     from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
         rebuild_tensors,
     )
@@ -122,9 +128,20 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
         process.join(timeout=60)
         assert process.exitcode == 0
         entries = payload["storages"]
-        records = [entry.rebuild(0) for entry in entries]
+        records = rebuild_entries(entries, 0)
         state = WeightCacheState(payload["manifest"], records, payload["aliases"], {})
-        buffers = [storage_bytes(record.storage) for record in records]
+        weight_index = state.manifest["tensors"]["weight"]["storage"]
+        other_index = state.manifest["tensors"]["other"]["storage"]
+        weight_record = records[weight_index]
+        other_record = records[other_index]
+        assert weight_record.owner is other_record.owner
+        assert entries[weight_index].fd is entries[other_index].fd
+        assert other_record.byte_offset == 512
+        assert exported_weight_bytes(records) == weight_record.storage.nbytes()
+        buffers = [
+            record_bytes(record, storage["nbytes"])
+            for record, storage in zip(records, state.manifest["storages"], strict=True)
+        ]
         views = rebuild_tensors(state.manifest, buffers)
         assert state.aliases == {"tied": "weight"}
         assert (
@@ -140,13 +157,17 @@ def test_vmm_weights_survive_producer_exit_and_preserve_views():
         assert views["offset"].stride() == (8, 2)
         assert views["empty"].shape == (0,)
         del payload, state, records, entries, buffers
+        del weight_record, other_record
         gc.collect()
         expected = torch.arange(48, dtype=torch.float32).reshape(6, 8)
+        expected_other = torch.arange(1024, dtype=torch.float32).reshape(32, 32)
         assert torch.equal(views["weight"].cpu(), expected)
         assert torch.equal(views["transposed"].cpu(), expected.T)
         assert torch.equal(views["offset"].cpu(), expected[1:5, ::2])
         assert torch.equal(views["bytes_view"].cpu(), expected.view(torch.uint8))
         assert torch.equal(views["host_table"], torch.arange(3))
+        assert torch.equal(views["other"].cpu(), expected_other)
+        assert torch.equal(views["other_view"].cpu(), expected_other[2:5, ::3])
         views["offset"].fill_(17)
         assert torch.equal(views["weight"][1:5, ::2], views["offset"])
     finally:
@@ -391,22 +412,16 @@ def test_weight_cache_backend_llm_restart(vllm_runner, tmp_path, monkeypatch, ba
         ],
     ) as daemon:
         daemon.wait_until_ready()
-        for mode in ("zero_copy", "copy"):
-            extra_config = {
-                "socket_dir": daemon.socket_dir,
-                "fallback": False,
-                "mode": mode,
-            }
-            with vllm_runner(
-                str(tmp_path),
-                load_format="ipc_cache",
-                model_loader_extra_config=extra_config,
-                **kwargs,
-            ) as runner:
-                assert (
-                    runner.generate([[1, 2, 3]], sampling, return_logprobs=True)
-                    == baseline
-                )
+        extra_config = {"socket_dir": daemon.socket_dir, "fallback": False}
+        with vllm_runner(
+            str(tmp_path),
+            load_format="ipc_cache",
+            model_loader_extra_config=extra_config,
+            **kwargs,
+        ) as runner:
+            assert (
+                runner.generate([[1, 2, 3]], sampling, return_logprobs=True) == baseline
+            )
 
 
 @pytest.mark.distributed(num_gpus=2)
@@ -1349,21 +1364,21 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
 @pytest.mark.parametrize(
     "case",
     [
-        (False, "yarn", 10000.0, 2.0, 512, 0, None),
-        (False, "deepseek_yarn", 10000, 2, 512, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 2, 512, 0, None),
-        (True, "yarn", 10000, 2, 512, 0, None),
-        (True, "deepseek_yarn", 1000000, 2, 512, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 4, 512, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 2, 512, 1, "tp_rank"),
-        (False, "yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
+        ("yarn", 10000.0, 2.0, 512, 0, None),
+        pytest.param(
+            ("deepseek_yarn", 10000, 2, 512, 0, "rope_parameters_hash"),
+            id="constructor-normalized",
+        ),
+        ("deepseek_yarn", 1000000, 2, 512, 0, "rope_parameters_hash"),
+        ("deepseek_yarn", 10000, 4, 512, 0, "rope_parameters_hash"),
+        ("deepseek_yarn", 10000, 2, 512, 1, "tp_rank"),
+        ("yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
     ],
 )
 def test_ipc_rope_matching(
     tmp_path, monkeypatch, default_vllm_config, fallback, nested, case
 ):
-    """Reloads accept constructor-normalized RoPE without weakening other checks."""
+    """Initial engine attachment requires an exact RoPE compatibility key."""
     import socket
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import nullcontext
@@ -1372,20 +1387,14 @@ def test_ipc_rope_matching(
     import torch
     from transformers import DeepseekV2Config, Qwen3VLConfig
 
-    from vllm.config import LoadConfig, ModelConfig, VllmConfig
+    from vllm.config import LoadConfig, ModelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        storage_bytes,
-    )
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         CacheConfigMismatchError,
-        hash_rope_parameters,
-    )
-    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-        rebuild_tensors,
+        WeightCacheKey,
     )
 
-    is_reload, rope_type, theta, factor, max_position, rank, mismatch = case
+    rope_type, theta, factor, max_position, rank, mismatch = case
     rope = dict(rope_type="yarn", rope_theta=10000, factor=2)
     config = (
         Qwen3VLConfig(text_config={"rope_parameters": rope})
@@ -1402,22 +1411,18 @@ def test_ipc_rope_matching(
         max_model_len=128,
     )
     model_config.hf_text_config.max_position_embeddings = 512
-    server = daemon.WeightCacheDaemon(
-        VllmConfig(model_config=model_config),
-        global_rank=0,
-        local_rank=0,
-        distributed_init_method="tcp://127.0.0.1:0",
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server.cache_key = WeightCacheKey.from_model_config(
+        model_config, 1, 0, cache_config=default_vllm_config.cache_config
     )
-    rope = model_config.hf_text_config.rope_parameters
-    # DeepseekV2 construction normalizes yarn to deepseek_yarn.
-    rope["rope_type"] = "deepseek_yarn"
-    server.loaded_rope_parameters_hash = hash_rope_parameters(model_config)
-    rope.update(rope_type=rope_type, rope_theta=theta, factor=factor)
+    model_config.hf_text_config.rope_parameters.update(
+        rope_type=rope_type, rope_theta=theta, factor=factor
+    )
     model_config.hf_text_config.max_position_embeddings = max_position
     server.model = torch.nn.Module()
-    server.model.register_buffer("rotary_cache", torch.ones(2), persistent=False)
-    server.capture_state()
-    assert server.state is not None
+    server.state, server.backend = _state_for_model(server.model, "torch_ipc")
+    server.backend_name = "torch_ipc"
+    server.role, server.global_rank = "target", 0
     for module in (daemon, ipc_loader):
         monkeypatch.setattr(module, "get_current_device_uuid", lambda: "test-device")
     for name in ("get_dp_group", "get_pp_group"):
@@ -1430,8 +1435,6 @@ def test_ipc_rope_matching(
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     loader.fallback = fallback
     loader.state_timeout_s = 5
-    model = torch.nn.Module()
-    model.register_buffer("rotary_cache", torch.zeros(2), persistent=False)
     client, connection = socket.socketpair()
     with client, connection, ThreadPoolExecutor(max_workers=1) as executor:
         client.settimeout(5)
@@ -1444,46 +1447,9 @@ def test_ipc_rope_matching(
                 if mismatch
                 else nullcontext()
             ):
-                if is_reload:
-                    loader.load_weights(model, model_config)
-                else:
-                    loader._fetch_state(
-                        model_config,
-                        default_vllm_config.cache_config,
-                        default_vllm_config.parallel_config,
-                        default_vllm_config.kernel_config,
-                        device_index=0,
-                    )
-            if is_reload:
-                expected = (
-                    torch.zeros(2)
-                    if mismatch
-                    else rebuild_tensors(
-                        server.state.manifest,
-                        [
-                            storage_bytes(record.storage)
-                            for record in server.state.storages
-                        ],
-                    )["rotary_cache"]
-                )
-                torch.testing.assert_close(model.rotary_cache, expected)
+                loader._fetch_state(default_vllm_config, model_config)
         finally:
             server_task.result(timeout=5)
-
-
-def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
-    """Copy mode clones the weights into the engine, so nothing is external
-    (vllm_config is never touched)."""
-    from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
-        IpcModelLoader,
-    )
-
-    copy_mode = LoadConfig(
-        load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
-    )
-    loader = IpcModelLoader(copy_mode)
-    assert loader.get_external_weight_memory(None) == 0
 
 
 def _serve_one(handler):
@@ -1520,7 +1486,6 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
 
     server = object.__new__(daemon.WeightCacheDaemon)
-    server._state_lock = threading.RLock()
     server._watchers = []
     connect, server_threads = _serve_one(server._handle_connection)
     load_config = LoadConfig(
@@ -1539,14 +1504,14 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     # The second watch prunes nothing while the first engine is alive.
     assert len(server._watchers) == 2
     threads[0].join(timeout=0.2)
-    assert threads[0].is_alive() and not loaders[0].daemon_lost.is_set()
+    assert threads[0].is_alive()
 
     # The daemon exiting closes its end of every watch connection.
     for watcher in server._watchers:
         watcher.close()
-    for loader, thread in zip(loaders, threads):
+    for thread in threads:
         thread.join(timeout=5)
-        assert loader.daemon_lost.is_set()
+        assert not thread.is_alive()
 
     # A watcher whose engine has exited is pruned; a live one is kept.
     peers = [socket.socketpair() for _ in range(2)]
@@ -1557,29 +1522,6 @@ def test_ipc_loader_detects_daemon_exit(monkeypatch):
     for ours, theirs in peers:
         ours.close()
         theirs.close()
-
-
-def test_ipc_loader_skips_watch_on_old_daemon(monkeypatch):
-    """Daemons predating the watch command reject it; loading still works."""
-    from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader.weight_cache import ipc_loader
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
-
-    def reject(connection) -> None:
-        assert serial_utils.recv_msg(connection) == {"cmd": "watch"}
-        serial_utils.send_msg(
-            connection, {"status": "error", "message": "Unknown command"}
-        )
-
-    loader = ipc_loader.IpcModelLoader(
-        LoadConfig(
-            load_format="ipc_cache",
-            model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
-        )
-    )
-    monkeypatch.setattr(loader, "_connect", _serve_one(reject)[0])
-    assert loader._watch_daemon() is None
-    assert not loader.daemon_lost.is_set()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -1618,9 +1560,11 @@ def test_daemon_releases_cublas_workspaces():
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
-def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
-    """Only the failed role's charge is reported, at most once."""
+@pytest.mark.parametrize(
+    "socket_path,fallback_bytes", [("target.sock", 8), ("draft.sock", 4)]
+)
+def test_external_weight_fallback_preserves_other_socket(socket_path, fallback_bytes):
+    """Only the failed socket's charge is reported, at most once."""
     from vllm.model_executor.model_loader.weight_cache.utils import (
         ExternalWeightCharges,
         record_external_weight_charge,
@@ -1629,12 +1573,12 @@ def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes)
 
     accounting = ExternalWeightCharges()
     with accounting.track():
-        record_external_weight_charge("target.sock", False, 8)
-        record_external_weight_charge("draft.sock", True, 4)
-        source = "draft.sock" if is_draft else "target.sock"
-        record_external_weight_fallback(source, is_draft)
-        record_external_weight_fallback(source, is_draft)
-        record_external_weight_fallback("uncharged.sock", False)
+        record_external_weight_charge("target.sock", 8)
+        record_external_weight_charge("draft.sock", 4)
+        record_external_weight_fallback(socket_path)
+        record_external_weight_fallback(socket_path)
+        record_external_weight_fallback("uncharged.sock")
+    assert accounting.current_bytes == 12 - fallback_bytes
     assert accounting.fallback_bytes == fallback_bytes
 
 
@@ -1649,7 +1593,7 @@ def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes)
 def test_ipc_cache_key_tracks_kv_quantization(
     tmp_path, monkeypatch, cache_dtype, skip_layers, mismatched_fields
 ):
-    """Initial loads and standalone reloads use the same KV compatibility key."""
+    """Initial engine loads include KV cache settings in the compatibility key."""
     from types import SimpleNamespace
 
     import torch
@@ -1693,7 +1637,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
     loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
     requested_keys: list[WeightCacheKey] = []
 
-    def request_state(key, *, is_reload=False):
+    def request_state(key):
         requested_keys.append(key)
         return WeightCacheState(
             storages=[],
@@ -1708,15 +1652,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
     )
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    model = loader.load_model(config, model_config)
-    config.cache_config.cache_dtype = "bfloat16"
-    config.cache_config.kv_cache_dtype_skip_layers.clear()
-    config.parallel_config.enable_expert_parallel = True
-    config.parallel_config.expert_placement_strategy = "round_robin"
-    loader.load_weights(model, model_config)
-    assert len(requested_keys) == 2
-    for key in requested_keys:
-        assert server.cache_key.mismatched_fields(key) == mismatched_fields
+    loader.load_model(config, model_config)
+    assert len(requested_keys) == 1
+    assert server.cache_key.mismatched_fields(requested_keys[0]) == mismatched_fields
 
 
 @pytest.mark.parametrize(
@@ -1778,14 +1716,13 @@ def test_ipc_cache_key_tracks_kernel_backends(
         )
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(
         ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
     )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
 
-    def request_state(key, *, is_reload=False):
+    def request_state(key):
         requested_keys.append(key)
         return WeightCacheState(
             storages=[],
@@ -1798,14 +1735,8 @@ def test_ipc_cache_key_tracks_kernel_backends(
     monkeypatch.setattr(loader, "_request_state", request_state)
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     loader.load_model(config, model_config)
-    # A standalone reload on a fresh loader has no recorded key, so it keys on
-    # the current engine config.
-    reloader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    monkeypatch.setattr(reloader, "_request_state", request_state)
-    reloader.load_weights(torch.nn.Module(), model_config)
-    assert len(requested_keys) == 2
-    for key in requested_keys:
-        assert server.cache_key.mismatched_fields(key) == mismatched_fields
+    assert len(requested_keys) == 1
+    assert server.cache_key.mismatched_fields(requested_keys[0]) == mismatched_fields
 
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
@@ -1995,18 +1926,15 @@ def _daemon_socket(daemon: WeightCacheDaemon, *, is_draft: bool = False) -> str:
     return paths[0]
 
 
-def _exercise_lease_release(
+def _exercise_lease_shutdown(
     source: WeightCacheDaemon,
     source_address: str | tuple[str, int],
-    control_socket: str,
     backend,
     token: str | None = None,
-    shutdown: bool = False,
 ) -> dict:
-    """Hold a real copy lease open while the source handles a real release."""
+    """Graceful source shutdown waits for an active D2D copy acknowledgement."""
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends import serial_utils
     from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
@@ -2025,22 +1953,10 @@ def _exercise_lease_release(
     manifest = payload["manifest"]
     assert len(manifest["storages"]) > 1
 
-    if shutdown:
-        assert source._proc is not None
-        source._proc.terminate()
-    else:
-        release_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        release_sock.settimeout(300)
-        release_sock.connect(control_socket)
-        serial_utils.send_msg(release_sock, {"cmd": "release"})
+    assert source._proc is not None
+    source._proc.terminate()
     source.wait_for_log("waiting for 1 weight-cache copy acknowledgement(s)")
-    if shutdown:
-        assert source._proc is not None
-        assert source._proc.poll() is None, "source exited before the copy ack"
-    else:
-        assert not select.select([release_sock], [], [], 0)[0], (
-            "source released before the copy ack"
-        )
+    assert source._proc.poll() is None, "source exited before the copy ack"
 
     mover = get_mover(backend)
     device = torch.device(
@@ -2049,16 +1965,7 @@ def _exercise_lease_release(
     tensors = mover.fill(manifest, payload["seed"], device)
     assert len(tensors) == len(manifest["tensors"])
     acknowledge_lease(transport)
-    if shutdown:
-        assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
-    else:
-        release_sock.settimeout(30)
-        assert serial_utils.recv_msg(release_sock)["status"] == "ok"
-        release_sock.close()
-        source.wait_for_log("released cached weights")
-        response = transport.request({"kind": "weights", "seed_backend": backend})
-        assert response is not None and response["status"] == "error", response
-        assert "Weights were released" in response["message"]
+    assert source.wait_for_exit(timeout_s=30) == 128 + signal.SIGTERM
     return payload
 
 
@@ -2128,9 +2035,7 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
             assert all(int(storages) > 1 for storages, _ in transfers)
             assert all(float(seconds) < 10.0 for _, seconds in transfers)
 
-            payload = _exercise_lease_release(
-                source, source_sock, source_sock, "peer_ipc", shutdown=True
-            )
+            payload = _exercise_lease_shutdown(source, source_sock, "peer_ipc")
             assert payload["seed"]["source_device_index"] == 0
             source_uuid = payload["seed"]["source_gpu_uuid"]
             assert source_uuid == current_platform.get_device_uuid(1)
@@ -2150,7 +2055,7 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
     reason="Cross-host weight seeding requires Mooncake TransferEngine",
 )
 def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
-    """Pull and release remote-copy leases over the JSON control plane.
+    """Hold a remote-copy lease through graceful source shutdown.
 
     Both daemons run on this host, but the exchange uses the token-authenticated
     TCP listener exactly as a cross-host seed would. The source uses GPU 0 and
@@ -2189,7 +2094,6 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
         env_extra=_visibility_env("0"),
     ) as source:
         source.wait_until_ready()
-        source_sock = _daemon_socket(source)
         with WeightCacheDaemon(
             QWEN_CASE.model,
             tp_size=1,
@@ -2213,12 +2117,8 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
             # Remote copies are latency-dominated; bound stalls, not bandwidth.
             assert float(transfers[0][1]) < 10.0
 
-            _exercise_lease_release(
-                source,
-                ("127.0.0.1", base_port),
-                source_sock,
-                "mooncake",
-                token,
+            _exercise_lease_shutdown(
+                source, ("127.0.0.1", base_port), "mooncake", token
             )
             mirror_outputs = generate(
                 vllm_runner, engine_case, mirror.socket_dir, fallback=False

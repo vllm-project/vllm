@@ -563,9 +563,9 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe_kernel = None
     mock_kernel = MagicMock()
     monkeypatch.setattr(
-        method,
+        UnquantizedFusedMoEMethod,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", mock_kernel),
+        lambda self, _: setattr(self, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
@@ -644,10 +644,12 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
         assert torch.equal(kernel_w2, expected_w2)
 
 
-def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
+def _check_flashinfer_ipc_weights(entries, expected, device_index):
     from vllm.model_executor.model_loader.utils import _register_processed_tensors
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheState,
+    )
     from vllm.model_executor.utils import weights_already_processed
 
     torch.accelerator.set_device_index(device_index)
@@ -656,7 +658,6 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
             monkeypatch, 192, is_gated=True, device="meta"
         )
         loader = object.__new__(IpcModelLoader)
-        loader.mode = mode
         storages, manifest = entries
         records = [entry.rebuild(device_index) for entry in storages]
         tensors, kinds = loader._rebuild_storages(
@@ -684,9 +685,8 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
 
 
 @pytest.mark.parametrize("cache_ndim", [3, 4])
-@pytest.mark.parametrize("mode", ["copy", "zero_copy"])
 def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
-    monkeypatch, cache_ndim, mode
+    monkeypatch, cache_ndim
 ):
     """A spawned IPC consumer restores views without transient method state."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -725,7 +725,6 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         args=(
             entries,
             expected,
-            mode,
             torch.accelerator.current_device_index(),
         ),
     )
@@ -736,10 +735,7 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         assert not consumer.is_alive(), "IPC consumer timed out"
         assert consumer.exitcode == 0, "IPC consumer failed; see child traceback"
         for source, reference in zip(packed, expected):
-            expected_source = (
-                torch.ones_like(reference) if mode == "zero_copy" else reference
-            )
-            assert torch.equal(source.cpu(), expected_source)
+            assert torch.equal(source.cpu(), torch.ones_like(reference))
     finally:
         if consumer.is_alive():
             consumer.terminate()

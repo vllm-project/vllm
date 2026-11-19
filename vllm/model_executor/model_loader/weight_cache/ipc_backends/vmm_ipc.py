@@ -124,42 +124,107 @@ class VmmAllocation:
 
 @dataclass
 class VmmStorage:
-    """A shareable allocation imported on demand for a local device."""
+    """A logical storage in an allocation imported on demand for a local device."""
 
     fd: SharedFileDescriptor
     size: int
+    byte_offset: int = 0
 
-    def rebuild(self, device_index: int) -> StorageRecord:
-        with torch.accelerator.device_index(device_index):
-            allocation = VmmAllocation(self.size, device_index, self.fd)
-            storage = allocation.tensor().untyped_storage()
-        return StorageRecord(owner=allocation, storage=storage)
+    def rebuild(self, device_index: int, cache: dict | None = None) -> StorageRecord:
+        base = cache.get(self.fd) if cache is not None else None
+        if base is None:
+            with torch.accelerator.device_index(device_index):
+                allocation = VmmAllocation(self.size, device_index, self.fd)
+                storage = allocation.tensor().untyped_storage()
+            base = StorageRecord(owner=allocation, storage=storage)
+            if cache is not None:
+                cache[self.fd] = base
+        return StorageRecord(
+            owner=base.owner,
+            storage=base.storage,
+            byte_offset=self.byte_offset,
+        )
 
 
 class VmmIPCBackend(IPCBackendBase):
     """Move canonical GPU storages to exportable VMM allocations after warmup."""
 
+    _ALIGNMENT = 512
+
+    def __init__(self, max_allocation_bytes: int = 1 << 30):
+        if max_allocation_bytes < 0:
+            raise ValueError("max_allocation_bytes must be non-negative")
+        self.max_allocation_bytes = max_allocation_bytes
+
+    @classmethod
+    def _plan_packs(
+        cls, sizes: list[int], max_allocation_bytes: int
+    ) -> list[list[int]]:
+        packs: list[list[int]] = []
+        offsets: list[int] = []
+        end = 0
+        for size in sizes:
+            if not max_allocation_bytes or size > max_allocation_bytes:
+                if offsets:
+                    packs.append(offsets)
+                    offsets = []
+                packs.append([0])
+                end = 0
+                continue
+            offset = (end + cls._ALIGNMENT - 1) // cls._ALIGNMENT * cls._ALIGNMENT
+            if offsets and offset + size > max_allocation_bytes:
+                packs.append(offsets)
+                offsets = []
+                offset = 0
+            offsets.append(offset)
+            end = offset + size
+        if offsets:
+            packs.append(offsets)
+        return packs
+
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
         records = super().materialize(storages)
+        groups: dict[int, list[int]] = {}
         for index, record in enumerate(records):
             storage = record.storage
             if not storage.is_cuda or not storage.nbytes():
                 continue
-            device = storage.device
-            assert device.index is not None
-            with torch.accelerator.device_index(device.index):
-                source = storage_bytes(storage)
-                allocation = VmmAllocation(storage.nbytes(), device.index)
-                buffer = allocation.tensor()
-                buffer[: source.numel()].copy_(source)
-                torch.accelerator.synchronize(device)
-                records[index] = StorageRecord(
-                    owner=allocation,
-                    storage=buffer.untyped_storage(),
-                )
-                storages[index] = records[index].storage
-                del source, buffer, storage, record, allocation
-                torch.accelerator.empty_cache()
+            assert storage.device.index is not None
+            groups.setdefault(storage.device.index, []).append(index)
+
+        allocations: list[VmmAllocation] = []
+        try:
+            for device_index, indices in groups.items():
+                sizes = [records[index].storage.nbytes() for index in indices]
+                position = 0
+                for offsets in self._plan_packs(sizes, self.max_allocation_bytes):
+                    pack_indices = indices[position : position + len(offsets)]
+                    position += len(offsets)
+                    sources = [
+                        storage_bytes(records[index].storage) for index in pack_indices
+                    ]
+                    pack_nbytes = offsets[-1] + sources[-1].numel()
+                    with torch.accelerator.device_index(device_index):
+                        allocation = VmmAllocation(pack_nbytes, device_index)
+                        allocations.append(allocation)
+                        buffer = allocation.tensor()
+                        for source, offset in zip(sources, offsets, strict=True):
+                            buffer[offset : offset + source.numel()].copy_(source)
+                        torch.accelerator.synchronize(device_index)
+                        for index, offset in zip(pack_indices, offsets, strict=True):
+                            records[index] = StorageRecord(
+                                owner=allocation,
+                                storage=buffer.untyped_storage(),
+                                byte_offset=offset,
+                            )
+                            storages[index] = records[index].storage
+                        del sources, source, buffer, allocation
+                        torch.accelerator.empty_cache()
+        except BaseException:
+            for allocation in allocations:
+                with suppress(BaseException):
+                    allocation.close()
+            raise
         return records
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
@@ -168,4 +233,4 @@ class VmmIPCBackend(IPCBackendBase):
 
         owner = cast(VmmAllocation, record.owner)
         assert owner.fd is not None
-        return VmmStorage(owner.fd, owner.size)
+        return VmmStorage(owner.fd, owner.size, record.byte_offset)
