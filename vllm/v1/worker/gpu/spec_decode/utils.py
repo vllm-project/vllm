@@ -88,7 +88,7 @@ def gather_rejected_tokens(
     features = None
     if aux_hidden_states:
         features = torch.stack([h[rows] for h in aux_hidden_states], dim=2)
-        features = features * valid[..., None, None].to(features.dtype)
+        features = torch.where(valid[..., None, None], features, 0)
     return RejectedTokens(
         rows, token_positions, valid, rejected, req_state_idx, features
     )

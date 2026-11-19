@@ -86,6 +86,20 @@ def test_features_are_the_raw_aux_rows():
     assert not out.features[1, 1:].any()
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_invalid_slots_are_zero_even_if_row_0_is_not_finite(bad):
+    # Invalid slots gather packed row 0; its value must not leak into them.
+    aux = _aux(8)
+    for h in aux:
+        h[0] = bad
+    out = gather_rejected_tokens(**_batch("AB"), aux_hidden_states=aux)
+    invalid = ~out.valid
+    assert torch.equal(out.features[invalid], torch.zeros_like(out.features[invalid]))
+    for i, j in out.valid.nonzero().tolist():
+        r = int(out.rows[i, j])
+        assert torch.equal(out.features[i, j], torch.stack([h[r] for h in aux]))
+
+
 def test_swapped_batch_order_keeps_each_request():
     ab = gather_rejected_tokens(**_batch("AB"), aux_hidden_states=_aux(8))
     ba = gather_rejected_tokens(**_batch("BA"), aux_hidden_states=_aux(8))
