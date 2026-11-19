@@ -558,17 +558,15 @@ def extend_kv_cache(
             + getattr(runner.speculator, "attn_groups", [])
             for group in groups
         ]
-        bind_kv_caches(
-            committed,
+        # Host-resident layers, absent from `committed`, keep their views, so
+        # layers sharing their KV still resolve as at allocation.
+        runner.kv_caches_by_layer = bind_kv_caches(
+            runner.kv_caches_by_layer | committed,
             forward_context,
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
         )
-        runner.kv_caches_by_layer = {
-            name: committed.get(name, view)
-            for name, view in runner.kv_caches_by_layer.items()
-        }
         runner.kv_caches = [
             cache
             for cache in runner.kv_caches_by_layer.values()
