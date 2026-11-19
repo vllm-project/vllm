@@ -70,6 +70,8 @@ class Step5FlashInferSparse:
         scale,
         *,
         contiguous_query=True,
+        request_offsets=None,
+        num_kv_groups=1,
     ) -> CompactPagedPrefill | None:
         """Plan paged prefill over dense model-dtype single-group pages.
 
@@ -114,6 +116,7 @@ class Step5FlashInferSparse:
         out,
         scale,
         *,
+        seq_lens=None,
         topk_lengths=None,
         clear_inactive=True,
         k_scale=None,
@@ -121,9 +124,9 @@ class Step5FlashInferSparse:
         query_len=1,
         gate=None,
     ):
-        """Decode attention for rows of ``query_len`` tokens per request.
+        """Decode attention for rows of `query_len` tokens per request.
 
-        ``gate`` ([tokens, all heads]) applies the headwise sigmoid gate.
+        `gate` ([tokens, all heads]) applies the headwise sigmoid gate.
         """
         if not _direct_sparse_decode(query, kv_cache, out):
             raise NotImplementedError(
@@ -152,7 +155,17 @@ class Step5FlashInferSparse:
             gate=gate,
         )
 
-    def prefill_metadata(self, owners, positions, regions, topk, *, paged_prefill=None):
+    def prefill_metadata(
+        self,
+        owners,
+        positions,
+        regions,
+        topk,
+        *,
+        paged_prefill=None,
+        out=None,
+        history_only=False,
+    ):
         return prepare_prefill_indexer(
             owners,
             positions,
@@ -160,13 +173,15 @@ class Step5FlashInferSparse:
             topk,
             self._num_sms,
             paged_prefill=paged_prefill,
+            out=out,
+            history_only=history_only,
         )
 
     def warmup_prefill_scoring(self, max_regions, topk, paired_heads, device):
         """JIT the scored-prefill variants a startup warmup step cannot reach.
 
         Per-chunk metadata specializes on the chunk size, which shrinks as the
-        context grows, and paired logits compile for ``next_n = 2``; either
+        context grows, and paired logits compile for `next_n = 2`; either
         would otherwise compile mid-serving on the first such prefill.
         """
         from flashinfer.attn_scores import compute_paged_mqa_logits_schedule
@@ -244,10 +259,10 @@ class Step5FlashInferSparse:
     ):
         """Score regions for (token, KV group) rows.
 
-        ``query`` is ``[tokens, row_groups, heads, 256]`` and ``weights`` is
-        ``[tokens, row_groups, heads]``; row ``r`` is group ``r % row_groups``
-        of token ``r // row_groups``. ``query_len`` tokens share a request of
-        ``table``/``seq_lens``.
+        `query` is `[tokens, row_groups, heads, 256]` and `weights` is
+        `[tokens, row_groups, heads]`; row `r` is group `r % row_groups`
+        of token `r // row_groups`. `query_len` tokens share a request of
+        `table`/`seq_lens`.
         """
         assert query.shape[1] == row_groups
         if (
@@ -314,6 +329,8 @@ class Step5FlashInferSparse:
         topk_lengths=None,
         paged_prefill=None,
         sort=True,
+        out=None,
+        history_only=False,
     ):
         return select_regions(
             scores,
@@ -323,6 +340,8 @@ class Step5FlashInferSparse:
             topk_lengths=topk_lengths,
             paged_prefill=paged_prefill,
             sort=sort,
+            out=out,
+            history_only=history_only,
         )
 
     def logits(
@@ -340,8 +359,8 @@ class Step5FlashInferSparse:
         pairs=None,
         paired_heads=0,
     ):
-        """With ``pairs`` (from ``prefill_pair_inputs``), consecutive row pairs
-        of one request are scored as ``next_n=2`` on their ``paired_heads``
+        """With `pairs` (from `prefill_pair_inputs`), consecutive row pairs
+        of one request are scored as `next_n=2` on their `paired_heads`
         real heads rather than zero-padding each row to the MMA minimum."""
         q = query[:, 0]
         w = weights[:, 0]

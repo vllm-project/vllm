@@ -6,7 +6,7 @@ GLM-4.7 uses XML-like tool calls::
 
     <tool_call>func_name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>
 
-The function name can be followed directly by the first ``<arg_key>`` tag,
+The function name can be followed directly by the first `<arg_key>` tag,
 and tool calls may have no arguments.
 """
 
@@ -68,7 +68,7 @@ class _ClosedArgs:
     """Closed key/value pairs of a raw argument text, reused by longer texts.
 
     Raw arguments only grow while a call streams, so a parse of a text that
-    extends ``text`` resumes after its last closed value.
+    extends `text` resumes after its last closed value.
     """
 
     __slots__ = ("text", "params", "outside")

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from collections import deque
 from typing import TypedDict
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from tests.v1.core.utils import create_scheduler as create_async_scheduler
 from tests.v1.core.utils import create_scheduler as create_spec_scheduler
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -26,11 +28,10 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
@@ -40,7 +41,7 @@ STOP_TOKEN = 128001
 
 
 class CachedState(TypedDict):
-    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+    """The subset of request state the model runner is simulated to cache."""
 
     req_id: str
     prompt_token_ids: list[int]
@@ -69,7 +70,7 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(max_model_len: int = 1024) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -77,7 +78,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.supports_multimodal_inputs = False
     vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.is_diffusion = False
-    vllm_config.model_config.max_model_len = 1024
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
@@ -86,9 +87,9 @@ def create_scheduler() -> Scheduler:
         num_blocks=1000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
                 ),
             )
@@ -130,7 +131,6 @@ class TestStreamingScheduler(unittest.TestCase):
                 )
                 runner_output = ModelRunnerOutput(
                     req_ids=[session.request_id],
-                    req_id_to_index={session.request_id: 0},
                     sampled_token_ids=[[STOP_TOKEN]],
                     logprobs=logprobs,
                     prompt_logprobs_dict={},
@@ -295,7 +295,7 @@ class TestStreamingScheduler(unittest.TestCase):
         turn, that turns its own transcripts into conversation history and later
         segments reproduce earlier ones.
         """
-        scheduler = create_scheduler()
+        scheduler = create_scheduler(max_model_len=6)
         scheduler._realtime_context_policy = False
 
         old_mm = MultiModalFeatureSpec(
@@ -310,8 +310,16 @@ class TestStreamingScheduler(unittest.TestCase):
             mm_features=[old_mm],
         )
         # Segment 1 ran and produced two output tokens.
-        session._all_token_ids.extend([10, 11])
-        session.num_computed_tokens = 5
+        session.append_output_token_ids([10, 11])
+        session.num_computed_tokens = 4
+
+        # Even a fresh turn must leave room for one sampled token.
+        oversized = StreamingUpdate.from_request(
+            DummyRequest("session", prompt_token_ids=list(range(6)))
+        )
+        assert not scheduler._update_request_as_session(session, oversized)
+        assert scheduler.dropped_streaming_updates == [session]
+        assert list(session.all_token_ids) == [1, 2, 3, 10, 11]
 
         new_mm = MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -326,7 +334,8 @@ class TestStreamingScheduler(unittest.TestCase):
             max_tokens=4,
         )
         update = StreamingUpdate.from_request(new_request)
-        scheduler._update_request_as_session(session, update)
+        # This chunk fits on its own but would overflow with the old history.
+        assert scheduler._update_request_as_session(session, update)
 
         # The new chunk's prompt is the whole prompt; segment 1's output is gone.
         assert session.prompt_token_ids == [4, 5, 6]
@@ -431,6 +440,32 @@ class TestStreamingScheduler(unittest.TestCase):
         _ = scheduler.schedule()
 
         assert session.status == RequestStatus.RUNNING
+
+    def test_streaming_update_overflow_via_queue_drains_to_fitting_update(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest("session", prompt_token_ids=[1, 2, 3, 4])
+        session.append_output_token_ids([10, 11])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.FINISHED_STOPPED
+        session.streaming_queue = deque(
+            [
+                # (6 - 1) + 3 = 8 tokens leaves no room to sample: dropped.
+                StreamingUpdate.from_request(
+                    DummyRequest("session", prompt_token_ids=[7, 8, 9])
+                ),
+                StreamingUpdate.from_request(
+                    DummyRequest("session", prompt_token_ids=[7, 8])
+                ),
+            ]
+        )
+        scheduler.requests[session.request_id] = session
+
+        assert not scheduler._handle_stopped_request(session)
+
+        assert session.status == RequestStatus.WAITING
+        assert session.prompt_token_ids == [1, 2, 3, 4, 10, 7, 8]
+        assert scheduler.num_waiting_for_streaming_input == 0
+        assert scheduler.dropped_streaming_updates == [session]
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
@@ -585,9 +620,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         # Step 3: Simulate model runner caching the prompt_token_ids
-        # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
@@ -606,7 +639,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle1 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_1]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -655,7 +687,7 @@ class TestStreamingScheduler(unittest.TestCase):
             scheduler_output_cycle2.num_scheduled_tokens[session.request_id] == 1
         )  # Only the output token [10]
 
-        # Step 8: Calculate num_tokens like gpu_model_runner.py:1284 does
+        # Step 8: Calculate the cached request's token count.
         # This is where the bug would manifest!
         num_tokens_cycle2 = len(cached_state_cycle1["prompt_token_ids"]) + len(
             cached_state_cycle1["output_token_ids"]
@@ -681,7 +713,6 @@ class TestStreamingScheduler(unittest.TestCase):
 
         mro_cycle2 = ModelRunnerOutput(
             req_ids=[session.request_id],
-            req_id_to_index={session.request_id: 0},
             sampled_token_ids=[[output_token_2]],
             logprobs=None,
             prompt_logprobs_dict={session.request_id: None},
@@ -743,8 +774,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._output_token_ids == []  # Output tokens are cleared
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
         cached_state_cycle3: CachedState = {
             "req_id": session.request_id,
@@ -779,7 +809,6 @@ class TestStreamingScheduler(unittest.TestCase):
 def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[request_id],
-        req_id_to_index={request_id: 0},
         sampled_token_ids=[token_ids],
         logprobs=None,
         prompt_logprobs_dict={request_id: None},
@@ -881,3 +910,52 @@ def test_restarted_session_frees_its_model_runner_slot():
 
     assert [req.req_id for req in output.scheduled_new_reqs] == ["new"]
     assert output.preempted_req_ids == {"session"}
+
+
+def test_overflow_update_is_dropped_and_session_resumes():
+    """Regression test for #62707."""
+    scheduler = create_async_scheduler(
+        max_num_seqs=4,
+        max_model_len=16,
+        max_num_batched_tokens=5,
+        skip_tokenizer_init=True,
+    )
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=32)
+    scheduler.add_request(session)
+
+    def step(token_ids: list[int]) -> list[EngineCoreOutput]:
+        output = scheduler.schedule()
+        assert all(count > 0 for count in output.num_scheduled_tokens.values())
+        ecos = scheduler.update_from_output(output, _model_output("session", token_ids))
+        return ecos[session.client_index].outputs
+
+    step([10])
+    scheduler.add_request(
+        DummyRequest("session", prompt_token_ids=[20, 21, 22, 23, 24])
+    )
+    step([STOP_TOKEN])
+    step([11])
+    step([12])
+    # Merging this chunk would give 19 tokens > max_model_len.
+    overflow_chunk = list(range(30, 38))
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=overflow_chunk))
+    turn_output, dropped_output = step([STOP_TOKEN])
+    assert turn_output.new_token_ids == [STOP_TOKEN]
+    assert dropped_output.new_token_ids == []
+    assert dropped_output.finish_reason == FinishReason.LENGTH
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.num_waiting_for_streaming_input == 1
+
+    # Dropped on arrival at the parked session; the pending empty turn keeps
+    # the engine stepping.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=overflow_chunk))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.has_requests()
+
+    # A fitting update (12 - 1 + 3 = 14 tokens) resumes the session, and its
+    # output follows the dropped chunk's empty turn.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[40, 41, 42]))
+    dropped_output, resumed_output = step([13])
+    assert dropped_output.finish_reason == FinishReason.LENGTH
+    assert resumed_output.new_token_ids == [13]
+    assert list(session.all_token_ids)[-4:] == [40, 41, 42, 13]

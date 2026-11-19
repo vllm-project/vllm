@@ -97,7 +97,7 @@
                 }
               ],
               "at_least_one": false,
-              "stop_after_first": false,
+              "stop_after_first": true,
               "excludes": [
                 "<think>",
                 "</think>"

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E test for the scale-out EC connector flow (render -> encode -> prefill).
+r"""E2E test for the scale-out EC connector flow (render -> encode -> prefill).
 
-Mimics the bash-script style of ``tests/v1/kv_connector/nixl_integration``:
-the instances are started by ``run_scale_out_ec_e2e_test.sh`` and this file is
+Mimics the bash-script style of `tests/v1/kv_connector/nixl_integration`:
+the instances are started by `run_scale_out_ec_e2e_test.sh` and this file is
 the HTTP client that drives the disaggregated request path and compares its
 output against a single-instance baseline.
 
@@ -14,9 +14,9 @@ Topology under test (started by the bash script):
     prefill (EC consumer) -- /inference/v1/generate
 
 The client renders each multimodal chat request once, sends the full
-``kwargs_data`` to the encode instance, then sends metadata-only features
-(``mm_metadata`` without ``kwargs_data``) plus the encode response's
-``ec_transfer_params`` to the prefill instance, and finally derenders the
+`kwargs_data` to the encode instance, then sends metadata-only features
+(`mm_metadata` without `kwargs_data`) plus the encode response's
+`ec_transfer_params` to the prefill instance, and finally derenders the
 output token ids. The derendered text must match the baseline exactly.
 
 Usage (from the bash script, or manually):
