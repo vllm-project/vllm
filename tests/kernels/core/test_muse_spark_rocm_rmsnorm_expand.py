@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MuseSpark1x ROCm RMSNorm that hands AITER experts a per-route copy."""
+"""Muse Spark ROCm RMSNorm that hands AITER experts a per-route copy."""
 
 import pytest
 import torch

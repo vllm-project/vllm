@@ -57,8 +57,34 @@ struct Utils {
 #ifndef USE_ROCM
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) \
     __shfl_down_sync(uint32_t(-1), var, lane_delta)
+  #define VLLM_SHFL_DOWN_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_down_sync(uint32_t(-1), var, lane_delta, width)
 #else
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) __shfl_down(var, lane_delta)
+  #define VLLM_SHFL_DOWN_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_down(var, lane_delta, width)
+#endif
+
+#ifndef USE_ROCM
+  #define VLLM_SHFL_SYNC_WIDTH(var, src_lane, width) \
+    __shfl_sync(uint32_t(-1), var, src_lane, width)
+  #define VLLM_SHFL_UP_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_up_sync(uint32_t(-1), var, lane_delta, width)
+#else
+  #define VLLM_SHFL_SYNC_WIDTH(var, src_lane, width) \
+    __shfl(var, src_lane, width)
+  #define VLLM_SHFL_UP_SYNC_WIDTH(var, lane_delta, width) \
+    __shfl_up(var, lane_delta, width)
+#endif
+
+// Ballot over the 32-lane group holding the calling lane (on wave64, its half
+// of the wavefront), restricted to the lanes in mask.
+#ifndef USE_ROCM
+  #define VLLM_BALLOT_SYNC_32(mask, pred) __ballot_sync(mask, pred)
+#else
+  #define VLLM_BALLOT_SYNC_32(mask, pred)                          \
+    (static_cast<uint32_t>(__ballot(pred) >> (__lane_id() & 32)) & \
+     static_cast<uint32_t>(mask))
 #endif
 
 #ifndef USE_ROCM
@@ -67,4 +93,15 @@ struct Utils {
 #else
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
+#endif
+
+// FP8 quant kernels convert two values per saturating `cvt`, see
+// scaled_fp8_conversion_vec and per_token_group_quant_8bit_packed. The
+// instruction exists from sm_89; lower the minimum arch once validated there.
+#define VLLM_FP8_CVT_X2_MIN_ARCH 1000
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && \
+    __CUDA_ARCH__ >= VLLM_FP8_CVT_X2_MIN_ARCH
+  #define VLLM_FP8_CVT_X2 1
+#else
+  #define VLLM_FP8_CVT_X2 0
 #endif

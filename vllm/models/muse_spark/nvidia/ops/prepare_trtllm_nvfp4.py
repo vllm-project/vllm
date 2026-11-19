@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pre-expert RMSNorm fused with the TRT-LLM MoE's NVFP4 input quantization.
 
-Matches ``MuseSpark1xRMSNorm`` (one BF16 rounding) followed by
-``scaled_fp4_quant(..., is_sf_swizzled_layout=False)`` with the static global
+Matches `MuseSparkRMSNorm` (one BF16 rounding) followed by
+`scaled_fp4_quant(..., is_sf_swizzled_layout=False)` with the static global
 scale, and reads the pooler output either contiguous or in the rank-block
-layout ``[tp, M, H / tp]`` left by a column all-gather.
+layout `[tp, M, H / tp]` left by a column all-gather.
 """
 
 import functools
@@ -37,7 +37,7 @@ def _rcp_approx(x):
 
 @triton.jit
 def _quantize_nvfp4_global_scale(values, global_scale, BLOCK_K: tl.constexpr):
-    """``scaled_fp4_quant``'s arithmetic (nvfp4_utils.cuh), linear scales."""
+    """`scaled_fp4_quant`'s arithmetic (nvfp4_utils.cuh), linear scales."""
     groups = tl.reshape(values, [BLOCK_K // 16, 16])
     amax = tl.max(tl.abs(groups), axis=1)
     sf = (global_scale * (amax * _rcp_approx(6.0))).to(tl.float8e4nv)
@@ -117,21 +117,33 @@ def norm_quant_trtllm_nvfp4(
     norm_eps: float,
     gain_center: float,
     global_scale: torch.Tensor,
+    *,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """RMSNorm + NVFP4 quant of ``[M, H]`` pooled states, in any rank-block layout.
+    """RMSNorm + NVFP4 quant of `[M, H]` pooled states, in any rank-block layout.
 
-    ``pooled`` is ``[M, H]`` or the ``[tp * M, H / tp]`` output of a dim-0
-    all-gather of column shards. Returns packed ``[M, H/2]`` uint8 values and
-    linear ``[M, H/16]`` uint8 (E4M3) block scales.
+    `pooled` is `[M, H]` or the `[tp * M, H / tp]` output of a dim-0
+    all-gather of column shards. Returns packed `[M, H/2]` uint8 values and
+    linear `[M, H/16]` uint8 (E4M3) block scales.
     """
     hidden = norm_weight.shape[0]
     shard = pooled.shape[1]
     assert pooled.dtype == torch.bfloat16 and pooled.is_contiguous()
     assert pooled.shape[0] * shard == num_tokens * hidden and hidden % _BLOCK_K == 0
-    packed = torch.empty(
-        num_tokens, hidden // 2, dtype=torch.uint8, device=pooled.device
-    )
-    sf = torch.empty(num_tokens, hidden // 16, dtype=torch.uint8, device=pooled.device)
+    if out is None:
+        packed = torch.empty(
+            num_tokens, hidden // 2, dtype=torch.uint8, device=pooled.device
+        )
+        sf = torch.empty(
+            num_tokens, hidden // 16, dtype=torch.uint8, device=pooled.device
+        )
+    else:
+        packed, sf = out
+        assert packed.shape == (num_tokens, hidden // 2)
+        assert sf.shape == (num_tokens, hidden // 16)
+        assert packed.dtype == sf.dtype == torch.uint8
+        assert packed.is_contiguous() and sf.is_contiguous()
+        assert packed.device == sf.device == pooled.device
     if num_tokens == 0:
         return packed, sf
     enable_pdl = _enable_pdl()
