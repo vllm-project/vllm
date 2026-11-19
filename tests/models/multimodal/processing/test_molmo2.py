@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
@@ -12,6 +13,9 @@ from vllm.model_executor.models.molmo2 import (
     Molmo2VisionBackbone,
     build_flat_image_bool_length,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from ...utils import build_model_context
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -144,3 +148,48 @@ def test_vision_pooling_means_preserve_batch_indices_and_drop_invalid_groups(
     )
     actual = Molmo2VisionBackbone.forward(backbone, image_features, token_pooling)
     torch.testing.assert_close(actual, expected_query[[0, 2, 3], 0])
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("max_crops", [1, 2])
+@pytest.mark.parametrize("prompt_as_tokens", [False, True])
+def test_crop_kwargs_match_processed_image_tokens(max_crops, prompt_as_tokens):
+    """Crop counts and placeholders follow the actual processor output."""
+    images = [Image.new("RGB", (1600, 1200)), Image.new("RGB", (400, 300))]
+    kwargs = {"max_crops": max_crops}
+    results = []
+    for on_engine in (False, True):
+        ctx = build_model_context(
+            "allenai/Molmo2-8B",
+            mm_processor_kwargs=kwargs if on_engine else None,
+            limit_mm_per_prompt={"image": 2},
+            mm_processor_cache_gb=0.01,
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        prompt = processor.dummy_inputs.get_dummy_text({"image": 2})
+        if prompt_as_tokens:
+            prompt = ctx.get_tokenizer().encode(prompt)
+        for _ in range(2):
+            result = processor(
+                prompt,
+                mm_items=processor.info.parse_mm_data({"image": images}),
+                hf_processor_mm_kwargs={} if on_engine else kwargs,
+            )
+            for placeholder, item in zip(
+                result["mm_placeholders"]["image"], result["mm_kwargs"]["image"]
+            ):
+                assert item is not None
+                image_tokens = item["image_tokens"].data
+                pixels = item["pixel_values"].data
+                assert isinstance(image_tokens, torch.Tensor)
+                assert isinstance(pixels, torch.Tensor)
+                expected = image_tokens.tolist()
+                assert placeholder.length == len(expected)
+                start = placeholder.offset
+                assert (
+                    result["prompt_token_ids"][start : start + len(expected)]
+                    == expected
+                )
+                assert pixels.shape[0] <= max_crops + 1
+        results.append(result["prompt_token_ids"])
+    assert results[0] == results[1]
