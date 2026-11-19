@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from benchmark_tiering import Scenario
 
 
+VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S = 30.0
+VLLM_FORCE_SHUTDOWN_TIMEOUT_S = 10.0
+VLLM_SURVIVOR_TIMEOUT_S = 15.0
+
+
 class _SignalHandlers:
     def __init__(self, handler) -> None:
         self.handler = handler
@@ -197,10 +202,16 @@ class VLLMServer:
         self.log_path = log_path
         self.proc: subprocess.Popen | None = None
         self.signal_handlers = _SignalHandlers(self._handle_termination)
+        self.graceful_shutdown_timeout_s = VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S
+        self.force_shutdown_timeout_s = VLLM_FORCE_SHUTDOWN_TIMEOUT_S
+        self.survivor_timeout_s = VLLM_SURVIVOR_TIMEOUT_S
+        self._stopped = False
+        self.pgid: int | None = None
 
     def _handle_termination(self, signum: int, _frame: object) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.send_signal(signum)
+        if self._stopped:
+            return
+        self.stop()
         raise SystemExit(128 + signum)
 
     def start(self) -> None:
@@ -226,8 +237,13 @@ class VLLMServer:
         try:
             with self.log_path.open("w") as log:
                 self.proc = subprocess.Popen(
-                    cmd, stdout=log, stderr=subprocess.STDOUT, env=env
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
                 )
+            self.pgid = self.proc.pid
         except BaseException:
             self.signal_handlers.restore()
             raise
@@ -251,29 +267,90 @@ class VLLMServer:
         )
 
     def stop(self) -> None:
-        """SIGINT x5 (10s waits), then SIGKILL; exit loudly if unkillable."""
-        assert self.proc is not None
+        """Terminate the server process group and reap surviving workers."""
+        if self._stopped:
+            return
+        self._stopped = True
         proc = self.proc
-        self.signal_handlers.restore()
-        for attempt in range(1, 6):
-            if proc.poll() is not None:
-                print(f"      vLLM process ({proc.pid}) has exited gracefully.")
-                return
-            print(f"      [Attempt {attempt}/5] Sending SIGINT to PID {proc.pid}...")
-            proc.send_signal(signal.SIGINT)
+        if proc is None:
+            self.signal_handlers.restore()
+            return
+
+        pgid = self.pgid
+
+        try:
+            if proc.poll() is None:
+                print(f"      Sending SIGTERM to vLLM process {proc.pid}...")
+                proc.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=10)
-        if proc.poll() is None:
-            print("      vLLM did not exit after 5 attempts. Force killing...")
-            proc.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=5)
-        if proc.poll() is None:
-            raise RuntimeError(
-                f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
-                "likely still locked. Aborting to prevent cascading failures."
-            )
-        print("      vLLM successfully terminated.")
+                proc.wait(timeout=self.graceful_shutdown_timeout_s)
+
+            if proc.poll() is None:
+                print(
+                    "      vLLM did not exit gracefully. "
+                    "Force killing its process group..."
+                )
+                self._signal_process_group(pgid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=self.force_shutdown_timeout_s)
+
+            if proc.poll() is None:
+                raise RuntimeError(
+                    f"vLLM process ({proc.pid}) could NOT be killed; GPU VRAM is "
+                    "likely still locked. Aborting to prevent cascading failures."
+                )
+
+            self._signal_process_group(pgid, signal.SIGKILL)
+            survivors = self._find_process_group_members(pgid)
+            if survivors:
+                print(
+                    f"      {len(survivors)} vLLM worker process(es) remain; "
+                    "waiting for them to exit..."
+                )
+                if not self._wait_for_processes(survivors, self.survivor_timeout_s):
+                    raise RuntimeError(
+                        f"vLLM workers {survivors} did not exit within "
+                        f"{self.survivor_timeout_s}s."
+                    )
+            print("      vLLM successfully terminated.")
+        finally:
+            self.signal_handlers.restore()
+
+    def _signal_process_group(self, pgid: int | None, signum: int) -> None:
+        if pgid is None:
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signum)
+
+    @staticmethod
+    def _find_process_group_members(pgid: int | None) -> list[int]:
+        if pgid is None:
+            return []
+        members: list[int] = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            with contextlib.suppress(OSError):
+                if os.getpgid(pid) == pgid:
+                    members.append(pid)
+        return members
+
+    def _wait_for_processes(self, pids: list[int], timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while pids and time.monotonic() < deadline:
+            pids = [pid for pid in pids if self._process_exists(pid)]
+            if pids:
+                time.sleep(0.5)
+        return not pids
+
+    @staticmethod
+    def _process_exists(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
 
     def assert_running(self) -> None:
         """Raise if the server exited before expected."""
