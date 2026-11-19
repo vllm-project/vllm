@@ -4,7 +4,8 @@
 composed decode (DS conv layout): TP8 / DCP8 (12 heads) and DEP's TP1 attention
 (96 heads), BF16 and FP32 conv state (`--mamba-cache-dtype float32`), plain and
 RecoverSSM verify steps and q = 1 steps, from one request to the wide batches the
-per-batch policy hands to the wide kernel.
+per-batch policy hands to the wide kernel; TP16 (6 heads) with KdaSplit's lean
+prologue.
 
 Stock: Triton `causal_conv1d_update` -> `fused_recurrent_kda` (verify),
 `kda_recoverssm_verify` (RecoverSSM verify) or
@@ -426,6 +427,124 @@ def test_policy_picks_core(monkeypatch, heads, requests, q, record, expected):
     key = (requests, q) if q > 1 else requests
     kda = PreparedKda(attention, {key: (_pitch(heads), int(heads == 12))}, True)
     assert kda.prepare_caches(caches).kernels[key] == expected
+
+
+LEAN_CASES = [
+    # (heads, requests, q, record): TP16 (6 heads, where the policy sets it) and TP8
+    (6, 1, 8, False),
+    (6, 1, 5, True),
+    (6, 1, 2, False),
+    (6, 3, 7, False),
+    (12, 1, 4, False),
+    (12, 2, 8, True),
+]
+
+
+@pytest.mark.parametrize("kernel", ["split"], indirect=True, ids=["KdaSplit"])
+@pytest.mark.parametrize("conv_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("heads,requests,q,record", LEAN_CASES)
+@torch.inference_mode()
+def test_lean_prologue_bitwise(
+    kernel, monkeypatch, heads, requests, q, record, conv_dtype
+):
+    """KdaSplit's lean prologue (the verify schedule's sixth field: each token's
+    inverse q and k norms on one lane, broadcast by shuffle; the output gate's
+    sigmoid only for the tokens the CTA normalizes) computes every value with the
+    same instructions as the plain prologue: outputs, caches and records are
+    bit-identical. The lean outputs also match the stock verify as in
+    test_verify_matches_stock (TP16 is not among its cases)."""
+    seed = heads + requests * 10 + q
+    columns = 1 if record else q
+    slots = 1 + requests * columns
+    projected, conv, state = _inputs(
+        heads, seed, requests * q, slots, q + 2, conv_dtype
+    )
+    table = torch.arange(1, slots, dtype=torch.int32, device=DEVICE)
+    table = table.view(requests, columns)
+    accepted = torch.randint(
+        1, q + 1, (requests,), dtype=torch.int32, device=DEVICE,
+        generator=torch.Generator(device=DEVICE).manual_seed(seed),
+    )  # fmt: skip
+    if record:
+        accepted.fill_(1)  # the commit rolled the window and the checkpoint
+    base = prepared.batch_table(prepared.SPEC_SCHEDULE[heads])[requests][:4]
+    built, split = [], prepared.KdaSplit
+
+    def spy(*a):
+        core = split(*a)
+        built.append(core.lean)
+        return core
+
+    monkeypatch.setattr(prepared, "KdaSplit", spy)
+    results = []
+    for lean in (0, 1):
+        schedule = ".".join(map(str, (*base, 0, lean)))
+        monkeypatch.setitem(prepared.SPEC_SCHEDULE, heads, f"{requests}:{schedule}")
+        prepared.executable.cache_clear()
+        records = None
+        if record:
+            records = KDARecoverSSMRecords.allocate(
+                requests, heads, q, D, torch.bfloat16, DEVICE
+            )
+        attention = _attention(heads, seed, records)
+        caches = (conv.clone(), state.clone())
+        policy = {(requests, q): (_pitch(heads), int(heads == 12))}
+        kda = PreparedKda(attention, policy, True)
+        built.clear()
+        kda.prepare_caches(caches)
+        assert built == [bool(lean)], built
+        out = torch.empty(requests * q, heads * D, device=DEVICE, dtype=torch.bfloat16)
+        kda.run(projected, out, caches=caches, slots=table, accepted=accepted, q=q)
+        kept = (records.correction, records.key_gate) if records is not None else ()
+        results.append((out, *caches, *kept))
+    prepared.executable.cache_clear()
+    for plain, lean_tensor in zip(*results):
+        torch.testing.assert_close(lean_tensor, plain, atol=0, rtol=0)
+    if not record:
+        out, lean_conv, lean_state = results[1]
+        stock_conv, stock_state = conv.clone(), state.clone()
+        stock = _stock(
+            attention, heads, projected, stock_conv, stock_state, table, accepted, q
+        )
+        torch.testing.assert_close(lean_conv, stock_conv, atol=0, rtol=0)
+        written = table.flatten().long()
+        _compare(out, stock, lean_state[written], stock_state[written])
+
+
+@pytest.mark.parametrize(
+    "heads,requests,q,lean",
+    [
+        (6, 1, 8, True),
+        (6, 1, 5, True),
+        (6, 2, 8, False),
+        (6, 4, 5, False),
+        (6, 1, 1, False),
+        (12, 1, 8, False),
+        (12, 1, 5, False),
+    ],
+)
+def test_lean_prologue_policy(monkeypatch, heads, requests, q, lean):
+    """The installed policy (no compile): KdaSplit's lean prologue at TP16 verify
+    steps of one request only; never at q = 1, whatever the schedule says."""
+    picked = lambda specs, h, mode, bias, device, tokens=1, record=False, fused=False: (
+        prepared.core(specs, h, mode, bias, device, tokens, record, fused)
+    )
+    monkeypatch.setattr(prepared, "executable", picked)
+    meta = dict(device="meta")
+    attention = _attention(heads, 0)
+    slots = 1 + requests * q
+    window = q + 2 if q > 1 else 3
+    caches = (
+        torch.empty(slots, 3 * heads * D, window, **meta),
+        torch.empty(slots, heads, D, D, **meta),
+    )
+    key = (requests, q) if q > 1 else requests
+    kda = PreparedKda(attention, {key: (_pitch(heads), int(heads == 12))}, True)
+    core = kda.prepare_caches(caches).kernels[key]
+    assert isinstance(core, prepared.KdaSplit)
+    assert core.lean is lean
+    single = prepared.KdaSplit(heads, 1, 0, False, (1, 8, 2, 8, 0, 1), tokens=1)
+    assert not single.lean
 
 
 @pytest.mark.parametrize(

@@ -240,7 +240,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="gloo" if current_platform.is_cpu() else "nccl",
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield
@@ -297,6 +297,32 @@ def workspace_init():
         init_workspace_manager(torch.device(0))
     yield
     reset_workspace_manager()
+
+
+@pytest.fixture
+def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep dummy FP8 weights within +-1, as before full-range dummy FP8 codes.
+
+    For tests that compare dummy-weight outputs of paths that are not bitwise
+    equivalent (greedy tokens across engines, fused vs. unfused kernels).
+    Full-range FP8 codes, NVFP4 block scales included, scale up activations,
+    so rounding noise flips near-tied greedy tokens or exceeds absolute
+    tolerances. The patch applies to this process only, so the engine core
+    runs in process; the model must also run in it (one worker, no
+    multiprocessing executor).
+    """
+    from vllm.model_executor.model_loader import dummy_loader
+
+    original = dummy_loader.initialize_single_dummy_weight
+
+    def initialize(param: torch.Tensor, *args, **kwargs) -> None:
+        if param.is_floating_point() and torch.finfo(param.dtype).bits == 8:
+            kwargs.setdefault("low", -1.0)
+            kwargs.setdefault("high", 1.0)
+        original(param, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_loader, "initialize_single_dummy_weight", initialize)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -371,7 +397,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -409,7 +435,7 @@ class HfRunner:
         *,
         revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -956,7 +982,6 @@ class VllmRunner:
     The default value of some arguments have been modified from
     {class}`~vllm.LLM` as follows:
 
-    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
     - `block_size`: To reduce memory usage, set default to `64` if on XPU
@@ -975,7 +1000,7 @@ class VllmRunner:
         convert: ConvertOption = "auto",
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",
@@ -1034,7 +1059,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
@@ -1944,3 +1969,43 @@ def fake_vllm_ir(monkeypatch):
     yield
 
     del test_lib
+
+
+@pytest.fixture
+def gpu_model_runner_for_requests(dist_init, tmp_path):
+    """A real MRv2 runner with small request buffers, without loading weights."""
+    from transformers import OPTConfig
+
+    from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=32,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        vocab_size=32000,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), max_model_len=1024),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_num_seqs=10,
+            max_num_batched_tokens=64,
+            max_model_len=1024,
+        ),
+    )
+    device = torch.device("cuda", 0)
+    runner = GPUModelRunner(config, device)
+    runner.model_state = DefaultModelState(config, nn.Module(), None, device)
+    runner.block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=10,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[64],
+        device=device,
+    )
+    return runner

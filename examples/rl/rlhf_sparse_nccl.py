@@ -170,6 +170,7 @@ def launch_llm(scheduling_strategy: PlacementGroupSchedulingStrategy):
         expert_placement_strategy="linear",
         moe_backend="triton",
         distributed_executor_backend="ray",
+        # Leave headroom for the weight transfer's buffers, which vLLM doesn't reserve.
         gpu_memory_utilization=0.7,
         enable_prefix_caching=False,
         weight_transfer_config=WeightTransferConfig(backend="sparse_nccl"),

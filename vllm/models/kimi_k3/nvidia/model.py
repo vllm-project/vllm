@@ -456,7 +456,9 @@ class KimiMoE(nn.Module):
                 intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                # MegaMoE adds the shared output locally, so without sequence
+                # parallelism (PP > 1) the TP-sharded partials must be reduced.
+                reduce_results=self.use_mega_moe and not use_sequence_parallel,
                 use_sequence_parallel=use_sequence_parallel,
                 # MegaMoE calls the shared expert directly. DeepEP v2 hands it
                 # to MoERunner, but preserves the local SP output layout needed
@@ -554,6 +556,7 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
+                intermediate_size_unpadded=moe_intermediate_size,
                 activation=config.hidden_act,
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -577,19 +580,11 @@ class KimiMoE(nn.Module):
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
-            if w13_weight is None:
-                w13_weight = getattr(self.experts, "w13_weight_packed", None)
-            w2_weight = getattr(self.experts, "w2_weight", None)
-            if w2_weight is None:
-                w2_weight = getattr(self.experts, "w2_weight_packed", None)
-            if w13_weight is not None:
-                w13_weight.data.zero_()
-            if w2_weight is not None:
-                w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
+            # Zero what a direct reload zero-fills at begin (weights and scales,
+            # whatever their names), so a cold start matches a reload.
+            for param in self.experts.routed_experts.parameters(recurse=False):
+                if getattr(param, "fill_on_reload", False):
+                    param.data.zero_()
 
     def _maybe_overlap_router_and_down_proj(
         self, hidden_states: torch.Tensor
@@ -1224,8 +1219,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
-
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
         if (
@@ -1323,7 +1316,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1704,7 +1696,7 @@ class KimiK3ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality in ("image", "image_embeds"):
             return "<|kimi_image_placeholder|>"
         raise ValueError(f"Unsupported modality: {modality}")
 
@@ -1817,16 +1809,6 @@ class KimiK3ForConditionalGeneration(
             ],
             out_hidden_size=self.hidden_size,
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int]:
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
-        )
-        return min_budget, max_budget
 
     @staticmethod
     def _get_grid_thws(mm_kwargs: dict[str, Any]) -> list[list[int]]:
@@ -2050,6 +2032,10 @@ class KimiK3ForConditionalGeneration(
         return media_features
 
     def embed_multimodal(self, **kwargs: object) -> NestedTensors | None:
+        if (image_embeds := kwargs.get("image_embeds")) is not None:
+            assert isinstance(image_embeds, torch.Tensor)
+            num_tokens = cast(torch.Tensor, kwargs["image_num_tokens"])
+            return image_embeds.split(num_tokens.flatten().tolist())
         media_input = self._parse_and_validate_media_input(**kwargs)
         if media_input is None:
             return None

@@ -1,0 +1,22 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+accuracy_threshold: 0.93
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+min_acceptance_length: 2.0
+expect_prefix_cache_hits: true
+env:
+  VLLM_ROCM_USE_AITER: "1"
+# 654 divides each 5232-token page and fits in the 663-token shared few-shot prefix.
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --enable-expert-parallel
+  --dtype bfloat16
+  --mamba-ssm-cache-dtype float16
+  --use-replayssm
+  --replayssm-buffer-len 16
+  --enable-prefix-caching
+  --prefix-match-unit 654
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

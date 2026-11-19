@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
@@ -19,6 +20,8 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
@@ -115,9 +118,14 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions in the span that receive embeddings; `None` means all."""
+
+    @model_validator(mode="after")
+    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have `length` entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -252,14 +260,9 @@ class GenerateRequest(BaseModel):
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     content_parts: list[dict[str, Any]] | None = None
-    """Raw multimodal input; server resolves media. Mutually exclusive
-    with `features`."""
-
-    @model_validator(mode="after")
-    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
-        if self.content_parts and self.features:
-            raise ValueError("content_parts and features are mutually exclusive")
-        return self
+    """Raw multimodal input; server resolves media and expands its
+    placeholders. With `features`, these placeholders must follow the
+    last `features` range, which is left as is."""
 
     _metadata_only_requires_ec: ClassVar[bool] = True
 
@@ -345,8 +348,8 @@ class GenerateRequest(BaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=-(2**63),
-        le=2**63 - 1,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -375,6 +378,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -608,6 +612,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -651,6 +659,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -678,6 +690,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
+
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
@@ -892,7 +912,7 @@ class DerenderStreamState(BaseModel):
         return v
 
     role_sent: bool = False
-    """True once the initial `role: "assistant"` delta has been emitted.
+    """True once the initial role delta (and any `echo` text) has been emitted.
 
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).

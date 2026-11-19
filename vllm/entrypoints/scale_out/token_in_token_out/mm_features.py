@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import cast
+
+import torch
 
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -25,6 +27,7 @@ from vllm.inputs import (
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
+    PlaceholderRange,
 )
 
 
@@ -113,6 +116,25 @@ def mm_kwargs_from_features(
     return mm_kwargs
 
 
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Inverse of `placeholder_ranges_from_engine_input`."""
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
+
+
 def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
 ) -> dict[str, list[PlaceholderRangeInfo]] | None:
@@ -125,10 +147,26 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
+
+
+def mm_hashes_from_engine_input(
+    engine_input: EngineInput,
+) -> dict[str, list[str]] | None:
+    """Return per-modality processor cache keys, or `None` for text-only prompts."""
+    if engine_input.get("type") != "multimodal":
+        return None
+
+    mm_hashes: MultiModalHashes = cast(MultiModalInput, engine_input)["mm_hashes"]
+    return {modality: list(hashes) for modality, hashes in mm_hashes.items()}
 
 
 def extract_mm_features(
