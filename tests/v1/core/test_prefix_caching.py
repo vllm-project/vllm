@@ -850,6 +850,75 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(
     assert not coordinator.has_pending_work()
 
 
+def test_hisparse_import_respects_prefill_admitted_while_receiving():
+    from tests.v1.kv_connector.unit.utils import (
+        create_request,
+        create_scheduler,
+        create_vllm_config,
+    )
+    from vllm.config import KVTransferConfig
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    config = create_vllm_config(
+        max_num_seqs=2, max_num_batched_tokens=160, max_model_len=256
+    )
+    config.kv_transfer_config = KVTransferConfig(
+        kv_role="kv_consumer",
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                {
+                    "kv_connector": "HiSparseConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {"host_pool_gib": 1},
+                },
+            ],
+        },
+    )
+    config.scheduler_config.long_prefill_token_threshold = 96
+    scheduler = create_scheduler(
+        config, 56, make_hisparse_kv_cache_config(56, 64, num_resident_groups=3)
+    )
+    manager = scheduler.kv_cache_manager
+    imported = create_request(
+        num_tokens=80, do_remote_prefill=True, num_remote_blocks=5
+    )
+    scheduler.add_request(imported)
+    admission = scheduler.schedule()
+    assert imported.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    host, _, *gpu_groups = manager.get_blocks(imported.request_id).blocks
+    tail = (host[-1].block_id, tuple(group[-1].block_id for group in gpu_groups[::2]))
+    scheduler.update_from_output(admission, ModelRunnerOutput(req_ids=[]))
+    initial_reservation = scheduler._inflight_prefill_reserved_blocks()
+
+    prefill = create_request(num_tokens=160)
+    scheduler.add_request(prefill)
+    chunk = scheduler.schedule()
+    assert chunk.num_scheduled_tokens == {prefill.request_id: 96}
+    reservation = scheduler._inflight_prefill_reserved_blocks()
+    assert reservation > initial_reservation
+    # A historical page needs one free block in each of the three resident groups.
+    assert 0 < manager.block_pool.get_num_free_blocks() - reservation < 3
+
+    scheduler.update_from_output(
+        chunk,
+        ModelRunnerOutput(
+            req_ids=[prefill.request_id],
+            sampled_token_ids=[[]],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={imported.request_id}
+            ),
+        ),
+    )
+    following = scheduler.schedule()
+    assert following.num_scheduled_tokens.get(prefill.request_id) == 64
+    transfers = following.kv_connector_metadata.metadata[1].command.page_transfers
+    assert [
+        (t.host_block_id, t.resident_block_ids) for t in transfers if t.restore
+    ] == [tail]
+
+
 def test_hisparse_aborted_promotion_keeps_pages_until_restored():
     """An abort cannot recycle GPU pages a queued promotion still writes."""
     manager = make_hisparse_kv_cache_manager(256, 16)
