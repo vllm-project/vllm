@@ -67,6 +67,19 @@ With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports spe
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+### Gated DeltaNet ReplaySSM
+
+Qwen3.5 models (Gated DeltaNet hybrids) support ReplaySSM for standard decoding with `--mamba-backend triton`, with or without prefix caching:
+
+```bash
+vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
+    --mamba-backend triton \
+    --use-replayssm \
+    --enable-prefix-caching
+```
+
+Speculative decoding and `--enable-mamba-cache-stochastic-rounding` are not supported. ReplaySSM pays off at serving batch sizes: on one GB300, Qwen3.5-122B-A10B-NVFP4 decodes 1.1–1.3x faster at 64–512 concurrent requests, but 5–7% slower with a single request.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
