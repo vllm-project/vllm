@@ -33,7 +33,7 @@ class CompressedSlotMappingKernel(
 ):
     TRITON_BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         compress_ratio: int
         triton_block_size: int
