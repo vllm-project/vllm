@@ -235,6 +235,7 @@ class QuantFP8(CustomOp):
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
 
+        assert scale is not None
         # Even for dynamic per-token scales,
         # reciprocal performs slightly better than division
         out = (

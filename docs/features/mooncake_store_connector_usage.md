@@ -298,6 +298,10 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+To free the pool's host memory while the engine sleeps, stop the external
+`mooncake_client`; see
+[Sleep Mode](sleep_mode.md#free-a-kv-connectors-host-memory).
+
 ### Tenant Isolation
 
 Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
@@ -596,3 +600,7 @@ To use a custom shared seed, set the same `PYTHONHASHSEED` on every instance tha
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
+
+Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
+recompute failed remote loads locally. The existing `"fail"` policy terminates
+affected requests. Transfer completion is reported after synchronous SDK return.

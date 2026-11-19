@@ -95,7 +95,7 @@ def test_dynamic_per_tensor_fp8_padding_graph(backend, padding_value):
     # Warm up compilation and allocations before capturing the graph.
     for _ in range(3):
         fn(x, is_padding=mask)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         actual, actual_scale = fn(x, is_padding=mask)

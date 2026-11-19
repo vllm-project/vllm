@@ -83,7 +83,12 @@ SPARSE_MLA_ARCHS = (
     "DeepseekV32ForCausalLM",
     "Glm5NextForCausalLM",
     "GlmMoeDsaForCausalLM",
+    "HYV4ForCausalLM",
 )
+# Their CUDA attention has no path below Hopper.
+CUDA_SM90_ARCHS = {
+    "InklingForCausalLM": "Inkling's FA4 attention (SM8x support: #55078)",
+}
 
 ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
@@ -266,6 +271,14 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
             pytest.mark.skipif(
                 not current_platform.has_device_capability(90),
                 reason="Sparse MLA needs compute capability 9.0 or newer",
+            )
+        )
+    if arch in CUDA_SM90_ARCHS:
+        marks.append(
+            pytest.mark.skipif(
+                current_platform.is_cuda()
+                and not current_platform.has_device_capability(90),
+                reason=f"{CUDA_SM90_ARCHS[arch]} needs compute capability 9.0 or newer",
             )
         )
     return marks

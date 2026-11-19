@@ -614,9 +614,10 @@ steps:
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/kernels/linear/
   - tests/kernels/quantization
-  - vllm/model_executor/kernels/linear/scaled_mm/
   - vllm/v1/worker/gpu/model_runner.py
+  - tests/models/quantization/test_mxfp8.py
   commands:
     # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
     # pytest: test_fp8_quant.py ran 2.4x slower after test_cutlass_scaled_mm.py
@@ -624,12 +625,13 @@ steps:
     - pytest -v -s kernels/quantization --ignore=kernels/quantization/test_cutlass_scaled_mm.py --ignore=kernels/quantization/test_fp8_quant.py
     - pytest -v -s kernels/quantization/test_cutlass_scaled_mm.py
     - pytest -v -s kernels/quantization/test_fp8_quant.py
+    - pytest -v -s models/quantization/test_mxfp8.py::test_quark_mxfp8_weight_only_checkpoint
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300 DPX) Quantization Kernels"
+      label: ":amd: (MI300) Quantization Kernels"
       dind: false
-      device: mi300_dpx
+      device: mi300_1
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -662,6 +664,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -683,6 +686,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/single_rank_group.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
