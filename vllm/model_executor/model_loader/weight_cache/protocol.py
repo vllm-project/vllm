@@ -361,7 +361,7 @@ class WeightCacheKey:
     linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
     language_model_only: bool = False
     mm_encoder_only: bool = False
-    mm_zero_limit_modalities: tuple[str, ...] = ()
+    mm_disabled_modalities: tuple[str, ...] = ()
     """With the two flags above, decides which components (e.g. the vision
     tower) are built; skipped ones are absent from the daemon's export."""
 
@@ -433,7 +433,7 @@ class WeightCacheKey:
             linear_backend_per_quant=linear_backend_per_quant,
             language_model_only=bool(mm_config and mm_config.language_model_only),
             mm_encoder_only=bool(mm_config and mm_config.mm_encoder_only),
-            mm_zero_limit_modalities=tuple(
+            mm_disabled_modalities=tuple(
                 sorted(m for m, opts in mm_limits.items() if opts.count == 0)
             ),
         )

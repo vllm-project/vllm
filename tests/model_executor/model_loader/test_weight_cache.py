@@ -1639,7 +1639,13 @@ def test_ipc_cache_key_tracks_kernel_backends(
         (
             {"limit_mm_per_prompt": {"image": 0, "video": 0}},
             {"limit_mm_per_prompt": {"image": 0}},
-            ["mm_zero_limit_modalities"],
+            ["mm_disabled_modalities"],
+        ),
+        ({"limit_mm_per_prompt": {"audio": 0}}, {}, ["mm_disabled_modalities"]),
+        (
+            {"limit_mm_per_prompt": {"audio": 0}},
+            {"limit_mm_per_prompt": {"image": 0, "video": 0}},
+            ["mm_disabled_modalities"],
         ),
         ({}, {"language_model_only": True}, ["language_model_only"]),
         ({}, {"mm_encoder_only": True}, ["mm_encoder_only"]),
@@ -1649,14 +1655,15 @@ def test_ipc_cache_key_tracks_skipped_mm_components(
     tmp_path, daemon_mm_kwargs, engine_mm_kwargs, mismatched_fields
 ):
     """Zero limits and the language- or encoder-only modes decide which model
-    components the daemon builds and exports; nonzero limits do not."""
-    from transformers import Qwen3VLConfig
+    components the daemon builds and exports; nonzero limits do not. An omni
+    model skips its vision and audio towers independently."""
+    from transformers import Qwen3OmniMoeConfig
 
     from vllm.config import CacheConfig, ModelConfig
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
 
-    config = Qwen3VLConfig()
-    config.architectures = ["Qwen3VLForConditionalGeneration"]
+    config = Qwen3OmniMoeConfig()
+    config.architectures = ["Qwen3OmniMoeForConditionalGeneration"]
     config.save_pretrained(tmp_path)
 
     def key(**mm_kwargs) -> WeightCacheKey:
