@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from functools import lru_cache
 from typing import Literal, ParamSpec, TypedDict, TypeGuard, TypeVar, cast
 
-from vllm.triton_utils import triton
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 KVUpcastMode = Literal["normal", "native1", "native4"]
 KV_UPCAST_MODES: tuple[KVUpcastMode, ...] = ("normal", "native1", "native4")
@@ -102,15 +102,15 @@ def _long_extend_splits(
     if dim == 512 and hq // hk == 8:
         cache_target = (16 if fp8 else 32) * 1024**2
         kv_bytes = 2 * batch * hk * seq_len * dim * (1 if fp8 else 2)
-        cache_splits: int = triton.next_power_of_2(triton.cdiv(kv_bytes, cache_target))
+        cache_splits: int = next_power_of_2(cdiv(kv_bytes, cache_target))
         if fp8:
             cache_splits = max(4, cache_splits)
         elif kv_bytes <= 64 * 1024**2:
             cache_splits = 1
         return max(base_splits, min(32, scratch_cap, cache_splits))
-    groups = batch * hk * triton.cdiv(query_len * (hq // hk), bm)
+    groups = batch * hk * cdiv(query_len * (hq // hk), bm)
     split_cap = 16 if seq_len < 131072 else 32
-    occupancy_splits: int = triton.next_power_of_2(triton.cdiv(512, groups))
+    occupancy_splits: int = next_power_of_2(cdiv(512, groups))
     return max(base_splits, min(split_cap, scratch_cap, occupancy_splits))
 
 
@@ -194,14 +194,14 @@ def _refine_segmented_launch_config(
         and 8192 <= span < 32768
         and span >= query_len + 256
     ):
-        query_groups = batch * triton.cdiv(query_len * gqa, cfg["bm"])
+        query_groups = batch * cdiv(query_len * gqa, cfg["bm"])
         if query_groups * cfg["splits"] < 96:
             scratch = batch * segmented_query_capacity(query_len) * hq * (dim + 1) * 4
             scratch_splits = MAX_LONG_EXTEND_WORKSPACE_BYTES * dim // 128 // scratch
             scratch_cap = 1 << (max(1, scratch_splits).bit_length() - 1)
             kv_bytes = 2 * batch * hk * span * dim * (1 if fp8 else 2)
             cache_target = (16 if fp8 else 32) * 1024**2
-            cache_cap = triton.next_power_of_2(triton.cdiv(kv_bytes, cache_target))
+            cache_cap = next_power_of_2(cdiv(kv_bytes, cache_target))
             if fp8:
                 cache_cap = max(4, cache_cap)
             elif kv_bytes <= 64 * 1024**2:
@@ -262,10 +262,10 @@ def _refine_segmented_launch_config(
                 }
             )
             if gqa == 1 and span >= 8192:
-                groups = batch * hk * triton.cdiv(query_len, cfg["bm"])
+                groups = batch * hk * cdiv(query_len, cfg["bm"])
                 cfg["splits"] = max(
                     cfg["splits"],
-                    min(32, triton.next_power_of_2(triton.cdiv(192, groups))),
+                    min(32, next_power_of_2(cdiv(192, groups))),
                 )
         else:
             cfg.update(
@@ -389,12 +389,12 @@ def _select_segmented_launch_config(
                 stages=1,
             )
         if dim == 64 and max_seq_len >= 32768:
-            groups = batch * hk * triton.cdiv(qcap * (hq // hk), 16)
+            groups = batch * hk * cdiv(qcap * (hq // hk), 16)
             return dict(
                 bm=16,
                 bn=32,
                 bk=64,
-                splits=min(64, triton.next_power_of_2(triton.cdiv(128, groups))),
+                splits=min(64, next_power_of_2(cdiv(128, groups))),
                 warps=4,
                 stages=1,
             )
@@ -404,7 +404,7 @@ def _select_segmented_launch_config(
             target = 128 if fp8 or kv_groups <= 4 else 64
             if qcap == 2 and not fp8:
                 target = 64
-            splits = min(128, triton.next_power_of_2(triton.cdiv(target, kv_groups)))
+            splits = min(128, next_power_of_2(cdiv(target, kv_groups)))
             if short:
                 splits = min(4, splits)
             cfg = dict(
@@ -431,20 +431,20 @@ def _select_segmented_launch_config(
                 stages=1,
             )
         else:
-            groups = kv_groups * triton.cdiv(qcap * gqa, 16)
+            groups = kv_groups * cdiv(qcap * gqa, 16)
             cfg = dict(
                 bm=16,
                 bn=32,
                 bk=dim,
                 splits=min(
                     MAX_SPLITS,
-                    triton.next_power_of_2(triton.cdiv(64, groups)),
+                    next_power_of_2(cdiv(64, groups)),
                 ),
                 warps=4,
                 stages=1,
             )
         if wide_gqa:
-            tiles = max(1, triton.cdiv(max_seq_len, cfg["bn"]))
+            tiles = max(1, cdiv(max_seq_len, cfg["bn"]))
             cfg["splits"] = min(cfg["splits"], 1 << (tiles.bit_length() - 1))
         else:
             while cfg["splits"] > 1 and max_seq_len < cfg["splits"] * cfg["bn"] * 2:
@@ -516,8 +516,8 @@ def _select_segmented_launch_config(
                 ):
                     cfg["qk_unroll"] = 2
             target = 64
-    groups = kv_groups * triton.cdiv(qcap * gqa, cfg["bm"])
-    splits = min(32, triton.next_power_of_2(triton.cdiv(target, groups)))
+    groups = kv_groups * cdiv(qcap * gqa, cfg["bm"])
+    splits = min(32, next_power_of_2(cdiv(target, groups)))
     min_span = cfg["bn"] * 2 if wide_gqa else 128
     while splits > 1 and max_seq_len < splits * min_span:
         splits //= 2
@@ -536,30 +536,30 @@ def _select_segmented_launch_config(
     elif dim == 64 and fp8 and max_seq_len <= 256:
         cfg.update({"bn": 32, "splits": 1})
     elif dim == 64 and qcap == 8 and max_seq_len >= 32768:
-        groups = batch * hk * triton.cdiv(qcap * (hq // hk), 32)
+        groups = batch * hk * cdiv(qcap * (hq // hk), 32)
         cfg.update(
             {
                 "bm": 32,
                 "bn": 32 if fp8 else 64,
-                "splits": min(64, triton.next_power_of_2(triton.cdiv(256, groups))),
+                "splits": min(64, next_power_of_2(cdiv(256, groups))),
             }
         )
     elif dim == 64 and fp8 and qcap == 8 and max_seq_len >= 4096:
-        groups = batch * hk * triton.cdiv(qcap * (hq // hk), 32)
+        groups = batch * hk * cdiv(qcap * (hq // hk), 32)
         cfg.update(
             {
                 "bm": 32,
                 "bn": 64,
-                "splits": min(32, triton.next_power_of_2(triton.cdiv(128, groups))),
+                "splits": min(32, next_power_of_2(cdiv(128, groups))),
             }
         )
     elif dim == 64 and fp8 and qcap >= 64 and max_seq_len >= 4096:
-        groups = batch * hk * triton.cdiv(qcap * (hq // hk), 64)
+        groups = batch * hk * cdiv(qcap * (hq // hk), 64)
         cfg.update(
             {
                 "bm": 64,
                 "bn": 32,
-                "splits": min(8, triton.next_power_of_2(triton.cdiv(1024, groups))),
+                "splits": min(8, next_power_of_2(cdiv(1024, groups))),
                 "stages": 1,
             }
         )
@@ -630,8 +630,8 @@ def _select_segmented_launch_config(
                     "waves_per_eu": 6,
                 }
             )
-            groups = batch * hk * triton.cdiv(qcap * (hq // hk), cfg["bm"])
-            cfg["splits"] = min(16, triton.next_power_of_2(triton.cdiv(192, groups)))
+            groups = batch * hk * cdiv(qcap * (hq // hk), cfg["bm"])
+            cfg["splits"] = min(16, next_power_of_2(cdiv(192, groups)))
         elif qcap >= 4096:
             cfg.update(
                 {

@@ -26,6 +26,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.ops import segmented_attention, segmented_attention_config
 from vllm.v1.attention.ops.segmented_attention import (
     _segmented_attention_reduce,
@@ -1708,14 +1709,14 @@ def _runtime_config(
         return config
     warm_batch, warm_query, _ = record["workload"]
     gqa = heads // kv_heads
-    warm_groups = warm_batch * triton.cdiv(warm_query * gqa, config["bm"])
-    groups = batch * triton.cdiv(query_len * gqa, config["bm"])
+    warm_groups = warm_batch * cdiv(warm_query * gqa, config["bm"])
+    groups = batch * cdiv(query_len * gqa, config["bm"])
     if groups < warm_groups:
         default = select_segmented_config(
             batch, query_len, seq_len, heads, kv_heads, dim, fp8, native_fp8=False
         )
         cap = max(config["splits"], default["splits"])
-        factor = triton.next_power_of_2(triton.cdiv(warm_groups, groups))
+        factor = next_power_of_2(cdiv(warm_groups, groups))
         config["splits"] = min(cap, config["splits"] * factor)
     return config
 

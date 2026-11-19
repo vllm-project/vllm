@@ -14,15 +14,18 @@ from vllm.v1.attention.ops.segmented_attention import _segmented_kv_upcast
 from vllm.v1.attention.ops.segmented_attention_config import SegmentedAttentionConfig
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_rdna
+    from vllm.platforms.rocm import on_gfx12x, on_rdna
 
-pytestmark = [
-    pytest.mark.skip_global_cleanup,
-    pytest.mark.skipif(
-        not (current_platform.is_rocm() and on_rdna()),
-        reason="Segmented attention requires RDNA GPUs",
-    ),
-]
+pytestmark = pytest.mark.skip_global_cleanup
+
+requires_rdna = pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_rdna()),
+    reason="Segmented attention requires RDNA GPUs",
+)
+requires_gfx12 = pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_rdna() and on_gfx12x()),
+    reason="Segmented attention with FP8 KV requires gfx12",
+)
 
 
 @pytest.mark.parametrize("gfx12", (False, True))
@@ -60,12 +63,9 @@ def _native_fp8_upcast_test_kernel(source, output, PACK: tl.constexpr):
     tl.store(output + index, _segmented_kv_upcast(value, tl.bfloat16, True, PACK))
 
 
+@requires_gfx12
 @pytest.mark.parametrize("pack", [1, 4])
 def test_segmented_native_fp8_upcast_all_encodings(pack):
-    from vllm.platforms.rocm import on_gfx12x
-
-    if not on_gfx12x():
-        pytest.skip("Native OCP FP8 conversion requires gfx12")
     source = torch.arange(256, dtype=torch.int32, device="cuda").to(torch.uint8)
     source = source.view(torch.float8_e4m3fn)
     output = torch.empty(256, dtype=torch.bfloat16, device="cuda")
@@ -341,13 +341,10 @@ def test_segmented_fp8_long_extend_split_workspace_bound(dim):
                         assert scratch <= MAX_LONG_EXTEND_WORKSPACE_BYTES * dim // 128
 
 
+@requires_rdna
 @torch.inference_mode()
 def test_segmented_bf16_d256_long_extend_matches_dense_reference():
-    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.ops.segmented_attention import run_segmented_attention
-
-    if not current_platform.is_rocm() or not on_rdna():
-        pytest.skip("RDNA segmented prefill")
 
     case = _make_paged_attention_case(
         [1024],
@@ -379,6 +376,7 @@ def test_segmented_bf16_d256_long_extend_matches_dense_reference():
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_gfx12
 @pytest.mark.parametrize(
     "query_len,heads,qk_amplitude,dim",
     [
@@ -399,11 +397,8 @@ def test_segmented_bf16_d256_long_extend_matches_dense_reference():
 def test_segmented_fp8_long_extend_matches_dense_reference(
     query_len, heads, qk_amplitude, dim
 ):
-    from vllm.platforms.rocm import on_gfx12x
     from vllm.v1.attention.ops.segmented_attention import run_segmented_attention
 
-    if not current_platform.is_rocm() or not on_gfx12x():
-        pytest.skip("FP8 KV requires gfx12")
     case = _make_paged_attention_case(
         [query_len],
         [8192 - query_len],
@@ -461,6 +456,7 @@ def test_segmented_fp8_long_extend_matches_dense_reference(
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_gfx12
 @pytest.mark.parametrize(
     "dim,pv_split", [(64, False), (128, False), (256, False), (512, False), (512, True)]
 )
@@ -468,11 +464,8 @@ def test_segmented_fp8_long_extend_matches_dense_reference(
 def test_segmented_native_upcast_preserves_peaked_logits(
     monkeypatch, dim, pv_split, pack
 ):
-    from vllm.platforms.rocm import on_gfx12x
     from vllm.v1.attention.ops import segmented_attention as segmented
 
-    if not on_gfx12x():
-        pytest.skip("Native OCP FP8 conversion requires gfx12")
     selector = segmented.select_segmented_config
 
     def native_config(*args, **kwargs):
@@ -637,7 +630,8 @@ def test_segmented_tuning_prunes_scheduler_and_kv_limits():
 
 @pytest.fixture
 def segmented_tuner(tmp_path, monkeypatch):
-    """Exercise real cache files and lookup while replacing GPU timing only."""
+    """Exercise real cache files and lookups without compiling or timing kernels."""
+    from contextlib import nullcontext
     from types import SimpleNamespace
 
     from vllm.model_executor.warmup import (
@@ -673,6 +667,7 @@ def segmented_tuner(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(tuning, "_tune_workload", tune)
+    monkeypatch.setattr(tuning, "_temporary_tuning_kernels", lambda _: nullcontext())
     geometry = (torch.device("cuda:0"), torch.bfloat16, 4, 2, 128, 16, 128**-0.5)
     return SimpleNamespace(
         module=tuning,
@@ -730,6 +725,7 @@ def test_segmented_tuning_releases_only_new_kernel_modules(monkeypatch, fail, de
         assert kernel.device_caches[1][0] == {"other": other_device}
 
 
+@requires_rdna
 def test_segmented_tuning_cleanup_preserves_graphs_and_reloads_kernels():
     """Existing graphs survive cleanup, and released variants still run correctly."""
     import weakref
@@ -839,6 +835,7 @@ def test_segmented_tuning_does_not_reuse_incompatible_winners(
     assert tuning.get_segmented_config(*state.lookup_args, **mode) is not None
 
 
+@requires_rdna
 @pytest.mark.parametrize(
     "dim,page,hq,hk,dtype,kv_dtype,byte_cache,force_splits",
     [
@@ -859,12 +856,9 @@ def test_segmented_attention_ragged_unified_graph_replay(
     monkeypatch, dim, page, hq, hk, dtype, kv_dtype, byte_cache, force_splits
 ):
     """Unified-cache segmented prefill follows metadata on graph replay."""
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
     from vllm.v1.attention.ops import segmented_attention as dispatcher
 
-    if not current_platform.is_rocm() or not (
-        on_gfx12x() if kv_dtype.itemsize == 1 else on_rdna()
-    ):
+    if kv_dtype.itemsize == 1 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     if force_splits is not None:
         original = dispatcher.select_segmented_config
@@ -992,6 +986,7 @@ def test_segmented_attention_ragged_unified_graph_replay(
     check(replay_lengths)
 
 
+@requires_rdna
 @pytest.mark.parametrize(
     "fp8,force_splits",
     [(False, None), (True, None), (False, 4), (True, 4)],
@@ -999,9 +994,7 @@ def test_segmented_attention_ragged_unified_graph_replay(
 @pytest.mark.parametrize("head_size", [256, 512])
 @torch.inference_mode()
 def test_segmented_ragged_prefill_matches_dense_reference(fp8, force_splits, head_size):
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
-
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     case = _make_paged_attention_case(
         [1, 2, 7, 129],
@@ -1021,19 +1014,19 @@ def test_segmented_ragged_prefill_matches_dense_reference(fp8, force_splits, hea
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("head_size", [256, 512])
 @torch.inference_mode()
 def test_rocm_segmented_attn_layout_cache_update(fp8, head_size):
     from types import SimpleNamespace
 
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
     from vllm.v1.attention.backend import AttentionType
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
 
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     cache_dtype = torch.uint8 if fp8 else torch.bfloat16
     kv_cache_dtype = "fp8" if fp8 else "auto"
@@ -1072,6 +1065,7 @@ def test_rocm_segmented_attn_layout_cache_update(fp8, head_size):
     torch.testing.assert_close(cached_value, expected_value, rtol=0, atol=0)
 
 
+@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("head_size,gqa,window", [(256, 2, 32), (512, 8, 0)])
 @torch.inference_mode()
@@ -1081,13 +1075,12 @@ def test_rocm_segmented_attn_cache_only_reader(
     """Gemma MTP readers use cached K/V through native attention and graphs."""
     from types import SimpleNamespace
 
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
     from vllm.v1.attention.ops import segmented_attention as dispatcher
 
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA cache readers (FP8 requires gfx12)")
     case = _make_paged_attention_case(
         [2, 1, 3],
@@ -1159,13 +1152,10 @@ def test_rocm_segmented_attn_cache_only_reader(
     torch.testing.assert_close(cache, original_cache, rtol=0, atol=0)
 
 
+@requires_rdna
 @torch.inference_mode()
 def test_segmented_mixed_causality_matches_dense_reference():
-    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.ops import segmented_attention as dispatcher
-
-    if not current_platform.is_rocm() or not on_rdna():
-        pytest.skip("RDNA unified attention per-request causal fallback")
 
     query_lens = [2, 3]
     context_lens = [5, 6]
@@ -1209,14 +1199,13 @@ def test_segmented_mixed_causality_matches_dense_reference():
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("window_size", [1, 2048])
 @torch.inference_mode()
 def test_segmented_sliding_window_matches_dense_reference(fp8, causal, window_size):
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
-
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     case = _make_paged_attention_case(
         [8],
@@ -1240,14 +1229,13 @@ def test_segmented_sliding_window_matches_dense_reference(fp8, causal, window_si
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("window_size", [0, 128])
 @pytest.mark.parametrize("head_size", [64, 128, 512])
 @torch.inference_mode()
 def test_segmented_sinks_match_dense_reference(fp8, window_size, head_size):
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
-
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     sinks = torch.linspace(
         -1.0,
@@ -1281,18 +1269,18 @@ def test_segmented_sinks_match_dense_reference(fp8, window_size, head_size):
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("window_size", [0, 128])
 @pytest.mark.parametrize("query_len", [1, 8])
 @torch.inference_mode()
 def test_segmented_sink_split_reduce_matches_reference(fp8, window_size, query_len):
-    from vllm.platforms.rocm import on_gfx12x, on_rdna
     from vllm.v1.attention.ops.segmented_attention import (
         run_segmented_attention,
         select_segmented_config,
     )
 
-    if not current_platform.is_rocm() or not (on_gfx12x() if fp8 else on_rdna()):
+    if fp8 and not on_gfx12x():
         pytest.skip("RDNA segmented prefill (FP8 requires gfx12)")
     sinks = torch.linspace(-1.0, 8.0, 16, device="cuda:0")
     case = _make_paged_attention_case(
@@ -1335,13 +1323,10 @@ def test_segmented_sink_split_reduce_matches_reference(fp8, window_size, query_l
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_gfx12
 @pytest.mark.parametrize("query_len,context_len", [(1, 8191), (8, 32760), (1, 131071)])
 @torch.inference_mode()
 def test_segmented_long_context_fp8_sinks_match_dense_reference(query_len, context_len):
-    from vllm.platforms.rocm import on_gfx12x
-
-    if not current_platform.is_rocm() or not on_gfx12x():
-        pytest.skip("FP8 KV requires gfx12")
     sinks = torch.linspace(-1.0, 1.0, 16, device="cuda:0", dtype=torch.bfloat16)
     case = _make_paged_attention_case(
         [query_len],
@@ -1361,6 +1346,7 @@ def test_segmented_long_context_fp8_sinks_match_dense_reference(query_len, conte
     assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @pytest.mark.parametrize(
     "feature",
     [
@@ -1371,11 +1357,7 @@ def test_segmented_long_context_fp8_sinks_match_dense_reference(query_len, conte
 )
 @torch.inference_mode()
 def test_segmented_softcap_and_output_scaling_match_dense_reference(feature):
-    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.ops import segmented_attention as dispatcher
-
-    if not current_platform.is_rocm() or not on_rdna():
-        pytest.skip("RDNA unified attention feature fallback")
 
     num_heads = 8
     configured_sliding_window = 16 if feature.startswith("sliding") else 0
@@ -1433,14 +1415,12 @@ def test_segmented_softcap_and_output_scaling_match_dense_reference(feature):
         assert torch.isfinite(output).all() and relative.max().item() < 0.01
 
 
+@requires_rdna
 @torch.inference_mode()
 def test_segmented_attention_cache_offsets_cross_int32_boundary():
     """A small logical prefix can live beyond 2**31 elements in a strided cache."""
-    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.ops.segmented_attention import run_segmented_attention
 
-    if not current_platform.is_rocm() or not on_rdna():
-        pytest.skip("RDNA segmented prefill")
     torch.accelerator.empty_cache()
     free, _ = torch.accelerator.get_memory_info()
     if free < 10 * 2**30:
