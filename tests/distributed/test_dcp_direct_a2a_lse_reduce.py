@@ -843,6 +843,9 @@ _requires_cutedsl_a2a = pytest.mark.skipif(
 )
 _A2A_HEAD_DIM = 512
 _A2A_MAX_NUM_TOKENS = 256
+# GPU cycles (~25 ms) that hold simulated ranks' streams while the host queues
+# their launches (_SimulatedA2ARanks._per_rank_streams).
+_LAUNCH_GATE_CYCLES = 50_000_000
 
 
 def _cutedsl_a2a():
@@ -946,7 +949,13 @@ class _SimulatedA2ARanks:
 
     def _per_rank_streams(self, launch) -> None:
         # Every rank's launches must be in flight before a combine can finish.
+        # All ranks share one GPU here, so a rank whose dispatch is queued
+        # after the other ranks' combines could find every SM held by their
+        # spinning blocks and never run (the combines then time out and
+        # trap). Hold all streams until every launch is queued, so each
+        # rank's dispatch is pending before any combine starts.
         current = torch.cuda.current_stream()
+        torch.cuda._sleep(_LAUNCH_GATE_CYCLES)
         streams = [torch.cuda.Stream() for _ in range(self.world_size)]
         for rank, stream in enumerate(streams):
             stream.wait_stream(current)
