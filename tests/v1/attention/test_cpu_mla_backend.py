@@ -119,7 +119,6 @@ def test_cpu_mla_backend_smoke(tmp_path) -> None:
     llm = LLM(
         model="deepseek-ai/DeepSeek-V2-Lite",
         skip_tokenizer_init=True,
-        trust_remote_code=True,
         load_format="dummy",
         enforce_eager=True,
         max_model_len=128,

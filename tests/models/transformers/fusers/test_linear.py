@@ -685,6 +685,114 @@ class PackedQKVAttention(nn.Module):
         return self.resid_dropout(self.c_proj(attn_output)), attn_weights
 
 
+class SlicedQKVAttention(nn.Module):
+    """Phi3-style: one packed projection sliced into q/k/v in the forward."""
+
+    is_causal = True
+
+    def __init__(
+        self,
+        hidden: int = 32,
+        head_dim: int = 8,
+        heads: int = 4,
+        kv_heads: int = 1,
+        layer_idx: int = 0,
+    ):
+        super().__init__()
+        self.config = SimpleNamespace(_attn_implementation="vllm")
+        self.layer_idx = layer_idx
+        self.head_dim = head_dim
+        self.scaling = head_dim**-0.5
+        self.query_pos = heads * head_dim
+        self.kv_dim = kv_heads * head_dim
+        self.qkv_proj = nn.Linear(hidden, self.query_pos + 2 * self.kv_dim, bias=False)
+        self.o_proj = nn.Linear(self.query_pos, hidden, bias=False)
+
+    def attend(self, hidden_states, q, k, v, attention_mask, **kwargs):
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        input_shape = hidden_states.shape[:-1]
+        q = q.reshape(*input_shape, -1, self.head_dim).transpose(1, 2)
+        k, v = k.unsqueeze(1), v.unsqueeze(1)
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, None
+        )
+        attn_output, attn_weights = attention_interface(
+            self, q, k, v, attention_mask, scaling=self.scaling, **kwargs
+        )
+        return self.o_proj(attn_output.reshape(*input_shape, -1)), attn_weights
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class RopeSlicedQKVAttention(SlicedQKVAttention):
+    """Also slices a tensor derived from the projection with int bounds."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        q = torch.cat([q[..., :4] * 2, q[..., 4:]], dim=-1)
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class GapSlicedQKVAttention(SlicedQKVAttention):
+    """A hole between k and v, so the slices do not tile the projection."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim + 1 :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class TracedBoundSlicedQKVAttention(SlicedQKVAttention):
+    """Slice bounds computed from a tensor shape, so fx sees them as nodes."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        n = hidden_states.shape[-1]
+        k_end = n + self.kv_dim
+        q = qkv[..., :n]
+        k = qkv[..., n:k_end]
+        v = qkv[..., k_end:]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class AnnotatedSlicedQKVAttention(SlicedQKVAttention):
+    """The source binds the projection with an annotated assign."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv: torch.Tensor = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
+class ReusedSlicedQKVAttention(SlicedQKVAttention):
+    """The projection has a fourth consumer."""
+
+    def forward(self, hidden_states, attention_mask=None, **kwargs):
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.query_pos
+        q = qkv[..., :query_pos] + qkv[..., :query_pos]
+        k = qkv[..., query_pos : query_pos + self.kv_dim]
+        v = qkv[..., query_pos + self.kv_dim :]
+        return self.attend(hidden_states, q, k, v, attention_mask, **kwargs)
+
+
 class PerHeadSplitAttention(nn.Module):
     """A packed projection reshaped and split *per head* -> not a q/k/v split."""
 
@@ -1268,6 +1376,87 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     assert fused.layer_idx == 3 and fused.is_causal
     out, _ = fused(x)
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [SlicedQKVAttention, RopeSlicedQKVAttention, AnnotatedSlicedQKVAttention],
+)
+def test_detects_and_rewrites_sliced_qkv(attn_cls):
+    """A projection sliced into q/k/v with global offsets must be re-sharded too.
+
+    Slices of derived tensors (e.g. rotary) must not interfere with the match."""
+    with torch.device("meta"):
+        meta = attn_cls()
+    fuser = get_fuser(meta, PackedQKVFuser)
+    assert isinstance(fuser, PackedQKVFuser)
+    assert (fuser.qkv_name, fuser.o_name) == ("qkv_proj", "o_proj")
+    assert (fuser.q_size, fuser.kv_size) == (32, 8)
+    names = fuser.fused_forward.__code__.co_names
+    assert "output_sizes" in names and "tp_size" in names
+
+    real = attn_cls(layer_idx=3)
+    for p in real.parameters():
+        nn.init.normal_(p, std=0.05)
+    x = torch.randn(1, 5, 32)
+    real.attn = FakeMQASelfAttn()
+    expected, _ = real(x)
+    fused = _apply_packed_qkv_fuser_with_stubs(real, fuser)
+    assert fused is real and fused.layer_idx == 3
+    out, _ = fused(x)
+    torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_sliced_qkv_forward_reads_per_rank_sections():
+    """With a head-sharded projection, the slices must follow the per-rank layout
+    `[q_r | k_r | v_r]`, not the global offsets."""
+    tp_size = 2
+    with torch.device("meta"):
+        meta = SlicedQKVAttention(heads=8, kv_heads=4)
+    fuser = get_fuser(meta, PackedQKVFuser)
+    assert fuser is not None
+
+    real: nn.Module = SlicedQKVAttention(heads=8, kv_heads=4)
+    q_size, kv_size = fuser.q_size, fuser.kv_size
+    weight = real.qkv_proj.weight.data
+    wq, wk, wv = (
+        weight[:q_size],
+        weight[q_size : q_size + kv_size],
+        weight[q_size + kv_size :],
+    )
+    x = torch.randn(1, 5, 32)
+    seen: dict[str, torch.Tensor] = {}
+
+    class Capture(FakeSelfAttn):
+        def forward(self, q, k, v):
+            seen.update(q=q, k=k, v=v)
+            return q
+
+    for rank in range(tp_size):
+        local = torch.cat([w.chunk(tp_size)[rank] for w in (wq, wk, wv)])
+        qkv = nn.Linear(32, local.shape[0], bias=False)
+        qkv.weight.data.copy_(local)
+        qkv.tp_size = tp_size
+        qkv.output_sizes = [q_size, kv_size, kv_size]
+        real.qkv_proj, real.attn = qkv, Capture()
+        real.o_proj = nn.Identity()
+        real.forward = MethodType(fuser.fused_forward, real)
+        real(x)
+        for name, w in (("q", wq), ("k", wk), ("v", wv)):
+            torch.testing.assert_close(
+                seen[name].reshape(5, -1),
+                (x @ w.chunk(tp_size)[rank].T).reshape(5, -1),
+            )
+
+
+@pytest.mark.parametrize(
+    "attn_cls",
+    [GapSlicedQKVAttention, ReusedSlicedQKVAttention, TracedBoundSlicedQKVAttention],
+)
+def test_irregular_slices_are_not_packed_qkv(attn_cls):
+    """Anything but exactly three tiling slices of the projection is left alone."""
+    with torch.device("meta"):
+        assert get_fuser(attn_cls(), PackedQKVFuser) is None
 
 
 def test_per_head_split_is_not_packed_qkv():

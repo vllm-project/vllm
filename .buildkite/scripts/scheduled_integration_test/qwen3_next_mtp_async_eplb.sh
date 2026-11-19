@@ -54,7 +54,6 @@ for BACK in "${BACKENDS[@]}"; do
     --all2all-backend "$BACK" \
     --eplb-config '{"window_size":200,"step_interval":600,"use_async":true}' \
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
-    --trust-remote-code \
     --max-model-len 2048 \
     "${PLATFORM_ARGS[@]}" \
     --port "$PORT" &

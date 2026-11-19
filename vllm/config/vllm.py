@@ -32,11 +32,10 @@ from .cache import CacheConfig
 from .compilation import (
     CompilationConfig,
     CompilationMode,
+    CUDAGraphCaptureDefaults,
     CUDAGraphMode,
-    decode_cudagraph_capture_grid,
     decode_cudagraph_capture_shapes,
-    prefill_cudagraph_capture_grid,
-    varlen_decode_cudagraph_capture_grid,
+    validate_cudagraph_capture_grid,
 )
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
@@ -114,8 +113,10 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
+        "HYV4DFlyModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
+        "Inkling2ForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
@@ -150,10 +151,23 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # recipe can start.
         # HYV4 also runs without torch.compile, preserving runtime-shape
         # kernel selection during graph capture.
-        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+        # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        return (
+            frozenset(
+                {
+                    "DeepseekV41ForCausalLM",
+                    "HYV4ForCausalLM",
+                    "HYV4VLForConditionalGeneration",
+                    "HYV4MTPModel",
+                }
+            )
+            | _QWEN3_5_ARCHITECTURES
+        )
     if current_platform.is_cuda():
-        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
-        # platforms keep the torch.compile path.
+        # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA and ROCm;
+        # other platforms keep the torch.compile path.
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
+    if current_platform.is_xpu():
         return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES | _QWEN3_5_ARCHITECTURES
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
@@ -232,14 +246,14 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if rotary embedding custom op is active and
+    """Enable if the RoPE custom op or another RoPE fusion is requested and
     use_inductor_graph_partition is enabled.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_enabled()
-        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and cfg.compilation_config.uses_rope_kernel()
         and (
             cfg.compilation_config.use_inductor_graph_partition
             or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -277,7 +291,10 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
 
     if not rocm_aiter_ops.is_enabled():
         return False
-    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+    cc = cfg.compilation_config
+    # Any RoPE fusion opt-in implies the RoPE kernel path. MRoPE still needs the
+    # RoPE custom op (added after defaults), so respect an explicit disable.
+    return cc.uses_rope_kernel() and "-rotary_embedding" not in cc.custom_ops
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -371,6 +388,53 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
     OptimizationLevel.O2: OPTIMIZATION_LEVEL_02,
     OptimizationLevel.O3: OPTIMIZATION_LEVEL_03,
 }
+
+
+# top_k values the pinned FlashInfer NVLinkOneSidedAlltoAll accepts.
+_ONE_SIDED_SUPPORTED_TOP_K = frozenset({1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 22})
+
+
+def _has_heterogeneous_moe_layers(model_config: "ModelConfig") -> bool:
+    """Whether MoE layers differ in num_experts or top_k (per-layer block_configs)."""
+    block_configs = getattr(model_config.hf_text_config, "block_configs", None)
+    if not block_configs:
+        return False
+
+    def field(block: Any, name: str) -> Any:
+        if isinstance(block, dict):
+            return block.get(name)
+        return getattr(block, name, None)
+
+    shapes = {
+        (field(block, "n_routed_experts"), field(block, "num_experts_per_tok"))
+        for block in block_configs
+        if field(block, "block_type") == "moe"
+    }
+    return len(shapes) > 1
+
+
+def _one_sided_model_unsupported_reason(model_config: "ModelConfig") -> str | None:
+    """Why a model's MoE layers cannot use flashinfer_nvlink_one_sided."""
+    # One shared communication object serves every MoE layer, so all of them
+    # must have the same num_experts and top_k (e.g. Nemotron Puzzle varies them
+    # per layer).
+    if _has_heterogeneous_moe_layers(model_config):
+        return "MoE layers with different num_experts or top_k"
+    top_k = model_config.get_num_experts_per_tok()
+    if top_k and top_k not in _ONE_SIDED_SUPPORTED_TOP_K:
+        return f"top_k={top_k}"
+    # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
+    quantization = model_config.quantization
+    if quantization is None:
+        if model_config.dtype in (torch.bfloat16, torch.float16):
+            return None
+        return f"dtype={model_config.dtype}"
+    if quantization == "modelopt_fp4":
+        return None
+    quant_cfg = model_config.model_arch_config.quantization_config or {}
+    if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
+        return None
+    return f"quantization={quantization!r}"
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -557,12 +621,36 @@ class VllmConfig:
         return bool(mm_config and mm_config.mm_encoder_only)
 
     @property
+    def gpu_iteration_timing(self) -> bool:
+        """Whether the output worker times logged iterations with CUDA events.
+        Otherwise they are logged without an elapsed time."""
+        # TODO: Drop this gate. Untimed iterations could be handled without the
+        # config knowing which frontend, executor and engine process are in use.
+        parallel_config = self.parallel_config
+        # With more API servers the frontend does not log iteration details.
+        frontend_logs = (
+            self.observability_config.enable_logging_iteration_details
+            and parallel_config._api_process_count == 1
+        )
+        # The worker ends a timed iteration in sample_tokens.
+        worker_returns_records = (
+            self.model_config is not None
+            and self.model_config.runner_type == "generate"
+            and not self.is_mm_encoder_only
+            and parallel_config.distributed_executor_backend in ("uni", "mp")
+            # Only EngineCoreProc publishes the records a dummy batch returns.
+            and envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        )
+        worker_times = self.device_config.device_type == "cuda"
+        return frontend_logs and worker_returns_records and worker_times
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
-            return pp_size + 1
+            return pp_size + self.scheduler_config.async_scheduling_depth - 1
         return pp_size
 
     @property
@@ -744,7 +832,11 @@ class VllmConfig:
             )
         ):
             return []
-        return decode_cudagraph_capture_grid(self.scheduler_config.max_num_seqs)
+        max_requests = self.scheduler_config.max_num_seqs
+        return validate_cudagraph_capture_grid(
+            current_platform.get_decode_cudagraph_capture_grid(max_requests),
+            max_requests,
+        )
 
     def get_varlen_decode_cudagraph_token_sizes(
         self, decode_query_len: int
@@ -755,14 +847,17 @@ class VllmConfig:
         of `decode_query_len` tokens each, within the decode token budget."""
         max_requests = self.compilation_config.max_decode_cudagraph_capture_requests
         assert max_requests is not None
-        return varlen_decode_cudagraph_capture_grid(
-            min(
-                max_requests * decode_query_len,
-                self.scheduler_config.max_num_batched_tokens,
-                self.compilation_config.max_decode_cudagraph_capture_tokens
-                or max_requests * decode_query_len,
+        max_tokens = min(
+            max_requests * decode_query_len,
+            self.scheduler_config.max_num_batched_tokens,
+            self.compilation_config.max_decode_cudagraph_capture_tokens
+            or max_requests * decode_query_len,
+        )
+        return validate_cudagraph_capture_grid(
+            current_platform.get_varlen_decode_cudagraph_capture_grid(
+                max_tokens, self.performance_mode == "interactivity"
             ),
-            self.performance_mode == "interactivity",
+            max_tokens,
         )
 
     @property
@@ -1045,6 +1140,78 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _one_sided_all2all_unsupported_reason(self) -> str | None:
+        """Why the deployment cannot use flashinfer_nvlink_one_sided, if it can't."""
+        if self.lora_config is not None:
+            return "LoRA"
+        # Experts picked with --moe-backend decide on their own whether they
+        # take one-sided dispatch, and most (triton, deep_gemm, cutlass,
+        # emulation, ...) reject it, so any explicit choice keeps the old
+        # allgather_reducescatter default.
+        moe_backend = self.kernel_config.moe_backend
+        if moe_backend != "auto":
+            return f"moe_backend={moe_backend!r}"
+        # No kernel is both batch invariant and one-sided compatible.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "VLLM_BATCH_INVARIANT=1"
+        model_config = self.model_config
+        if model_config is None:
+            return None
+        if reason := _one_sided_model_unsupported_reason(model_config):
+            return reason
+        # A separate MoE draft model builds its MoE layers on the same
+        # communication object, so it has to fit it and match the target.
+        spec = self.speculative_config
+        draft = spec.draft_model_config if spec is not None else None
+        if spec is not None and draft is not None and draft.is_moe:
+            if spec.moe_backend not in (None, "auto"):
+                return f"draft moe_backend={spec.moe_backend!r}"
+            if reason := _one_sided_model_unsupported_reason(draft):
+                return f"draft model {reason}"
+            if model_config.is_moe and (
+                draft.get_num_experts(),
+                draft.get_num_experts_per_tok(),
+            ) != (
+                model_config.get_num_experts(),
+                model_config.get_num_experts_per_tok(),
+            ):
+                return "a draft model with different num_experts or top_k"
+        return None
+
+    def _maybe_fall_back_from_auto_one_sided_all2all(self) -> None:
+        """Keep the "auto" all2all default to models one-sided supports."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config._all2all_backend_auto_one_sided
+            or parallel_config.all2all_backend != "flashinfer_nvlink_one_sided"
+        ):
+            return
+        reason = self._one_sided_all2all_unsupported_reason()
+        if reason is None:
+            return
+        logger.info_once(
+            "all2all_backend='auto': using 'allgather_reducescatter' instead of "
+            "'flashinfer_nvlink_one_sided', which does not support %s.",
+            reason,
+        )
+        parallel_config.all2all_backend = "allgather_reducescatter"
+
+    def _sync_draft_all2all_backend(self) -> None:
+        """Make the draft follow the target's final all2all backend.
+
+        The draft's ParallelConfig is built before this config, so it holds the
+        target's backend from before any fallback, while both share one EP
+        communicator.
+        """
+        spec = self.speculative_config
+        draft = spec.draft_parallel_config if spec is not None else None
+        if (
+            draft is not None
+            and draft is not self.parallel_config
+            and draft.enable_expert_parallel
+        ):
+            draft.all2all_backend = self.parallel_config.all2all_backend
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1157,31 +1324,12 @@ class VllmConfig:
                 "context parallelism (DCP/PCP > 1)."
             )
 
-        kv_transfer_config = self.kv_transfer_config
-        if kv_transfer_config is not None:
-            for connector_name in (
-                "NixlConnector",
-                "NixlPullConnector",
-                "NixlPushConnector",
-                "MoRIIOConnector",
-                "MooncakeConnector",
-            ):
-                if kv_transfer_config.has_connector(connector_name):
-                    raise ValueError(
-                        "--enable-return-routed-experts is incompatible with "
-                        f"{connector_name}; PD auxiliary output is not supported."
-                    )
-
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
         # not `direct_reload_enabled()`: importing it would load the model
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
             return
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
-
         offload = self.offload_config
         if (
             offload.offload_backend != "auto"
@@ -1196,16 +1344,6 @@ class VllmConfig:
             # its load_weights runs a layerwise reload, and its post-load
             # processing replaces the weight parameter
             raise ValueError("Direct reload does not support torchao quantization.")
-        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
-            getattr(self.quant_config, "online_quantization_config", None) is not None
-        ):
-            # `finish` clears the guard that keeps online quantization from
-            # quantizing its already-quantized bytes again
-            raise ValueError("Direct reload does not support online quantization.")
-        if self.lora_config is not None:
-            # LoRA wraps layers after cold start; their wrappers forward
-            # `quant_method`, so a rerun would process each base layer twice
-            raise ValueError("Direct reload does not support LoRA.")
         spec = self.speculative_config
         if spec is not None and spec.draft_lm_head_quantization is not None:
             # after `begin` the draft's quantized lm_head is a view of the target
@@ -1444,7 +1582,7 @@ class VllmConfig:
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
-        self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+        self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
@@ -1479,6 +1617,7 @@ class VllmConfig:
             self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
+        self._resolve_specialized_decode_switch()
         self._resolve_mm_encoder_only()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
@@ -1538,7 +1677,7 @@ class VllmConfig:
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
         ):
             dcp_size = self.parallel_config.decode_context_parallel_size
             transfer_tp_size = max(
@@ -1796,13 +1935,27 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
+        # Must run before binding a MoE-EP backend, which rejects one-sided.
+        self._maybe_fall_back_from_auto_one_sided_all2all()
+
         # This populates IR op priorities,
         # must happen after compilation mode and backend are decided,
         # but before fusion defaults are applied as those may depend on op priority.
         self.kernel_config.set_platform_defaults(self)
+        # After every fallback of the target's backend.
+        self._sync_draft_all2all_backend()
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        cc = self.compilation_config
+        if (
+            cc.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in cc.custom_ops
+        ):
+            # MRoPE is not an IR op yet; its fusion matches the RoPE custom op.
+            # CompilationConfig only covers an explicit flag; this covers the
+            # optimization-level default.
+            cc.custom_ops.append("+rotary_embedding")
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
@@ -1851,11 +2004,15 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
-            if self.model_config is not None and not hasattr(
-                self.model_config.hf_text_config, "index_topk"
+            if (
+                self.model_config is not None
+                and not hasattr(self.model_config.hf_text_config, "index_topk")
+                and getattr(self.model_config.hf_text_config, "indexer_budget", None)
+                is None
             ):
                 raise ValueError(
-                    "HiSparse is only supported for DSA models with index_topk."
+                    "HiSparse is only supported for DSA models with index_topk "
+                    "and QSA models with indexer_budget."
                 )
 
         self._normalize_piecewise_cudagraph_mode(
@@ -2355,7 +2512,7 @@ class VllmConfig:
         capture as:
 
         ```python
-        default_max_graph_size = 1024 if is_data_center_blackwell else 512
+        default_max_graph_size = platform_defaults.legacy_max_tokens
         decode_query_len = self.uniform_decode_query_len
         max_graph_size = min(
             max_num_seqs * decode_query_len * 2, default_max_graph_size
@@ -2427,11 +2584,8 @@ class VllmConfig:
             # configured.
             uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
-                from vllm.platforms import current_platform
-
-                default_max_graph_size = (
-                    1024 if current_platform.is_device_capability_family(100) else 512
-                )
+                defaults = current_platform.get_cudagraph_capture_defaults(self)
+                default_max_graph_size = defaults.legacy_max_tokens
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
                 max_cudagraph_capture_size = min(
@@ -2624,22 +2778,19 @@ class VllmConfig:
                 "decode CUDA graphs with decode_cudagraph_capture_request_sizes or "
                 "max_decode_cudagraph_capture_requests."
             )
-        from vllm.platforms import current_platform
-
         shared_sizes = compilation_config.cudagraph_capture_sizes
         shared_max = compilation_config.max_cudagraph_capture_size
         max_num_seqs = self.scheduler_config.max_num_seqs
         max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        # On SM100, unset kinds default to wider grids; elsewhere, and with the
-        # deprecated fields, they default to the shared sizes resolved above.
-        wide_defaults = (
-            not legacy_sizes and current_platform.is_device_capability_family(100)
+        defaults = (
+            CUDAGraphCaptureDefaults()
+            if legacy_sizes
+            else current_platform.get_cudagraph_capture_defaults(self)
         )
-        if (
-            wide_defaults
-            and compilation_config.max_decode_cudagraph_capture_tokens is None
-        ):
-            compilation_config.max_decode_cudagraph_capture_tokens = 8192
+        if compilation_config.max_decode_cudagraph_capture_tokens is None:
+            compilation_config.max_decode_cudagraph_capture_tokens = (
+                defaults.max_decode_tokens
+            )
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2664,13 +2815,16 @@ class VllmConfig:
                 "prefill_cudagraph_capture_token_sizes",
                 "max_prefill_cudagraph_capture_tokens",
             )
-        elif max_prefill_tokens is not None or wide_defaults:
-            prefill_sizes = prefill_cudagraph_capture_grid(
-                min(
-                    8192 if max_prefill_tokens is None else max_prefill_tokens,
-                    max_num_tokens,
+        elif max_prefill_tokens is not None or defaults.max_prefill_tokens is not None:
+            if max_prefill_tokens is None:
+                max_prefill_tokens = defaults.max_prefill_tokens
+            assert max_prefill_tokens is not None
+            prefill_limit = min(max_prefill_tokens, max_num_tokens)
+            prefill_sizes = validate_cudagraph_capture_grid(
+                current_platform.get_prefill_cudagraph_capture_grid(
+                    prefill_limit, self.performance_mode == "interactivity"
                 ),
-                self.performance_mode == "interactivity",
+                prefill_limit,
             )
         else:
             prefill_sizes = list(shared_sizes)
@@ -2683,11 +2837,16 @@ class VllmConfig:
                 "decode_cudagraph_capture_request_sizes",
                 "max_decode_cudagraph_capture_requests",
             )
-        elif max_decode_requests is not None or wide_defaults:
-            decode_sizes = decode_cudagraph_capture_grid(
-                max_num_seqs
-                if max_decode_requests is None
-                else min(max_decode_requests, max_num_seqs)
+        elif (
+            max_decode_requests is not None or defaults.max_decode_requests is not None
+        ):
+            if max_decode_requests is None:
+                max_decode_requests = defaults.max_decode_requests
+            assert max_decode_requests is not None
+            decode_limit = min(max_decode_requests, max_num_seqs)
+            decode_sizes = validate_cudagraph_capture_grid(
+                current_platform.get_decode_cudagraph_capture_grid(decode_limit),
+                decode_limit,
             )
         else:
             # The request counts each target query length rounds the shared sizes
@@ -2997,6 +3156,25 @@ class VllmConfig:
             "EC/KV consumer: pre-computed-embedding inputs may "
             "omit the embedding tensor."
         )
+
+    def _resolve_specialized_decode_switch(self) -> None:
+        """`kernel_config.monokernel` and
+        `additional_config={"decode_backend": "latency_specialized"}` are one
+        switch: setting either sets both, whichever one a model reads."""
+        extra = self.additional_config
+        if not isinstance(extra, dict):
+            return
+        backend = extra.get("decode_backend")
+        if backend == "latency_specialized":
+            self.kernel_config.monokernel = True
+        elif self.kernel_config.monokernel:
+            if backend is not None:
+                raise ValueError(
+                    "--monokernel conflicts with additional_config "
+                    f"decode_backend={backend!r}; it means "
+                    "decode_backend=latency_specialized."
+                )
+            self.additional_config = {**extra, "decode_backend": "latency_specialized"}
 
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
@@ -3376,6 +3554,24 @@ class VllmConfig:
                 "not forward sampling masks"
             )
 
+        if self.lora_config is not None:
+            target_modules = self.lora_config.target_modules
+            # Default targets include lm_head. Explicit targets may name it
+            # directly or with a module prefix (e.g. language_model.lm_head).
+            targets_lm_head = target_modules is None or any(
+                target == "lm_head" or target.endswith(".lm_head")
+                for target in target_modules
+            )
+            if targets_lm_head:
+                # compute_logits_local() skips the TP logits gather, and the
+                # lm_head LoRA delta can only be applied after that gather
+                # (LogitsProcessorWithLoRA raises on skip_gather).
+                blockers.append(
+                    "it does not yet work with LoRA when the lm_head is targeted, "
+                    "whose delta requires the TP logits gather that batch-sharded "
+                    "sampling skips"
+                )
+
         if blockers:
             raise ValueError(
                 "Batch-sharded sampling was explicitly enabled via "
@@ -3531,7 +3727,7 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if not self.kv_transfer_config.has_connector("NixlConnector"):
+        if not self.kv_transfer_config.has_connector("NixlPullConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
@@ -3560,13 +3756,9 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
-        # size is finalized from the global KV cache groups.
-        nixl_pd_active = (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
-        )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        # Runs after adjust_dcp_kv_cache_interleave_size, so an auto-resolved NIXL
+        # interleave is already the local block size here.
+        if self.parallel_config.decode_context_parallel_size > 1:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
