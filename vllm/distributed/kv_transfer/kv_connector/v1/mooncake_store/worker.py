@@ -1387,6 +1387,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 block_size=self.block_size,
                 restored_extent=token_len,
                 certification_mode=self._evidence_certification,
+                vllm_cached_tokens=req_meta.load_spec.vllm_cached_tokens,
             )
             self._evidence_buffer.start_attempt(evidence)
         # Reverse map physical block id -> logical block index for the
@@ -1591,9 +1592,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                             # terminal sweep only ever counts blocks in
                             # expected_blocks, so an unmapped id can only
                             # fail the accounting closed, never inflate it.
-                            logical = block_logical.get(block_id)
-                            if logical is not None:
-                                evidence.note_block_outcome(logical, True)
+                            loaded_logical = block_logical.get(block_id)
+                            if loaded_logical is not None:
+                                evidence.note_block_outcome(loaded_logical, True)
                 self._record_operation(
                     "load_get",
                     load_get_start,
@@ -1610,9 +1611,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     if evidence is not None:
                         for _key, _value, block_id in failed:
-                            logical = block_logical.get(block_id)
-                            if logical is not None:
-                                evidence.note_block_outcome(logical, False)
+                            failed_logical = block_logical.get(block_id)
+                            if failed_logical is not None:
+                                evidence.note_block_outcome(failed_logical, False)
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
                         "(batch_keys=%d, first_failures=%s)",
@@ -1669,6 +1670,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             evidence.finalize()
         self.set_finished_request(req_id)
         self.request_queue.task_done()
+
 
 # ============================================================
 # Store Worker

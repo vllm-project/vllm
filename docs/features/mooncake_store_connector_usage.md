@@ -370,6 +370,10 @@ the repair policy consumes, driven by the actual per-key store GET outcomes:
   accounting, identified by the scheduler-assigned transfer generation. Late
   artifacts of an older attempt cannot affect a newer delivery.
 
+When a request combines a local prefix-cache hit with an external load, the
+rollback boundary accounts for the already valid local prefix and the
+contiguous successfully loaded blocks before the failed block.
+
 In multi-group or HMA layouts, where store block ids cannot be mapped to one
 scheduler group unambiguously, the evidence channels stay off and the flat
 channel keeps working: the deployment fails closed to recompute/fail rather
