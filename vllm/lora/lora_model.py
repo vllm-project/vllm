@@ -266,7 +266,16 @@ class LoRAModel:
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")
                     expert_suffix = module_name[expert_idx + 1 :]
-                    if expert_suffix not in expected_lora_modules:
+                    expert_path = expert_suffix.split(".")
+                    matches_short_name = (
+                        len(expert_path) == 3
+                        and expert_path[1].isdigit()
+                        and base_name in expected_lora_modules
+                    )
+                    if (
+                        expert_suffix not in expected_lora_modules
+                        and not matches_short_name
+                    ):
                         unexpected_modules.append(module_name)
 
                 elif base_name not in expected_lora_modules and base_name not in (
