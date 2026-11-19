@@ -211,32 +211,12 @@ class Executor(ABC):
             )
         return aligned
 
-    def align_block_sizes(self) -> None:
-        """Give workers without attention layers the KV cache block sizes that
-        the workers with them chose. A pipeline stage holds only some layers,
-        and a stage of a hybrid model without attention layers cannot align the
-        block size to the Mamba page size.
-
-        Raises:
-            RuntimeError: Workers of a hybrid model chose different sizes.
-
-        """
-        replies: list[tuple[bool, dict[str, Any]]] = self.collective_rpc(
-            "get_block_sizes"
-        )
-        chosen = [sizes for has_attention, sizes in replies if has_attention]
-        if not chosen or all(sizes == chosen[0] for _, sizes in replies):
-            return
-        if any(sizes != chosen[0] for sizes in chosen):
-            if self.vllm_config.model_config.is_hybrid:
-                raise RuntimeError(
-                    f"Workers chose different KV cache block sizes: {chosen}"
-                )
-            return
-        self.collective_rpc("set_block_sizes", args=(chosen[0],))
-
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")
+
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Publish the Mamba block size resolved for the whole model."""
+        self.collective_rpc("set_mamba_block_size", args=(mamba_block_size,))
 
     def get_supported_kv_cache_layouts(self) -> list[list[str]]:
         """Layouts each worker's backends support, most preferred first."""

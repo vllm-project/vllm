@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_bac
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -39,14 +38,6 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
-
-# Cache config fields that `Platform.update_block_size_for_backend` sets.
-_BLOCK_SIZE_FIELDS = (
-    "block_size",
-    "mamba_block_size",
-    "mamba_page_size_padded",
-    "skip_page_size_padded",
-)
 
 
 class CompilationTimes(NamedTuple):
@@ -120,18 +111,9 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def get_block_sizes(self) -> tuple[bool, dict[str, Any]]:
-        """Whether this worker chose the KV cache block sizes from attention
-        layers (`Platform.update_block_size_for_backend`), and the sizes."""
-        has_attention = bool(current_platform._find_non_ssm_backends(self.vllm_config))
-        cache_config = self.vllm_config.cache_config
-        sizes = {name: getattr(cache_config, name) for name in _BLOCK_SIZE_FIELDS}
-        return has_attention, sizes
-
-    def set_block_sizes(self, sizes: dict[str, Any]) -> None:
-        """Adopt the KV cache block sizes chosen by other workers."""
-        for name, value in sizes.items():
-            setattr(self.vllm_config.cache_config, name, value)
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""

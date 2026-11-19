@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_planning import (
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -169,7 +170,6 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
 
         try:
-            self.model_executor.align_block_sizes()
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 self._eep_scale_up_before_kv_init()
 
@@ -290,6 +290,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
