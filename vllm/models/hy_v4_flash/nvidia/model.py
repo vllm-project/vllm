@@ -40,10 +40,10 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
         raise NotImplementedError("HYV4 Flash requires NVIDIA CUDA")
     if vllm_config.model_config.dtype != torch.bfloat16:
         raise ValueError("HYV4 Flash requires bfloat16 compute")
+    kv_transfer = vllm_config.kv_transfer_config
     if (
-        vllm_config.kv_transfer_config is not None
-        or vllm_config.lora_config is not None
-    ):
+        kv_transfer is not None and kv_transfer.kv_connector != "DecodeBenchConnector"
+    ) or vllm_config.lora_config is not None:
         raise ValueError("HYV4 Flash does not support KV transfer or LoRA")
     spec = vllm_config.speculative_config
     if spec is not None and spec.method != "dfly":
