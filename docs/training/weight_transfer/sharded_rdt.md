@@ -116,7 +116,7 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 
 Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. With EP every worker may pull from every rank, so the arena grows with the number of workers.
 
-For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB) per trainer rank, and a receive arena of at most 2 GiB per worker.
+For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB, unless a single tensor is larger than `buffer_bytes`) per trainer rank, and a receive arena of at most 2 GiB per worker.
 
 ## Limitations
 

@@ -515,7 +515,7 @@ class _RDTProducerServer:
                     )
                 dtype, shape = self._served[name]
                 if len(box) != len(shape) or any(
-                    not 0 <= a <= b <= n for (a, b), n in zip(box, shape)
+                    not 0 <= a < b <= n for (a, b), n in zip(box, shape)
                 ):
                     raise ValueError(f"{name!r}: box {box} is outside {shape}")
                 pieces.append((name, box_slices(box)))
@@ -572,11 +572,17 @@ class _RDTProducerServer:
                 self._unit_cond(spec.unit),
                 lambda: (
                     self._sync_idx < sync_idx
-                    or (self._sync_idx == sync_idx and spec.unit not in self._resident)
+                    or (
+                        self._sync_idx == sync_idx
+                        and consumer_id in self._live
+                        and spec.unit not in self._resident
+                    )
                 ),
                 f"unit {spec.unit} of sync {sync_idx}",
                 sync_idx,
             )
+            if self._sync_idx == sync_idx and consumer_id not in self._live:
+                raise ValueError(f"consumer {consumer_id} is not in sync {sync_idx}")
             # the unit stays resident until this bucket is served and freed
             self._wait_for(
                 self._room,
@@ -669,9 +675,8 @@ class _RDTProducerServer:
         return flat
 
     def _track_free(self, flat: torch.Tensor, *key: int) -> None:
-        """Account the bucket once Ray drops its last reference to `flat`,
-        i.e. frees the object after the consumer's read completed (or the
-        consumer died). Nothing here may reference `flat` past the return."""
+        """Account the bucket once Ray drops its last reference to `flat`
+        (the consumer's read is done); keep no reference to `flat`."""
         weakref.finalize(flat, self._freed_bucket, *key)
 
     def _freed_bucket(

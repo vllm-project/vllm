@@ -340,8 +340,9 @@ def test_publish_checks_the_metadata(server):
 
 
 def test_a_unit_waits_for_every_live_consumer(server):
+    """A consumer left out of the sync is refused, not left waiting."""
     s = server()
-    for c in (0, 1):
+    for c in (0, 1, 2):
         s.register_consumer(c, [WHOLE_N])
     s.begin_sync([0, 1], 0)
     _publish(s, _weights(), 0)
@@ -352,6 +353,8 @@ def test_a_unit_waits_for_every_live_consumer(server):
     assert 0 in s._resident and not future.done()
     s.free()
     assert future.result(timeout=5) == [0]
+    with pytest.raises(ValueError, match="not in sync"):
+        _call(s.bucket, 2, 0, 0).result(timeout=5)
 
 
 def test_an_unneeded_unit_is_released_at_publish(server):
