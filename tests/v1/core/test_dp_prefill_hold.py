@@ -250,6 +250,27 @@ def test_sizes_arrivals_past_external_hits():
     assert row[dph._ADMITTED_CACHED] == 128
 
 
+def test_queue_scan_takes_the_hit_of_a_deferred_lookup():
+    """A request looked up but deferred keeps no computed tokens, so the queue
+    scan would fall back to the local hit probed at arrival and miss a
+    synchronous external load; it takes the scheduler's fresh hit instead."""
+    scheduler, hold = _hold_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=128, is_async=False)
+    )
+    (dec,) = create_requests(num_requests=1, num_tokens=200, req_ids=["d"])
+    scheduler.add_request(dec)
+    _finish_step(scheduler, scheduler.schedule())
+    assert not dec.is_prefill_chunk
+    (req,) = create_requests(num_requests=1, num_tokens=200, req_ids=["r"])
+    scheduler.add_request(req)
+    assert hold.local_row()[dph._X] == 200
+
+    hold.hold = True
+    output = scheduler.schedule()
+    assert "r" not in output.num_scheduled_tokens
+    assert hold.local_row()[dph._X] == 200 - 128
+
+
 class _Clock:
     """Stands in for `time` in the hold module."""
 

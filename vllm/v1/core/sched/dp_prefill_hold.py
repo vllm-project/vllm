@@ -280,6 +280,12 @@ class PrefillHold:
         self._cached_tokens[request.request_id] = num_cached_tokens(request)
         self._arrived += 1
 
+    def on_lookup(self, request: "Request", num_computed_tokens: int) -> None:
+        """Takes the prefix hit, local and external, the scheduler just looked
+        up, for the queue scan: a request it defers or skips keeps no computed
+        tokens, which would leave the scan with the hit probed at arrival."""
+        self._cached_tokens[request.request_id] = num_computed_tokens
+
     def on_scheduled(
         self, output: "SchedulerOutput", requests: Mapping[str, "Request"]
     ) -> None:

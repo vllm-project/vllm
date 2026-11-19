@@ -1265,6 +1265,9 @@ class Scheduler(SchedulerInterface):
                         num_computed_tokens = 0
                         load_kv_async = False
 
+                    if self.prefill_hold is not None:
+                        self.prefill_hold.on_lookup(request, num_computed_tokens)
+
                     # Include encoder inputs needed to replay the prefix tail.
                     ec_computed_tokens = num_computed_tokens
                     if not window_loaded:
