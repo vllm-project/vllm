@@ -35,6 +35,7 @@ from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
     OfflineScoringInputsContext,
+    PoolingEngineInput,
     ScoringRenderParams,
 )
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
@@ -163,6 +164,8 @@ async def test_pooling_workers_share_only_their_request_media_budget(
         tracker = AsyncMultiModalItemTracker(processor.model_config)
         getattr(tracker, budget_attr).charge(1)
 
+    rejected: PoolingEngineInput | BaseException
+    accepted: PoolingEngineInput | BaseException
     rejected, accepted = await asyncio.gather(
         processor.render_async(params, budget),
         processor.render_async(params, MediaRequestBudgets()),
@@ -170,8 +173,10 @@ async def test_pooling_workers_share_only_their_request_media_budget(
     )
     assert isinstance(rejected, error_type)
     assert limit_env in str(rejected)
-    assert isinstance(accepted, dict)
-    assert accepted["prompts"]["prompt_token_ids"] == [3]
+    assert not isinstance(accepted, BaseException)
+    prompt = accepted["prompts"]
+    assert prompt["type"] == "token"
+    assert prompt["prompt_token_ids"] == [3]
     assert getattr(MultiModalItemTracker(processor.model_config), budget_attr).used == 0
 
 
@@ -209,7 +214,8 @@ def test_offline_scoring_uses_default_template_unless_overridden(
     processor = llm_reranker_processor
     processor.chat_template = default_template
     processor.renderer = SimpleNamespace(
-        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32)
+        default_cmpl_tok_params=TokenizeParams(max_total_tokens=32),
+        default_chat_tok_params=TokenizeParams(max_total_tokens=32),
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="classify",

@@ -75,7 +75,8 @@ class PoolingBaseServing(ABC, BaseServing):
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
         await self._preprocessing(io_processor, ctx)
-        await self._prepare_generators(ctx)
+        generators = await self._prepare_generators(ctx)
+        ctx.result_generator = merge_async_iterators(*generators)
         await self._collect_batch(ctx)
         return await self._postprocessing_async(io_processor, ctx)
 
@@ -148,7 +149,7 @@ class PoolingBaseServing(ABC, BaseServing):
     async def _prepare_generators(
         self,
         ctx: PoolingServeContext,
-    ):
+    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         if ctx.engine_inputs is None:
             raise ValueError("Engine inputs not available")
 
@@ -189,7 +190,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
             generators.append(generator)
 
-        ctx.result_generator = merge_async_iterators(*generators)
+        return generators
 
     async def _collect_batch(
         self,
