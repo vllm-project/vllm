@@ -13,7 +13,8 @@ use fastokens::pre_tokenized::{
 use fastokens::{PreTokenizer as FastokensPreTokenizer, Split as FastokensSplitPreTokenizer};
 use thiserror_ext::AsReport as _;
 use tokenizers::{
-    AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, Tokenizer as HfTokenizer,
+    AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, PreTokenizerWrapper,
+    Tokenizer as HfTokenizer,
 };
 use tracing::{info, warn};
 
@@ -143,6 +144,37 @@ fn encode_fastokens_ordinary(
     Ok(tokenizer.post_process(ids, false))
 }
 
+/// Find the replacement character (SentencePiece's `▁`) of a Metaspace
+/// pre-tokenizer, alone or inside a `Sequence`, like Python's
+/// `get_leading_space_marker`. Decoding an isolated token strips its leading
+/// occurrence.
+fn leading_space_marker(tokenizer: &HfTokenizer) -> Option<char> {
+    let metaspace_replacement = |pre_tokenizer: &PreTokenizerWrapper| match pre_tokenizer {
+        PreTokenizerWrapper::Metaspace(metaspace) => Some(metaspace.get_replacement()),
+        _ => None,
+    };
+    match tokenizer.get_pre_tokenizer()? {
+        PreTokenizerWrapper::Sequence(sequence) => {
+            sequence.as_ref().iter().find_map(metaspace_replacement)
+        }
+        pre_tokenizer => metaspace_replacement(pre_tokenizer),
+    }
+}
+
+fn restore_leading_spaces(raw_token: &str, decoded: String, marker: char) -> String {
+    let marker_count = raw_token.chars().take_while(|&ch| ch == marker).count();
+    let existing_spaces = decoded.chars().take_while(|&ch| ch == ' ').count();
+    let missing_spaces = marker_count.saturating_sub(existing_spaces);
+    if missing_spaces == 0 {
+        return decoded;
+    }
+
+    let mut restored = String::with_capacity(decoded.len() + missing_spaces);
+    restored.push_str(&" ".repeat(missing_spaces));
+    restored.push_str(&decoded);
+    restored
+}
+
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
 ///
 /// This tries to load with `fastokens` first for better performance, then falls
@@ -153,6 +185,7 @@ pub struct HuggingFaceTokenizer {
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
+    leading_space_marker: Option<char>,
 }
 
 impl HuggingFaceTokenizer {
@@ -179,11 +212,13 @@ impl HuggingFaceTokenizer {
         };
         // HF materializes the merged vocabulary to count it, so cache the result.
         let vocab_size = tokenizer.get_vocab_size(true);
+        let leading_space_marker = leading_space_marker(&tokenizer);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
             special_token_ids,
             added_vocab,
             vocab_size,
+            leading_space_marker,
         }
     }
 
@@ -228,6 +263,9 @@ impl HuggingFaceTokenizer {
             special_token_ids,
             added_vocab,
             vocab_size,
+            // fastokens rejects Metaspace pre-tokenizers, so those tokenizers load
+            // through the HF backend.
+            leading_space_marker: None,
         }
     }
 
@@ -311,6 +349,17 @@ impl Tokenizer for HuggingFaceTokenizer {
                 decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
             }
         }
+    }
+
+    fn decode_token(&self, token_id: u32) -> Result<String> {
+        let decoded = self.decode(&[token_id], false)?;
+        let Some(marker) = self.leading_space_marker else {
+            return Ok(decoded);
+        };
+        let Some(raw_token) = self.id_to_token(token_id) else {
+            return Ok(decoded);
+        };
+        Ok(restore_leading_spaces(&raw_token, decoded, marker))
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {

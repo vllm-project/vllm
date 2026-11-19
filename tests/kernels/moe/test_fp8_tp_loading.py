@@ -7,6 +7,8 @@ import torch
 
 import vllm.distributed as distributed
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe import (
     unquantized_fused_moe_method as unquantized_module,
 )
@@ -312,6 +314,22 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
         assert relative_l2 < 0.01, relative_l2.item()
 
 
+def _static_fp8() -> Fp8Config:
+    return Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+
+
+def _make_padded_experts(monkeypatch, quant_config=None):
+    """Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do."""
+    return _make_fp8_tp_experts(
+        monkeypatch,
+        1,
+        0,
+        intermediate_size=256,
+        quant_config=quant_config,
+        config_overrides={"intermediate_size_per_partition": 384},
+    )
+
+
 @pytest.mark.parametrize("static", [False, True])
 def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
     """After a dummy start, begin zeroes the padding of a padded layer."""
@@ -320,11 +338,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
         record_checkpoint_layout,
     )
 
-    quant_config = (
-        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
-        if static
-        else None
-    )
+    quant_config = _static_fp8() if static else None
     suffixes = ("weight",) if static else ("weight", "weight_scale_inv")
     generator = torch.Generator().manual_seed(0)
     checkpoint = {
@@ -336,15 +350,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
     }
 
     def make_and_load(dummy: bool):
-        # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
-        layer = _make_fp8_tp_experts(
-            monkeypatch,
-            1,
-            0,
-            intermediate_size=256,
-            quant_config=quant_config,
-            config_overrides={"intermediate_size_per_partition": 384},
-        )
+        layer = _make_padded_experts(monkeypatch, quant_config)
         model = torch.nn.Module()
         model.experts = layer
         if dummy:
@@ -354,7 +360,7 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
             for p in layer.parameters():
                 p.data.fill_(7)
             record_checkpoint_layout(model)
-            # Post-load processing may rewrite moe_config; the record stands.
+            # Post-load processing may rewrite moe_config; the construction flag stands.
             layer.moe_config.intermediate_size_per_partition_unpadded = 384
             begin_direct_reload(model)
         else:
@@ -382,3 +388,50 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
             torch.testing.assert_close(
                 p.float(), getattr(expected, name).float(), rtol=0, atol=0
             )
+
+
+def _flagged(layer) -> set[str]:
+    return {
+        n for n, p in layer.named_parameters() if getattr(p, "fill_on_reload", False)
+    }
+
+
+def test_padded_experts_flagged_for_reload_fill(monkeypatch):
+    """Construction flags the padded expert tensors, not per-expert scalars."""
+    padded = _make_padded_experts(monkeypatch, _static_fp8())
+    assert _flagged(padded) == {"w13_weight", "w2_weight"}  # scales are (E,), (E, 2)
+
+    block_tp = _make_fp8_tp_experts(monkeypatch, 2, 0, intermediate_size=640)
+    assert block_tp.moe_config.tp_shard_with_padding
+    assert _flagged(block_tp) == {
+        "w13_weight",
+        "w2_weight",
+        "w13_weight_scale_inv",
+        "w2_weight_scale_inv",
+    }
+
+    assert _flagged(_make_fp8_tp_experts(monkeypatch, 1, 0)) == set()
+
+
+@pytest.mark.parametrize("unpadded", [None, 256])
+def test_factory_unpadded_size_flags_padding(dist_init, unpadded):
+    """Kimi-K3 passes the checkpoint's size as `intermediate_size_unpadded`."""
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.static_forward_context = dict()
+    with set_current_vllm_config(vllm_config):
+        experts = FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=256,
+            intermediate_size=384,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+            prefix="model.layers.0.mlp.experts",
+            intermediate_size_unpadded=unpadded,
+        ).routed_experts
+    assert experts.moe_config.intermediate_size_per_partition_unpadded == (
+        unpadded or 384
+    )
+    assert _flagged(experts) == ({"w13_weight", "w2_weight"} if unpadded else set())

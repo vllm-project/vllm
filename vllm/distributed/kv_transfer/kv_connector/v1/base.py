@@ -331,6 +331,18 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def on_kv_cache_ready(self) -> None:
+        """Finish deferred registration after final KV sizing.
+
+        Called on each worker before requests, after preceding device work.
+        Normally follows warmup and capture. With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH,
+        it precedes deferred warmup/capture in warm_and_capture().
+        Must return in bounded time: an unbounded wait blocks engine startup.
+        No hook timeout or cancellation is provided. Exceptions fail startup;
+        background tasks are not awaited. Not called on sleep/wake.
+        """
+        return
+
     def unregister_kv_caches(self) -> None:
         """Drop KV cache registrations before sleep. Transfers are already
         drained. Idempotent."""

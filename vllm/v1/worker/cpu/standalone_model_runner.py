@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -237,6 +238,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
+            log_layer_backends(self.model, self.vllm_config.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -579,6 +581,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
+        self.ec_connector.reset()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         if self.pooling_runner is not None:
