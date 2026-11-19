@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU coverage for sampled-token dedup in top-k logprobs.
 
-``compute_topk_scores`` launches Triton kernels for log-softmax and ranks.
+`compute_topk_scores` launches Triton kernels for log-softmax and ranks.
 This module patches those with torch equivalents so the production fast path
-(topk + ``_drop_sampled_token_from_topk`` + concat) can run on CPU tensors.
+(topk + `_drop_sampled_token_from_topk` + concat) can run on CPU tensors.
 """
 
 from __future__ import annotations
