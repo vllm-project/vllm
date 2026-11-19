@@ -67,8 +67,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         meta = self._recving_metadata[req_id]
         assert meta.remote is not None and self.transfer_topo is not None
         remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
-        # Post-processing stays on the ordinary step path until heterogeneous
-        # receive/abort correctness has been established.
+        # Receives that need post-processing are reported by the step.
         return (
             not self.use_host_buffer
             and not self.enable_permute_local_kv

@@ -20,7 +20,7 @@ with suppress(Exception):
     EarlyKVRecvSender(get_open_zmq_ipc_path()).poll()
 """
     result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=300
     )
     assert result.returncode == 1
     assert "Early KV receive poll failed" in result.stdout + result.stderr

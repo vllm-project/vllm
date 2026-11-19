@@ -6,6 +6,7 @@ import os
 import time
 from itertools import chain
 
+import msgspec
 import torch
 import zmq
 
@@ -77,15 +78,17 @@ class EarlyKVRecvReceiver:
     def __init__(self) -> None:
         self.path = get_open_zmq_ipc_path()
         self._socket = make_zmq_socket(zmq.Context.instance(), self.path, zmq.PULL)
+        self._decoder = msgspec.msgpack.Decoder(list[str])
 
     def drain(self) -> list[set[str]]:
         """Pending reports, one per worker poll; each is a separate vote."""
         notifications: list[set[str]] = []
         while True:
             try:
-                notifications.append(self._socket.recv_pyobj(zmq.NOBLOCK))
+                message = self._socket.recv(zmq.NOBLOCK)
             except zmq.Again:
                 return notifications
+            notifications.append(set(self._decoder.decode(message)))
 
     def close(self) -> None:
         self._socket.close(linger=0)
@@ -124,7 +127,7 @@ class EarlyKVRecvSender:
             with torch.inference_mode():
                 req_ids = get_kv_transfer_group().poll_finished_recving()
             if req_ids:
-                self._socket.send_pyobj(req_ids)
+                self._socket.send(msgspec.msgpack.encode(list(req_ids)))
         except Exception:
             logger.exception("Early KV receive poll failed")
             # Wake the monitor even while the engine is paused. Receive state
