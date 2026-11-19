@@ -885,15 +885,15 @@ def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
 
 
 def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
-    """Waiting requests count their uncached tokens (never below 0); only the
-    first pp_size are looked up in the prefix cache, the rest count in full."""
+    """Waiting requests count their uncached tokens (never below 0), each looked
+    up in the prefix cache once while its num_tokens is unchanged."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
     scheduler.pp_microbatch_min_tokens = 16
     ids = [f"r{i}" for i in range(6)]
     for request in create_requests(6, 400, max_tokens=1, req_ids=ids):
         scheduler.add_request(request)
     # r1's hit exceeds its tokens, as for a preempted request with cached output.
-    hits = {"r0": 384, "r1": 1000, "r2": 384, "r3": 384}
+    hits = {"r0": 384, "r1": 1000, "r2": 384, "r3": 384, "r4": 384, "r5": 0}
     looked_up: list[str] = []
 
     def hit(request):
@@ -901,16 +901,16 @@ def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
         return hits[request.request_id]
 
     monkeypatch.setattr(scheduler.kv_cache_manager, "get_num_cached_tokens", hit)
-    # 16 + 0 + 16 + 16 + 400 + 400 = 848 tokens -> ceil(848 / 4).
-    assert scheduler._pp_microbatch_cap(512) == 212
-    assert looked_up == ids[:4]
+    # 16 + 0 + 16 + 16 + 16 + 400 = 464 tokens -> ceil(464 / 4).
+    assert scheduler._pp_microbatch_cap(512) == 116
+    assert looked_up == ids
 
     # Hits are remembered while requests wait, until num_tokens changes.
-    assert scheduler._pp_microbatch_cap(512) == 212
-    assert looked_up == ids[:4]
+    assert scheduler._pp_microbatch_cap(512) == 116
+    assert looked_up == ids
     scheduler.requests["r2"].append_output_token_ids(0)
     scheduler._pp_microbatch_cap(512)
-    assert looked_up == ids[:4] + ["r2"]
+    assert looked_up == ids + ["r2"]
 
 
 def test_pp_microbatch_cap_skips_decode_only_steps():

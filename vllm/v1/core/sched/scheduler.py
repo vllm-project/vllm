@@ -739,11 +739,10 @@ class Scheduler(SchedulerInterface):
             if request.num_computed_tokens >= request.num_prompt_tokens
             and not self._needs_no_more_steps(request)
         )
-        for i, request in enumerate(itertools.chain(*waiting_queues)):
+        for request in itertools.chain(*waiting_queues):
             if prefill >= budget * self.pp_size:
                 break  # cap already at the full budget
-            # Look up hits only for the first pp_size; later ones count in full.
-            hit = self._pp_num_cached_tokens(request) if i < self.pp_size else 0
+            hit = self._pp_num_cached_tokens(request)
             prefill += max(0, request.num_tokens - hit)
         # num_prefill_lookahead: the MTP lookahead reservation must leave a token.
         cap = max(
