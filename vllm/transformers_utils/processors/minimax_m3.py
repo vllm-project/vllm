@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3.1 VL HuggingFace-compatible Processor / ImageProcessor /
 VideoProcessor, vendored into vLLM so the model loads without
-``--trust-remote-code`` (the released checkpoint only ships these classes as
-remote code via ``auto_map``).
+`--trust-remote-code` (the released checkpoint only ships these classes as
+remote code via `auto_map`).
 
 Both image and video processors use the MiniMax M3.1 aligned-size resize
-(``compute_aligned_size``): tiny inputs are upscaled to a minimum area /
+(`compute_aligned_size`): tiny inputs are upscaled to a minimum area /
 short side, then both dims are ceil-aligned to the patch factor and capped
-at a per-modality long side (selectable via the OpenAI-style ``detail``
-kwarg or an explicit ``max_long_side_pixel``). The original async
+at a per-modality long side (selectable via the OpenAI-style `detail`
+kwarg or an explicit `max_long_side_pixel`). The original async
 frame-sampling helpers are intentionally omitted: vLLM performs its own
 frame loading and feeds decoded frames to the processor.
 """
@@ -61,20 +61,20 @@ def compute_aligned_size(
     max_long_side_pixel: int,
     min_short_side: int = MIN_SHORT_SIDE_PIXEL,
 ) -> tuple[int, int]:
-    """Compute the resize target ``(resized_height, resized_width)``.
+    """Compute the resize target `(resized_height, resized_width)`.
 
-    Three layers (mirrors sglang's M3.1 ``compute_aligned_size``):
+    Three layers (mirrors sglang's M3.1 `compute_aligned_size`):
 
-    1. Aspect-ratio guard: reject inputs whose ratio exceeds ``MAX_RATIO``.
+    1. Aspect-ratio guard: reject inputs whose ratio exceeds `MAX_RATIO`.
     2. Floor layers: upscale proportionally when the area is below
-       ``min_pixels``, or the short side is below ``min_short_side``.
-    3. Alignment layer: ``_align_to_factor`` ceil-aligns both dims to
-       ``factor`` and caps them at ``max_long_side_pixel``.
+       `min_pixels`, or the short side is below `min_short_side`.
+    3. Alignment layer: `_align_to_factor` ceil-aligns both dims to
+       `factor` and caps them at `max_long_side_pixel`.
 
     Args:
         height: Original height in pixels, must be > 0.
         width: Original width in pixels, must be > 0.
-        factor: Alignment factor, usually ``patch_size * merge_size``.
+        factor: Alignment factor, usually `patch_size * merge_size`.
         min_pixels: Area floor; smaller inputs are upscaled to at least
             this area before alignment.
         max_long_side_pixel: Per-dim cap applied by the alignment layer
@@ -82,11 +82,11 @@ def compute_aligned_size(
         min_short_side: Short-side pixel floor.
 
     Returns:
-        ``(resized_height, resized_width)``, both multiples of ``factor``
-        and at most ``max_long_side_pixel``.
+        `(resized_height, resized_width)`, both multiples of `factor`
+        and at most `max_long_side_pixel`.
 
     Raises:
-        ValueError: If the aspect ratio exceeds ``MAX_RATIO``.
+        ValueError: If the aspect ratio exceeds `MAX_RATIO`.
 
     """
     if max(height, width) / min(height, width) > MAX_RATIO:
@@ -113,15 +113,15 @@ def _align_to_factor(
     factor: int,
     max_size: tuple[int, int],
 ) -> tuple[int, int]:
-    """Ceil-align both dims to ``factor``, then cap at per-dim ``max_size``.
+    """Ceil-align both dims to `factor`, then cap at per-dim `max_size`.
 
     When either aligned dim exceeds its cap, scale both dims back down
     proportionally (integer arithmetic, preserving the aspect ratio) and
     ceil-align again.
 
     Returns:
-        ``(height, width)`` with both dims multiples of ``factor`` and at
-        most the corresponding ``max_size`` dim.
+        `(height, width)` with both dims multiples of `factor` and at
+        most the corresponding `max_size` dim.
 
     """
     max_w, max_h = max_size
@@ -150,15 +150,15 @@ def resolve_max_long_side_pixel(
     *,
     modality: str,
 ) -> int:
-    """Resolve the long-side pixel cap from ``detail`` / explicit override.
+    """Resolve the long-side pixel cap from `detail` / explicit override.
 
-    ``detail`` (default ``"auto"``) maps to a per-modality cap. An explicit
-    ``max_long_side_pixel`` takes priority over a non-auto ``detail``; the
-    ``"auto"`` tier value itself is treated as "unset" so the processor class
-    defaults (2016 for images, 672 for videos) do not shadow ``detail``.
+    `detail` (default `"auto"`) maps to a per-modality cap. An explicit
+    `max_long_side_pixel` takes priority over a non-auto `detail`; the
+    `"auto"` tier value itself is treated as "unset" so the processor class
+    defaults (2016 for images, 672 for videos) do not shadow `detail`.
 
     Raises:
-        ValueError: If ``detail`` or ``modality`` is not a known value.
+        ValueError: If `detail` or `modality` is not a known value.
 
     """
     if modality == "image":

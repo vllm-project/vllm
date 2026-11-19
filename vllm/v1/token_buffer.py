@@ -76,7 +76,7 @@ else:
 def extend_from_slice(
     dst: list[int], src: Sequence[int], start: int, stop: int
 ) -> None:
-    """``dst.extend(src[start:stop])``, copied without Python ints when both are
+    """`dst.extend(src[start:stop])`, copied without Python ints when both are
     TokenBuffers."""
     if isinstance(dst, array) and isinstance(src, array):
         dst.extend(array.__getitem__(src, slice(start, stop)))
@@ -90,11 +90,11 @@ def rfind_tokens(
     start: int = 0,
     stop: int | None = None,
 ) -> int:
-    """Return the index of the last token in ``token_ids[start:stop]`` that is
-    one of ``targets`` (``None`` entries, for absent tokens, are ignored), or -1.
+    """Return the index of the last token in `token_ids[start:stop]` that is
+    one of `targets` (`None` entries, for absent tokens, are ignored), or -1.
 
     An int32 buffer (a TokenBuffer) is searched with numpy, in chunks growing
-    back from ``stop`` so a recent match is found quickly, without creating a
+    back from `stop` so a recent match is found quickly, without creating a
     Python int per token. Other sequences are scanned backwards in Python.
     """
     if stop is None:
@@ -124,9 +124,9 @@ def rfind_token_sequences(
     start: int = 0,
     stop: int | None = None,
 ) -> tuple[int, int]:
-    """Return ``(index, k)`` for the newest occurrence in ``token_ids[start:stop]``
-    of any of the multi-token ``markers``, ``k`` being its position in
-    ``markers`` (the first listed wins at the same index), or ``(-1, -1)``.
+    """Return `(index, k)` for the newest occurrence in `token_ids[start:stop]`
+    of any of the multi-token `markers`, `k` being its position in
+    `markers` (the first listed wins at the same index), or `(-1, -1)`.
 
     Candidates are found with rfind_tokens on the markers' first tokens, so a
     TokenBuffer is searched with numpy and only candidate positions are read.
@@ -149,7 +149,7 @@ def rfind_token_sequences(
 
 
 def token_slice(tokens: Sequence[int], start: int, stop: int) -> Sequence[int]:
-    """``tokens[start:stop]``; for a TokenBuffer an int32 array, so that no
+    """`tokens[start:stop]`; for a TokenBuffer an int32 array, so that no
     Python ints are made until it is read."""
     if isinstance(tokens, array):
         return array.__getitem__(tokens, slice(start, stop))
@@ -157,10 +157,10 @@ def token_slice(tokens: Sequence[int], start: int, stop: int) -> Sequence[int]:
 
 
 class TokenIdsView(Sequence[int]):
-    """``tokens`` followed by ``suffix``, shortened from the end by pop().
+    """`tokens` followed by `suffix`, shortened from the end by pop().
 
     Copied into a list only when read element-wise, so a caller that ignores
-    it, or searches it with rfind_tokens, doesn't copy ``tokens``.
+    it, or searches it with rfind_tokens, doesn't copy `tokens`.
     """
 
     def __init__(self, tokens: Sequence[int], suffix: Iterable[int] = ()) -> None:

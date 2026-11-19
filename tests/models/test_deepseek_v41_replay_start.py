@@ -26,14 +26,8 @@ WINDOW = 4
 # Group 0 is prefix-cacheable (compressed KV), group 1 is the replayed window.
 KV_CACHE_CONFIG = SimpleNamespace(
     kv_cache_groups=[
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(prefix_cacheable=True, prefix_replay_tokens=0)
-        ),
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=WINDOW
-            )
-        ),
+        SimpleNamespace(prefix_cacheable=True, prefix_replay_tokens=0),
+        SimpleNamespace(prefix_cacheable=False, prefix_replay_tokens=WINDOW),
     ]
 )
 
@@ -44,6 +38,7 @@ def state(monkeypatch):
     cfg.model_config.enable_prompt_embeds = False
     cfg.model_config.uses_mrope = False
     cfg.model_config.is_multimodal_model = False
+    cfg.model_config.supports_multimodal_inputs = False
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.scheduler_config.max_num_seqs = 8
     cfg.scheduler_config.max_num_batched_tokens = 64

@@ -313,6 +313,19 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
+    def get_vision_encoder_info(
+        self,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> PixtralHFEncoderInfo:
+        size = self.get_hf_processor().image_processor.size
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(
+            mm_processor_kwargs or {}
+        )
+        if override_size := merged_mm_kwargs.get("images_kwargs", {}).get("size"):
+            size = size | override_size
+
+        return PixtralHFEncoderInfo(self.get_hf_config(), size["longest_edge"])
+
 
 class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -367,7 +380,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
         assert isinstance(hf_config, LlavaConfig)
-        encoder_info = PixtralHFEncoderInfo(hf_config)
+        encoder_info = self.info.get_vision_encoder_info(hf_processor_mm_kwargs)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -537,7 +550,7 @@ class LlavaForConditionalGeneration(
         )
 
         # NOTE: These are special cases for Pixtral-12B in the HF-format
-        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json
         if (
             config.text_config.architectures is None
             and config.text_config.model_type == "mistral"

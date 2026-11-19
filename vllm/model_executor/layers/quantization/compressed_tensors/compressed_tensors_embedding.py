@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Quantized embedding method for compressed-tensors.
 
-Adds dequant-on-lookup support for a pack-quantized ``VocabParallelEmbedding``
+Adds dequant-on-lookup support for a pack-quantized `VocabParallelEmbedding`
 (2-8 bit INT, channel- or group-quantized). Only the gathered token rows are
 unpacked and dequantized, so the packed weight is never densified.
 """
@@ -37,7 +37,7 @@ def _dequant_gather_kernel(
     BLOCK: tl.constexpr,
 ):
     """Gather embedding rows by token id, unpack int32-packed INT weights, and
-    dequantize to ``out`` dtype in one pass (no int8 intermediate)."""
+    dequantize to `out` dtype in one pass (no int8 intermediate)."""
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     col_mask = col < hidden

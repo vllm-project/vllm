@@ -415,6 +415,7 @@ def test_multi_example_connector_consistency():
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
+        "on_kv_cache_ready",
         "get_handshake_metadata",
         "handle_preemptions",
         "bind_connector_metadata",
@@ -457,8 +458,10 @@ def test_multi_example_connector_consistency():
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -498,8 +501,10 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
 
@@ -665,6 +670,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         }
 
@@ -691,6 +697,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -723,6 +730,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
         }
 
@@ -745,6 +753,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -777,6 +786,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             }
         )
 
@@ -811,6 +821,7 @@ class TestMultiConnectorStats:
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
+                "num_declined_expired_reads": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -868,6 +879,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -886,6 +898,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -920,6 +933,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -949,6 +963,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -978,6 +993,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }
@@ -1010,6 +1026,7 @@ class TestMultiConnectorStats:
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
+                        "num_declined_expired_reads": [],
                     }
                 )
             }

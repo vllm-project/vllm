@@ -6,6 +6,27 @@ from PIL import Image, ImageDraw, ImageFont
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+DASH_BACKENDS = (
+    ["ROCM_AITER_FA"]
+    if current_platform.is_rocm()
+    else [
+        "FLASH_ATTN",
+        pytest.param(
+            "FLASHINFER",
+            marks=pytest.mark.skipif(
+                not has_flashinfer(), reason="requires FlashInfer"
+            ),
+        ),
+    ]
+)
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="Unlimited-OCR-2 DASH attention requires CUDA or ROCm",
+)
 
 
 def _attention_class_names(model):
@@ -50,13 +71,12 @@ def _prefill_graph_segments(worker):
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("crop_mode", [False, True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 @pytest.mark.parametrize("graph_mode", ["eager", "decode", "prefill"])
 def test_unlimited_ocr2_batched_pages(
     vllm_runner, graph_mode, backend, crop_mode, monkeypatch
 ):
     """Load DASH weights and preserve page content across batched requests."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     enforce_eager = graph_mode == "eager"
     prefill_graph = graph_mode == "prefill"
     chunked_prefill = graph_mode != "decode"
@@ -90,8 +110,8 @@ def test_unlimited_ocr2_batched_pages(
         },
         enable_chunked_prefill=chunked_prefill,
         enable_prefix_caching=False,
-        mm_encoder_attn_backend="FLASHINFER"
-        if backend == "FLASHINFER"
+        mm_encoder_attn_backend=backend
+        if backend in ("FLASHINFER", "ROCM_AITER_FA")
         else "TORCH_SDPA",
         limit_mm_per_prompt={"image": 2},
         mm_processor_kwargs={"crop_mode": crop_mode},
@@ -202,12 +222,11 @@ def test_unlimited_ocr2_batched_pages(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
     vllm_runner, monkeypatch, backend
 ):
     """Queue distinct cropped pages beyond the encoder cache's token budget."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     requests = []
     expected = ["The invoice total is 125 dollars.", "The access code is ORANGE 2468."]
     font = ImageFont.load_default(size=40)
@@ -254,14 +273,15 @@ def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", DASH_BACKENDS)
 def test_unlimited_ocr2_excess_markers_survive_preemption(
     vllm_runner, monkeypatch, backend
 ):
     """Recomputation preserves raw logits after routing passes the last page."""
     import torch
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     requests = []
     for idx in range(2):
         pages = []
@@ -285,6 +305,8 @@ def test_unlimited_ocr2_excess_markers_survive_preemption(
         max_model_len=1024,
         max_num_seqs=2,
         max_num_batched_tokens=128,
+        # 80 blocks x 16 tokens fit one request but not both; preemption needs it.
+        block_size=16,
         num_gpu_blocks_override=80,
         kv_cache_memory_bytes=1024**3,
         enable_chunked_prefill=True,

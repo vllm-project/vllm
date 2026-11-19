@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``--mamba-ssm-cache-dtype`` must reach GLM-5.3-Flash's KDA recurrent state
+"""`--mamba-ssm-cache-dtype` must reach GLM-5.3-Flash's KDA recurrent state
 (it used to be dropped, leaving the state float32 unconditionally)."""
 
 from types import SimpleNamespace
