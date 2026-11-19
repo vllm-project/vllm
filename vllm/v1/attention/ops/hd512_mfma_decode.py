@@ -300,6 +300,7 @@ hd512_group_attn2(const bf16* __restrict__ q,
         const int* __restrict__ it_row,     // [n_items] -> bt row of member 0
         const int* __restrict__ it_mem,     // [n_items * 4] member rows, -1 pad
         const int* __restrict__ it_sblk,    // [n_items] shared (full) blocks
+        const int* __restrict__ q_map,      // [nreq] member row -> q row, or 0
         float* __restrict__ part_o,
         float* __restrict__ part_ml,
         float scale,
@@ -348,7 +349,8 @@ hd512_group_attn2(const bf16* __restrict__ q,
 
     const int slen = sblk * 16;    // all shared blocks are full
     const int mrowc = memc < 0 ? 0 : memc;
-    const bf16* qrow = q + ((long)(mrowc * 8 + kvh * 4 + (nw & 3))) * 512;
+    const long qseq = q_map ? (long)q_map[mrowc] : (long)mrowc;
+    const bf16* qrow = q + ((long)(qseq * 8 + kvh * 4 + (nw & 3))) * 512;
     const int* btrow = bt + (long)it_row[item] * bt_stride;
 
     float acc[8][4];
@@ -492,7 +494,8 @@ hd512_group_attn2(const bf16* __restrict__ q,
 
 extern "C" __global__ void __launch_bounds__(64)
 hd512_combine_cascade(bf16* __restrict__ out,
-           const int* __restrict__ grp_flag,   // [nseq] 1 = fold group A slots
+           const int* __restrict__ grp_flag,   // [nreq] 1 = fold group A slots
+           const int* __restrict__ seqmap,    // [nseq] row -> request, or 0
            const float* __restrict__ part_oA,
            const float* __restrict__ part_mlA,
            const float* __restrict__ part_oB,
@@ -503,9 +506,13 @@ hd512_combine_cascade(bf16* __restrict__ out,
     const int kvh = head >> 2;
     const int warp = head & 3;
     const int lane = threadIdx.x;
+    // B-pass slots and the output row are packed (seq); the A-pass slots and
+    // the group flag live at the request row (gseq) -- on the mixed-batch
+    // path the packed decode subset is not the request range.
+    const int gseq = seqmap ? seqmap[seq] : seq;
     const long baseB = (((long)(seq * 2 + kvh) * segsB) * 4 + warp);
-    const long baseA = (((long)(seq * 2 + kvh) * segsA) * 4 + warp);
-    const int grp = grp_flag[seq];
+    const long baseA = (((long)(gseq * 2 + kvh) * segsA) * 4 + warp);
+    const int grp = grp_flag[gseq];
     float mstar = -INFINITY;
     for (int sgm = 0; sgm < segsB; ++sgm)
         mstar = fmaxf(mstar, part_mlB[(baseB + (long)sgm * 4) * 2]);
@@ -575,6 +582,28 @@ void launch_hd512_group2(at::Tensor q, at::Tensor kc, at::Tensor bt,
         (const bf16*)q.data_ptr(), (const bf16*)kc.data_ptr(),
         (const int*)bt.data_ptr(), (const int*)it_row.data_ptr(),
         (const int*)it_mem.data_ptr(), (const int*)it_sblk.data_ptr(),
+        nullptr,
+        (float*)part_o.data_ptr(), (float*)part_ml.data_ptr(),
+        scale, v_delta, k_blk, k_slot, k_hkv, (int)segs,
+        (int)bt.stride(0));
+}
+
+// Mixed-batch variant: q rows are addressed through q_map (member row ->
+// token row); group items and block tables stay at request granularity.
+void launch_hd512_group2_map(at::Tensor q, at::Tensor q_map, at::Tensor kc,
+                         at::Tensor bt, at::Tensor it_row, at::Tensor it_mem,
+                         at::Tensor it_sblk,
+                         at::Tensor part_o, at::Tensor part_ml,
+                         double scale_d, long v_delta, long k_blk,
+                         long k_slot, long k_hkv, long segs, long stream) {
+    const long n_items = it_row.size(0);
+    float scale = (float)scale_d;
+    dim3 grid((unsigned)n_items, 2, (unsigned)segs);
+    hd512_group_attn2<<<grid, 256, 0, (hipStream_t)stream>>>(
+        (const bf16*)q.data_ptr(), (const bf16*)kc.data_ptr(),
+        (const int*)bt.data_ptr(), (const int*)it_row.data_ptr(),
+        (const int*)it_mem.data_ptr(), (const int*)it_sblk.data_ptr(),
+        (const int*)q_map.data_ptr(),
         (float*)part_o.data_ptr(), (float*)part_ml.data_ptr(),
         scale, v_delta, k_blk, k_slot, k_hkv, (int)segs,
         (int)bt.stride(0));
@@ -588,6 +617,24 @@ void launch_hd512_combine_cascade(at::Tensor out, at::Tensor grp_flag,
     dim3 grid((unsigned)nseq, 8, 1);
     hd512_combine_cascade<<<grid, 64, 0, (hipStream_t)stream>>>(
         (bf16*)out.data_ptr(), (const int*)grp_flag.data_ptr(),
+        nullptr,
+        (const float*)part_oA.data_ptr(), (const float*)part_mlA.data_ptr(),
+        (const float*)part_oB.data_ptr(), (const float*)part_mlB.data_ptr(),
+        (int)nseq, (int)segsA, (int)segsB);
+}
+
+// Mixed-batch variant: out / B slots are packed rows, group flag and A
+// slots live at request rows, seqmap maps packed row -> request row.
+void launch_hd512_combine_cascade_map(at::Tensor out, at::Tensor seqmap,
+                                  at::Tensor grp_flag,
+                                  at::Tensor part_oA, at::Tensor part_mlA,
+                                  at::Tensor part_oB, at::Tensor part_mlB,
+                                  long segsA, long segsB, long stream) {
+    long nseq = out.size(0);
+    dim3 grid((unsigned)nseq, 8, 1);
+    hd512_combine_cascade<<<grid, 64, 0, (hipStream_t)stream>>>(
+        (bf16*)out.data_ptr(), (const int*)grp_flag.data_ptr(),
+        (const int*)seqmap.data_ptr(),
         (const float*)part_oA.data_ptr(), (const float*)part_mlA.data_ptr(),
         (const float*)part_oB.data_ptr(), (const float*)part_mlB.data_ptr(),
         (int)nseq, (int)segsA, (int)segsB);
@@ -610,7 +657,18 @@ void launch_hd512_group2(at::Tensor q, at::Tensor kc, at::Tensor bt,
                          at::Tensor part_o, at::Tensor part_ml,
                          double scale, long v_delta, long k_blk,
                          long k_slot, long k_hkv, long segs, long stream);
+void launch_hd512_group2_map(at::Tensor q, at::Tensor q_map, at::Tensor kc,
+                         at::Tensor bt, at::Tensor it_row, at::Tensor it_mem,
+                         at::Tensor it_sblk,
+                         at::Tensor part_o, at::Tensor part_ml,
+                         double scale, long v_delta, long k_blk,
+                         long k_slot, long k_hkv, long segs, long stream);
 void launch_hd512_combine_cascade(at::Tensor out, at::Tensor grp_flag,
+                                  at::Tensor part_oA, at::Tensor part_mlA,
+                                  at::Tensor part_oB, at::Tensor part_mlB,
+                                  long segsA, long segsB, long stream);
+void launch_hd512_combine_cascade_map(at::Tensor out, at::Tensor seqmap,
+                                  at::Tensor grp_flag,
                                   at::Tensor part_oA, at::Tensor part_mlA,
                                   at::Tensor part_oB, at::Tensor part_mlB,
                                   long segsA, long segsB, long stream);
@@ -639,7 +697,9 @@ def hd512_get_kernel():
                 "launch_hd512",
                 "launch_hd512_attn",
                 "launch_hd512_group2",
+                "launch_hd512_group2_map",
                 "launch_hd512_combine_cascade",
+                "launch_hd512_combine_cascade_map",
             ],
             with_cuda=True,
             extra_cuda_cflags=["-O3"],
@@ -928,6 +988,103 @@ def hd512_cascade_attention(
         NUM_SEGMENTS,
         stream,
     )
+
+
+def hd512_cascade_rows(
+    query: torch.Tensor,
+    output: torch.Tensor,
+    kv_cache: torch.Tensor,
+    dec_req: torch.Tensor,
+    dec_tok: torch.Tensor,
+    q_map: torch.Tensor,
+    block_table: torch.Tensor,
+    bufs,
+    part_o: torch.Tensor,
+    part_ml: torch.Tensor,
+    softmax_scale: float,
+) -> None:
+    """Cascade chain over the decode-row subset of a mixed batch
+    (VLLM_GEMMA4_HD512_CASCADE_MIXED).
+
+    The runner-side group descriptors (group items, shifted tables, group
+    flags) are request-indexed and already cover the whole batch, chunk
+    rows included; only the launch carries the packed subset. The A-pass
+    reads its member queries through q_map (request row -> token row;
+    chunk-row members read an in-bounds row whose A slots no path folds),
+    the B-pass runs the split-KV kernel over the subset's gathered shifted
+    tables, and the combine folds the two partial sets via the packed
+    subset's own sequence map. Rows are written back into the full batch's
+    output by their token index.
+
+    Args:
+        query: [num_tokens, 8, 512] bf16, the full batch.
+        output: [num_tokens, 8, 512] bf16, the full batch.
+        kv_cache: per-layer cache view, strides as in hd512_decode_attention.
+        dec_req: [num_dec] device request rows of the decode subset
+            (the combine's sequence map and the B-pass table rows).
+        dec_tok: [num_dec] device token rows of the decode subset
+            (in/out gather and scatter).
+        q_map: [>= max request row + 1] int32 device, request row -> first
+            token row (attention metadata's query_start_loc head).
+        block_table: [num_reqs, max_blocks] int32 full-batch table.
+        bufs: HD512CascadeBufs of this step (items, grp_flag, bt/sq_shifted,
+            grp_part scratch).
+        part_o: B-pass partial-output scratch (NUM_SEGMENTS slots).
+        part_ml: B-pass max/sum scratch (NUM_SEGMENTS slots).
+        softmax_scale: attention scale.
+
+    """
+    strides = kv_cache.stride()
+    assert kv_cache.dtype == torch.bfloat16 and strides[3] == 1, (
+        "hd512_mfma_decode requires a bf16 cache with a stride-1 content dim"
+    )
+    q_dec = query.index_select(0, dec_tok)
+    out_dec = torch.empty_like(q_dec)
+    bt_s = bufs.bt_shifted.index_select(0, dec_req).contiguous()
+    sq_s = bufs.sq_shifted.index_select(0, dec_req).contiguous()
+    stream = torch.cuda.current_stream().cuda_stream
+    kernel = hd512_get_kernel()
+    v_args = (512 * strides[3], strides[0], strides[2], strides[1])
+    kernel.launch_hd512_group2_map(
+        query,
+        q_map,
+        kv_cache,
+        block_table,
+        bufs.it_row,
+        bufs.it_mem,
+        bufs.it_sblk,
+        bufs.grp_part_o,
+        bufs.grp_part_ml,
+        softmax_scale,
+        *v_args,
+        CASCADE_SEGS_A,
+        stream,
+    )
+    kernel.launch_hd512_attn(
+        q_dec,
+        kv_cache,
+        bt_s,
+        sq_s,
+        part_o,
+        part_ml,
+        softmax_scale,
+        *v_args,
+        NUM_SEGMENTS,
+        stream,
+    )
+    kernel.launch_hd512_combine_cascade_map(
+        out_dec,
+        dec_req.to(torch.int32),
+        bufs.grp_flag,
+        bufs.grp_part_o,
+        bufs.grp_part_ml,
+        part_o,
+        part_ml,
+        CASCADE_SEGS_A,
+        NUM_SEGMENTS,
+        stream,
+    )
+    output.index_copy_(0, dec_tok, out_dec)
 
 
 def hd512_cascade_groups(

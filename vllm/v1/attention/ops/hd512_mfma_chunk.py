@@ -547,6 +547,8 @@ class HD512ChunkStepPlan:
     __slots__ = (
         "num_dec",
         "dec_tok",
+        "dec_req",
+        "q_map",
         "bt_dec",
         "sl_dec",
         "stock_tok",
@@ -634,14 +636,21 @@ def hd512_build_step_plan(
         stock_mask[dec] = False
     stock = stock_mask.nonzero(as_tuple=True)[0]
 
-    # Decode arm tensors (same layout as hd512_build_split's).
+    # Decode arm tensors (same layout as hd512_build_split's), plus the
+    # request-row indices and the row->token map the cascade-mixed dispatch
+    # (VLLM_GEMMA4_HD512_CASCADE_MIXED) needs to launch the group fold over
+    # the decode-row subset.
     if plan.num_dec:
         dec_dev = dec.to(device, non_blocking=True)
         plan.dec_tok = qsl[dec].to(device, non_blocking=True)
+        plan.dec_req = dec_dev
+        plan.q_map = query_start_loc[:num_reqs].to(torch.int32)
         plan.bt_dec = block_table.index_select(0, dec_dev).contiguous()
         plan.sl_dec = seq_lens.index_select(0, dec_dev).contiguous()
     else:
         plan.dec_tok = None
+        plan.dec_req = None
+        plan.q_map = None
         plan.bt_dec = None
         plan.sl_dec = None
 

@@ -48,6 +48,7 @@ from vllm.v1.attention.ops.hd512_mfma_decode import (
     hd512_build_split,
     hd512_cascade_attention,
     hd512_cascade_groups,
+    hd512_cascade_rows,
     hd512_cascade_scratch_shape,
     hd512_decode_attention,
     hd512_decode_rows,
@@ -878,6 +879,14 @@ class TritonAttentionImpl(AttentionImpl):
             and (logits_soft_cap or 0.0) == 0.0
         )
 
+        # gfx942 hd512 cascade over the decode-row subset of MIXED batches
+        # (VLLM_GEMMA4_HD512_CASCADE_MIXED): armed by the cascade flag's
+        # geometry; mixed-batch precedence is defined at the dispatch site
+        # (inside the chunk routing branch, which requires _hd512_mfma_chunk).
+        self._hd512_cascade_mixed = (
+            envs.VLLM_GEMMA4_HD512_CASCADE_MIXED and self._hd512_mfma_cascade
+        )
+
         # gfx942 hd512 MFMA chunk kernel (VLLM_GEMMA4_HD512_CHUNK): same
         # covered set as the decode kernel; routes this layer's prefill/chunk
         # rows above a prefix threshold to it.
@@ -1050,15 +1059,39 @@ class TritonAttentionImpl(AttentionImpl):
                 attn_metadata.hd512_step = plan
             if plan is not None and plan.num_dec <= attn_metadata.hd512_capacity:
                 if plan.num_dec:
-                    hd512_decode_rows(
-                        query[:num_actual_tokens],
-                        output,
-                        kv_cache,
-                        plan,
-                        attn_metadata.hd512_part_o,
-                        attn_metadata.hd512_part_ml,
-                        self.scale,
-                    )
+                    # Mixed-batch precedence: with CASCADE_MIXED (which
+                    # requires CASCADE) the decode-row subset runs the
+                    # cascade chain over the step's group descriptors
+                    # instead of the plain split-KV row pass.
+                    _bufs = attn_metadata.hd512_cascade
+                    if (
+                        self._hd512_cascade_mixed
+                        and _bufs is not None
+                        and attn_metadata.num_reqs <= _bufs.capacity
+                    ):
+                        hd512_cascade_rows(
+                            query[:num_actual_tokens],
+                            output,
+                            kv_cache,
+                            plan.dec_req,
+                            plan.dec_tok,
+                            plan.q_map,
+                            attn_metadata.block_table,
+                            _bufs,
+                            attn_metadata.hd512_part_o,
+                            attn_metadata.hd512_part_ml,
+                            self.scale,
+                        )
+                    else:
+                        hd512_decode_rows(
+                            query[:num_actual_tokens],
+                            output,
+                            kv_cache,
+                            plan,
+                            attn_metadata.hd512_part_o,
+                            attn_metadata.hd512_part_ml,
+                            self.scale,
+                        )
                 if plan.routed:
                     n_o, n_ml = hd512c_scratch_shape(
                         plan.rt_ntiles, self._hd512_chunk_segs
