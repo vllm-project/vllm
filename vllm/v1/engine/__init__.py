@@ -166,6 +166,10 @@ class EngineCoreReadyResponse:
     # Whether a disaggregated consumer accepts placeholder metadata without
     # embedding tensors.
     allow_missing_mm_embeddings: bool = False
+    # Encoder cache tokens a request's distinct multimodal items may need in
+    # total, for frontends without a VllmConfig (the Rust frontend). Set
+    # without chunked prefill, when they are all encoded in one step.
+    max_mm_embeds_per_request: int | None = None
 
 
 class EngineCoreRequest(

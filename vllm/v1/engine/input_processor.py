@@ -630,9 +630,14 @@ class InputProcessor:
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
+            mm_hashes = prompt_input["mm_hashes"]
+            num_embeds_by_hash: dict[str, int] = {}
             for modality, mm_positions in decoder_mm_positions.items():
-                for mm_position in mm_positions:
+                for mm_hash, mm_position in zip(
+                    mm_hashes[modality], mm_positions, strict=True
+                ):
                     num_embeds = mm_position.get_num_embeds()
+                    num_embeds_by_hash[mm_hash] = num_embeds
                     if num_embeds > self.mm_encoder_cache_size:
                         raise VLLMValidationError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
@@ -642,6 +647,22 @@ class InputProcessor:
                             f"size or increase the encoder cache size "
                             f"by setting --limit-mm-per-prompt at startup."
                         )
+
+            # Without chunked prefill, the scheduler encodes all of a prompt's
+            # items in one step, so they must fit in the encoder cache together.
+            total_num_embeds = sum(num_embeds_by_hash.values())
+            if (
+                prompt_type == "decoder"
+                and not self.scheduler_config.enable_chunked_prefill
+                and not self.vllm_config.is_mm_encoder_only
+                and total_num_embeds > self.mm_encoder_cache_size
+            ):
+                raise VLLMValidationError(
+                    f"The prompt's multimodal items need {total_num_embeds} "
+                    "encoder cache tokens, more than the encoder cache size of "
+                    f"{self.mm_encoder_cache_size}. They must fit together when "
+                    "chunked prefill is disabled."
+                )
 
         # Shared by generate, embedding and pooling requests.
         if prompt_ids:
