@@ -21,6 +21,7 @@ from vllm.model_executor.layers.mamba.abstract import (
 from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -33,7 +34,10 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.gdn_attn import (
@@ -82,6 +86,19 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            self.tp_size,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+            self.num_spec,
         )
 
     def _init_prefill_checkpointing(self) -> None:
@@ -251,7 +268,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
-        a, b = self._prepare_gating(a, b)
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -330,13 +346,11 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
 
-        # Split mixed non-spec-decode+prefill to process independently
-        split_non_spec = (
-            spec_sequence_masks is None
-            and attn_metadata.num_prefills > 0
-            and attn_metadata.num_decodes > 0
+        num_decode_tokens = (
+            attn_metadata.num_decode_tokens
+            if spec_sequence_masks is None and attn_metadata.num_prefills > 0
+            else 0
         )
-        num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
@@ -349,22 +363,17 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 a_non_spec = a
                 b_non_spec = b
 
-            if split_non_spec:
-                conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
-                a_prefill = a_non_spec[num_decode_tokens:]
-                b_prefill = b_non_spec[num_decode_tokens:]
-            else:
-                conv_output_prefill = mixed_qkv_non_spec
-                a_prefill = a_non_spec
-                b_prefill = b_non_spec
-
             (
                 query_non_spec,
                 key_non_spec,
                 value_non_spec,
                 g_non_spec,
                 beta_non_spec,
-            ) = self._prepare_prefill_inputs(conv_output_prefill, a_prefill, b_prefill)
+            ) = self._prepare_prefill_inputs(
+                mixed_qkv_non_spec[num_decode_tokens:],
+                a_non_spec[num_decode_tokens:],
+                b_non_spec[num_decode_tokens:],
+            )
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec
@@ -394,7 +403,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part
-        if split_non_spec:
+        if num_decode_tokens:
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
@@ -479,9 +488,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             # Init cache
             scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
-            if split_non_spec and prefill_in_place:
+            if num_decode_tokens and prefill_in_place:
                 core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
-            elif split_non_spec:
+            elif num_decode_tokens:
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
                 core_attn_out_non_spec = torch.cat(
@@ -515,19 +524,15 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         elif not prefill_in_place:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-    def _prepare_gating(
-        self, a: torch.Tensor, b: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Qwen keeps raw projections for its fused prefill/decode kernels.
-        return a, b
-
     def _prepare_prefill_inputs(
         self,
         conv_output: torch.Tensor,
         a: torch.Tensor,
         b: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+        q, k, v = self.rearrange_mixed_qkv(conv_output)
+        assert q is not None and k is not None and v is not None
+        return q, k, v, a.unsqueeze(0), b.unsqueeze(0)
 
     def _recurrent_update(
         self,
@@ -542,7 +547,19 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         ssm_state_indices: torch.Tensor,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        raise NotImplementedError
+        return fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=a.unsqueeze(0),
+            beta=b.unsqueeze(0),
+            initial_state=initial_state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
 
     def _forward_chunk_prefill(
         self,

@@ -25,18 +25,12 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     _log_gdn_backend_decision,
     _resolve_gdn_prefill_backend,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops import (
-    chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule,
-)
+from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -52,19 +46,6 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
     """
-
-    def get_state_shape(
-        self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
-            self.num_spec,
-        )
 
     def __init__(
         self,
@@ -368,57 +349,20 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._warmup_prefill_kernels(mixed_qkv)
             return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        num_tokens = attn_metadata.num_actual_tokens
+        g, beta = fused_olmo_hybrid_gdn_gating(
+            self.A_log,
+            a[:num_tokens],
+            b[:num_tokens],
+            self.dt_bias,
+            self.allow_neg_eigval,
+        )
         self._forward_core_impl(
             mixed_qkv,
-            b,
-            a,
+            beta.squeeze(0),
+            g.squeeze(0),
             core_attn_out,
             attn_metadata,
-            use_qk_l2norm_in_kernel=True,
-        )
-
-    def _prepare_gating(
-        self, a: torch.Tensor, b: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        g, beta = fused_olmo_hybrid_gdn_gating(
-            self.A_log, a, b, self.dt_bias, self.allow_neg_eigval
-        )
-        return g.squeeze(0), beta.squeeze(0)
-
-    def _prepare_prefill_inputs(
-        self,
-        conv_output: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        q, k, v = self.rearrange_mixed_qkv(conv_output)
-        assert q is not None and k is not None and v is not None
-        return q, k, v, a.unsqueeze(0), b.unsqueeze(0)
-
-    def _recurrent_update(
-        self,
-        *,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        initial_state: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        ssm_state_indices: torch.Tensor,
-        num_accepted_tokens: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return fused_recurrent_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=a.unsqueeze(0),
-            beta=b.unsqueeze(0),
-            initial_state=initial_state,
-            inplace_final_state=True,
-            cu_seqlens=cu_seqlens,
-            ssm_state_indices=ssm_state_indices,
-            num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
         )
 

@@ -133,7 +133,6 @@ def _build_layer(
         "rearrange_mixed_qkv",
         "_forward_core",
         "_forward_core_impl",
-        "_prepare_gating",
         "_prepare_prefill_inputs",
         "_recurrent_update",
         "_forward_chunk_prefill",
