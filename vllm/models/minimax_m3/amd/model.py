@@ -38,6 +38,9 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
@@ -54,6 +57,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     RoutedExperts,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -104,6 +108,8 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.glue import M3Glue
+from vllm.models.minimax_m3.amd.glue.carry import Mxfp8Carry
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
@@ -160,9 +166,10 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -342,6 +349,10 @@ class MiniMaxM3MLP(nn.Module):
     def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
         """Whether down_proj's kernel quantizes its input inside the GEMM at
         this token count; that is already a single launch, so keep it."""
+        if not isinstance(
+            _mxfp8_linear_kernel(self.down_proj), RocmDotScaledMxfp8LinearKernel
+        ):
+            return False
         n, k = self.down_proj.weight.shape
         return (
             0 < num_tokens <= _FUSED_QUANT_MAX_M
@@ -550,7 +561,9 @@ class MiniMaxM3MoE(nn.Module):
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
+            routed_scale_mode=RoutedScaleMode.ROUTER
+            if self.use_aiter_moe_fse
+            else RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             n_shared_experts=(
@@ -951,7 +964,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Main GQA K/V cache. Block size may change after load, refresh it.
         # AITER sparse PA wants K and V as two separate head groups
         # (H folded into the content dim).
@@ -959,7 +972,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         kv_bytes = (
             self.num_kv_heads * self.head_dim * self.kv_cache_torch_dtype.itemsize
         )
-        return FullAttentionSpec(
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -969,6 +982,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_head_slots=2 if sparse_pa else None,
             state_content_bytes=kv_bytes if sparse_pa else None,
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
         if self.kv_cache.numel() == 0:
@@ -1584,25 +1598,34 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
+def _mxfp8_linear_kernel(linear: nn.Module):
+    """The MXFP8 kernel of `linear`, or None."""
+    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
+    kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return kernel
+
+
 def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
     """Whether `input_layernorm` can hand `qkv_proj` an MXFP8 activation.
 
     The quant key does not encode the scale layout (FlashInfer wants swizzled
-    scales under the same key), so this also requires the ROCm `dot_scaled`
-    kernel, which reads the row-major scales the fused norm writes.
+    scales under the same key), so this also requires a ROCm kernel that
+    reads the row-major scales the fused norm writes.
     """
     if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:
         return False
-    # Quark keeps the kernel on the layer's scheme, ModelOpt on the method.
-    kernel = getattr(getattr(qkv_proj, "scheme", None), "ocp_mx_linear", None)
-    if kernel is None:
-        kernel = getattr(getattr(qkv_proj, "quant_method", None), "kernel", None)
+    kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, RocmDotScaledMxfp8LinearKernel
+        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
+    # set on the backbone's MoE layers when a glue path is on (glue/runtime.py)
+    _m3_glue: M3Glue | None = None
+
     def __init__(
         self,
         config: PreTrainedConfig,
@@ -1702,7 +1725,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         attn_input: torch.Tensor | QuantizedActivation
-        if residual is None:
+        if isinstance(hidden_states, Mxfp8Carry):
+            # the previous MoE layer already normed and quantized this layer's
+            # attention input (codes of every row); the residual it returned
+            # goes with it
+            attn_input = QuantizedActivation(
+                hidden_states.x_q,
+                hidden_states.x_s,
+                torch.bfloat16,
+                hidden_states.x_q.shape,
+                kMxfp8Dynamic,
+            )
+            residual = hidden_states.res_local
+        elif residual is None:
             residual = hidden_states
             attn_input = self.input_layernorm(hidden_states)
         elif self.fuse_input_norm_mxfp8:
@@ -1721,6 +1756,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=attn_input,
         )
+
+        # the glue: the whole MoE half from the o_proj partial, when this
+        # forward's plan selected it (glue/runtime.py)
+        if self._m3_glue is not None:
+            glued = self._m3_glue.moe_half(self, hidden_states, residual)
+            if glued is not None:
+                return glued
 
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         if self.fuse_post_norm_mxfp8:
@@ -1905,6 +1947,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
 
             self._mono = MonoDecode(self, vllm_config)
+        # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
+        self.m3_glue = M3Glue.create(self, vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1946,27 +1990,38 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, self.start_layer, hidden_states, residual
             )
         layers = self.layers[self.start_layer : self.end_layer]
-        if decode is None:
-            for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
-                )
-        else:
-            step = decode.plan(positions, intermediate_tensors)
-            failure: Exception | None = None
-            try:
+        # one glue plan for the whole forward (the MoE layers read it)
+        glue = self.m3_glue
+        plan = (
+            glue.begin_forward(positions, intermediate_tensors)
+            if glue is not None
+            else None
+        )
+        try:
+            if decode is None:
                 for idx, layer in enumerate(layers, start=self.start_layer):
-                    kernel = step.layer(layer.layer_id) if step else None
-                    hidden_states, residual = (kernel or layer)(
-                        positions, hidden_states, residual
-                    )
+                    hidden_states, residual = layer(positions, hidden_states, residual)
                     self._maybe_add_hidden_state(
                         aux_hidden_states, idx + 1, hidden_states, residual
                     )
-            except Exception as err:
-                failure = err
-            decode.after_step(step, failure)
+            else:
+                step = decode.plan(positions, intermediate_tensors)
+                failure: Exception | None = None
+                try:
+                    for idx, layer in enumerate(layers, start=self.start_layer):
+                        kernel = step.layer(layer.layer_id) if step else None
+                        hidden_states, residual = (kernel or layer)(
+                            positions, hidden_states, residual
+                        )
+                        self._maybe_add_hidden_state(
+                            aux_hidden_states, idx + 1, hidden_states, residual
+                        )
+                except Exception as err:
+                    failure = err
+                decode.after_step(step, failure)
+        finally:
+            if glue is not None:
+                glue.end_forward(plan)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -2081,7 +2136,10 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.m3_glue is not None:
+            self.model.m3_glue.after_load_weights()
+        return loaded
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the

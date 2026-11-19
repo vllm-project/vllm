@@ -27,7 +27,7 @@ class EPTestOptions(NamedTuple):
     hf_overrides: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
@@ -108,7 +108,7 @@ class EPTestSettings:
 # The values displayed here are only a rough indicator of the size of the model
 
 TEST_MODELS = {
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(trust_remote_code=True),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": EPTestSettings.fast(tp_base=4),
 }
 
