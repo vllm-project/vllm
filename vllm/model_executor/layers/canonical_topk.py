@@ -21,7 +21,36 @@ their ascending positions.
 
 import torch
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+
+logger = init_logger(__name__)
+
+# Features (e.g. a TP replication switch) that need a canonical top-k on top of
+# VLLM_DETERMINISTIC_SPARSE_TOPK / VLLM_BATCH_INVARIANT.
+_required_by: set[str] = set()
+
+
+def require_deterministic_sparse_topk(reason: str) -> None:
+    """Turn the canonical sparse-indexer top-k on for this process.
+
+    Call it while the model is built, before the first forward pass and before
+    the attention metadata builders are made: every site reads the flag at call
+    time through `deterministic_sparse_topk()`."""
+    if reason not in _required_by:
+        _required_by.add(reason)
+        logger.info("Canonical sparse-indexer top-k turned on by %s.", reason)
+
+
+def deterministic_sparse_topk() -> bool:
+    """Whether the sparse indexer top-k must be canonical (see module docstring)."""
+    return (
+        envs.VLLM_DETERMINISTIC_SPARSE_TOPK
+        or envs.VLLM_BATCH_INVARIANT
+        or bool(_required_by)
+    )
+
 
 _BLOCK = 2048
 # Largest key, above any score's: marks empty slots when taking the minimum.
