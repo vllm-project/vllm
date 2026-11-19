@@ -1497,6 +1497,13 @@ class AsyncMPClient(MPClient):
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
         status = self._engine_status[self.engine_ranks_managed[0]]
+        is_pause = ft_request.instruction == "pause"
+        if is_pause and status["status"] != "healthy":
+            return FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=f"cannot pause: status is {status['status'].upper()}",
+            )
 
         # Reject a second recovery while one is in flight
         if status.get("ft_state") == "recovering":
@@ -1506,9 +1513,10 @@ class AsyncMPClient(MPClient):
                 reason="another recovery is in progress",
             )
 
-        status["ft_state"] = "recovering"
-        status["last_ft_request_id"] = ft_request.request_id
-        status.pop("ft_error", None)
+        if not is_pause:
+            status["ft_state"] = "recovering"
+            status["last_ft_request_id"] = ft_request.request_id
+            status.pop("ft_error", None)
 
         try:
             res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
@@ -1516,7 +1524,7 @@ class AsyncMPClient(MPClient):
         except Exception as e:
             result = FaultToleranceResult(ft_request.request_id, False, str(e))
 
-        if not result.success:
+        if not result.success and not is_pause:
             # Status pushes replace the cached entry; re-read before recording.
             status = self._engine_status[self.engine_ranks_managed[0]]
             status["ft_state"] = "failed"
