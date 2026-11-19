@@ -975,6 +975,15 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// Return the multimodal processor kwargs as JSON for managed Python engine
+    /// forwarding, or `None` when nothing is configured.
+    pub fn mm_processor_kwargs_json(&self) -> Option<String> {
+        (!self.mm_processor_kwargs.is_empty()).then(|| {
+            serde_json::to_string(&self.mm_processor_kwargs)
+                .expect("mm-processor-kwargs serialization should not fail")
+        })
+    }
+
     /// Apply fallback logic for configuration from env variables, using
     /// `lookup` to read the environment.
     fn apply_env_fallbacks(
@@ -1598,12 +1607,10 @@ impl ServeArgs {
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
         }
-        if !self.runtime.mm_processor_kwargs.is_empty() {
-            managed_engine.python_args.extend([
-                "--mm-processor-kwargs".to_string(),
-                serde_json::to_string(&self.runtime.mm_processor_kwargs)
-                    .expect("processor kwargs serialize"),
-            ]);
+        if let Some(mm_processor_kwargs) = self.runtime.mm_processor_kwargs_json() {
+            managed_engine
+                .python_args
+                .extend(["--mm-processor-kwargs".to_string(), mm_processor_kwargs]);
         }
         // The engine checks the adapters against the model at startup, as it
         // does under the Python frontend.
