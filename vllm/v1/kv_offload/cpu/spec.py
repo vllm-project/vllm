@@ -115,8 +115,8 @@ class CPUOffloadingSpec(OffloadingSpec):
         if not 0 <= self.async_init_pin_pace < float("inf"):
             raise ValueError("async_init_pin_pace must be a finite number >= 0")
 
-        cpu_bytes = int(self.extra_config.get("cpu_bytes_to_use") or 0)
-        if not cpu_bytes and config.default_num_blocks is None:
+        cpu_bytes_to_use = int(self.extra_config.get("cpu_bytes_to_use") or 0)
+        if not cpu_bytes_to_use and config.default_num_blocks is None:
             raise Exception(
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
@@ -138,7 +138,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             aligned_kv_bytes_per_chunk = round_up(
                 kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            shared_row_chunks = cpu_bytes // aligned_kv_bytes_per_chunk
+            shared_row_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
             if (
                 self.SHARED_REGION_PER_RANK
                 and self._uses_shared_region()
@@ -147,19 +147,18 @@ class CPUOffloadingSpec(OffloadingSpec):
                 aligned_kv_bytes_per_chunk = world_size * round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
-            if not cpu_bytes:
+            self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            if not cpu_bytes_to_use:
                 assert config.default_num_blocks is not None
                 self.num_chunks = cdiv(config.default_num_blocks, self.blocks_per_chunk)
-            else:
-                self.num_chunks = cpu_bytes // aligned_kv_bytes_per_chunk
-                if self.num_chunks < shared_row_chunks and config.parallel.rank == 0:
-                    logger.info(
-                        "Per-rank CPU offload regions page-align each rank's "
-                        "slot: %d chunks fit in cpu_bytes_to_use, %d fewer than "
-                        "with one shared row per chunk.",
-                        self.num_chunks,
-                        shared_row_chunks - self.num_chunks,
-                    )
+            if self.num_chunks < shared_row_chunks and config.parallel.rank == 0:
+                logger.info(
+                    "Per-rank CPU offload regions page-align each rank's slot: "
+                    "%d chunks fit in cpu_bytes_to_use, %d fewer than with one "
+                    "shared row per chunk.",
+                    self.num_chunks,
+                    shared_row_chunks - self.num_chunks,
+                )
 
             # Expose aligned_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
