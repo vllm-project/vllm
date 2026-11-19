@@ -62,7 +62,7 @@ class MoRIIOTransferAck(NamedTuple):
     consumer_tp_size: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
@@ -84,7 +84,7 @@ class WriteTask:
     retried: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerTransferPlan:
     """Plan for transferring a single layer."""
 
@@ -98,7 +98,7 @@ class LayerTransferPlan:
     use_batch: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
@@ -242,10 +242,12 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 def get_port_offset(
     dp_rank: int,
     tp_rank: int,
-    tp_size: int = 1,
+    tp_size: int,
     pp_rank: int = 0,
     pp_stride: int = 0,
 ) -> int:
+    """Port offset of a worker; tp_size is the TP size of the instance that
+    owns the port, so listeners and senders agree."""
     return pp_rank * pp_stride + dp_rank * tp_size + tp_rank
 
 
@@ -321,7 +323,7 @@ def _warn_deprecated_env_vars() -> None:
             )
 
 
-@dataclass
+@dataclass(slots=True)
 class MoRIIOConfig:
     local_ip: str
     local_kv_port: int
@@ -408,7 +410,7 @@ class MoRIIOConfig:
             tp_size, pc.data_parallel_size_local or pc.data_parallel_size
         )
         port_offset = get_port_offset(
-            dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
+            dp_rank, tp_rank, tp_size, pp_rank=pp_rank, pp_stride=pp_port_stride
         )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
@@ -567,7 +569,7 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     return m.group(1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     """Metadata for a single request."""
 

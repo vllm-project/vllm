@@ -46,7 +46,7 @@ class AttentionType(StrEnum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultipleOf:
     base: int
 
@@ -406,7 +406,7 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class CommonAttentionMetadata:
     """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
@@ -1018,10 +1018,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         """If `fused_rope_kvcache_supported` returns True, this method will be called
         by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
-        to perform the inplace RoPE and KV cache update.
+        to perform the RoPE and KV cache update. The rotated q/k go to
+        `query_out`/`key_out` when given, else RoPE is applied in place. Overrides
+        without these arguments still work: the caller passes them copies.
         """
         raise NotImplementedError
 

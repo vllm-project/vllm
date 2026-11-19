@@ -148,7 +148,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             backend_name = kernel_type.__name__
 
         if backend_name not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsWNA16", backend_name)
+            logger.debug("Using %s for CompressedTensorsWNA16", backend_name)
             self._kernel_backends_being_used.add(backend_name)
 
         # If group_size is -1, we are in channelwise case.
