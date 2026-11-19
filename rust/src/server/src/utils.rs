@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asynk_strim_attr::{TryYielder, try_stream};
@@ -219,31 +220,37 @@ pub fn convert_logit_bias(
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
-) -> ResolvedRequestContext {
-    // `None` when the header is absent or cannot be parsed as a `u32`.
-    let data_parallel_rank = headers
-        .get("X-data-parallel-rank")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse().ok());
-    let priority = headers
-        .get("X-Vllm-Priority")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok());
+) -> Result<ResolvedRequestContext, ApiError> {
+    let request_id_header: Option<String> = header_value(headers, "X-Request-Id")?;
+    Ok(ResolvedRequestContext {
+        request_id: resolve_base_request_id(request_id_header.as_deref(), request_id),
+        data_parallel_rank: header_value(headers, "X-data-parallel-rank")?,
+        priority: header_value(headers, "X-Vllm-Priority")?,
+        session_id: header_value(headers, "X-Session-ID")?,
+    })
+}
 
-    // Extract request id from header.
-    let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
-    let request_id = resolve_base_request_id(request_id_header, request_id);
-    let session_id = headers
-        .get("X-Session-ID")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-
-    ResolvedRequestContext {
-        request_id,
-        data_parallel_rank,
-        priority,
-        session_id,
+/// Read one request header as `T`: `None` when it is absent or empty, a 400
+/// when it is present but not visible ASCII or does not parse, so a malformed
+/// value is never silently dropped.
+pub(crate) fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<Option<T>, ApiError>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let Ok(value) = value.to_str() else {
+        bail_invalid_request!("Invalid {name} header: not a visible ASCII string.");
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse() {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => bail_invalid_request!("Invalid {name} header {value:?}: {error}."),
     }
 }
 
@@ -265,7 +272,7 @@ mod tests {
     use std::convert::Infallible;
 
     use axum::extract::Query;
-    use axum::http::Uri;
+    use axum::http::{HeaderName, HeaderValue, Uri};
     use futures::{StreamExt as _, stream};
     use tokio::time::{Instant, sleep};
 
@@ -331,6 +338,59 @@ mod tests {
         let logit_bias = HashMap::from([("7".to_string(), 1.0), ("42".to_string(), -2.5)]);
         let converted = convert_logit_bias(Some(logit_bias)).expect("valid keys");
         assert_eq!(converted, Some(HashMap::from([(7, 1.0), (42, -2.5)])));
+    }
+
+    /// A request header is absent (`None`) when missing or empty, parsed when
+    /// valid, and a 400 when present but unreadable or unparsable.
+    #[test]
+    fn resolve_request_context_header_values() {
+        let resolve = |name: &str, value: HeaderValue| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), value);
+            resolve_request_context(&headers, Some("body-id"))
+        };
+
+        let context = resolve("X-Vllm-Priority", HeaderValue::from_static(" -5 ")).unwrap();
+        assert_eq!(context.priority, Some(-5));
+        let context = resolve("X-data-parallel-rank", HeaderValue::from_static("3")).unwrap();
+        assert_eq!(context.data_parallel_rank, Some(3));
+        for name in [
+            "X-Vllm-Priority",
+            "X-data-parallel-rank",
+            "X-Request-Id",
+            "X-Session-ID",
+        ] {
+            let context = resolve(name, HeaderValue::from_static("")).unwrap();
+            assert_eq!(
+                context,
+                ResolvedRequestContext {
+                    request_id: "body-id".to_string(),
+                    ..Default::default()
+                },
+                "{name}"
+            );
+        }
+
+        let errors = [
+            ("X-Vllm-Priority", HeaderValue::from_static("high")),
+            ("X-Vllm-Priority", HeaderValue::from_static("1.5")),
+            ("X-Vllm-Priority", HeaderValue::from_static("2147483648")),
+            ("X-data-parallel-rank", HeaderValue::from_static("-1")),
+            ("X-Request-Id", HeaderValue::from_bytes(b"id-\xe9").unwrap()),
+            ("X-Session-ID", HeaderValue::from_bytes(b"id-\xe9").unwrap()),
+        ]
+        .map(|(name, value)| resolve(name, value).unwrap_err().to_error_response().error.message);
+        expect_test::expect![[r#"
+            [
+                "Invalid X-Vllm-Priority header \"high\": invalid digit found in string.",
+                "Invalid X-Vllm-Priority header \"1.5\": invalid digit found in string.",
+                "Invalid X-Vllm-Priority header \"2147483648\": number too large to fit in target type.",
+                "Invalid X-data-parallel-rank header \"-1\": invalid digit found in string.",
+                "Invalid X-Request-Id header: not a visible ASCII string.",
+                "Invalid X-Session-ID header: not a visible ASCII string.",
+            ]
+        "#]]
+        .assert_debug_eq(&errors);
     }
 
     /// Collect `(elapsed seconds, frame)` pairs from a response whose event
