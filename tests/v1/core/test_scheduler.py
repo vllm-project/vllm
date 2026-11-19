@@ -1919,6 +1919,32 @@ def test_long_prefill_threshold_applies_to_lone_request_with_pp(adaptive: bool):
     assert chunks == [400, 400, 200]
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_lone_pp_prefill_keeps_unsplittable_mm_item_whole(adaptive: bool):
+    """The lone-prefill PP cap must not strand a request whose multimodal item
+    may not be split and is larger than the cap: it keeps its old behavior and
+    schedules the whole prompt."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        long_prefill_token_threshold_adaptive=adaptive,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+        async_scheduling=True,
+        pipeline_parallel_size=2,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 600
+
+
 def test_long_prefill_threshold_applies_with_other_requests():
     """The threshold caps the prefill as soon as another request is queued."""
     scheduler = create_scheduler(
