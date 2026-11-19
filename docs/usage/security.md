@@ -102,6 +102,11 @@ denial of service:
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
 | `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB, and a `torch.save` archive can deflate-compress its storages. The uncompressed archive size is checked before `torch.load` and the dense size before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
 
+Nano Nemotron VL also uses `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` as a separate
+per-prompt limit for image patch tensors on its static-tiling path. Before
+resizing, it charges at least four bytes per channel per patch pixel and
+accounts for temporary copies made when concatenating tensors.
+
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.

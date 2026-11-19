@@ -24,6 +24,8 @@ from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig, TensorType
 from transformers.image_transforms import to_pil_image
 
+from vllm import envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
@@ -848,6 +850,35 @@ class BaseNanoNemotronVLProcessor(ABC):
         images: list[Image.Image],
         max_num_tiles: int,
     ) -> list[torch.Tensor]:
+        limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+        if limit > 0:
+            target_ratios = get_internvl_target_ratios(1, max_num_tiles)
+            num_patches = sum(
+                calculate_internvl_targets(
+                    orig_width=image.width,
+                    orig_height=image.height,
+                    target_ratios=target_ratios,
+                    image_size=self.image_size,
+                    use_thumbnail=self.use_thumbnail,
+                )[0]
+                for image in images
+            )
+            # Budget at least float32 per channel even when normalization is
+            # deferred to the model device. Resizing and encoding still scale
+            # with the expanded patch geometry.
+            dtype = self.dtype or torch.float32
+            bytes_per_channel = max(torch.float32.itemsize, dtype.itemsize)
+            patch_bytes = num_patches * 3 * self.image_size**2 * bytes_per_channel
+            # Concatenation keeps both the input tiles and the new tensor live.
+            if len(images) > 1 or (self.use_thumbnail and num_patches > 1):
+                patch_bytes *= 2
+            if patch_bytes > limit:
+                raise VLLMValidationError(
+                    "Image preprocessing exceeds VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES="
+                    f"{limit} (estimated {patch_bytes} bytes for patches).",
+                    parameter="image",
+                )
+
         return [
             dynamic_preprocess(
                 image,

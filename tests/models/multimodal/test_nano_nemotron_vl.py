@@ -5,16 +5,21 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+import httpx
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import BatchEncoding
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import BatchEncoding, LlavaConfig, TokenizersBackend
 
+from tests.utils import RemoteLaunchRenderServer
 from vllm import envs
 from vllm.config import MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLDummyInputsBuilder,
@@ -28,6 +33,7 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processors import nano_nemotron_vl as nemotron_processors
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
@@ -237,17 +243,19 @@ _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 
 
-def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
+def _make_processor(
+    *, static_tiling: bool = False, use_thumbnail: bool = False, **kwargs
+) -> NanoNemotronVLProcessor:
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
         downsample_ratio=0.5,
-        use_thumbnail=False,
+        use_thumbnail=use_thumbnail,
         norm_mean=_NORM_MEAN,
         norm_std=_NORM_STD,
         dtype=torch.bfloat16,
         vision_config=SimpleNamespace(
-            args={"min_num_patches": 4, "max_num_patches": 64},
+            args={} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64},
             # As in the Nemotron 3 Nano Omni checkpoints.
             video_target_num_patches=16,
             video_maintain_aspect_ratio=True,
@@ -257,6 +265,91 @@ def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
     return NanoNemotronVLProcessor(
         config=config, tokenizer=_CharTokenizer(), max_model_len=1024, **kwargs
     )
+
+
+@pytest.mark.parametrize("do_cpu_normalize", [False, True])
+@pytest.mark.parametrize("single_image", [False, True])
+def test_static_image_preprocessing_budget(
+    do_cpu_normalize: bool,
+    single_image: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(
+        static_tiling=True,
+        use_thumbnail=True,
+        do_rescale=do_cpu_normalize,
+        do_normalize=do_cpu_normalize,
+    )
+    images = [Image.new("RGB", (8, 8)), Image.new("RGB", (16, 8))]
+    expected_patches = [1, 3]
+    if single_image:
+        images = images[1:]
+        expected_patches = expected_patches[1:]
+    text = "<image>" * len(images)
+    dtype = torch.bfloat16 if do_cpu_normalize else torch.uint8
+    # One tile for the first image, two tiles and a thumbnail for the second.
+    # The outputs coexist with their concatenated copy.
+    required_bytes = 2 * sum(expected_patches) * 3 * 16 * 16 * torch.float32.itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", required_bytes - 1)
+    with pytest.raises(
+        VLLMValidationError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
+    ):
+        processor(text=text, images=images, max_num_tiles=2)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", required_bytes)
+    output = processor(text=text, images=images, max_num_tiles=2)
+    assert output["image_num_patches"].tolist() == expected_patches
+    assert output["pixel_values_flat"].dtype == dtype
+
+
+def test_render_rejects_over_budget_static_image_patches(tmp_path):
+    LlavaConfig(
+        architectures=["NemotronH_Nano_VL_V2"],
+        vision_config={"model_type": "clip_vision_model", "args": {}},
+        force_image_size=16,
+        patch_size=4,
+        downsample_ratio=0.5,
+        use_thumbnail=False,
+        norm_mean=_NORM_MEAN,
+        norm_std=_NORM_STD,
+    ).save_pretrained(tmp_path)
+    image_tokens = ["<img>", "<image>", "</img>"]
+    vocab = {token: i for i, token in enumerate(["[UNK]", *image_tokens])}
+    TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="[UNK]")),
+        unk_token="[UNK]",
+        additional_special_tokens=image_tokens,
+        chat_template="{% for msg in messages %}{{ msg.content }}{% endfor %}",
+    ).save_pretrained(tmp_path)
+    images = [
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_url(Image.new("RGB", (8, 8), color))},
+        }
+        for color in ("red", "blue")
+    ]
+    model = str(tmp_path)
+    with RemoteLaunchRenderServer(
+        model,
+        ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"],
+        env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": "8000"},
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        for content, status in ((images, 400), (images[:1], 200)):
+            response = httpx.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                },
+            )
+            assert response.status_code == status, response.text[:512]
+            if status == 400:
+                assert (
+                    "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"
+                    in response.json()["error"]["message"]
+                )
 
 
 @pytest.mark.parametrize(
