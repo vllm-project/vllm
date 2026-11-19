@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS batch-invariance tests.
 
-The NVFP4 CUTLASS tests in this file must run with ``VLLM_BATCH_INVARIANT=1``
+The NVFP4 CUTLASS tests in this file must run with `VLLM_BATCH_INVARIANT=1`
 before the first relevant native kernel call. Do not run them in the same pytest
 process after tests that intentionally exercise non-batch-invariant NVFP4
 scaled-mm kernels.
@@ -203,6 +203,33 @@ def test_online_fp8_linear_batch_invariant(
         baseline = layer(needle)[0]
         assert torch.equal(layer(torch.cat([needle, filler]))[0][:1], baseline)
         assert torch.equal(layer(torch.cat([filler, needle]))[0][-1:], baseline)
+
+
+@requires_fp8
+@_NVFP4_REQUIRES_SM100
+@torch.inference_mode()
+def test_flashinfer_fp8_mm_batch_invariant_after_autotune(monkeypatch):
+    """Under "auto", autotune may pick a different bmm_fp8 backend per M bucket."""
+    from vllm.utils import flashinfer as fi
+
+    if not fi.has_flashinfer():
+        pytest.skip("FlashInfer is not installed.")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    fp8 = current_platform.fp8_dtype()
+    x = (0.5 * torch.randn(2048, 4096)).to(fp8)
+    b = (0.5 * torch.randn(4096, 4096)).to(fp8).t()
+    scale_a, scale_b = torch.tensor(0.02), torch.tensor(0.03)
+
+    def run(m):
+        return fi.flashinfer_scaled_fp8_mm(x[:m], b, scale_a, scale_b, torch.bfloat16)
+
+    buckets = fi.flashinfer_get_hybrid_num_tokens_buckets(2048)
+    with fi.autotune(tuning_buckets=buckets, round_up=True):
+        run(2048)
+    ref = run(2048)
+    for m in (1, 7, 64, 128, 512):
+        assert torch.equal(run(m), ref[:m])
 
 
 @requires_fp8

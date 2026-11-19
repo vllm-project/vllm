@@ -495,6 +495,16 @@ def deserialize_tensorizer_model(
             f"It must either point to a local existing file, or have a "
             f"S3, HTTP or HTTPS scheme."
         )
+    # Skip modules this model lacks, unloaded parameters fail the meta check
+    modules = {name for name, _ in model.named_modules()}
+    skipped: list[str] = []
+
+    def in_model(name: str) -> bool:
+        keep = name.rpartition(".")[0] in modules
+        if not keep:
+            skipped.append(name)
+        return keep
+
     before_mem = get_mem_usage()
     start = time.perf_counter()
     device_index = torch.accelerator.current_device_index()
@@ -510,8 +520,10 @@ def deserialize_tensorizer_model(
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,
     ):
-        deserializer.load_into_module(model)
+        deserializer.load_into_module(model, filter_func=in_model)
         end = time.perf_counter()
+    if skipped:
+        logger.warning("Skipped tensors of modules the model lacks: %s", skipped)
 
     total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
     duration = end - start

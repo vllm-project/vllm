@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Token-threshold TRT-LLM execution over Muse MegaMoE's shared NVFP4 weights."""
+"""Token-threshold TRT-LLM execution over Muse MegaMoE's shared weights."""
 
 import functools
 
@@ -36,7 +36,7 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._decode_workspace = None
-        if self.is_nvfp4:
+        if self.trtllm_token_threshold:
             if get_tensor_model_parallel_world_size() not in (4, 8):
                 raise ValueError(
                     "Muse hybrid MoE currently supports single-node TEP4/8"
@@ -69,13 +69,59 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
 
     def use_trtllm(self, num_tokens: int, sp_active: bool) -> bool:
         return (
-            self.is_nvfp4
+            self.weight_layout == "trtllm"
             and not sp_active
             and 0 < num_tokens <= self.trtllm_token_threshold
         )
 
-    def prepare_decode_inputs(self, pooled, norm, buffer):
-        num_tokens = pooled.shape[0]
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        sp_active: bool = True,
+    ) -> torch.Tensor:
+        if self.is_nvfp4 or not self.use_trtllm(hidden_states.shape[0], sp_active):
+            return super().forward(hidden_states, topk_weights, topk_ids)
+        return self._forward_trtllm_bf16(hidden_states, topk_weights, topk_ids)
+
+    def _forward_trtllm_bf16(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        from flashinfer.fused_moe import WeightLayout, trtllm_bf16_routed_moe
+
+        num_tokens = hidden_states.shape[0]
+        topk_ids = topk_ids.to(torch.int32)
+        is_padding = self.get_padding_mask(num_tokens)
+        if is_padding is not None:
+            topk_ids = topk_ids.masked_fill(is_padding[:, None], -1)
+        raw = trtllm_bf16_routed_moe(
+            topk_ids=(topk_ids, topk_weights.float()),
+            hidden_states=hidden_states,
+            gemm1_weights=self.w13_weight,
+            gemm2_weights=self.w2_weight,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=self.intermediate_size,
+            local_expert_offset=self.experts_start_idx,
+            local_num_experts=self.num_local_experts,
+            use_shuffled_weight=True,
+            weight_layout=WeightLayout.BlockMajorK,
+            do_finalize=False,
+            tune_max_num_tokens=self.trtllm_token_threshold,
+        )
+        return self._finalize_all_reduce(raw, num_tokens, hidden_states.device)
+
+    @property
+    def nvfp4_input_global_scale(self) -> torch.Tensor:
+        return self._input_global_scale
+
+    def prepare_decode_inputs(self, pooled, norm, buffer, num_tokens: int):
         return norm_quant_trtllm_nvfp4(
             pooled,
             num_tokens,
@@ -89,21 +135,24 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
             ),
         )
 
-    def forward_trtllm(self, hidden_states: torch.Tensor, buffer) -> torch.Tensor:
+    def forward_trtllm(
+        self,
+        quantized_input: tuple[torch.Tensor, torch.Tensor],
+        buffer,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
         import flashinfer
-        from flashinfer.comm.mnnvl_cutedsl_moe_finalize import (
-            moe_finalize_rmsnorm_allreduce,
-        )
 
-        num_tokens = hidden_states.shape[0]
+        packed, scales = quantized_input
+        num_tokens = packed.shape[0]
         raw = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(
-                buffer.topk_idx[:num_tokens].to(torch.int32),
+                topk_ids,
                 buffer.topk_weights[:num_tokens],
             ),
             routing_bias=None,
-            hidden_states=buffer.x[:num_tokens].view(torch.uint8),
-            hidden_states_scale=buffer.x_sf[:num_tokens].view(torch.float8_e4m3fn),
+            hidden_states=packed,
+            hidden_states_scale=scales.view(torch.float8_e4m3fn),
             gemm1_weights=self.w13_weight,
             gemm1_weights_scale=self.w13_weight_scale,
             gemm1_bias=None,
@@ -128,12 +177,24 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
             do_finalize=False,
             tune_max_num_tokens=self.trtllm_token_threshold,
         )
+        return self._finalize_all_reduce(raw, num_tokens, packed.device)
+
+    def _finalize_all_reduce(
+        self, raw, num_tokens: int, device: torch.device
+    ) -> torch.Tensor:
+        """Post-expert norm, routing-weighted sum and the EP all-reduce."""
+        from flashinfer.comm.mnnvl_cutedsl_moe_finalize import (
+            moe_finalize_rmsnorm_allreduce,
+        )
+
         result = convert_flashinfer_moe_output(
             raw, do_finalize=False, num_tokens=num_tokens, top_k=self.top_k
         )
         assert isinstance(result, UnfinalizedMoEOutput)
         norm = self.post_expert_norm
-        y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+        y = torch.empty(
+            (num_tokens, self.hidden_size), device=device, dtype=torch.bfloat16
+        )
         moe_finalize_rmsnorm_allreduce(
             result.gemm2_permuted,
             result.expert_weights,

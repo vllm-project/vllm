@@ -22,7 +22,7 @@ use vllm_engine_core_client::protocol::structured_outputs::{
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
-use crate::backend::{SamplingHints, SamplingLimits};
+use crate::backend::{DefaultMaxTokens, SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
 
@@ -34,6 +34,31 @@ pub struct PreparedTextRequest {
     pub text_request: TextRequest,
     /// The southbound request ready to be sent to `vllm-llm`.
     pub generate_request: GenerateRequest,
+}
+
+/// Sampling values sent to the engine, after request values, model defaults,
+/// and vLLM defaults are resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveSampling {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub max_tokens: u32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
+}
+
+impl PreparedTextRequest {
+    /// Return the resolved sampling values of the generate request.
+    pub fn effective_sampling(&self) -> EffectiveSampling {
+        let params = &self.generate_request.sampling_params;
+        EffectiveSampling {
+            temperature: params.temperature,
+            top_p: params.top_p,
+            max_tokens: params.max_tokens,
+            presence_penalty: params.presence_penalty,
+            frequency_penalty: params.frequency_penalty,
+        }
+    }
 }
 
 /// Convert a high-level [`TextRequest`] into one lower-level
@@ -48,6 +73,8 @@ pub fn lower_text_request(
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
     validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    let skip_special_tokens = &mut request.decode_options.skip_special_tokens;
+    *skip_special_tokens = skip_special_tokens.or(sampling_hints.default_skip_special_tokens);
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -101,6 +128,8 @@ pub fn lower_sampling_params(
         default_presence_penalty,
         default_frequency_penalty,
         default_max_tokens,
+        // A decode option, resolved by `lower_text_request`.
+        default_skip_special_tokens: _,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
     structured_outputs_backend: StructuredOutputBackend,
@@ -362,11 +391,12 @@ fn tokenize_bad_words(
 /// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
 /// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
 ///
-/// Takes the minimum of all available limits: user-specified, generation-config
-/// default, and `max_model_len - prompt_len`.
+/// Takes the minimum of the requested (or default) value and
+/// `max_model_len - prompt_len`; a [`DefaultMaxTokens::Cap`] also bounds the
+/// requested value.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
-    default_max_tokens: Option<u32>,
+    default_max_tokens: Option<DefaultMaxTokens>,
     max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
@@ -384,7 +414,11 @@ pub fn resolve_max_tokens(
     }
     let model_max_tokens = max_model_len - prompt_len;
 
-    let request_max_tokens = user_max_tokens.or(default_max_tokens);
+    let request_max_tokens = match default_max_tokens {
+        None => user_max_tokens,
+        Some(DefaultMaxTokens::Fallback(fallback)) => Some(user_max_tokens.unwrap_or(fallback)),
+        Some(DefaultMaxTokens::Cap(cap)) => Some(user_max_tokens.map_or(cap, |n| n.min(cap))),
+    };
     Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
 }
 
@@ -446,6 +480,7 @@ mod tests {
             default_presence_penalty: None,
             default_frequency_penalty: None,
             default_max_tokens: None,
+            default_skip_special_tokens: None,
         }
     }
 
@@ -475,6 +510,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sampling_limits,
             StructuredOutputBackend::Xgrammar,
@@ -987,6 +1023,7 @@ mod tests {
             files,
             model_id.to_string(),
             GenerationConfigMode::Auto,
+            &Default::default(),
         )
         .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
@@ -1013,6 +1050,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             }
         "#]]
         .assert_debug_eq(&hints);
@@ -1096,6 +1134,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1176,7 +1215,8 @@ mod tests {
                 default_repetition_penalty: Some(1.2),
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
-                default_max_tokens: Some(128),
+                default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1242,6 +1282,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             SamplingLimits {
                 max_logprobs: -1,
@@ -1642,7 +1683,8 @@ mod tests {
                 default_repetition_penalty: Some(1.2),
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
-                default_max_tokens: Some(128),
+                default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1685,6 +1727,36 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn resolve_max_tokens_applies_the_server_cap_to_client_values() {
+        use DefaultMaxTokens::{Cap, Fallback};
+        // A client asking for more than the cap is clamped, like Python's
+        // `override_max_tokens`; a model fallback does not clamp it.
+        assert_eq!(
+            resolve_max_tokens(Some(80), Some(Cap(30)), 200, 100).unwrap(),
+            30
+        );
+        assert_eq!(
+            resolve_max_tokens(Some(80), Some(Fallback(30)), 200, 100).unwrap(),
+            80
+        );
+        // Unset requests take the cap.
+        assert_eq!(
+            resolve_max_tokens(None, Some(Cap(30)), 200, 100).unwrap(),
+            30
+        );
+        // The context window still wins when it is tighter than the cap.
+        assert_eq!(
+            resolve_max_tokens(None, Some(Cap(500)), 200, 100).unwrap(),
+            100
+        );
+        // Smaller client values pass through.
+        assert_eq!(
+            resolve_max_tokens(Some(10), Some(Cap(30)), 200, 100).unwrap(),
+            10
+        );
     }
 
     #[test]
@@ -1820,13 +1892,13 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_uses_default_when_user_omits() {
-        let result = resolve_max_tokens(None, Some(64), 200, 100);
+        let result = resolve_max_tokens(None, Some(DefaultMaxTokens::Fallback(64)), 200, 100);
         assert_eq!(result.unwrap(), 64);
     }
 
     #[test]
     fn resolve_max_tokens_default_capped_by_model_len() {
-        let result = resolve_max_tokens(None, Some(256), 200, 100);
+        let result = resolve_max_tokens(None, Some(DefaultMaxTokens::Fallback(256)), 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
