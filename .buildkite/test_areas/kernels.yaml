@@ -660,6 +660,9 @@ steps:
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
@@ -738,6 +741,9 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - cmake/external_projects/deepgemm.cmake
   - tools/build_deepgemm_C.py
   - tools/setup_deepgemm_pythons.sh
