@@ -3696,6 +3696,38 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
+@pytest.mark.parametrize("key", ["rope_parameters", "rope_scaling"])
+def test_rope_override_keeps_checkpoint_rope_base(key):
+    """A RoPE override that omits `rope_theta` must not reset the RoPE base.
+
+    In Transformers v5 the base lives inside `rope_parameters`, which the
+    override replaces wholesale, so the model silently ran with the default
+    base instead of the checkpoint's.
+    """
+    from transformers import LlamaConfig
+
+    config = LlamaConfig(
+        max_position_embeddings=131072,
+        rope_parameters={"rope_type": "default", "rope_theta": 500000.0},
+        partial_rotary_factor=0.5,
+    )
+    yarn = {
+        "rope_type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 32768,
+    }
+    ModelConfig._apply_dict_overrides(config, {key: yarn})
+    assert config.rope_parameters == {
+        **yarn,
+        "rope_theta": 500000.0,
+        "partial_rotary_factor": 0.5,
+    }
+
+    # An explicit base in the override still wins
+    ModelConfig._apply_dict_overrides(config, {key: {**yarn, "rope_theta": 1e6}})
+    assert config.rope_parameters["rope_theta"] == 1e6
+
+
 def test_nested_hf_overrides():
     """Test that nested hf_overrides work correctly."""
     # Test with a model that has text_config

@@ -43,7 +43,9 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     iter_rope_parameters,
+    merge_rope_base_parameters,
     mrope_num_dims,
+    patch_rope_parameters,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
@@ -582,14 +584,25 @@ class ModelConfig:
         """Apply dict overrides, handling both nested configs and dict values."""
         from transformers import PreTrainedConfig
 
+        rope_overridden = False
         for key, value in overrides.items():
             attr = getattr(config, key, None)
             if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
                 cls._update_nested(attr, value)
             else:
+                if key in ("rope_parameters", "rope_scaling"):
+                    # Keep the checkpoint's RoPE base if the override omits it
+                    value = merge_rope_base_parameters(
+                        getattr(config, "rope_parameters", None), value
+                    )
+                    rope_overridden = True
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
+
+        if rope_overridden:
+            # Standardize and validate the override like values from config.json
+            patch_rope_parameters(config)
 
     def __post_init__(
         self,

@@ -696,6 +696,31 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         _patch_legacy_rope_type(rope_parameters)
 
 
+_ROPE_BASE_KEYS = ("rope_theta", "partial_rotary_factor")
+
+
+def merge_rope_base_parameters(current: Any, override: Any) -> Any:
+    """Carry the RoPE base parameters over into an override that omits them.
+
+    An override of `rope_parameters` (or its legacy alias `rope_scaling`)
+    replaces the whole dict. In Transformers v5, `rope_theta` and
+    `partial_rotary_factor` live only inside that dict, so an override that
+    only changes the scaling would silently drop the checkpoint's values.
+    """
+    if not isinstance(current, dict) or not isinstance(override, dict):
+        return override
+    nested = is_rope_parameters_nested(current)
+    if nested != is_rope_parameters_nested(override):
+        return override
+    if nested:
+        return {
+            layer_type: merge_rope_base_parameters(current.get(layer_type), params)
+            for layer_type, params in override.items()
+        }
+    base = {k: current[k] for k in _ROPE_BASE_KEYS if current.get(k) is not None}
+    return base | override
+
+
 def patch_rope_parameters(config: PreTrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
