@@ -751,3 +751,20 @@ def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
     executed = HummingGroupedExperts.executed_activation_key
     assert executed(kInt4Static, kFp8DynamicTokenSym) == kFp8DynamicTokenSym
     assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
+
+
+def test_hpc_clamp_rejected_during_backend_selection():
+    """Exclude HPC before selection so automatic mode can use another kernel."""
+    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+    config.swiglu_limit = 10.0
+    supported, reason = HPCExperts.is_supported_config(
+        HPCExperts,
+        config,
+        kFp8Static128BlockSym,
+        kFp8Dynamic128Sym,
+        HPCExperts.activation_format(),
+    )
+    assert not supported
+    assert reason is not None and "SwiGLU clamp" in reason

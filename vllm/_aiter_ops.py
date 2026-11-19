@@ -3209,7 +3209,7 @@ class rocm_aiter_ops:
             assert max_valid_seq_len is not None
             # AITER v0.1.19 decode is one-block only. This measured gfx950
             # FP32/k=1024 compressed-row boundary is independent of the native
-            # split-count boundary in sampler.cu.
+            # split-count boundary in csrc/attention/dsa/topk/top_k_per_row.cu.
             if (
                 num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
                 and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
@@ -4835,6 +4835,32 @@ class rocm_aiter_ops:
             prequant=prequant,
             y_scale=y_scale,
         )
+
+    @staticmethod
+    def triton_bf16_bmm(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        Y: torch.Tensor,
+    ) -> torch.Tensor:
+        """Y[b] = X[b] @ W[b]^T with X (B, M, K), W (B, N, K), Y (B, M, N).
+
+        Inputs and output may be strided views.
+        """
+        from aiter.ops.triton.batched_gemm_bf16 import batched_gemm_bf16
+
+        return batched_gemm_bf16(X, W, dtype=Y.dtype, YQ=Y, backend="triton")
+
+    @staticmethod
+    @functools.cache
+    def is_triton_bf16_bmm_tuned(B: int, M: int, N: int, K: int) -> bool:
+        """Whether AITER has a tuned triton_bf16_bmm config for this shape on
+        the current GPU."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("BATCHED_GEMM-A16W16", N, K, M=M, B=B)
+        except (AssertionError, ImportError, KeyError, OSError, TypeError):
+            return False
 
     @staticmethod
     def fused_bf16_bmm_cat_quant_pad_mla(
