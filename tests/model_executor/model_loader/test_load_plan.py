@@ -773,7 +773,7 @@ def test_layerwise_mode_is_refused(monkeypatch):
     make, shapes = _single(None)
     model = _cold_start(make, _checkpoint(shapes, 0))
     monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+    with pytest.raises(RuntimeError, match="reloads layerwise"):
         plan_loads(model, _metadata(shapes))
 
 

@@ -44,6 +44,7 @@ __all__ = [
     "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "layerwise_reason",
     "loadable_tensors",
     "mark_loaded",
     "record_checkpoint_layout",
@@ -101,18 +102,40 @@ def direct_reload_enabled() -> bool:
     if envs.VLLM_RELOAD_MODE != "auto":
         return envs.VLLM_RELOAD_MODE == "direct"
     config = get_current_vllm_config_or_none()
+    if config is None or config.weight_transfer_config is None:
+        return False
+    if reason := _auto_refusal(config):
+        logger.info_once(
+            "Direct reload does not support %s: weight updates reload layerwise.",
+            reason,
+        )
+        return False
+    return True
+
+
+def _auto_refusal(config: VllmConfig) -> str | None:
+    """Why `auto` reloads `config`'s model layerwise despite weight updates."""
     # auto leaves online quantization layerwise: its methods stay online
-    return (
-        config is not None
-        and config.weight_transfer_config is not None
-        and direct_reload_refusal(config) is None
-        and getattr(config.model_config, "quantization_config", None) is None
-    )
+    if getattr(config.model_config, "quantization_config", None) is not None:
+        return "online quantization"
+    return direct_reload_refusal(config)
 
 
 def reloads_directly(model: torch.nn.Module) -> bool:
     """Whether `model`'s updates reload directly: its cold start recorded a layout."""
     return envs.VLLM_RELOAD_MODE != "layerwise" and hasattr(model, "_ckpt_param_names")
+
+
+def layerwise_reason(model: torch.nn.Module) -> str:
+    """Why `model`'s updates reload layerwise, for error messages."""
+    if envs.VLLM_RELOAD_MODE == "layerwise":
+        return "VLLM_RELOAD_MODE=layerwise"
+    if reason := model.__dict__.get("_layerwise_reason"):
+        return reason
+    config = get_current_vllm_config_or_none()
+    if config is None or config.weight_transfer_config is None:
+        return "no weight_transfer_config"
+    return _auto_refusal(config) or "no checkpoint layout was recorded"
 
 
 def direct_reload_active(model: torch.nn.Module) -> bool:
@@ -233,12 +256,18 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     no other model recorded first), and which parameter names hold checkpoint
     tensors.
     Runs once; reloads reuse the cold-start record."""
-    if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
-        return  # pre-processed weights are already in runtime layout
-    if reason := _module_refusal(model):
-        logger.info_once(
-            "Direct reload does not support %s: reloading layerwise.", reason
+    if hasattr(model, "_ckpt_param_names") or hasattr(model, "_layerwise_reason"):
+        return
+    # pre-processed weights are already in runtime layout
+    reason = "pre-processed weights" if is_weights_pre_processed() else None
+    if reason := reason or _module_refusal(model):
+        model._layerwise_reason = reason
+        logger.info(
+            "Direct reload does not support %s: weight updates reload layerwise.",
+            reason,
         )
+        for _, t in loadable_tensors(model):
+            t._ckpt_refused = True  # a direct model sharing it must refuse too
         return
     # what cold start loaded, every update must load again; after a dummy
     # start (nothing loaded) the first update sets it
@@ -327,6 +356,12 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    # e.g. a layerwise target's lm_head shared into a direct draft
+    if any(hasattr(t, "_ckpt_refused") for _, t in loadable_tensors(model)):
+        raise RuntimeError(
+            "direct reload: this model shares tensors with a model that reloads "
+            "layerwise; set VLLM_RELOAD_MODE=layerwise"
+        )
     _check_params_kept(model)
     views = _checkpoint_views(model)
 

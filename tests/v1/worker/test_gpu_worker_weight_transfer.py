@@ -33,6 +33,8 @@ class _RecordingEngine:
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
+        self.model = nn.Module()
+        self.model._ckpt_param_names = frozenset()  # as a direct cold start records
 
     def _record_config(self) -> None:
         self.seen_configs.append(get_current_vllm_config())
@@ -69,9 +71,7 @@ class _RecordingModelRunner:
         self.seen_config = get_current_vllm_config()
 
     def get_model(self) -> nn.Module:
-        model = nn.Module()
-        model._ckpt_param_names = frozenset()  # as a direct cold start records
-        return model
+        return nn.Module()
 
     def on_target_weights_replaced(self) -> None:
         self.target_hook_calls += 1

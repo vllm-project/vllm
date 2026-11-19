@@ -4,8 +4,8 @@ Direct reload updates a running model's weights in place. It is the default
 (`VLLM_RELOAD_MODE=auto`) for engines with runtime weight updates
 (`--weight-transfer-config`), except for the configurations below and online
 quantization, which reload layerwise (see [Layerwise (Re)loading](layerwise.md)).
-`VLLM_RELOAD_MODE=direct` also enables it for online quantization and disk
-`reload_weights`; `layerwise` disables it.
+`VLLM_RELOAD_MODE=direct` also enables it for disk `reload_weights` and for the
+online quantization schemes listed below; `layerwise` disables it.
 
 !!! tip
     Prefer direct reload for RL weight updates. Use layerwise reload only for
@@ -30,10 +30,12 @@ stay valid. Each update must send every weight.
 
 ## Online Quantization
 
-[Online quantization](../features/quantization/online.md) works in direct mode.
-Each high-precision tensor is quantized as it is loaded, into the layout of the
-matching pre-quantized checkpoint; the trainer keeps sending BF16 weights under
-their checkpoint names.
+With `VLLM_RELOAD_MODE=direct`, the supported
+[online quantization](../features/quantization/online.md) schemes below quantize
+each high-precision tensor as it is loaded, into the layout of the matching
+pre-quantized checkpoint; the trainer keeps sending BF16 weights under their
+checkpoint names. Other schemes, and some configurations and models (see
+[Refused Configurations](#refused-configurations)), are not supported.
 
 ```bash
 VLLM_RELOAD_MODE=direct vllm serve Qwen/Qwen3-30B-A3B --quantization fp8_per_block

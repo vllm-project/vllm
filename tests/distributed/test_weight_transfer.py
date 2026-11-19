@@ -395,7 +395,7 @@ class TestNCCLEngineParsing:
             torch.device("cpu"),
             model,
         )
-        match = "VLLM_RELOAD_MODE=direct" if refusal == "layerwise" else "EPLB"
+        match = "reloads layerwise" if refusal == "layerwise" else "EPLB"
         with pytest.raises(RuntimeError, match=match):
             engine.init_transfer_engine(
                 NCCLWeightTransferInitInfo(

@@ -806,3 +806,8 @@ def test_refused_module_reloads_layerwise(monkeypatch):
     start_reload(model)
     finish_reload(model, _MODEL_CONFIG, _DEVICE)
     assert calls == ["init", "finalize"]
+    # a direct draft holding the layerwise model's tensors refuses to reload
+    draft = _cold_start(_checkpoint())
+    draft.attn = model.attn
+    with pytest.raises(RuntimeError, match="reloads layerwise"):
+        begin_direct_reload(draft)
