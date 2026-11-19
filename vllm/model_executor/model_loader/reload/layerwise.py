@@ -113,10 +113,6 @@ def initialize_layerwise_reload(
 
     With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
-    # disable torchao reloading to avoid infinite recursion
-    model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
-    model._do_torchao_reload = False
-
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
@@ -258,9 +254,6 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         model_config: config needed for applying processing to attention layers
 
     """
-    if hasattr(model, "_original_do_torchao_reload"):
-        model._do_torchao_reload = model._original_do_torchao_reload
-
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
     for layer in model.modules():
