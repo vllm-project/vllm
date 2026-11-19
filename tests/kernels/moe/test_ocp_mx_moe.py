@@ -2823,93 +2823,213 @@ def test_convert_weight_to_mxfp4_cutlass_swizzles_scales_per_expert():
     assert not torch.equal(out_w2_scale, w2_scale)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Marlin repack requires CUDA"
+@pytest.fixture(params=["compressed_tensors", "inc"])
+def packed_mxfp4_quant_config(request):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.layers.quantization.inc import INCConfig
+
+    if request.param == "inc":
+        quant_config = INCConfig.from_config(
+            {
+                "bits": 4,
+                "group_size": 32,
+                "sym": True,
+                "packing_format": "auto_round:llm_compressor",
+                "data_type": "mx_fp",
+                "act_bits": 4,
+                "act_group_size": 32,
+                "act_data_type": "mx_fp",
+            }
+        )
+    else:
+        weights = {
+            "num_bits": 4,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 32,
+            "symmetric": True,
+            "dynamic": False,
+        }
+        quant_config = CompressedTensorsConfig.from_config(
+            {
+                "format": "mxfp4-pack-quantized",
+                "config_groups": {
+                    "group_0": {
+                        "targets": ["Linear"],
+                        "weights": weights,
+                        "input_activations": weights | {"dynamic": True},
+                    }
+                },
+            }
+        )
+    return quant_config
+
+
+@pytest.mark.parametrize(
+    "moe_backend,activation,strict",
+    [
+        ("deep_gemm", "mxfp8", False),
+        ("cutlass", "fp8_per_block_dynamic", False),
+        ("deep_gemm", None, False),
+        ("cutlass", None, False),
+        ("marlin", "mxfp8", True),
+    ],
 )
-def test_packed_mxfp4_moe_method_converts_weights_for_marlin(
-    monkeypatch: pytest.MonkeyPatch,
+def test_packed_mxfp4_rejects_incompatible_activation(
+    packed_mxfp4_quant_config,
+    default_vllm_config,
+    monkeypatch,
+    moe_backend,
+    activation,
+    strict,
 ):
-    """Packed MXFP4 checkpoints must reach Marlin via the pure converter.
+    """Packed loaders must use the oracle's activation and strictness checks."""
+    from vllm.config.quantization import QuantSpec
 
-    `prepare_moe_fp4_layer_for_marlin` rewrites the layer in place and
-    allocates a `workspace` the modular kernel never reads; the shared oracle
-    routes to `prepare_moe_mxfp4_layer_for_marlin` instead and hands the
-    repacked tensors back to the caller.
-    """
-    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    with pytest.raises(ValueError, match="does not support activation="):
+        _make_packed_mxfp4_layer(
+            packed_mxfp4_quant_config, moe_backend, QuantSpec(activation=activation)
+        )
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_MXFP4_AVAILABLE, reason="Requires SM100")
+@pytest.mark.parametrize(
+    "activation,expected",
+    [
+        ("mxfp4", "CUTLASS_MXFP4_MXFP4"),
+        (None, "FLASHINFER_TRTLLM_MXFP4_BF16"),
+        ("fp8_per_block_dynamic", "DEEPGEMM_MXFP4"),
+    ],
+)
+def test_packed_mxfp4_auto_honors_activation_override(
+    packed_mxfp4_quant_config,
+    default_vllm_config,
+    activation,
+    expected,
+):
+    """Auto selection must follow the requested precision, including BF16."""
+    from vllm.config.quantization import QuantSpec
+
+    layer = _make_packed_mxfp4_layer(
+        packed_mxfp4_quant_config, "auto", QuantSpec(activation=activation)
+    )
+    assert layer.quant_method.mxfp4_backend.name == expected
+
+
+def test_mxfp4_cutlass_rejects_expert_bias(default_vllm_config):
+    """The common CUTLASS mapping must reject GPT-OSS's unsupported bias."""
+    from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+
+    config = replace(
+        make_dummy_moe_config(hidden_dim=256, intermediate_size=128),
+        moe_backend="cutlass",
+        has_bias=True,
+    )
+    with pytest.raises(ValueError, match="expert bias"):
+        GptOssMxfp4MoEMethod(config)
+
+
+def _make_packed_mxfp4_layer(quant_config, backend, activation_override=None):
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    if activation_override is not None:
+        quant_config.online_quantization_config = OnlineQuantizationConfig(
+            QuantizationConfigArgs(
+                targets={"model.layers.0.mlp.experts": activation_override}
+            )
+        )
+    config = replace(
+        make_dummy_moe_config(num_experts=2, hidden_dim=256, intermediate_size=128),
+        moe_backend=backend,
+        activation=MoEActivation.SWIGLUOAI
+        if backend == "triton"
+        else MoEActivation.SILU,
+    )
+    manager = ExpertMapManager(
+        max_num_batched_tokens=config.max_num_tokens,
+        top_k=config.experts_per_token,
+        global_num_experts=config.num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    return RoutedExperts(
+        "model.layers.0.mlp.experts",
+        torch.bfloat16,
+        config,
+        quant_config,
+        manager,
+    )
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_MXFP4_AVAILABLE, reason="Requires SM100")
+@pytest.mark.parametrize("backend", ["marlin", "triton", "flashinfer_trtllm"])
+def test_packed_mxfp4_weight_only_backends_execute(
+    packed_mxfp4_quant_config,
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    backend,
+):
+    """Packed checkpoint names reach each backend's real weight format and GEMMs."""
+    from tests.kernels.utils import torch_experts
+    from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
-    )
+    from vllm.model_executor.layers.quantization.mxfp4 import PackedMxfp4MoEMethod
 
-    num_experts, hidden_size, intermediate_size = 2, 256, 128
-    w13_n = 2 * intermediate_size
-
-    monkeypatch.setattr(
-        ct_mxfp4,
-        "select_mxfp4_moe_backend",
-        lambda moe, candidates: (Mxfp4MoeBackend.MARLIN, MarlinExperts),
+    torch.manual_seed(0)
+    with torch.device("cuda"):
+        layer = _make_packed_mxfp4_layer(packed_mxfp4_quant_config, backend)
+    method = layer.quant_method
+    assert isinstance(method, PackedMxfp4MoEMethod)
+    assert (
+        method.mxfp4_backend
+        == {
+            "marlin": Mxfp4MoeBackend.MARLIN,
+            "triton": Mxfp4MoeBackend.TRITON,
+            "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        }[backend]
     )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.utils.marlin_utils_fp4."
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda *args, **kwargs: pytest.fail(
-            "packed MXFP4 must use the pure Marlin converter"
-        ),
+    for param in (layer.w13_weight_packed, layer.w2_weight_packed):
+        param.data.random_(0, 256)
+    layer.w13_weight_scale.data.random_(122, 126)
+    layer.w2_weight_scale.data.random_(122, 126)
+    w13 = dq_mxfp4_torch(
+        layer.w13_weight_packed, layer.w13_weight_scale, torch.bfloat16
     )
-    processed_layers: list[torch.nn.Module] = []
-    kernel = types.SimpleNamespace(
-        fused_experts=types.SimpleNamespace(
-            keep_constants=lambda _: None,
-            process_weights_after_loading=processed_layers.append,
-        )
-    )
-    monkeypatch.setattr(ct_mxfp4, "make_mxfp4_moe_kernel", lambda **_: kernel)
-
-    method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(
-        types.SimpleNamespace(w13_num_shards=2, moe_backend="auto")
-    )
-    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
-
-    layer = torch.nn.Module()
-    layer._expert_routing_tables = lambda: ()
-    method.create_weights(
-        layer,
-        num_experts=num_experts,
-        hidden_size=hidden_size,
-        intermediate_size_per_partition=intermediate_size,
-        params_dtype=torch.bfloat16,
-    )
-    gen = torch.Generator().manual_seed(0)
-    for name in ("w13_weight_packed", "w2_weight_packed"):
-        param = getattr(layer, name)
-        param.data.copy_(
-            torch.randint(0, 256, param.shape, dtype=torch.uint8, generator=gen)
-        )
-    # E8M0 exponent bias: an all-127 scale is exactly 1.0.
-    layer.w13_weight_scale.data.fill_(127)
-    layer.w2_weight_scale.data.fill_(127)
-    layer.to(torch.device("cuda"))
-
+    w2 = dq_mxfp4_torch(layer.w2_weight_packed, layer.w2_weight_scale, torch.bfloat16)
+    if backend == "triton":
+        # SWIGLUOAI consumes adjacent gate/up rows; checkpoints store halves.
+        gate, up = w13.chunk(2, dim=1)
+        w13 = torch.stack((gate, up), dim=2).flatten(1, 2)
     method.process_weights_after_loading(layer)
-
     assert layer.w13_weight_packed is layer.w13_weight
     assert layer.w2_weight_packed is layer.w2_weight
-    # Marlin repacks the 4-bit weights into its own int32 tile layout ...
-    assert layer.w13_weight.dtype == torch.int32
-    assert layer.w2_weight.dtype == torch.int32
-    # ... and permutes the scales into [E, K // group_size, N].
-    assert layer.w13_weight_scale.dtype == torch.float8_e8m0fnu
-    assert layer.w13_weight_scale.shape == (num_experts, hidden_size // 32, w13_n)
-    assert layer.w2_weight_scale.shape == (
-        num_experts,
-        intermediate_size // 32,
-        hidden_size,
-    )
-    # The in-place helper's workspace is dead weight for the modular kernel,
-    # which allocates its own.
-    assert not hasattr(layer, "workspace")
-    assert processed_layers == [layer]
+
+    x = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda") / 10
+    ids = torch.tensor([[0], [1], [0], [1]], dtype=torch.int32, device="cuda")
+    weights = torch.ones(4, 1, dtype=torch.float32, device="cuda")
+    expected = torch_experts(x, w13, w2, weights, ids, activation=layer.activation)
+    if method.is_monolithic:
+        logits = torch.full((4, 2), -100.0, device="cuda")
+        logits.scatter_(1, ids.long(), 0.0)
+        actual = layer.forward_monolithic(x, logits)
+    else:
+        actual = layer.forward_modular(x, weights, ids)
+    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
 
 
 # The emulation dequantizes only the batch's distinct experts, one per slot:

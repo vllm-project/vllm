@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Union
 
@@ -213,16 +212,6 @@ B12X_BACKENDS = (
     Mxfp4MoeBackend.B12X_MXFP4_BF16,
 )
 
-# Candidate backends, in preference order, for quant methods that load the
-# packed MXFP4 checkpoint layout (uint8 `w13/w2_weight_packed` plus uint8 E8M0
-# `weight_scale`, group_size=32): compressed-tensors W4A4 and AutoRound/INC.
-PACKED_MXFP4_CANDIDATE_BACKENDS = (
-    Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
-    Mxfp4MoeBackend.DEEPGEMM_MXFP4,
-    Mxfp4MoeBackend.XPU,
-    Mxfp4MoeBackend.MARLIN,
-)
-
 # Megakernels consume the checkpoint's MXFP4 tensors through the shared
 # FlashInfer MoE-EP adapter; vLLM does not convert their weight layout.
 FLASHINFER_MOE_EP_MXFP4_BACKENDS = (
@@ -394,6 +383,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
         "b12x": list(B12X_BACKENDS),
+        "cutlass": [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4],
         "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
         "flashinfer_trtllm": [
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -436,33 +426,6 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     )
 
 
-def _narrow_mxfp4_candidates(
-    runner_backend: MoEBackend,
-    candidates: Sequence[Mxfp4MoeBackend],
-) -> list[Mxfp4MoeBackend]:
-    """Narrow `candidates` to the backends a non-auto `moe_backend` names.
-
-    `map_mxfp4_backend` deliberately omits `"cutlass"`, which names vLLM's
-    own W4A4 kernel rather than either FlashInfer CUTLASS backend, so resolve
-    that spelling here.
-
-    Args:
-        runner_backend: Requested `moe_backend`; never `"auto"`.
-        candidates: Backends the caller prepares weights for, in preference
-            order.
-
-    Returns:
-        The subset of `candidates` the request names, order preserved. Empty
-        if the request names no backend the caller implements.
-
-    """
-    if runner_backend == "cutlass":
-        requested = [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4]
-    else:
-        requested = map_mxfp4_backend(runner_backend)
-    return [b for b in candidates if b in requested]
-
-
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
@@ -477,6 +440,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
@@ -677,9 +641,9 @@ def _filter_by_activation(
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching `requested_activation_key`, followed by BF16
     variants as a higher-precision fallback unless VLLM_STRICT_QUANT_SCHEME
-    forbids it; without one, prefer BF16 if the list has any, else keep the
-    list as-is so explicit non-BF16 picks (e.g. the `_afp8` aliases) still
-    land."""
+    forbids it; without one, prefer BF16 if the list has any, else keep explicit
+    non-BF16 picks (e.g. the `_afp8` aliases). An explicit BF16 override rules
+    out quantized-only backends."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
@@ -695,7 +659,14 @@ def _filter_by_activation(
                 if _applies_requested_activation(b, requested_activation_key)
             ]
         return matching + [b for b in bf16 if b not in matching]
-    return bf16 if bf16 else backends
+    if bf16:
+        return bf16
+    if (
+        _user_moe_activation_override_is_set()
+        and _user_moe_activation_override() is None
+    ):
+        return []
+    return backends
 
 
 def _get_requested_backends(
@@ -706,13 +677,15 @@ def _get_requested_backends(
     if runner_backend == "b12x":
         if envs.VLLM_B12X_MOE_FP4_FORCE_A16:
             backends = [Mxfp4MoeBackend.B12X_MXFP4_BF16]
-            if requested_activation_key is None:
-                return backends
-            return _filter_by_activation(backends, requested_activation_key)
-        # W4A8 is the high-throughput b12x path and is preferred when the
-        # model does not request an activation format. Keep this as backend
-        # policy instead of exposing a separate backend name per precision.
-        if requested_activation_key is None:
+        # b12x chooses its own precision for the default MXFP4 scheme.
+        # Explicit activation overrides and strict checkpoint precision win.
+        if not _user_moe_activation_override_is_set() and (
+            requested_activation_key is None
+            or (
+                requested_activation_key == kMxfp4Dynamic
+                and not envs.VLLM_STRICT_QUANT_SCHEME
+            )
+        ):
             return backends
     return _filter_by_activation(backends, requested_activation_key)
 
@@ -720,7 +693,6 @@ def _get_requested_backends(
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
-    candidates: Sequence[Mxfp4MoeBackend] | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary MXFP4 MoE backend.
 
@@ -730,12 +702,6 @@ def select_mxfp4_moe_backend(
             the checkpoint. Backends that match it are preferred, with BF16
             activation backends as a fallback.
             Use kFp8StaticTensorSym for W4A8 scheme.
-        candidates: Restrict the selection to these backends, in preference
-            order. Quant methods whose checkpoint can only be converted for a
-            subset of the backends pass that subset (e.g.
-            `PACKED_MXFP4_CANDIDATE_BACKENDS`); `None` considers every
-            backend. Ignored for `moe_backend="b12x"`, which picks its own
-            precision.
 
     Note: Shape-specific fallbacks may still occur at runtime.
     Returns `NONE` and a placeholder experts class for requantization sources.
@@ -752,18 +718,9 @@ def select_mxfp4_moe_backend(
     activation_format = config.activation_format
 
     if runner_backend != "auto":
-        if candidates is not None and runner_backend != "b12x":
-            requested_backends = _narrow_mxfp4_candidates(runner_backend, candidates)
-            if not requested_backends:
-                raise ValueError(
-                    f"moe_backend={runner_backend!r} is not supported for this "
-                    f"MXFP4 MoE checkpoint; expected one of "
-                    f"{[b.value for b in candidates]}."
-                )
-        else:
-            requested_backends = _get_requested_backends(
-                runner_backend, requested_activation_key
-            )
+        requested_backends = _get_requested_backends(
+            runner_backend, requested_activation_key
+        )
         if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -802,17 +759,9 @@ def select_mxfp4_moe_backend(
         raise last_error
 
     # Select kernels in order of backend.
-    if candidates is not None:
-        AVAILABLE_BACKENDS = list(candidates)
-        if activation_format.is_batched:
-            AVAILABLE_BACKENDS = [
-                Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
-                for b in AVAILABLE_BACKENDS
-            ]
-    else:
-        AVAILABLE_BACKENDS = _filter_by_activation(
-            _get_priority_backends_for_gpt_oss(), requested_activation_key
-        )
+    AVAILABLE_BACKENDS = _filter_by_activation(
+        _get_priority_backends_for_gpt_oss(), requested_activation_key
+    )
 
     unsupported_reasons: list[tuple[Mxfp4MoeBackend, str | None]] = []
     oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
@@ -1982,32 +1931,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in TRITON_BACKENDS or (
         mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
     ):
-        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
-            # AITER moe_gemm_a16w4 needs gate/up interleaved
-            def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
-                gate, up = w.chunk(2, dim=1)
-                return torch.stack((gate, up), dim=2).reshape(w.shape)
-
-            w13_weight = interleave_gate_up(w13_weight)
-            w13_weight_scale = interleave_gate_up(w13_weight_scale)
-
+        if mxfp4_backend in (
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON,
+        ):
+            w13_weight = _interleave_gate_up_rows(w13_weight)
+            w13_weight_scale = _interleave_gate_up_rows(w13_weight_scale)
             if w13_bias is not None:
-                w13_bias = interleave_gate_up(w13_bias.to(torch.float32))
-        elif mxfp4_backend == Mxfp4MoeBackend.TRITON:
-
-            def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-                shape = w.shape
-                n = shape[-1]
-                first = w[..., : n // 2]
-                second = w[..., n // 2 :]
-                stacked = torch.stack((first, second), dim=-1)
-                return stacked.reshape(shape)
-
-            w13_weight = shuffle_weight(w13_weight)
-            w13_weight_scale = shuffle_weight(w13_weight_scale)
-
-            if w13_bias is not None:
-                w13_bias = shuffle_weight(w13_bias.to(torch.float32))
+                w13_bias = _interleave_gate_up_rows(w13_bias.to(torch.float32))
         else:
             if w13_bias is not None:
                 w13_bias = w13_bias.to(torch.float32)
