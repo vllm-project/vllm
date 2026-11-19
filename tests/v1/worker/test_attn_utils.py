@@ -9,7 +9,7 @@ never addressed by the logical view.
 
 import importlib
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
+    bind_kv_caches,
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
@@ -1461,3 +1462,51 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         drafter, None, kv_cache_config, None, None, target_groups, kernel_block_sizes
     )
     assert built == {"draft": 128}
+
+
+def _patch_binding(monkeypatch, shared_layers, captured):
+    monkeypatch.setattr(
+        attn_utils, "get_shared_kv_cache_layers", lambda _: shared_layers
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "map_kv_caches_to_kernel_blocks",
+        lambda caches, _: caches,
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "bind_kv_cache_to_layers",
+        lambda caches, _: captured.update(caches),
+    )
+
+
+def test_bind_kv_caches_skips_host_resident_shared_target(monkeypatch):
+    """A host-resident shared target is absent from the rebuilt views (#68561)."""
+    captured: dict[str, torch.Tensor] = {}
+    _patch_binding(monkeypatch, {"draft": "target"}, captured)
+    draft_view = torch.zeros(1)
+
+    kv_caches = {"draft": draft_view}
+    result = bind_kv_caches(
+        kv_caches,
+        {},
+        cast(Any, SimpleNamespace(host_group_ids=(0,))),
+        cast(Any, SimpleNamespace()),
+    )
+
+    assert result == {"draft": draft_view}
+    assert captured == {}
+
+
+def test_bind_kv_caches_requires_shared_target_without_host_groups(monkeypatch):
+    """Without host-resident groups a missing shared target stays fatal."""
+    captured: dict[str, torch.Tensor] = {}
+    _patch_binding(monkeypatch, {"draft": "target"}, captured)
+
+    with pytest.raises(KeyError, match="target"):
+        bind_kv_caches(
+            {"draft": torch.zeros(1)},
+            {},
+            cast(Any, SimpleNamespace(host_group_ids=())),
+            cast(Any, SimpleNamespace()),
+        )

@@ -441,6 +441,11 @@ def bind_kv_caches(
 ) -> dict[str, Any]:
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+        if target not in kv_caches and kv_cache_config.host_group_ids:
+            # Host-resident targets are not part of the committed views rebuilt
+            # on extend; their storage does not move, so the sharing layer keeps
+            # the binding made at allocation.
+            continue
         kv_caches[layer_name] = kv_caches[target]
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
