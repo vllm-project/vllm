@@ -153,3 +153,28 @@ def test_determinism_disables_fused_mqa_topk(monkeypatch: pytest.MonkeyPatch):
     assert fused.use_fused_mqa_topk(**eligible)
     monkeypatch.setattr(envs, "VLLM_DETERMINISTIC_SPARSE_TOPK", True, raising=False)
     assert not fused.use_fused_mqa_topk(**eligible)
+
+
+def test_require_turns_the_canonical_topk_on(monkeypatch: pytest.MonkeyPatch):
+    """A feature that needs ranks to agree (a TP replication switch) turns the
+    canonical top-k on without the env var, and every reader sees it."""
+    import vllm.envs as envs
+    from vllm.model_executor.kernels.attention.dsa import fused_mqa_topk as fused
+    from vllm.model_executor.layers import canonical_topk
+
+    monkeypatch.setattr(envs, "VLLM_DETERMINISTIC_SPARSE_TOPK", False, raising=False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False, raising=False)
+    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", True, raising=False)
+    monkeypatch.setattr(fused, "fused_mqa_topk_available", lambda: True)
+    monkeypatch.setattr(canonical_topk, "_required_by", set())
+    eligible = dict(
+        query_shape=(fused.FUSED_MQA_TOPK_HEADS, fused.FUSED_MQA_TOPK_HEAD_DIM),
+        topk=max(fused.FUSED_MQA_TOPK_TOPKS),
+        fp4_cache=False,
+        full_context=True,
+    )
+    assert not canonical_topk.deterministic_sparse_topk()
+    assert fused.use_fused_mqa_topk(**eligible)
+    canonical_topk.require_deterministic_sparse_topk("a replication switch")
+    assert canonical_topk.deterministic_sparse_topk()
+    assert not fused.use_fused_mqa_topk(**eligible)
