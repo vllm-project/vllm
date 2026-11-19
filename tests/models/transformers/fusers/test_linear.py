@@ -1414,7 +1414,7 @@ def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
     fuser = get_fuser(meta, PackedQKVFuser)
     assert fuser is not None and fuser.form == "slice"
 
-    real = SlicedQKVAttention(heads=8, kv_heads=4)
+    real: nn.Module = SlicedQKVAttention(heads=8, kv_heads=4)
     q_size, kv_size = fuser.q_size, fuser.kv_size
     weight = real.qkv_proj.weight.data
     wq, wk, wv = (
@@ -1423,7 +1423,7 @@ def test_sliced_qkv_forward_reads_per_rank_sections(tp_size):
         weight[q_size + kv_size :],
     )
     x = torch.randn(1, 5, 32)
-    seen = {}
+    seen: dict[str, torch.Tensor] = {}
 
     class Capture(FakeSelfAttn):
         def forward(self, q, k, v):
