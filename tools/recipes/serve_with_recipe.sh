@@ -39,6 +39,11 @@ if [[ "$has_detect_hardware" == false && \
     args+=(--detect-hardware)
 fi
 
+# Opt-in protocol for validation harnesses; normal CLI use is unchanged.
+if [[ -n "${RECIPE_VALIDATION_RESULT_OUT:-}" ]]; then
+    args+=(--validation-result-out "$RECIPE_VALIDATION_RESULT_OUT")
+fi
+
 echo "==> Generating vLLM configuration"
 python3 "${CONVERTER}" "${args[@]}"
 
