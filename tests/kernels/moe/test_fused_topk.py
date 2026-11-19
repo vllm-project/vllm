@@ -50,7 +50,9 @@ def torch_topk(
 )
 @pytest.mark.parametrize("num_tokens", [1, 33, 56])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
-@pytest.mark.parametrize("num_experts", [6, 16])
+# 6 and 109 run a larger fused kernel with the extra experts masked (e.g. an
+# expert-pruned model); 600 has no fused kernel.
+@pytest.mark.parametrize("num_experts", [6, 16, 109, 600])
 @pytest.mark.parametrize("topk", [3, 4])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
@@ -149,7 +151,8 @@ def test_fused_topk_padded_row_stride(
 )
 @pytest.mark.parametrize("num_tokens", [1, 33, 56])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
-@pytest.mark.parametrize("num_experts", [6, 16, 352])
+# With negative biases a masked expert must still never win (e.g. 230).
+@pytest.mark.parametrize("num_experts", [6, 16, 230, 352])
 @pytest.mark.parametrize("topk", [3, 4])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
