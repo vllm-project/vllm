@@ -223,7 +223,7 @@ def window_indices(positions: torch.Tensor, window: int, width: int) -> torch.Te
         raise ValueError("SWA index width must cover its causal window")
     columns = torch.arange(width, device=positions.device)
     first = (positions - window + 1).clamp_min(0)
-    count = torch.minimum(positions + 1, positions.new_tensor(window)).clamp_min(0)
+    count = (positions + 1).clamp(0, window)
     indices = first[:, None] + columns
     live = (positions[:, None] >= 0) & (columns < count[:, None])
     return torch.where(live, indices, -1).int()
