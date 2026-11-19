@@ -86,6 +86,10 @@ def activation_quant_dtype(
     )
 
 
+# Past this many top-k ids per local expert, dequantize every expert.
+_ROUTED_MAX_IDS_PER_EXPERT = 4
+
+
 class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     """Extension of TritonExperts to support emulated OCP MX MoE experts.
 
@@ -123,6 +127,23 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         self.quantization_emulation = True
 
         self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
+
+        # Biases of the experts `apply` dequantized when it ran on a subset,
+        # indexed like the dequantized weights; None means all experts.
+        self._routed_w1_bias: torch.Tensor | None = None
+        self._routed_w2_bias: torch.Tensor | None = None
+
+    @property
+    def w1_bias(self) -> torch.Tensor | None:
+        if self._routed_w1_bias is not None:
+            return self._routed_w1_bias
+        return super().w1_bias
+
+    @property
+    def w2_bias(self) -> torch.Tensor | None:
+        if self._routed_w2_bias is not None:
+            return self._routed_w2_bias
+        return super().w2_bias
 
     @staticmethod
     def is_supported_config(
@@ -184,15 +205,20 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         w2_scale: torch.Tensor | None,
         topk_ids: torch.Tensor,
         dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """w1 and w2 of only the routed experts and topk_ids renumbered onto
-        them, or None to dequantize every expert.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """w1 and w2 of only the routed experts, topk_ids renumbered onto
+        them and the expert of each slot (-1 for an unused one), or None to
+        dequantize every expert.
 
         Every decision and shape depends only on topk_ids' shape, so this
         needs no host sync and also runs under graph capture.
         """
         num_experts = w1.size(0)
         if topk_ids.numel() == 0 or w1_scale is None or w2_scale is None:
+            return None
+        # A batch this large routes to nearly every expert: gathering would
+        # only add launches.
+        if topk_ids.numel() > _ROUTED_MAX_IDS_PER_EXPERT * num_experts:
             return None
         if (
             current_platform.is_rocm()
@@ -213,6 +239,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
                 dequant_routed_mxfp4(w1, w1_scale, used),
                 dequant_routed_mxfp4(w2, w2_scale, used),
                 local_ids,
+                used,
             )
         # Otherwise gather one expert per top-k slot. Past a quarter of the
         # experts that saves little (break-even near 0.4x on MI250X, 0.65x on
@@ -226,6 +253,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             self._dequantize_weights(w1[used], w1_scale[used], dtype),
             self._dequantize_weights(w2[used], w2_scale[used], dtype),
             order.argsort().view_as(topk_ids).to(topk_ids.dtype),
+            used,
         )
 
     def apply(
@@ -258,38 +286,44 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         # Dequantizing every local expert writes the whole layer in bf16/fp16
         # on each call. Dequantize only the batch's experts where possible.
         routed = None
-        if (
-            expert_map is None
-            and self._lora_context is None
-            and self.quant_config.w1_bias is None
-            and self.quant_config.w2_bias is None
-        ):
+        if expert_map is None and self._lora_context is None:
             routed = self._dequantize_routed(
                 w1, w2, w1_scale, w2_scale, topk_ids, hidden_states.dtype
             )
+        w1_bias = w2_bias = None
         if routed is not None:
-            w1_dequant, w2_dequant, topk_ids = routed
+            w1_dequant, w2_dequant, topk_ids, used = routed
             global_num_experts = w1_dequant.size(0)
+            # Unused slots (-1) are never referenced by the renumbered ids.
+            slots = used.clamp(min=0)
+            if self.quant_config.w1_bias is not None:
+                w1_bias = self.quant_config.w1_bias[slots]
+            if self.quant_config.w2_bias is not None:
+                w2_bias = self.quant_config.w2_bias[slots]
         else:
             w1_dequant = self._dequantize_weights(w1, w1_scale, hidden_states.dtype)
             w2_dequant = self._dequantize_weights(w2, w2_scale, hidden_states.dtype)
 
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.
-        super().apply(
-            output=output,
-            hidden_states=hidden_states,
-            w1=w1_dequant,
-            w2=w2_dequant,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            a1q_scale=None,
-            a2_scale=a2_scale,
-            workspace13=workspace13,
-            workspace2=workspace2,
-            expert_tokens_meta=expert_tokens_meta,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+        self._routed_w1_bias, self._routed_w2_bias = w1_bias, w2_bias
+        try:
+            super().apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1_dequant,
+                w2=w2_dequant,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=None,
+                a2_scale=a2_scale,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+        finally:
+            self._routed_w1_bias = self._routed_w2_bias = None
