@@ -484,39 +484,3 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 `embed&token_classify` task is an internal execution contract for this plugin,
 not a generic Pooling API response format. Without the plugin, select one of
 the three concrete tasks above.
-
-## ShieldGemma 2
-
-[ShieldGemma 2](https://huggingface.co/google/shieldgemma-2-4b-it) is an image safety classifier built on Gemma 3. The reference model answers `Yes` or `No` to "does the image violate the policy?". vLLM serves the original checkpoint as a classifier with one label: the probability of `Yes`, computed as a two-way softmax over the `Yes` and `No` logits.
-
-| Architecture | Backbone | Example HF Models |
-| - | - | - |
-| `ShieldGemma2ForImageClassification` | Gemma 3 + SigLIP | `google/shieldgemma-2-4b-it` |
-
-Start the server:
-
-```shell
-vllm serve google/shieldgemma-2-4b-it --runner pooling
-```
-
-Send one request per policy. Put the image before the policy text; the chat template wraps the policy in the ShieldGemma 2 prompt:
-
-```shell
-curl -s http://localhost:8000/classify -H "Content-Type: application/json" -d '{
-    "model": "google/shieldgemma-2-4b-it",
-    "messages": [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
-                {"type": "text", "text": "No Violence/Gore content: the image shall not contain content that depicts shocking, sensational, or gratuitous violence."}
-            ]
-        }
-    ]
-}'
-```
-
-The response contains `probs: [P(Yes)]`; `P(Yes) >= 0.5` means the image violates the policy.
-
-!!! note
-    vLLM replaces the checkpoint's chat template with one that starts with two `<bos>` tokens. This matches the reference Transformers processor, whose template and tokenizer each add one. Passing `add_special_tokens: true` in the request adds a third and shifts the result.
