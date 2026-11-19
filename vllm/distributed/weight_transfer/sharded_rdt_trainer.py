@@ -102,6 +102,8 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
 
     def __post_init__(self) -> None:
         if self.num_rdt_buffers is not None:
+            if self.num_buffers not in (DEFAULT_NUM_BUFFERS, self.num_rdt_buffers):
+                raise ValueError("set num_buffers only; num_rdt_buffers is deprecated")
             warnings.warn(
                 "num_rdt_buffers is deprecated; use num_buffers.",
                 DeprecationWarning,
@@ -350,16 +352,9 @@ class _RDTProducerServer:
         while blocked() and not failed():
             cond.wait(_STALL_POLL_S)
             stalled = time.monotonic() - self._last_progress
-            # a sync not begun here, or a consumer still planning, is no stall
-            waiting = (
-                sync_idx is None or sync_idx <= self._sync_idx
-            ) and self._live <= self._buckets.keys()
-            if (
-                blocked()
-                and not failed()
-                and waiting
-                and stalled >= self._stall_timeout
-            ):
+            # a pull ahead of this rank's sync is not a stall
+            begun = sync_idx is None or sync_idx <= self._sync_idx
+            if blocked() and not failed() and begun and stalled >= self._stall_timeout:
                 msg = (
                     f"RDT stall: no progress for {stalled:.0f}s waiting for "
                     f"{what}. A consumer most likely died mid-sync: "
@@ -934,6 +929,15 @@ class ShardedRDTTrainerWeightTransferEngine(
     def _arena_bytes(self) -> int:
         """`arena_bytes` for this rank, over the consumers that may pull from it."""
         ii = self._init_info
+        return arena_bytes(
+            buffer_bytes=ii.buffer_bytes,
+            num_buffers=ii.num_buffers,
+            num_consumers=self._num_pullers(),
+        )
+
+    def _num_pullers(self) -> int:
+        """Consumers that may pull from this rank."""
+        ii = self._init_info
         router = RdtRouter(
             self._world,
             ii.num_consumers,
@@ -942,11 +946,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             [m.name for m in self._meta],
             workers_per_replica=ii.workers_per_replica,
         )
-        return arena_bytes(
-            buffer_bytes=ii.buffer_bytes,
-            num_buffers=ii.num_buffers,
-            num_consumers=len(router.consumers_of(self.rank)),
-        )
+        return len(router.consumers_of(self.rank))
 
     def _spawn_server(self) -> None:
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -990,7 +990,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_gpus=0,
             # every in-flight pull may wait in `bucket` for its unit, plus
             # control calls; a smaller pool would queue a publish behind them
-            max_concurrency=ii.num_consumers * ii.num_buffers + 8,
+            max_concurrency=self._num_pullers() * ii.num_buffers + 8,
             enable_tensor_transport=True,
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=ray.get_runtime_context().get_node_id(), soft=False

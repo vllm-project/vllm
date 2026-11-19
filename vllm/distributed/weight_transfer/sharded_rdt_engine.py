@@ -614,8 +614,8 @@ class ShardedRDTWeightTransferEngine(
             torch._foreach_copy_(bucket.typed_dsts, typed_srcs)
         loads = []
         for (_, staging, rows), src in zip(bucket.staged, staged_srcs):
-            if staging.count == 1:
-                loads.append((staging.name, src))
+            if staging.count == 1:  # a loader may keep it past the slot's reuse
+                loads.append((staging.name, src.clone()))
                 continue
             if staging.tensor is None:
                 staging.tensor = torch.empty(
