@@ -177,11 +177,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> int | None:
         """How far past `num_computed_tokens` a load may reach, if bounded.
 
-        Bounded by the deepest prefix the groups this connector does not
-        offload already hold, since nothing refills them beyond it.
+        The bound comes from auxiliary-output coverage and from any
+        groups this connector cannot refill beyond the local prefix.
         """
+        aux_limit = request.aux_output_external_hit_limit
         if not self._bounding_group_ids:
-            return None
+            return (
+                None if aux_limit is None else max(0, aux_limit - num_computed_tokens)
+            )
         assert self._kv_cache_manager is not None
         coordinator = self._kv_cache_manager.coordinator
         assert isinstance(coordinator, HybridKVCacheCoordinator)
@@ -189,6 +192,8 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             request.block_hashes, request.num_tokens - 1
         )
         bound = min(per_group_hits[group_id] for group_id in self._bounding_group_ids)
+        if aux_limit is not None:
+            bound = min(bound, aux_limit)
         return max(0, bound - num_computed_tokens)
 
     def get_external_cache_hit_sources(
