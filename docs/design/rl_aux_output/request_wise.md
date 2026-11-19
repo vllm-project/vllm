@@ -79,54 +79,79 @@ What request-wise gives up:
 
 ## Evidence
 
-Both branches were validated with a closed-loop simulator. A driver runs agentic sessions against one engine, updates the weights on a timer, reads every delivered object as a trainer would, and releases objects by the rules of each design. After every response it reads back the newly delivered rows and keeps a digest per position. At the end it compares the rows each trajectory takes, bit for bit, with the rows first delivered for each position. Planted faults (dropped keys, double releases, removals of another session's objects, shifted rows) confirm that each class of failure is detected.
+Both branches were validated with a closed-loop simulator. A driver runs agentic sessions against one engine, updates the weights on a timer, reads every delivered object as a trainer would, and releases objects by the rules of each design. After every response it reads back the newly delivered rows and keeps a digest per position. Planted faults (dropped keys, double releases, removals of another session's objects, shifted rows) confirm that each class of failure is detected.
 
-**DeepSeek V4.1 Flash, without batch invariance.** The runs cover eight scenarios. Each runs 120 weight versions unless noted, with trajectories of up to 1M tokens and up to 150 versions of staleness. The table gives the number of trajectories checked.
+A run is accepted only if all of the following hold:
 
-| Scenario | Session | Request-wise |
-| --- | --- | --- |
-| Keep updates only | 179 | 187 |
-| Sleep and prefix-cache reset at every update, 40 versions | running | 42 |
-| Abort pause at every update, 160 versions | 80 | 155 |
-| KV cache limited to 4 GiB (preemption) | 140 | 133 |
-| Sub-agents and compaction | running | 207 |
-| GRPO groups of 8 | 102 | 109 |
-| Asynchronous KV load failures injected (recompute) | 93 | 154 |
-| Synchronous KV load failures injected (recompute) | 196 | 156 |
-
-Every completed run shows the following:
-
-- No position's row differs from the row first produced for it. The row of a request's last prompt position, from which it samples its first token, is taken from that request. The session runs alone checked 154M positions.
-- No object is left in the store after its release, including the objects of outputs no client received.
+- Every row a trajectory takes is bit for bit the row first delivered for that position. The row of a request's last prompt position, from which it samples its first token, is taken from that request.
+- The objects of outputs no client received are gone after the next pause.
 - No release removes an object of another live session.
-- Every planted fault is caught.
+- The store evicts nothing.
+- Every session that is not a planted fault is consumed and released by the end.
+- Every difference between the sampled logprob and the stored top-k logprob of the same token is classified.
 
-The sampled logprob and the stored top-k logprob of the same token come from two different computations. Without batch invariance they differ by up to 3.4e-2. This is a numerical difference, not a row mismatch.
+**DeepSeek V4.1 Flash, without batch invariance.** Both designs are valid in all eight scenarios. Each scenario runs 120 weight versions unless noted, with trajectories of up to 1M tokens and up to 150 versions of staleness.
 
-**Qwen3-30B-A3B, with batch invariance.** Both designs were run on five scenarios (keep, sleep and reset, aborts, mixed with preemption, sub-agents and compaction), each with 50 to 80 versions.
+| Scenario | Session: trajectories (positions) | Request-wise: trajectories (positions) |
+| --- | --- | --- |
+| Keep updates only | 179 (34.6M) | 187 (37.8M) |
+| Sleep and prefix-cache reset at every update, 40 versions | 41 (8.9M) | 43 (9.4M) |
+| Abort pause at every update, 160 versions | 80 (14.0M) | 130 (20.3M) |
+| KV cache limited to 4 GiB (preemption) | 140 (28.8M) | 143 (29.7M) |
+| Sub-agents and compaction | 198 (19.4M) | 207 (19.8M) |
+| GRPO groups of 8 | 102 (21.0M) | 98 (18.9M) |
+| Asynchronous KV load failures injected (recompute) | 93 (19.1M) | 145 (29.2M) |
+| Synchronous KV load failures injected (recompute) | 196 (36.6M) | 156 (30.7M) |
 
-- The first-produced check found 0 mismatches, over 2,229 trajectories for the session design and 2,475 for request-wise.
-- A reference engine replays each trajectory under its listed versions and matches bit for bit. The exceptions are positions whose KV was reused across another version history: 6 trajectories for the session design and 85 for request-wise. For those, a reference that replays the KV of the producing request matches exactly.
-- The request-wise runs used `2f6c9bd4fe`; runs on the final head are in progress.
+- Request-wise ran at its head `7a3f62ba55`.
+- Session ran at `de72f5cf5a`. Its head `04495f3806` adds a simplification with identical test results.
+- In every run:
+  - no row differs from the row first produced;
+  - no undelivered object is left;
+  - no other session's object is removed;
+  - nothing is evicted;
+  - every planted fault is caught.
+- The sampled logprob and the stored top-k logprob come from two different computations, and without batch invariance they differ by up to 3.4e-2. A 1M-token request resubmitted across a weight update shows differences of the same order. In both cases the rows are the first-produced ones.
 
-**Overhead.** This was measured on the request-wise branch, on one node, in the keep-only scenario, with 120 versions per run. The session design has no separate measurement yet.
+**Qwen3-30B-A3B, with batch invariance.** Both designs were run on five scenarios (keep, sleep and reset, aborts, mixed with preemption, sub-agents and compaction), each with 50 to 80 versions. The request-wise runs used its head.
 
-- With aux outputs on, generated tokens per second in steady state drop by 2.6%. Decode speed per running request is unchanged: 93.8 against 91.5 tokens/s.
-- Trainer reads take 9.4 s at p50 and 18.1 s at p99, and read 3.6 to 3.8 GB per update.
-- The simulator's own read-back costs another 11%. A deployment does not have it.
-- Whole-run throughput is not used for this comparison. The runs complete different numbers of trajectories, and the read-back keeps requests out of the engine.
+- The first-produced check found 0 mismatches: 24.9M positions for session, 25.5M for request-wise.
+- A reference engine replays each trajectory under its listed versions and matches bit for bit. The exceptions are positions whose KV was reused across another version history: 6 trajectories for session, 80 for request-wise. For those, a reference that replays the KV of the producing request reproduces every row exactly.
+- That second reference cannot reproduce sampled logprobs when one KV block mixes versions. This is a limit of the reference, not of the rows.
 
-**Deployment.** Mooncake disk eviction must be off.
+**Capacity.** With routed experts, top-128 logprobs and hidden states, one position of DeepSeek V4.1 Flash takes 11,744 bytes: 480 for the experts (40 layers × 6 × 2 B), 1,024 for the top-k, and 10,240 for the hidden states.
 
-- With the default bucket eviction, a quota or a full disk deletes unreleased objects, oldest bucket first. Reads then miss, but no wrong row is delivered.
-- With eviction off, writes that do not fit are refused, and the engine stops at the put stall deadline.
+- Bytes held by unreleased sessions peaked at 112 to 271 GB per run for session and 61 to 188 GB for request-wise.
+- SSD use peaked higher. On Mooncake 0.3.14 it is the live bytes plus removed bytes that are not reclaimed yet: with nothing live at the end, 18 to 260 GB remained on disk. Plan disk by bytes written, not by live bytes.
+- The live peak exceeded a bound that counts only running sessions by up to 2×, for three reasons:
+  - sessions waiting for their group's release still hold objects;
+  - prefix-cache resets list recomputed positions under new names;
+  - sub-agents keep more sessions per group.
+- A trainer that consumes trajectories many versions late holds those trajectories' objects as well; the simulator consumed them at once.
 
-Admission by free disk is therefore required (the session branch's protocol, section 8). Its bound, the longest context times all branches times the group size, reserved about ten times what the sub-agent scenario wrote, which lowered concurrency. A bound per live branch is future work.
+**Overhead.**
 
-**Not covered.**
+- Request-wise, measured on one node in the keep-only scenario with 120 versions per run:
+  - With aux outputs on, generated tokens per second in steady state drop by 2.6%. Decode speed per running request is unchanged.
+  - Trainer reads take 9.4 s at p50 and 18.1 s at p99.
+  - The simulator's own read-back costs another 11%, which a deployment does not pay.
+- Session: the same measurement is pending.
 
-- Mooncake 0.3.14 does not free SSD space when objects are removed, so both designs need a holder-side reclaim (RFC kvcache-ai/Mooncake#3220).
-- Mooncake 0.3.14 can register again a key that was removed while its offload to SSD was in flight.
+**Deployment.**
+
+- Mooncake disk eviction must be off:
+  - With the default bucket eviction, a quota or a full disk deletes unreleased objects, oldest bucket first. Reads then miss, but no wrong row is delivered.
+  - With eviction off, writes that do not fit are refused, and the engine stops at the put stall deadline.
+- Admission by free disk is therefore required (the session branch's protocol, section 8).
+- Its bound (the longest context times all branches times the group size) reserved about ten times what the sub-agent scenario wrote. This lowered concurrency there. A bound per live branch is future work.
+
+**Known limits.**
+
+- **Objects that reappear after a release.** A few objects (6 to 9 per run, in some runs of either design) were present again after their owner removed them successfully.
+  - Per-key engine logs show that the engine wrote each of them once, minutes before the release, and never again.
+  - The suspected source is Mooncake 0.3.14 registering a removed key again when an offload to SSD it had already taken completes.
+  - The root cause is pending. Until then, check after a release and remove what reappeared.
+- Mooncake 0.3.14 does not free SSD space when objects are removed (RFC kvcache-ai/Mooncake#3220).
 - A failed synchronous KV load remains a documented limit of both designs. The runs cover only the injected path.
 - The request-wise branch's `request_wise.md` lists that design's other limits: outputs lost after `generate` yielded them, and the versions of listed products, which are not returned.
 - The session branch's protocol lists a request that is preempted and then scheduled under another version history. Such a request lists only the rows it computed again.
