@@ -100,9 +100,15 @@ class MambaPrefillCheckpointMetadata:
 class MambaPrefillCheckpointBuilder:
     """Build backend-neutral prefill checkpoint locations."""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+        checkpoint_alignment: int | None,
+    ) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
+        self.checkpoint_alignment = checkpoint_alignment
         speculative_config = vllm_config.speculative_config
         self.drop_eagle_block = (
             speculative_config is not None
@@ -117,7 +123,7 @@ class MambaPrefillCheckpointBuilder:
     ) -> MambaPrefillCheckpointMetadata | None:
         if self.vllm_config.cache_config.mamba_cache_mode != "align":
             return None
-        if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
+        if self.checkpoint_alignment is None:
             return None
         cache_config = self.vllm_config.cache_config
         hash_block_size = cache_config.hash_block_size
@@ -135,7 +141,7 @@ class MambaPrefillCheckpointBuilder:
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+            checkpoint_alignment=self.checkpoint_alignment,
             drop_eagle_block=self.drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
             num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,

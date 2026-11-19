@@ -8,6 +8,8 @@ Differences from the reference:
 - `developer` messages are supported and render as user turns.
 - Images arrive as placeholders; deepseek_v41.py flattens content first.
 - Tool namespaces (`ns::name`) are not supported.
+- A system message's `updated_tools` renders as deepseek-recipe's
+  "### Updated Tool Schemas" (tool search results).
 
 Message normalization and serving controls live in deepseek_v41.py.
 """
@@ -389,6 +391,11 @@ def render_message(
         prompt += system_msg_template.format(content=content or "")
         if tools:
             prompt += "\n\n" + render_tools(tools)
+        if msg.get("updated_tools"):
+            schemas = tools_from_openai_format(msg["updated_tools"])
+            prompt += "\n\n### Updated Tool Schemas\n\n" + "\n".join(
+                to_json(t) for t in schemas
+            )
         if response_format:
             prompt += "\n\n" + response_format_template.format(
                 schema=to_json(response_format)
@@ -502,7 +509,7 @@ def render_message(
                 tool_calls=tc_content,
             )
     else:
-        raise NotImplementedError(f"Unknown role: {role}")
+        raise ValueError(f"Invalid role: {role}")
 
     # Historical assistant separators are needed even without a generation prompt.
     if is_last and not add_generation_prompt:
