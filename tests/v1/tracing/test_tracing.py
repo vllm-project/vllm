@@ -19,9 +19,12 @@ from tests.tracing.conftest import (  # noqa: F401
 )
 
 
+# Tracing must not depend on stat logging; offline LLM disables it by default.
+@pytest.mark.parametrize("disable_log_stats", [False, True])
 def test_traces(
     monkeypatch: pytest.MonkeyPatch,
     trace_service: FakeTraceService,
+    disable_log_stats: bool,
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
@@ -42,7 +45,7 @@ def test_traces(
                 model=model,
                 otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
                 gpu_memory_utilization=0.3,
-                disable_log_stats=False,
+                disable_log_stats=disable_log_stats,
             )
             prompts = ["This is a short prompt"]
             outputs = llm.generate(prompts, sampling_params=sampling_params)

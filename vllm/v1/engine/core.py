@@ -156,7 +156,12 @@ class EngineCore:
                 vllm_config,
             )
 
-        self.log_stats = log_stats
+        # Tracing needs the request events, also in engines launched apart
+        # from the frontend (headless, api_server_count > 1).
+        self.log_stats = (
+            log_stats
+            or vllm_config.observability_config.otlp_traces_endpoint is not None
+        )
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 

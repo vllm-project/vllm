@@ -74,7 +74,8 @@ class LLMEngine:
         if tracing_endpoint is not None:
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
-        self.log_stats = log_stats
+        # Tracing needs the request stats; default stat loggers stay off.
+        self.log_stats = log_stats or tracing_endpoint is not None
 
         parallel_config = vllm_config.parallel_config
         executor_backend = parallel_config.distributed_executor_backend
