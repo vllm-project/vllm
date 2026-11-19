@@ -40,17 +40,10 @@ steps:
   - rust-toolchain.toml
   - docker/Dockerfile.rust
   - docker/docker-bake.hcl
-  - requirements/build/rust.txt
-  - tools/build_rust.py
   - .dockerignore
+  - LICENSE
   - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/release-pipeline.yaml
-  - .buildkite/scripts/docker-build-metadata-args.sh
-  - .buildkite/scripts/build-rust-frontend-image.sh
   - .buildkite/scripts/smoke-rust-frontend-image.sh
-  - .buildkite/scripts/test-rust-frontend-external-engine.sh
-  - .buildkite/scripts/publish-rust-frontend-image.sh
-  - .buildkite/scripts/publish-release-images.sh
   commands:
   - docker buildx bake -f docker/docker-bake.hcl rust-frontend --set "rust-frontend.tags=local/vllm-rust-frontend:$$BUILDKITE_JOB_ID"
   - bash .buildkite/scripts/smoke-rust-frontend-image.sh "local/vllm-rust-frontend:$$BUILDKITE_JOB_ID"
