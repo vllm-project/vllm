@@ -246,7 +246,7 @@ class Lfm3AudioDummyInputsBuilder(BaseDummyInputsBuilder[Lfm3AudioProcessingInfo
 class Lfm3AudioMultiModalProcessor(BaseMultiModalProcessor[Lfm3AudioProcessingInfo]):
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:

@@ -8,6 +8,7 @@
 from collections.abc import Sequence
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -31,12 +32,13 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
+    is_mamba_align_group,
+    is_mamba_group,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    MambaSpec,
     get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -84,6 +86,8 @@ def _partial_tail_non_mamba_puts(
     prompt_tokens = req_meta.num_prompt_tokens
     completed = req_meta.completed_token_len
     assert prompt_tokens is not None and completed is not None
+    if req_meta.max_offload_tokens is not None:
+        completed = min(completed, req_meta.max_offload_tokens)
     hash_block_size = coord.hash_block_size
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
@@ -157,9 +161,9 @@ class MooncakeStoreScheduler:
             kv_cache_config, vllm_config
         )
         mamba_groups = {
-            group_id: group.kv_cache_spec
+            group_id: group
             for group_id, group in enumerate(store_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
+            if is_mamba_group(group)
         }
         self._boundary_state_group_ids = frozenset(mamba_groups)
         if (
@@ -179,9 +183,9 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(
-                spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
-            ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert all(map(is_mamba_align_group, mamba_groups.values())), (
+                "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
             )
@@ -374,6 +378,9 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                max_offload_tokens=get_max_offload_tokens(
+                    request_real.kv_transfer_params
+                ),
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -540,7 +547,7 @@ class MooncakeStoreScheduler:
         pool = self._gpu_block_pool
         coord = self._store_coord
         assert coord is not None
-        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
+        block_sizes = [g.block_size for g in coord.kv_cache_groups]
         for req_meta in requests:
             if not req_meta.can_save:
                 continue
@@ -552,6 +559,13 @@ class MooncakeStoreScheduler:
                 continue
             if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+            if (
+                req_meta.max_offload_tokens is not None
+                and not req_meta.token_len_chunk
+                and not req_meta.boundary_puts
+            ):
+                req_meta.can_save = False
+                continue
             if self.enable_kv_events and coord.num_hash_lookahead_tokens:
                 request, _ = self._unfinished_requests[req_meta.req_id]
                 req_meta.num_hash_lookahead_tokens = coord.num_hash_lookahead_tokens
@@ -647,6 +661,11 @@ class MooncakeStoreScheduler:
         boundary_tokens = next(iter(boundaries))
         if boundary_tokens > tracker.prefill_end_tokens:
             return False
+        if (
+            tracker.max_offload_tokens is not None
+            and boundary_tokens > tracker.max_offload_tokens
+        ):
+            return False
 
         mamba_puts: list[BoundaryPut] = []
         for group_id, block_id, boundary in partial_tail_offloads:
@@ -668,6 +687,7 @@ class MooncakeStoreScheduler:
             prefill_end_tokens=tracker.prefill_end_tokens,
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
+            max_offload_tokens=tracker.max_offload_tokens,
         )
         coord = self._store_coord
         assert coord is not None
@@ -675,7 +695,7 @@ class MooncakeStoreScheduler:
             *_partial_tail_non_mamba_puts(
                 coord,
                 req_meta,
-                [g.kv_cache_spec.block_size for g in coord.kv_cache_groups],
+                [g.block_size for g in coord.kv_cache_groups],
             ),
             *mamba_puts,
         ]
@@ -723,6 +743,11 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[BoundaryPut] = []
             for group_id, block_id, boundary_tokens in entries:
+                if (
+                    tracker.max_offload_tokens is not None
+                    and boundary_tokens > tracker.max_offload_tokens
+                ):
+                    continue
                 is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
                 if is_decode_boundary and not self.save_decode_cache:
                     continue
@@ -751,6 +776,7 @@ class MooncakeStoreScheduler:
                     prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_puts=accepted,
                     completed_token_len=tracker.token_len,
+                    max_offload_tokens=tracker.max_offload_tokens,
                 )
             )
 

@@ -10,7 +10,7 @@ from vllm.exceptions import VLLMValidationError
 from .types import ChatTemplateContentFormatOption
 
 
-@dataclass
+@dataclass(slots=True)
 class ChatTemplateConfig:
     chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
