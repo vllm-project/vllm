@@ -8,4 +8,3 @@ startup_max_wait_seconds: 1200
 server_args: >-
   --enforce-eager
   --max-model-len 4096
-  --trust-remote-code
