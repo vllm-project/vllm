@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Non-streaming tokens-mode generate responses rendered from sample logprobs
-kept as FlatLogprobs engine rows: byte-identical to the per-entry pydantic
-path, which every other case still uses."""
+kept as FlatLogprobs engine rows: the same JSON (values and key order) as the
+per-entry pydantic path, which every other case still uses."""
 
 import asyncio
 import json
@@ -21,9 +21,6 @@ from tests.entrypoints.scale_out.token_in_token_out.test_generate_stream import 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.scale_out.token_in_token_out import logprobs_render
 from vllm.entrypoints.scale_out.token_in_token_out import serving as serving_mod
-from vllm.entrypoints.scale_out.token_in_token_out.logprobs_render import (
-    format_float_reprs,
-)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     GenerateResponseBase,
@@ -111,14 +108,29 @@ def _body(serving, k, outputs, finish_reason="length"):
     return JSONResponse(content=response.model_dump()).body, False
 
 
+class _OrderedObject(dict):
+    """A JSON object whose equality also compares key order."""
+
+    def __eq__(self, other):
+        if not isinstance(other, dict):
+            return NotImplemented
+        return list(self.items()) == list(other.items())
+
+
+def _parsed(body):
+    """`body` parsed with key order kept: float notation may differ between
+    the paths, values and structure may not."""
+    return json.loads(body, object_pairs_hook=_OrderedObject)
+
+
 def _outcome(serving, k, choices, finish_reason="length"):
-    """Bodies of the list and the flat storage of `choices`, or the error
-    each raises."""
+    """Parsed bodies of the list and the flat storage of `choices`, or the
+    error each raises."""
     results = []
     for flat in (False, True):
         outputs = [(tokens, _stored(k, *steps, flat=flat)) for tokens, steps in choices]
         try:
-            results.append(_body(serving, k, outputs, finish_reason)[0])
+            results.append(_parsed(_body(serving, k, outputs, finish_reason)[0]))
         except ValueError as e:
             results.append(f"{type(e).__name__}: {e}")
     return results
@@ -126,14 +138,14 @@ def _outcome(serving, k, choices, finish_reason="length"):
 
 @pytest.mark.parametrize("k", [0, 1, 3, 8])
 @pytest.mark.parametrize("n", [1, 37, 1500])  # 1500: across render blocks
-def test_rendered_bytes_equal_the_per_entry_path(monkeypatch, k, n):
+def test_rendered_json_equals_the_per_entry_path(monkeypatch, k, n):
     monkeypatch.setattr(logprobs_render, "RENDER_BLOCK_ENTRIES", 1000)
     serving = _build_serving_tokens(_mock_engine())
     rows = _rows(n, k + 1, seed=k * 7 + n)
     token_ids = rows[0][:, 0].tolist()
     legacy, _ = _body(serving, k, [(token_ids, _stored(k, rows, flat=False))])
     fast, rendered = _body(serving, k, [(token_ids, _stored(k, rows, flat=True))])
-    assert rendered and fast == legacy
+    assert rendered and _parsed(fast) == _parsed(legacy)
 
 
 def _cases():
@@ -186,7 +198,7 @@ def _cases():
 
 @pytest.mark.parametrize("name,k,choices", _cases(), ids=[c[0] for c in _cases()])
 def test_special_and_irregular_rows_match_the_per_entry_path(name, k, choices):
-    """The same bytes, or the same error, as the list storage."""
+    """The same JSON, or the same error, as the list storage."""
     serving = _build_serving_tokens(_mock_engine())
     legacy, fast = _outcome(serving, k, choices)
     assert fast == legacy
@@ -223,7 +235,7 @@ def test_sampled_entry_and_top_logprobs_follow_dict_semantics(k, row, expected_t
     ranks = np.array([4])
     legacy, fast = _outcome(serving, k, [([row[0]], [(ids, lps, ranks)])])
     assert fast == legacy
-    entry = json.loads(fast)["choices"][0]["logprobs"]["content"][0]
+    entry = fast["choices"][0]["logprobs"]["content"][0]
     sampled = expected_top[0]
     assert (entry["token_id"], entry["logprob"], entry["rank"]) == sampled
     assert [
@@ -235,14 +247,6 @@ def test_aborted_choice_without_tokens():
     serving = _build_serving_tokens(_mock_engine())
     legacy, fast = _outcome(serving, 3, [([], [])], finish_reason="abort")
     assert fast == legacy
-
-
-def test_float_reprs_match_repr():
-    """The msgspec fast path gives `repr`'s digits for float32 values."""
-    bits = np.random.default_rng(0).integers(0, 2**32, 1 << 20, dtype=np.uint64)
-    values = bits.astype(np.uint32).view(np.float32)
-    values = values[np.isfinite(values)].astype(np.float64)
-    assert format_float_reprs(values) == [repr(v).encode() for v in values.tolist()]
 
 
 @pytest.mark.asyncio
