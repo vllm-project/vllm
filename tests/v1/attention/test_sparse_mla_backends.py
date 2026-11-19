@@ -4183,8 +4183,8 @@ def test_hisparse_mixed_batch_bf16_row_split(
     staging_calls = []
     original_gather = cache_handle.runtime.gather_prefill_cache
 
-    def spy_gather(self, kv, plan, resident_cache=None):
-        staged = original_gather(kv, plan, resident_cache)
+    def spy_gather(self, kv, plan, resident_cache=None, used_blocks=None):
+        staged = original_gather(kv, plan, resident_cache, used_blocks)
         staging_calls.append((plan, staged.shape))
         return staged
 
@@ -4346,8 +4346,12 @@ def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     ("row_width", "kv_dtype"),
     [(16, torch.float32), (528, torch.uint8), (656, torch.uint8)],
 )
-def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype):
-    """Staged rows come from the resident cache when a shadow page exists."""
+@pytest.mark.parametrize("mask_blocks", [False, True])
+def test_hisparse_gather_prefill_cache_prefers_resident_rows(
+    row_width, kv_dtype, mask_blocks, monkeypatch
+):
+    """Staged rows come from the resident cache when a shadow page exists, and
+    host rows of blocks outside `used_blocks` are not read."""
     if not _has_hisparse_ops():
         pytest.skip("hisparse CUDA ops unavailable")
     device = torch.device("cuda")
@@ -4384,9 +4388,21 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype
         row_width=row_width, block_size=block_size, kv_dtype=kv_dtype
     )
     runtime.bind_source_cache(host_cache)
-    staged = runtime.gather_prefill_cache(
-        host_cache, plan, resident_cache=resident_cache
+    num_staged_blocks = plan.row_ids.shape[1] // block_size
+    used_blocks = None
+    if mask_blocks:
+        used_blocks = torch.zeros(num_staged_blocks, dtype=torch.bool, device=device)
+        used_blocks[1::2] = True
+    # Fill the staged allocation so unwritten rows are recognizable.
+    sentinel = 7 if kv_dtype is torch.uint8 else -1.0
+    empty = torch.empty
+    monkeypatch.setattr(
+        torch, "empty", lambda *a, **kw: empty(*a, **kw).fill_(sentinel)
     )
+    staged = runtime.gather_prefill_cache(
+        host_cache, plan, resident_cache=resident_cache, used_blocks=used_blocks
+    )
+    monkeypatch.undo()
 
     staged_flat = staged.view(-1, row_width).cpu()
     host_flat = host_cache.view(-1, row_width)
@@ -4398,12 +4414,43 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype
         if int(host_rows[i]) < 0:
             assert int(plan.miss_mask[0, i]) == 0
             continue
+        if (
+            used_blocks is not None
+            and not bool(used_blocks[i // block_size])
+            and int(gpu_rows[i]) < 0
+        ):
+            assert bool((staged_flat[i] == sentinel).all())
+            continue
         expected = (
             resident_flat[int(gpu_rows[i])]
             if int(gpu_rows[i]) >= 0
             else host_flat[int(host_rows[i])]
         )
         torch.testing.assert_close(staged_flat[i], expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hisparse_prefill_stages_only_topk_referenced_blocks():
+    """Staging covers the blocks the prefill top-k reads, not whole contexts."""
+    device = torch.device("cuda")
+    block_size = 4
+    block_table = torch.tensor([[5, 2, 7], [9, 3, 0]], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([12, 8], dtype=torch.int32, device=device)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table, seq_lens, block_size, staging_block_capacity=5
+    )
+    req_ids = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    topk = torch.full((2, 128), -1, dtype=torch.int32, device=device)
+    topk[0, :2] = torch.tensor([0, 9])
+    topk[1, 0] = 5
+
+    used = index_group_module._referenced_blocks(plan, req_ids, topk)
+
+    staged_table = plan.block_table.cpu()
+    expected = torch.zeros(plan.row_ids.shape[1] // block_size, dtype=torch.bool)
+    for req, logical_block in ((0, 0), (0, 2), (1, 1)):
+        expected[int(staged_table[req, logical_block])] = True
+    assert torch.equal(used.cpu(), expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -5745,7 +5792,7 @@ def test_bf16_dcp_filters_topk_and_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
 
 
-def test_hisparse_prefill_reuses_builder_staging_plan():
+def test_hisparse_prefill_reuses_builder_staging_plan(monkeypatch):
     """Every layer must reuse the batch plan instead of synchronizing to dedupe."""
     plan = SimpleNamespace(
         block_table=torch.tensor([[0]], dtype=torch.int32),
@@ -5754,9 +5801,13 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     staged = torch.empty((1, 1, 8))
     calls = []
 
-    def gather(kv_cache, staging_plan, resident_cache=None):
-        calls.append((kv_cache, staging_plan, resident_cache))
+    def gather(kv_cache, staging_plan, resident_cache=None, used_blocks=None):
+        calls.append((kv_cache, staging_plan, resident_cache, used_blocks))
         return staged
+
+    used_blocks = torch.ones(1, dtype=torch.bool)
+    referenced = MagicMock(return_value=used_blocks)
+    monkeypatch.setattr(index_group_module, "_referenced_blocks", referenced)
 
     resident_cache = torch.empty((1, 1, 8))
     resident_block_table = torch.tensor([[1]], dtype=torch.int32)
@@ -5779,14 +5830,17 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
         req_id_per_token=torch.tensor([0], dtype=torch.int32),
     )
 
+    topk = torch.zeros((1, 4), dtype=torch.int32)
     result, block_table, request_ids = index_group.stage_prefill_rows(
-        0, source, metadata
+        0, source, metadata, topk
     )
 
     assert result is staged
     assert block_table is plan.block_table
     torch.testing.assert_close(request_ids, metadata.req_id_per_token)
-    assert calls == [(source, plan, resident_cache)]
+    assert calls == [(source, plan, resident_cache, used_blocks)]
+    assert referenced.call_args.args[0] is plan
+    assert referenced.call_args.args[2] is topk
 
 
 def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):

@@ -1109,7 +1109,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             )
 
         prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
-            layer_index, kv_c_and_k_pe_cache, attn_metadata
+            layer_index, kv_c_and_k_pe_cache, attn_metadata, topk[num_decode_tokens:]
         )
         physical_topk, valid_counts = triton_convert_req_index_to_global_index(
             req_ids,

@@ -73,6 +73,25 @@ def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
     torch.testing.assert_close(destination, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("packed_bytes", [False, True])
+def test_hisparse_cuda_resident_gather_copies_rows_and_skips_misses(packed_bytes):
+    backing = torch.arange(24, dtype=torch.float32, device="cuda")
+    source = backing.as_strided((2, 2, 4), (12, 4, 1))
+    if packed_bytes:
+        source = source.view(torch.uint8)
+    destination = torch.full((4, 4), -1.0, device="cuda")
+
+    CUDAHiSparseBackend().gather_resident_rows(
+        source, destination, torch.tensor([3, 0, 2, -1], device="cuda")
+    )
+
+    expected = torch.stack(
+        [backing[16:20], backing[0:4], backing[12:16], torch.full_like(backing[:4], -1)]
+    )
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "tokens,decode_tokens,requests,query_len,max_rows,expected",
     [
