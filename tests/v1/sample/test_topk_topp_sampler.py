@@ -931,6 +931,22 @@ class TestTritonTopkToppExact:
         )
         _assert_exact_filter(source, actual, k, p)
 
+    def test_exact_nucleus_past_a_refined_pick(self):
+        """A top-p-only nucleus of ~120 tokens over 300 near-tied maxima (one per
+        supergroup of 256), each with a runner-up in another group. The tier refines
+        the crowded bin of maxima, so only its best 64 logits are complete, and it
+        used to keep 56 runners-up in place of better maxima."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab, n = 131072, 300
+        source = torch.full((1, vocab), -10.0)
+        maxima = torch.arange(n) * 256
+        source[0, maxima] = 5.0 - 0.01 * torch.randperm(n) / n
+        source[0, maxima + 16] = 5.0 - 0.03
+        p = torch.tensor([0.2])
+        actual = apply_top_k_top_p_triton(source.clone(), None, p)
+        _assert_exact_filter(source, actual, None, p)
+
     def test_cuda_graph_replay(self):
         """Device k/p are read at replay time, and the grid barrier resets."""
         from vllm.v1.sample.ops.topk_topp_triton import (

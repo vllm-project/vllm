@@ -784,7 +784,9 @@ def _tier(
             use_k, kept_mass, row_sum.to(tl.float32) * tl.exp(row_max - best)
         )
         keep = keep & (tl.cumsum(weight, 0) - weight < p * total)
-        ok = ok & (use_k | (kept_mass >= p * total))
+        # A refined pick is complete only for the best need logits.
+        nucleus = tl.sum(keep.to(tl.int32))
+        ok = ok & (use_k | ((kept_mass >= p * total) & (nucleus <= need)))
     tl.store(kept_row + rank, top, mask=keep & ok)
     return ok, tl.sum(keep.to(tl.int32))
 
