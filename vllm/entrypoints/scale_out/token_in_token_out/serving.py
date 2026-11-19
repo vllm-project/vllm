@@ -459,9 +459,8 @@ class ServingTokens(GenerateBaseServing):
             and sampling_params.logprobs >= 0
             and sampling_params.prompt_logprobs is None
         ):
-            # Keep the top-k rows as numpy columns without decoded tokens: the
-            # response is rendered from them without a Python object per
-            # entry. Prompt logprobs stay lists, as the response returns them.
+            # Keep sample logprobs as rows without decoded tokens, to render
+            # them without a Python object per entry (see logprobs_render).
             sampling_params.flat_logprobs = True
             sampling_params._detokenize_logprobs = False
 
@@ -545,8 +544,7 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
-        # choice position -> pre-rendered JSON of its logprobs
-        fragments: dict[int, list[bytes]] = {}
+        fragments: dict[int, list[bytes]] = {}  # choice -> rendered logprobs
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
         derender_choice_fields: list[dict[str, Any]] = []
@@ -558,33 +556,31 @@ class ServingTokens(GenerateBaseServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
             if num_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                rendered = None
-                top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
-                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
-                    rendered = await render_tokens_logprobs(
-                        token_ids, out_logprobs, self.render_lock
-                    )
-                    if rendered is None:
-                        # Irregular rows: the per-entry path. Iterating once
-                        # is cheaper than indexing each position.
-                        top_logprobs = list(out_logprobs)
-                if rendered is not None:
-                    fragments[len(tokens_choices)] = rendered
-                elif text_mode:
+                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+                if text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         top_limit=top_limit,
                     )
+                elif isinstance(out_logprobs, FlatLogprobs) and (
+                    rendered := await render_tokens_logprobs(
+                        token_ids, out_logprobs, self.render_lock
+                    )
+                ):
+                    fragments[len(tokens_choices)] = rendered
+                    logprobs = None
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=top_logprobs,
+                        # One pass, rather than indexing a FlatLogprobs.
+                        top_logprobs=list(out_logprobs),
                     )
+            else:
+                logprobs = None
 
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)

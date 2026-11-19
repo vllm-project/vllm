@@ -49,8 +49,7 @@ router = APIRouter()
 
 
 async def _send_parts(parts: list[bytes]) -> AsyncGenerator[bytes, None]:
-    """Yields `parts` in order, dropping each once yielded so the sent part
-    of a large body is freed while the rest is still being sent."""
+    """Yields `parts`, dropping each so sent parts can be freed."""
     parts.reverse()
     while parts:
         yield parts.pop()

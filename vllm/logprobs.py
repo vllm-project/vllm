@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-import operator
 from collections.abc import Callable, Iterable, Iterator, MutableSequence, Sequence
 from dataclasses import dataclass
 from typing import Any, overload
@@ -35,22 +34,18 @@ _NO_RANK = np.iinfo(np.int64).min
 
 
 def _fits(values: np.ndarray, dtype: np.dtype) -> bool:
-    """Whether `values` round-trip through `dtype`."""
+    """Whether `values` round-trip through `dtype` (NaN included)."""
     if dtype.kind == values.dtype.kind and dtype.itemsize >= values.dtype.itemsize:
         return True
     with np.errstate(over="ignore", invalid="ignore"):
         cast = values.astype(dtype)
-    # values != values marks NaN, which round-trips as NaN.
     return bool(((cast == values) | (values != values)).all())
 
 
 class _Column:
-    """An append-only 1-D array in a buffer that doubles when full. Values
-    that `dtype` cannot hold exactly widen the column to `wide`.
-
-    Appends only write past the current length and growing allocates a new
-    buffer, so views returned earlier stay valid.
-    """
+    """An append-only 1-D array in a buffer that doubles when full, widened
+    from `dtype` to `wide` when a value would not round-trip. Growing
+    allocates a new buffer, so earlier views stay valid."""
 
     def __init__(self, dtype: str, wide: str | None = None) -> None:
         self.dtype = np.dtype(dtype)
@@ -65,8 +60,7 @@ class _Column:
         values = np.asarray(values)
         if not values.size:
             return
-        start = self._len
-        end = start + values.size
+        start, end = self._len, self._len + values.size
         if values.dtype != self.dtype and not _fits(values, self.dtype):
             self.dtype = self.wide
             self._buf = self.view().astype(self.wide)
@@ -86,22 +80,18 @@ class _Column:
     def read(self, start: int, stop: int) -> list:
         return self._buf[start:stop].tolist()
 
-    def copy_range(self, start: int, stop: int) -> "_Column":
-        """A new column holding a copy of elements `[start, stop)`."""
+    def copy(self, start: int, stop: int) -> "_Column":
+        """A new column holding elements `[start, stop)`."""
         column = _Column.__new__(_Column)
         column.dtype, column.wide = self.dtype, self.wide
         column._buf = self._buf[start:stop].copy()
-        column._len = len(column._buf)
+        column._len = column._buf.size
         return column
 
 
 class _ColumnView(Sequence[Any]):
-    """A read-only view of one `FlatLogprobs` column that converts only the
-    elements read, so indexing it in a loop costs O(1) per element and no
-    copy is kept. It follows later appends."""
-
-    # Elements converted per step while iterating.
-    _BLOCK = 1024
+    """A read-only view of one `FlatLogprobs` column that follows later
+    appends and converts only the elements read."""
 
     def __init__(
         self,
@@ -110,31 +100,24 @@ class _ColumnView(Sequence[Any]):
         item: Callable[[int], Any] | None = None,
     ) -> None:
         self._length = length
-        # read(start, stop) -> elements [start, stop) as Python values.
-        self._read = read
+        self._read = read  # (start, stop) -> those elements as Python values
         self._item = item or (lambda index: read(index, index + 1)[0])
 
     def __len__(self) -> int:
         return self._length()
 
     def __getitem__(self, index):
-        n = len(self)
         if isinstance(index, slice):
-            start, stop, step = index.indices(n)
+            start, stop, step = index.indices(len(self))
             if step == 1:
                 return self._read(start, max(start, stop))
-            return [self[i] for i in range(start, stop, step)]
-        i = operator.index(index)
-        if i < 0:
-            i += n
-        if not 0 <= i < n:
-            raise IndexError("FlatLogprobs column index out of range")
-        return self._item(i)
+            return [self._item(i) for i in range(start, stop, step)]
+        return self._item(range(len(self))[index])
 
     def __iter__(self) -> Iterator[Any]:
         n = len(self)
-        for start in range(0, n, self._BLOCK):
-            yield from self[start : min(start + self._BLOCK, n)]
+        for start in range(0, n, 1024):
+            yield from self._read(start, min(start + 1024, n))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Sequence) or isinstance(other, (str, bytes)):
@@ -148,25 +131,18 @@ class _ColumnView(Sequence[Any]):
 
 
 class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
-    """Logprobs of a request stored as flat numpy columns.
+    """Logprobs of a request in a few append-only numpy columns, with no
+    Python object per position or entry (about 8.5 bytes per entry).
 
-    Compared to list[dict[int, Logprob]], this creates no Python object per
-    position or entry: entries (position, candidate) are kept in a few
-    append-only numpy columns, about 8.5 bytes per entry.
+    Token ids and logprobs are int32 / float32, the engine's dtypes, widened
+    to int64 / float64 if a value would not round-trip. A position's first
+    entry keeps its rank and entry `j > 0` has rank `j`, as
+    `append_logprobs_for_next_position` gives; any other rank switches to a
+    per-entry rank column. Decoded tokens are kept once one is not None.
 
-    Token ids and logprobs are kept as int32 / float32, the engine's dtypes,
-    and a column widens to int64 / float64 when a value would not round-trip.
-    The rank of each position's first entry is kept per position, and entry
-    `j > 0` has rank `j`, as `append_logprobs_for_next_position` gives;
-    other ranks switch to a per-entry rank column. Decoded tokens are only
-    kept once one is not None.
-
-    NOTE: To reduce the migration overhead and improve backward compatibility,
-    we support the key Sequence APIs of list, so it could act as
-    list[LogprobsOnePosition]. The column attributes (`start_indices`,
-    `end_indices`, `token_ids`, `logprobs`, `ranks`,
-    `decoded_tokens`) are read-only views that convert only the elements
-    read; use `list(...)` for a list.
+    It supports the key Sequence APIs of list[LogprobsOnePosition]. The
+    column attributes (`start_indices`, `end_indices`, `token_ids`,
+    `logprobs`, `ranks`, `decoded_tokens`) are read-only views.
     """
 
     def __init__(
@@ -179,17 +155,14 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         decoded_tokens: Sequence[str | None] | None = None,
     ) -> None:
         self._num_positions = 0
-        # Entries per position while all positions have the same number.
+        # Entries per position, while all positions have the same number.
         self._width = 0
-        # Position i spans entries [ends[i - 1], ends[i]); kept once
-        # positions have different widths.
+        # End offset of each position, once positions have different widths.
         self._ends: _Column | None = None
         self._token_ids = _Column("<i4", "<i8")
         self._logprobs = _Column("<f4", "<f8")
-        # Rank of each position's first entry.
         self._first_ranks = _Column("<i8")
-        # Rank of every entry (_NO_RANK for None), once an entry j > 0 of
-        # some position had another rank than j.
+        # Rank of every entry (_NO_RANK for None), once a rank is irregular.
         self._ranks: _Column | None = None
         self._decoded: list[str | None] | None = None
         if start_indices is not None:
@@ -239,8 +212,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         decoded_tokens: Sequence[str | None] | None = None,
     ) -> None:
         """Appends `n` positions given as engine rows: `[n, S]` token ids
-        and logprobs and the `[n]` ranks of slot 0 (slot `j > 0` has rank
-        `j`), optionally with the `n * S` decoded tokens."""
+        and logprobs, the `[n]` ranks of slot 0 and optionally the `n * S`
+        decoded tokens."""
         self._append(
             token_ids.shape[1],
             token_ids.reshape(-1),
@@ -260,18 +233,14 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         canonical = width == 0 or (
             ranks[0] is not None and list(ranks[1:]) == list(range(1, width))
         )
-        first_rank = ranks[0] if width and canonical else 0
-        entry_ranks = (
-            None
-            if canonical
-            else np.array([_NO_RANK if r is None else r for r in ranks], np.int64)
-        )
         self._append(
             width,
             token_ids,
             logprobs,
-            np.array([first_rank]),
-            entry_ranks,
+            np.array([ranks[0] if width and canonical else 0]),
+            None
+            if canonical
+            else np.array([_NO_RANK if r is None else r for r in ranks], np.int64),
             decoded_tokens,
         )
 
@@ -284,9 +253,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         ranks: np.ndarray | None = None,
         decoded_tokens: Sequence[str | None] | None = None,
     ) -> None:
-        """Appends `len(first_ranks)` positions with `widths` entries
-        (one for all, or per position). `ranks` gives every entry's rank
-        when they are not the canonical ones."""
+        """Appends `len(first_ranks)` positions of `widths` entries (one for
+        all, or each), with every entry's rank in `ranks` if not canonical."""
         n = len(first_ranks)
         if n == 0:
             return
@@ -302,16 +270,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             self._width = widths
         else:
             if self._ends is None:
-                uniform_ends = self._ends_range(0, self._num_positions)
+                uniform_ends = self._bounds(0, self._num_positions)[1:]
                 self._ends = _Column("<i8")
                 self._ends.append(uniform_ends)
-            if not isinstance(widths, int):
-                ends = base + np.cumsum(widths)
-            elif n == 1:
-                ends = np.array([base + widths])
-            else:
-                ends = base + widths * np.arange(1, n + 1)
-            self._ends.append(ends)
+            self._ends.append(base + np.cumsum(np.broadcast_to(widths, n)))
         self._num_positions += n
         self._token_ids.append(token_ids)
         self._logprobs.append(logprobs)
@@ -334,11 +296,15 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 else decoded_tokens
             )
 
-    def _ends_range(self, start: int, stop: int) -> np.ndarray:
-        """End offsets of positions `[start, stop)`."""
+    def _bounds(self, start: int, stop: int) -> np.ndarray:
+        """Entry offsets `b` of positions `[start, stop)`: position
+        `start + i` spans entries `[b[i], b[i + 1])`."""
         if self._ends is None:
-            return self._width * np.arange(start + 1, stop + 1)
-        return self._ends.view()[start:stop]
+            return self._width * np.arange(start, stop + 1)
+        ends = self._ends.view()
+        return np.concatenate(
+            (ends[start - 1 : start] if start else [0], ends[start:stop])
+        )
 
     def _start(self, position: int) -> int:
         if self._ends is None:
@@ -346,8 +312,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         return int(self._ends.view()[position - 1]) if position else 0
 
     def _entry_ranks(self, start: int, stop: int) -> np.ndarray:
-        """Ranks of entries `[start, stop)`, int64 with `_NO_RANK` for
-        None."""
+        """Ranks of entries `[start, stop)`, with `_NO_RANK` for None."""
         if self._ranks is not None:
             return self._ranks.view()[start:stop]
         return self._canonical_ranks(start, stop)
@@ -371,14 +336,11 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         """Appends positions `[start, stop)` of `source`."""
         if start >= stop:
             return
-        begin, end = source._start(start), source._start(stop)
-        widths: int | np.ndarray = source._width
-        if source._ends is not None:
-            widths = np.diff(source._ends.view()[start:stop], prepend=begin)
-            if (widths == widths[0]).all():
-                widths = int(widths[0])
+        bounds = source._bounds(start, stop)
+        begin, end = int(bounds[0]), int(bounds[-1])
+        widths = np.diff(bounds)
         self._append(
-            widths,
+            int(widths[0]) if (widths == widths[0]).all() else widths,
             source._token_ids.view()[begin:end],
             source._logprobs.view()[begin:end],
             source._first_ranks.view()[start:stop],
@@ -402,12 +364,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         return len(self._token_ids)
 
     def rows(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """The entries as engine rows: `token_ids[N, S]` (int32),
-        `logprobs[N, S]` (float32) and the ranks of slot 0 `[N]` (int64).
-
-        None unless every position has the same `S > 0` entries, entry
-        `j > 0` of each has rank `j` and no column was widened.
-        """
+        """The entries as engine rows: int32 `token_ids[N, S]`, float32
+        `logprobs[N, S]` and the int64 ranks of slot 0 `[N]`; None unless
+        all positions have `S > 0` entries, canonical ranks and no column
+        was widened."""
         n = len(self)
         if n and (
             self._ends is not None
@@ -426,19 +386,23 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
     def first_token_ids(self, start: int, stop: int) -> list[int]:
         """Token id of the first entry of each position in `[start, stop)`
         that has entries."""
-        if start >= stop:
-            return []
-        ends = self._ends_range(start, stop)
-        begins = np.concatenate(([self._start(start)], ends[:-1]))
+        bounds = self._bounds(start, stop)
+        begins, ends = bounds[:-1], bounds[1:]
         return self._token_ids.view()[begins[begins < ends]].tolist()
 
     @property
     def start_indices(self) -> Sequence[int]:
-        return _ColumnView(self.__len__, self._start_list, self._start)
+        return _ColumnView(
+            self.__len__, lambda a, b: self._bounds(a, b)[:-1].tolist(), self._start
+        )
 
     @property
     def end_indices(self) -> Sequence[int]:
-        return _ColumnView(self.__len__, self._end_list, self._end)
+        return _ColumnView(
+            self.__len__,
+            lambda a, b: self._bounds(a, b)[1:].tolist(),
+            lambda i: self._start(i + 1),
+        )
 
     @property
     def token_ids(self) -> Sequence[int]:
@@ -452,31 +416,21 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
 
     @property
     def ranks(self) -> Sequence[int | None]:
-        return _ColumnView(self._token_ids.__len__, self._rank_list)
+        return _ColumnView(
+            self._token_ids.__len__,
+            lambda a, b: [
+                None if r == _NO_RANK else r for r in self._entry_ranks(a, b).tolist()
+            ],
+        )
 
     @property
     def decoded_tokens(self) -> Sequence[str | None]:
-        return _ColumnView(self._token_ids.__len__, self._decoded_list)
-
-    def _start_list(self, start: int, stop: int) -> list[int]:
-        if start >= stop:
-            return []
-        return [self._start(start), *self._ends_range(start, stop - 1).tolist()]
-
-    def _end_list(self, start: int, stop: int) -> list[int]:
-        return self._ends_range(start, stop).tolist()
-
-    def _end(self, position: int) -> int:
-        return self._start(position + 1)
-
-    def _rank_list(self, start: int, stop: int) -> list[int | None]:
-        ranks = self._entry_ranks(start, stop).tolist()
-        return [None if rank == _NO_RANK else rank for rank in ranks]
-
-    def _decoded_list(self, start: int, stop: int) -> list[str | None]:
-        if self._decoded is None:
-            return [None] * (stop - start)
-        return self._decoded[start:stop]
+        return _ColumnView(
+            self._token_ids.__len__,
+            lambda a, b: (
+                [None] * (b - a) if self._decoded is None else self._decoded[a:b]
+            ),
+        )
 
     def __len__(self) -> int:
         """Gets number of positions stored in the container."""
@@ -504,21 +458,22 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         if not isinstance(index, int):
             raise TypeError(f"Invalid index type: {type(index)}")
         position = range(len(self))[index]
-        return self._position(position, self._start(position), self._end(position))
+        return self._position(
+            position, self._start(position), self._start(position + 1)
+        )
 
     def _uniform_slice(self, start: int, stop: int) -> "FlatLogprobs":
-        """Positions `[start, stop)` while all positions have the same
-        width: each column is copied as is, without going through `_append`
-        (e.g. the per-step `[-n:]` of DELTA outputs)."""
+        """Positions `[start, stop)` of same-width positions, copying each
+        column directly (e.g. the per-step `[-n:]` of DELTA outputs)."""
         begin, end = start * self._width, stop * self._width
         sliced = FlatLogprobs()
         sliced._num_positions = stop - start
         sliced._width = self._width
-        sliced._token_ids = self._token_ids.copy_range(begin, end)
-        sliced._logprobs = self._logprobs.copy_range(begin, end)
-        sliced._first_ranks = self._first_ranks.copy_range(start, stop)
+        sliced._token_ids = self._token_ids.copy(begin, end)
+        sliced._logprobs = self._logprobs.copy(begin, end)
+        sliced._first_ranks = self._first_ranks.copy(start, stop)
         if self._ranks is not None:
-            sliced._ranks = self._ranks.copy_range(begin, end)
+            sliced._ranks = self._ranks.copy(begin, end)
         if self._decoded is not None:
             sliced._decoded = self._decoded[begin:end]
         return sliced
@@ -529,11 +484,6 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
             ranks = self._ranks.read(begin, end)
         else:
             ranks = [self._first_ranks.item(position), *range(1, end - begin)]
-        decoded: Iterable[str | None] = (
-            itertools.repeat(None)
-            if self._decoded is None
-            else self._decoded[begin:end]
-        )
         return {
             token_id: Logprob(
                 logprob=logprob,
@@ -544,7 +494,9 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 self._token_ids.read(begin, end),
                 self._logprobs.read(begin, end),
                 ranks,
-                decoded,
+                itertools.repeat(None)
+                if self._decoded is None
+                else self._decoded[begin:end],
             )
         }
 
@@ -561,18 +513,15 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         """Iterates the container and yields LogprobsOnePosition for
         each position.
         """
-        begin = 0
-        for position, end in enumerate(self._ends_range(0, len(self)).tolist()):
-            yield self._position(position, begin, end)
-            begin = end
+        bounds = self._bounds(0, len(self)).tolist()
+        for position in range(len(self)):
+            yield self._position(position, bounds[position], bounds[position + 1])
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, FlatLogprobs):
             return NotImplemented
         return (
-            np.array_equal(
-                self._ends_range(0, len(self)), other._ends_range(0, len(other))
-            )
+            np.array_equal(self._bounds(0, len(self)), other._bounds(0, len(other)))
             and np.array_equal(self._token_ids.view(), other._token_ids.view())
             and np.array_equal(
                 self._logprobs.view(), other._logprobs.view(), equal_nan=True

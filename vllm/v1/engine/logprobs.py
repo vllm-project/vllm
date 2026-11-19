@@ -27,41 +27,6 @@ logger = init_logger(__name__)
 NONES = itertools.repeat(None)
 
 
-def _row_width(num_logprobs: int, num_slots: int) -> int:
-    """Engine slots kept per position: the sampled token and the top-k."""
-    return num_slots if num_logprobs == -1 else num_logprobs + 1
-
-
-def _append_rows(
-    container: SampleLogprobs | PromptLogprobs,
-    token_ids: np.ndarray,
-    logprobs: np.ndarray,
-    ranks: np.ndarray,
-    decoded_tokens: list[str] | None,
-    num_logprobs: int,
-) -> None:
-    """Appends `[n, S]` engine rows (already cut to the request's width)
-    and the ranks of their sampled tokens, with the `n * S` decoded tokens
-    or none."""
-    if isinstance(container, FlatLogprobs):
-        container.append_rows(token_ids, logprobs, ranks, decoded_tokens)
-        return
-    width = token_ids.shape[1]
-    for i, (row_ids, row_logprobs, rank) in enumerate(
-        zip(token_ids.tolist(), logprobs.tolist(), ranks.tolist())
-    ):
-        append_logprobs_for_next_position(
-            container,
-            row_ids,
-            row_logprobs,
-            NONES
-            if decoded_tokens is None
-            else decoded_tokens[i * width : (i + 1) * width],
-            rank,
-            num_logprobs,
-        )
-
-
 @dataclass(slots=True)
 class LogprobsProcessor:
     # Tokenizer for this request,
@@ -123,26 +88,17 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
-        width = _row_width(self.num_logprobs, token_ids_lst.shape[1])
-        token_ids_lst = token_ids_lst[:, :width]
-        logprobs_lst = logprobs_lst[:, :width]
+        token_ids, logprobs, ranks, _ = logprobs_lists
         # Sampler puts the sampled logprob in first.
-        for sampled_token_logprob in logprobs_lst[:, 0].tolist():
+        for sampled_token_logprob in logprobs[:, 0].tolist():
             self.cumulative_logprob += sampled_token_logprob
-
-        decoded_tokens = (
-            self._decode_rows(token_ids_lst, self.logprobs)
-            if self.tokenizer is not None and self.detokenize_sample_logprobs
-            else None
-        )
-        _append_rows(
+        self._append_rows(
             self.logprobs,
-            token_ids_lst,
-            logprobs_lst,
-            ranks_lst,
-            decoded_tokens,
             self.num_logprobs,
+            token_ids,
+            logprobs,
+            ranks,
+            self.detokenize_sample_logprobs,
         )
 
     def _update_prompt_logprobs(
@@ -161,43 +117,63 @@ class LogprobsProcessor:
         assert self.prompt_logprobs is not None
 
         token_ids, logprobs, ranks, *_ = prompt_logprobs_tensors
-
-        width = _row_width(self.num_prompt_logprobs, logprobs.shape[1])
-        token_ids_np = token_ids[:, :width].numpy()
-        decoded_tokens = (
-            None
-            if self.tokenizer is None
-            else self._decode_rows(token_ids_np, self.prompt_logprobs)
-        )
-        _append_rows(
+        self._append_rows(
             self.prompt_logprobs,
-            token_ids_np,
-            logprobs[:, :width].numpy(),
-            ranks.numpy(),
-            decoded_tokens,
             self.num_prompt_logprobs,
+            token_ids.numpy(),
+            logprobs.numpy(),
+            ranks.numpy(),
+            detokenize=True,
         )
+
+    def _append_rows(
+        self,
+        container: SampleLogprobs | PromptLogprobs,
+        num_logprobs: int,
+        token_ids: np.ndarray,
+        logprobs: np.ndarray,
+        ranks: np.ndarray,
+        detokenize: bool,
+    ) -> None:
+        """Appends `[n, S]` engine rows, cut to the requested width, with the
+        `[n]` ranks of their sampled tokens."""
+        width = token_ids.shape[1] if num_logprobs == -1 else num_logprobs + 1
+        token_ids, logprobs = token_ids[:, :width], logprobs[:, :width]
+        decoded = (
+            self._decode_rows(token_ids, container)
+            if detokenize and self.tokenizer is not None
+            else None
+        )
+        if isinstance(container, FlatLogprobs):
+            container.append_rows(token_ids, logprobs, ranks, decoded)
+            return
+        for i, (row_ids, row_logprobs, rank) in enumerate(
+            zip(token_ids.tolist(), logprobs.tolist(), ranks.tolist())
+        ):
+            append_logprobs_for_next_position(
+                container,
+                row_ids,
+                row_logprobs,
+                NONES if decoded is None else decoded[i * width : (i + 1) * width],
+                rank,
+                num_logprobs,
+            )
 
     def _decode_rows(
         self,
         token_ids: np.ndarray,
         logprobs_source: SampleLogprobs | PromptLogprobs,
     ) -> list[str]:
-        """Decoded tokens of `[n, S]` rows about to be appended to
-        `logprobs_source`, flattened, with byte-fallback pieces corrected.
-
-        A row is corrected only when one of its tokens ends with the
-        replacement character, so the context (the sampled or prompt tokens
-        of the positions before it: the source's last positions and this
-        batch's earlier rows) is built only for those rows.
-        """
+        """The decoded tokens of `[n, S]` rows about to be appended to
+        `logprobs_source`, flattened. Rows with a byte-fallback piece are
+        corrected using the tokens of the positions before them: the
+        source's last positions and this batch's earlier rows."""
         assert self.tokenizer is not None
         width = token_ids.shape[1]
         decoded = convert_ids_list_to_tokens(self.tokenizer, token_ids.ravel().tolist())
-        rows = sorted(
-            {i // width for i, token in enumerate(decoded) if token.endswith("�")}
-        )
-        for row in rows:
+        for row in sorted(
+            {i // width for i, t in enumerate(decoded) if t.endswith("�")}
+        ):
             in_batch = token_ids[max(0, row - 4) : row, 0].tolist()
             context = (
                 self._get_sampled_context_ids(logprobs_source, 4 - len(in_batch))

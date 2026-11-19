@@ -681,9 +681,8 @@ class GenerateDerenderResponse(GenerateResponseBase):
 
 @dataclass
 class RenderedGenerateResponse:
-    """A non-streaming generate response already rendered to JSON: the JSON
-    of the equivalent `GenerateResponse`, as parts to concatenate. Kept as
-    parts so the body is sent without first joining it into one copy."""
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
 
     parts: list[bytes]
 

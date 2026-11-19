@@ -1,19 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Object-free rendering of `/inference/v1/generate` sample logprobs.
-
-`render_tokens_logprobs` reads the engine rows of a
-`FlatLogprobs` and produces the same JSON values that
-`ServingTokens._create_tokens_logprobs` + `model_dump` + Starlette's
-`JSONResponse.render` produce for the same rows, without a Python object
-per entry, yielding to the event loop between blocks of rows. Floats are
-written by orjson, so their notation can differ from `json.dumps` (e.g.
-`-0.00001` for `-1e-05`), not their values.
-`render_json_with_fragments` splices such pre-rendered values into the
-JSON of the remaining (small) response.
-"""
+"""Renders `/inference/v1/generate` sample logprobs from `FlatLogprobs`
+engine rows without a Python object per entry: the same JSON values as
+`ServingTokens._create_tokens_logprobs` + `JSONResponse` (orjson may write a
+float in other notation, e.g. `-0.00001` for `-1e-05`)."""
 
 import asyncio
+import contextlib
 import json
 import secrets
 from collections.abc import Mapping, Sequence
@@ -24,44 +17,38 @@ import orjson
 
 from vllm.logprobs import FlatLogprobs
 
-# Logprob entries (rows x slots) rendered between yields to the event loop,
-# about 2 ms of work; also bounds the per-block arrays.
+# Logprob entries rendered between yields to the event loop (about 2 ms).
 RENDER_BLOCK_ENTRIES = 1 << 13
 
 
-class _LeadTable:
-    """token id -> `prefix + str(id) + suffix` as a numpy object array, so a
-    block of ids maps to its JSON pieces with one fancy index.
+def _object_array(items: list) -> np.ndarray:
+    array = np.empty(len(items), dtype=object)
+    array[:] = items
+    return array
 
-    Covers ids below `max_ids`, kept for the process lifetime (a few MB per
-    table at a 150k vocabulary); blocks with other ids are formatted per call.
-    """
+
+class _LeadTable:
+    """Cached `prefix + str(id) + suffix` per token id below `max_ids`, so a
+    block of ids maps to its JSON pieces with one fancy index."""
 
     max_ids = 1 << 18
 
     def __init__(self, prefix: bytes, suffix: bytes):
-        self.prefix = prefix
-        self.suffix = suffix
-        self._values = np.empty(0, dtype=object)
-        self._filled = np.zeros(0, dtype=bool)
+        self.prefix, self.suffix = prefix, suffix
+        self._values: np.ndarray | None = None
+        self._filled = np.zeros(self.max_ids, dtype=bool)
 
     def _formatted(self, ids: np.ndarray) -> np.ndarray:
-        result = np.empty(ids.size, dtype=object)
-        result[:] = [b"%s%d%s" % (self.prefix, i, self.suffix) for i in ids.tolist()]
-        return result
+        return _object_array(
+            [b"%s%d%s" % (self.prefix, i, self.suffix) for i in ids.tolist()]
+        )
 
     def lookup(self, ids: np.ndarray) -> np.ndarray:
         """The pieces of a non-empty array of ids, in its shape."""
-        lo, hi = int(ids.min()), int(ids.max())
-        if lo < 0 or hi >= self.max_ids:
+        if ids.min() < 0 or ids.max() >= self.max_ids:
             return self._formatted(ids.ravel()).reshape(ids.shape)
-        if hi >= len(self._values):
-            size = min(self.max_ids, max(hi + 1, 2 * len(self._values)))
-            values = np.empty(size, dtype=object)
-            values[: len(self._values)] = self._values
-            filled = np.zeros(size, dtype=bool)
-            filled[: len(self._filled)] = self._filled
-            self._values, self._filled = values, filled
+        if self._values is None:
+            self._values = np.empty(self.max_ids, dtype=object)
         missing = np.unique(ids[~self._filled[ids]])
         if missing.size:
             self._values[missing] = self._formatted(missing)
@@ -86,16 +73,17 @@ async def render_tokens_logprobs(
     container: FlatLogprobs,
     lock: asyncio.Lock | None = None,
 ) -> list[bytes] | None:
-    """See `_render_tokens_logprobs`. Renders of more than one block
-    hold `lock`: they all run on the event loop's thread, so interleaving
-    them adds no throughput, only memory, as each holds its partial output.
-    """
+    """See `_render_tokens_logprobs`. Renders of more than one block hold
+    `lock`: on one event loop, interleaving them would only hold more partial
+    output at once."""
     rows = container.rows()
     if rows is None:
         return None
-    if lock is None or rows[0].size <= RENDER_BLOCK_ENTRIES:
-        return await _render_tokens_logprobs(sampled_token_ids, rows)
-    async with lock:
+    async with (
+        lock
+        if lock is not None and rows[0].size > RENDER_BLOCK_ENTRIES
+        else contextlib.nullcontext()
+    ):
         return await _render_tokens_logprobs(sampled_token_ids, rows)
 
 
@@ -103,20 +91,14 @@ async def _render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
     engine_rows: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> list[bytes] | None:
-    """Render the `GenerateLogProbs` JSON of one choice, as parts whose
-    concatenation is the JSON.
+    """The `GenerateLogProbs` JSON of one choice, as parts to concatenate.
 
-    Per position, the per-entry path builds a dict from the row (keys keep
-    their first occurrence's order, values come from the last occurrence;
-    slot 0 has the engine rank, slot `j` rank `j`), looks the sampled
-    entry up by the sampled id, and lists every dict item as `top_logprobs`
-    (one fewer when the sampled id repeats in the top-k); logprobs are clamped
-    (NaN and values below -9999 are -9999.0) and a rank of 0 is null.
-
-    Returns None when the rows do not map to that shape directly (sampled id
-    not in slot 0, repeated top-k ids, a value JSON cannot represent): the
-    caller then uses the per-entry path.
-    """
+    Matches the per-entry path, which builds a dict per row (first
+    occurrence's key order, last occurrence's value; slot 0 has the engine
+    rank, slot `j` rank `j`), looks the sampled entry up in it and lists all
+    its items as `top_logprobs`, clamping logprobs to -9999.0 (NaN too) and
+    sending rank 0 as null. Returns None for rows it cannot map directly
+    (sampled id not in slot 0, repeated top-k ids, non-finite values)."""
     token_ids, logprobs, engine_ranks = engine_rows
     n = len(sampled_token_ids)
     if n != len(token_ids):
@@ -128,7 +110,7 @@ async def _render_tokens_logprobs(
 
     num_slots = token_ids.shape[1]
     cols = np.arange(num_slots)
-    rank_pieces = np.array(_rank_pieces(list(range(num_slots + 1))), dtype=object)
+    rank_pieces = _object_array(_rank_pieces(list(range(num_slots + 1))))
     block_rows = max(1, RENDER_BLOCK_ENTRIES // num_slots)
     parts: list[bytes] = [b'{"content":[']
     for start in range(0, n, block_rows):
@@ -136,22 +118,17 @@ async def _render_tokens_logprobs(
             await asyncio.sleep(0)
         ids = token_ids[start : start + block_rows]
         rows = len(ids)
-        if num_slots > 2:
-            # Repeated top-k ids: logprob_token_ids may repeat an id, and a
-            # co-batched logprob_token_ids request pads other rows with id 0.
-            top = np.sort(ids[:, 1:], axis=1)
-            if (top[:, 1:] == top[:, :-1]).any():
-                return None
-        # The slot (>= 1) repeating the sampled id, at most one per row here.
-        if num_slots > 1:
-            eq = ids[:, 1:] == ids[:, :1]
-            has_dup = eq.any(axis=1)
-            dup_col = np.where(has_dup, eq.argmax(axis=1) + 1, num_slots)
-        else:
-            has_dup = np.zeros(rows, dtype=bool)
-            dup_col = np.full(rows, num_slots)
-        # Slots of the top-k entries: the duplicate's slot is skipped, so a
-        # row with a duplicate has no last entry.
+        # Repeated top-k ids (e.g. from logprob_token_ids).
+        top = np.sort(ids[:, 1:], axis=1)
+        if (top[:, 1:] == top[:, :-1]).any():
+            return None
+        # The slot (>= 1) repeating the sampled id, or num_slots if none.
+        dup_col = np.where(ids[:, 1:] == ids[:, :1], cols[1:], num_slots).min(
+            axis=1, initial=num_slots
+        )
+        has_dup = dup_col < num_slots
+        # Slots of the top-k entries: a row with a duplicate skips its slot
+        # and so has no last entry.
         src = cols[None, :] + (cols[None, :] >= dup_col[:, None])
         missing = src == num_slots
         src = np.minimum(src, num_slots - 1)
@@ -167,15 +144,12 @@ async def _render_tokens_logprobs(
             return None
         sampled_ranks = np.where(has_dup, dup_col, engine_ranks[start : start + rows])
 
-        # Per row: content lead, value, rank; first top lead, value, rank;
-        # lead, value, rank per further top entry; the row end. Built as one
-        # object array: per-row lists would be GC-tracked objects.
-        floats = np.empty(rows * num_slots, dtype=object)
+        # Per row: lead, value and rank of the content entry, of the first
+        # top entry and of each further one, then the row end, in one object
+        # array (per-row lists would be GC-tracked).
         encoded = orjson.dumps(values.ravel(), option=orjson.OPT_SERIALIZE_NUMPY)
-        floats[:] = encoded[1:-1].split(b",")
-        floats = floats.reshape(rows, num_slots)
-        sampled_rank_pieces = np.empty(rows, dtype=object)
-        sampled_rank_pieces[:] = _rank_pieces(sampled_ranks.tolist())
+        floats = _object_array(encoded[1:-1].split(b",")).reshape(rows, num_slots)
+        sampled_rank_pieces = _object_array(_rank_pieces(sampled_ranks.tolist()))
         out = np.empty((rows, 3 * (num_slots + 1) + 1), dtype=object)
         out[:, 0] = _CONTENT_LEADS.lookup(ids[:, 0])
         out[:, 1] = floats[:, 0]
@@ -213,10 +187,9 @@ def _dumps(content: Any) -> bytes:
 def render_json_with_fragments(
     content: dict[str, Any], key: str, fragments: Mapping[int, list[bytes]]
 ) -> list[bytes]:
-    """Render `content` like `JSONResponse`, with the value of
-    `content["choices"][i][key]` replaced by the pre-rendered JSON
-    `fragments[i]` (parts to concatenate), as parts whose concatenation is
-    the body. `content` is modified in place."""
+    """`content` rendered like `JSONResponse`, as parts to concatenate, with
+    `content["choices"][i][key]` (modified in place) replaced by the
+    pre-rendered parts `fragments[i]`."""
     token = secrets.token_hex(16)
     for index in fragments:
         content["choices"][index][key] = token
