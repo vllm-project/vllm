@@ -62,8 +62,9 @@ def count_modules(model, cls: type) -> int:
     return sum(isinstance(m, cls) for m in model.modules())
 
 
-def count_fusers(model) -> Counter[str]:
-    return Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
+def count_fusers(model) -> dict[str, int]:
+    counts = Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
+    return dict(counts)
 
 
 def check_implementation(
@@ -95,7 +96,7 @@ def check_implementation(
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
         expected = {name: n * num_layers for name, n in num_fused.items()}
         for counts in model_test.apply_model(count_fusers):
-            assert {name: counts[name] for name in expected} == expected
+            assert {name: counts.get(name, 0) for name in expected} == expected
 
         tp_size = kwargs_test.get("tensor_parallel_size", 1)
         from vllm.model_executor.layers.attention import Attention
