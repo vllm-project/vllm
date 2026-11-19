@@ -1532,6 +1532,12 @@ def rocm_aiter_sparse_attn_indexer(
             # gather adds on top of the chunk.
             row_bytes = head_dim + 4
             gather_elems = total_seq_lens * (2 * row_bytes + head_dim + 4)
+            if envs.VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL:
+                # Row-sharded scoring grows the logits budget by the DCP world
+                # size, so a fake-tensor trace must see the grown budget.
+                # Callers sized for DCP=1 see the allocation up to dcp times
+                # larger, which at the default budget is 16 GiB at DCP8.
+                max_logits_elems *= dcp_world_size
         _ = torch.empty(
             max_logits_elems + gather_elems,
             dtype=torch.uint8,

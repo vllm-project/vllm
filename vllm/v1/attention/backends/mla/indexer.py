@@ -983,6 +983,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
+    # Set by builders whose indexer layout keeps exactly one key per token, so
+    # a rank can score its share of a prefill chunk's query rows against every
+    # rank's keys and share the selections. Layouts that compress keys or
+    # preselect candidates keep scoring every row.
+    _dcp_prefill_rowshard_supported: bool = False
 
     @classmethod
     def get_cudagraph_support(
@@ -1051,9 +1056,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self._rowshard_dcp_prefill = (
             self._needs_global_row_bounds
             and envs.VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL
+            and self._dcp_prefill_rowshard_supported
             and self.compress_ratio == 1
             and not self.indexer_uses_fp4
-            and self.vllm_config.model_config.hf_text_config.model_type == "kimi_linear"
         )
         # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
         # the logits budget). PCP + DCP has its own planner. v4.1 candidate

@@ -6,7 +6,6 @@ import math
 
 import torch
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -260,14 +259,12 @@ def gather_global_indexer_keys(
     all_cu = torch.cat(
         (counts.new_zeros((1, dcp_world_size)), counts.cumsum(0, dtype=torch.int32))
     )
-    # The per-rank row count is the stride into the gathered buffer, so both
-    # the allocation and the restore below must use the same (padded) value.
-    rows = chunk.max_local_total_seq_lens
-    if envs.VLLM_ROCM_DSA_DCP_PAD_KEY_GATHER:
-        # AITER's IPC all-gather only takes a payload whose byte count is a
-        # multiple of 16. Rounding the rows up buys that for any width.
-        align = 16 // math.gcd(width, 16)
-        rows = triton.cdiv(rows, align) * align
+    # Keep every rank's payload a whole number of 16-byte packs so an IPC
+    # all-gather can take it without a repack. The row count is the stride into
+    # the gathered buffer, so the allocation and the restore below must use the
+    # same value.
+    align = 16 // math.gcd(width, 16)
+    rows = triton.cdiv(chunk.max_local_total_seq_lens, align) * align
     packed = torch.empty((rows, width), dtype=torch.uint8, device=device)
     local_width = (
         triton.cdiv(chunk.max_seqlen_k, dcp_world_size * cp_interleave) * cp_interleave
