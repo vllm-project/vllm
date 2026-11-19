@@ -12,6 +12,7 @@ stock layer loop: hidden states, aux hidden states and KV caches.
 """
 
 import dataclasses
+import importlib.util
 import inspect
 import json
 from typing import Any
@@ -270,18 +271,29 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     assert built_buckets(1) == [8]
     assert built_buckets(3) == [8, 16, 32]
     assert built_buckets(16) == built_buckets(128) == [8, 16, 32, 64, 96, 128]
+    # TP 4 has the builds up to 64 rows: larger steps run stock.
+    assert built_buckets(1, 4) == [8]
+    assert built_buckets(3, 4) == [8, 16, 32]
+    assert built_buckets(8, 4) == built_buckets(128, 4) == [8, 16, 32, 64]
 
 
-def test_kv_cache_guard_accepts_only_dense_bf16_lbhnc() -> None:
+def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:
     lbhnc = torch.empty(10, 2, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lbhnc, 2) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=False) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=True) == "kv:torch.bfloat16"
     lhbnc = torch.empty(2, 10, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2).startswith("kv:stride")
-    fp8 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e4m3fn, device="meta")
-    assert kv_cache_refusal(fp8, 2).startswith("kv:torch.float8")
+    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2, False).startswith("kv:stride")
+    # vLLM allocates an fp8 cache as uint8; the backend views it as e4m3.
+    for dtype in (torch.uint8, torch.float8_e4m3fn):
+        fp8 = torch.empty(10, 2, 16, 128, dtype=dtype, device="meta")
+        assert kv_cache_refusal(fp8, 2, kv_fp8=True) is None
+        assert kv_cache_refusal(fp8, 2, kv_fp8=False) == f"kv:{dtype}"
+    e5m2 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e5m2, device="meta")
+    assert kv_cache_refusal(e5m2, 2, kv_fp8=True) == "kv:torch.float8_e5m2"
     block32 = torch.empty(10, 2, 32, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(block32, 2).startswith("kv:shape")
-    assert kv_cache_refusal(torch.empty(0, dtype=torch.bfloat16), 2) == "kv:unbound"
+    assert kv_cache_refusal(block32, 2, False).startswith("kv:shape")
+    unbound = torch.empty(0, dtype=torch.bfloat16)
+    assert kv_cache_refusal(unbound, 2, False) == "kv:unbound"
 
 
 def test_config_guard_accepts_only_the_checkpoint_shape() -> None:
@@ -313,21 +325,26 @@ def _moe_parallel(use_ep: bool = True, ep_size: int = 8, ep_rank: int = 3):
     )
 
 
-def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
+def test_deployment_guard_accepts_only_tep8_or_tep4_with_dspark(checkpoints) -> None:
     tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
     tep8 = _vllm_config(tiny, dspark, tp=8)
     assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
+    for cache_dtype in ("fp8", "fp8_e4m3"):
+        fp8 = _vllm_config(tiny, dspark, tp=8, cache_dtype=cache_dtype)
+        assert deployment_refusals(fp8, 3, 8, _moe_parallel()) == []
+    tep4 = _vllm_config(tiny, dspark, tp=4)
+    assert deployment_refusals(tep4, 3, 4, _moe_parallel(ep_size=4)) == []
 
-    tp4 = _vllm_config(tiny, dspark, tp=4, expert_placement_strategy="round_robin")
-    tp4.parallel_config.enable_expert_parallel = False
-    assert deployment_refusals(tp4, 3, 4, _moe_parallel(use_ep=False)) == [
-        "tensor_parallel_size=4 (kernel: 8)",
+    tp2 = _vllm_config(tiny, dspark, tp=2, expert_placement_strategy="round_robin")
+    tp2.parallel_config.enable_expert_parallel = False
+    assert deployment_refusals(tp2, 1, 2, _moe_parallel(use_ep=False)) == [
+        "tensor_parallel_size=2 (kernel: (4, 8))",
         "expert parallelism off (needs --enable-expert-parallel)",
         "expert placement round_robin",
         "MoE layers not expert parallel",
     ]
 
-    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8")
+    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8_e5m2")
     no_draft.lora_config = LoRAConfig()
     no_draft.model_config.enable_sleep_mode = True
     no_draft.weight_transfer_config = WeightTransferConfig()
@@ -336,7 +353,19 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
         "LoRA on",
         "sleep mode on",
         "weight transfer on",
-        "kv_cache_dtype=fp8 (kernel: bf16)",
+        "kv_cache_dtype=fp8_e5m2 (kernel: bf16, fp8_e4m3)",
+    ]
+
+
+def test_deployment_guard_keeps_ep_ring1_to_tp8(checkpoints, monkeypatch) -> None:
+    """Ring1 placement covers 8 ranks of 32 experts only."""
+    monkeypatch.setenv("VLLM_MUSE_MONO_EP_RING1", "1")
+    tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
+    tep8 = _vllm_config(tiny, dspark, tp=8)
+    assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
+    tep4 = _vllm_config(tiny, dspark, tp=4)
+    assert deployment_refusals(tep4, 3, 4, _moe_parallel(ep_size=4)) == [
+        "VLLM_MUSE_MONO_EP_RING1 needs tensor_parallel_size=8"
     ]
 
 
@@ -354,6 +383,28 @@ def _on_gfx950() -> bool:
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(), reason="Muse Spark on ROCm needs AITER's gfx950 kernels"
 )
+requires_flydsl = pytest.mark.skipif(
+    importlib.util.find_spec("flydsl") is None
+    or importlib.util.find_spec("aiter") is None,
+    reason="the K3 builds need FlyDSL and AITER",
+)
+
+
+@requires_flydsl
+def test_k3_tp8_builds_batch_the_16_row_launch_only() -> None:
+    """TP 8 takes the reduce-scatter token sums in every K3 build, the down
+    ring and goab only at 16 rows (they lose at 8); TP 4 builds keep neither."""
+    from vllm.models.muse_spark.amd.mono.kernels import k3
+
+    key = {(s, w): k3.build_vllm(S=s, W=w) for s in (8, 16) for w in (4, 8)}
+    assert [(k.tokred, k.drain, k.goab) for k in key.values()] == [
+        (False, False, False),
+        (True, False, False),
+        (False, False, False),
+        (True, True, True),
+    ]
+    with pytest.raises(AssertionError):
+        k3.build_vllm(S=8, W=4, ring1=1)
 
 
 @dataclasses.dataclass(slots=True)
@@ -507,7 +558,8 @@ def test_fused_attention_layers_follow_the_window(tiny_model) -> None:
 _K3_HEAD = (
     "attn_o attn_g stream_pre w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
     "w13 w13s w2 w2s w_post w_pp w_pff alpha beta w_in w_qkvg stream_out xn_out "
-    "part_out q_out g_out k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "part_out q_out g_out k_cache v_cache slots cos_sin pos k_scale v_scale scratch "
+    "epoch health tl"
 )
 _HA_HEAD = (
     "attn_o attn_g stream_in w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
@@ -516,15 +568,15 @@ _HA_HEAD = (
 _HM_HEAD = "h ids sc w13 w13s w2 w2s w_post part_out scratch epoch health tl"
 _HB_HEAD = (
     "part w_pp w_pff alpha beta w_in w_qkvg stream_out sfull_out q_out g_out "
-    "k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "k_cache v_cache slots cos_sin pos k_scale v_scale scratch epoch health tl"
 )
 _REPLICAS = " w13r w13sr w2r w2sr eptab"
-_DESC_WORDS = 10
+_DESC_WORDS = 12
 
 
-def _params(head: str, world_size: int, tail: str) -> list[str]:
-    """A launch's parameters in order."""
-    return head.split() + [f"peer{r}" for r in range(world_size)] + tail.split()
+def _params(head: str, tail: str) -> list[str]:
+    """A launch's parameters in order: 8 peer slots at any world size."""
+    return head.split() + [f"peer{r}" for r in range(8)] + tail.split()
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
@@ -580,13 +632,14 @@ class StockLaunches:
         if not fused:
             return _device_view(attn_o, (rows, d.q_rows), torch.bfloat16)
         words = _device_view(attn_o, (_DESC_WORDS,), torch.int64).tolist()
-        md, _, kv_cache, _ = _attention_context(layer)
+        md, attn, kv_cache, _ = _attention_context(layer)
         assert words[1:5] == [
             kv_cache.data_ptr(),
             kv_cache.stride(0),
             md.block_table.data_ptr(),
             md.seq_lens.data_ptr(),
         ]
+        assert words[10:] == [attn._k_scale.data_ptr(), attn._v_scale.data_ptr()]
         assert words[8] == nreq
         q = _device_view(words[0], (rows, d.q_rows), torch.bfloat16)
         out = _device_view(words[5], (rows, d.q_rows), torch.bfloat16)
@@ -604,10 +657,12 @@ class StockLaunches:
         )
         stream = _device_view(a["stream"], (rows, d.hidden_size), torch.float32)
         positions = _device_view(b["pos"], (rows,), torch.int64)
-        _, _, kv_cache, slots = _attention_context(nxt)
+        _, attn, kv_cache, slots = _attention_context(nxt)
         assert b["k_cache"] == kv_cache.data_ptr()
         assert b["v_cache"] == kv_cache.stride(0)
         assert b["slots"] == slots.data_ptr()
+        assert b["k_scale"] == attn._k_scale.data_ptr()
+        assert b["v_scale"] == attn._v_scale.data_ptr()
         rope = nxt.self_attn.rotary_emb
         if rope is not None:
             assert b["cos_sin"] == rope.cos_sin_cache.data_ptr()
@@ -631,6 +686,8 @@ class _Key:
     next_rope: bool = True
     attn: str = ""
     bnd: int = 0
+    kv_fp8: bool = False
+    ring1: int = 0
 
 
 class _Kernel:
@@ -649,19 +706,20 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn=""):
-        return _Key(S, W, next_rope, attn, self.owner.bnd if self.name == "k5" else 0)
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False, ring1=0):
+        bnd = self.owner.bnd if self.name == "k5" else 0
+        return _Key(S, W, next_rope, attn, bnd, kv_fp8, ring1)
 
     def build(self, key: _Key):
-        o, w = self.owner, key.W
+        o = self.owner
         if self.name == "k3":
-            params = _params(_K3_HEAD, w, "layer rank g_stride" + _REPLICAS)
+            params = _params(_K3_HEAD, "layer rank g_stride" + _REPLICAS)
             return o.launcher("k3", params, lambda a: _run_k3(o, key, a))
         if self.name == "k5m":
-            params = _params(_HM_HEAD, w, "layer rank nrows" + _REPLICAS)
+            params = _params(_HM_HEAD, "layer rank nrows" + _REPLICAS)
             return o.launcher("hm", params, lambda a: None)
-        ha = _params(_HA_HEAD, w, "layer rank g_stride s_full nrows")
-        hb = _params(_HB_HEAD, w, "layer rank so_stride so_off gather nrows")
+        ha = _params(_HA_HEAD, "layer rank g_stride s_full nrows")
+        hb = _params(_HB_HEAD, "layer rank so_stride so_off gather nrows")
 
         def run_ha(a):
             o.pending[a["layer"]] = a | {"fused": bool(key.attn)}
@@ -682,7 +740,9 @@ class _AttnFrag:
         return 4096
 
     @staticmethod
-    def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
+    def vllm_desc(
+        q, kv_cache, block_table, seq_lens, out, part, nreq, scale, k_scale, v_scale
+    ):
         return [
             q.data_ptr(),
             kv_cache.data_ptr(),
@@ -694,6 +754,8 @@ class _AttnFrag:
             block_table.stride(0),
             nreq,
             0,
+            k_scale.data_ptr(),
+            v_scale.data_ptr(),
         ]
 
 
@@ -793,9 +855,16 @@ class Step:
 
 
 def _run_mono(
-    tiny: TinyModel, step: Step, bnd: int, buckets: list[int], mode=CUDAGraphMode.NONE
+    tiny: TinyModel,
+    step: Step,
+    bnd: int,
+    buckets: list[int],
+    mode=CUDAGraphMode.NONE,
+    ring1_group=None,
+    inspect_mono=None,
 ):
-    """The step with the monokernel attached, on the stock launches."""
+    """The step with the monokernel attached, on the stock launches;
+    `inspect_mono(mono, launches)` runs before it is detached."""
     from vllm.distributed import get_tp_group
 
     launches = StockLaunches(tiny.model, tiny.dims, bnd)
@@ -810,9 +879,13 @@ def _run_mono(
         fused_attention=fused_attention_layers(
             tiny.layers, 4096, _AttnFrag.VLLM_MAX_KEYS
         ),
+        ring1_group=ring1_group,
     )
     try:
-        return launches, step.run(tiny, mode)
+        out = step.run(tiny, mode)
+        if inspect_mono is not None:
+            inspect_mono(tiny.model.mono, launches)
+        return launches, out
     finally:
         tiny.model.mono.close()
         tiny.model.mono = None
@@ -881,4 +954,33 @@ def test_other_steps_run_stock(tiny_model, query_lens, mode) -> None:
     stock = step.run(tiny_model, mode)
     launches, mono = _run_mono(tiny_model, step, 0, [8, 16, 32, 64, 96, 128], mode)
     assert launches.calls == []
+    _assert_same_step(stock, mono)
+
+
+@requires_gfx950
+def test_ep_ring1_k3_reads_the_received_expert_copies(tiny_model) -> None:
+    """Ring1: K3's replica arguments point at the copies of rank r + 1's
+    experts received over the TP group (here rank 0's own)."""
+    from vllm.distributed import get_tp_group
+
+    tiny_model.lm.set_aux_hidden_state_layers((14, 30, 46, 58, 62))
+    step = Step(tiny_model, [ROWS_PER_REQUEST], seed=11)
+    stock = step.run(tiny_model)
+    k3_layers = []
+
+    def check(mono, launches) -> None:
+        for name, a in launches.calls:
+            assert name == "k3"
+            lw = mono.weights[a["layer"]]
+            got = [a[n] for n in ("w13r", "w13sr", "w2r", "w2sr")]
+            assert got == [t.data_ptr() for t in lw.ring1]
+            for own, copy in zip((lw.w13, lw.w13s, lw.w2, lw.w2s), lw.ring1):
+                assert copy.data_ptr() != own.data_ptr()
+                assert torch.equal(copy, own)
+            k3_layers.append(a["layer"])
+
+    _, mono = _run_mono(
+        tiny_model, step, 0, [8, 16], ring1_group=get_tp_group(), inspect_mono=check
+    )
+    assert k3_layers == list(range(FIRST_LAYER, LAST_LAYER + 1))
     _assert_same_step(stock, mono)

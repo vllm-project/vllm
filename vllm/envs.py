@@ -145,6 +145,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_MUSE_SP_MIN_TOKENS: int = 1024
+    VLLM_MUSE_MONO_EP_RING1: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
@@ -1380,6 +1381,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by =0.
     "VLLM_ROCM_MUSE_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_MUSE_SP_MIN_TOKENS", "1024")
+    ),
+    # Muse Spark `--monokernel` at TP 8: every rank also holds rank r + 1's
+    # routed experts (about 48 GiB more a rank), and the 8 / 16-row launches run
+    # some of rank r + 1's routed experts on rank r to even out the step's
+    # per-rank expert load.
+    "VLLM_MUSE_MONO_EP_RING1": lambda: bool(
+        int(os.getenv("VLLM_MUSE_MONO_EP_RING1", "0"))
     ),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
