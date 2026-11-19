@@ -166,6 +166,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    VLLM_GEMMA4_HD512_DECODE: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
@@ -1350,6 +1351,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # gfx942 (MI300X/MI325X): route pure-decode calls of head_size 512
+    # full-attention layers through the split-KV MFMA decode kernel in
+    # vllm.v1.attention.ops.hd512_mfma_decode instead of the stock Triton
+    # unified attention.
+    "VLLM_GEMMA4_HD512_DECODE": lambda: (
+        os.getenv("VLLM_GEMMA4_HD512_DECODE", "False").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
