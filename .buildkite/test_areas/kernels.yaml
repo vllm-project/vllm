@@ -169,11 +169,11 @@ steps:
       - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
       - vllm/models/deepseek_v4/common/ops/
       - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-      - csrc/topk.cu
-      - csrc/persistent_topk.cuh
-      - csrc/sampled_topk.cuh
-      - csrc/topk_histogram_4096.cuh
-      - csrc/topk_histogram_4096_overflow.cuh
+      - csrc/attention/dsa/topk/topk.cu
+      - csrc/attention/dsa/topk/persistent_topk.cuh
+      - csrc/attention/dsa/topk/sampled_topk.cuh
+      - csrc/attention/dsa/topk/topk_histogram_4096.cuh
+      - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
       - vllm/model_executor/layers/indexer_topk.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - tests/kernels/test_top_k_per_row.py
@@ -660,6 +660,9 @@ steps:
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
@@ -738,6 +741,9 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - cmake/external_projects/deepgemm.cmake
   - tools/build_deepgemm_C.py
   - tools/setup_deepgemm_pythons.sh
@@ -903,7 +909,7 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
-  - csrc/fused_mqa_topk/
+  - csrc/attention/dsa/fused_mqa_topk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
