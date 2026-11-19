@@ -680,6 +680,30 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
         torch.testing.assert_close(outs[0], outs[1], atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+def test_plan_admits_cache_smaller_than_stale_indices():
+    """The plan runs before the forward writes kv_indices, so slots left from
+    a step over a large cache must not reject this step's smaller cache (the
+    HiSparse staging workspace)."""
+    torch.manual_seed(0)
+    rows, width = 8, SM90_WIDTH
+    state = _real_state(rows)
+    state.kv_indices.fill_((1 << 16) - 1)
+    lens = torch.full((rows,), 4, dtype=torch.int32)
+    state.plan(rows, lens, None, None)
+    small = torch.randn(16, 1, HEAD, device="cuda", dtype=torch.bfloat16)
+    slots = torch.full((rows, width), -1, dtype=torch.int32)
+    slots[:, :4] = torch.randint(0, 16, (rows, 4), dtype=torch.int32)
+    state.pack_indices(slots.cuda())
+    q = torch.randn(rows, SM90_HEADS, HEAD, device="cuda", dtype=torch.bfloat16)
+
+    out = state.wrapper.run(q, q[..., :0], small, small[..., :0])
+
+    assert not out.isnan().any()
+
+
 def test_supports_combination_gates(monkeypatch, default_vllm_config):
     monkeypatch.setattr(sm90_mod, "has_flashinfer_sm90_nope_mla", lambda: True)
     call = lambda **kw: FlashInferMLASparseSM90Backend.supports_combination(

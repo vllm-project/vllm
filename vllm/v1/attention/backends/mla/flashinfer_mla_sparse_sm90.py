@@ -375,13 +375,17 @@ class _SM90State:
         self._lens_cpu[:num_tokens] = kv_lens
         self._kv_cpu[0] = 0
         torch.cumsum(self._lens_cpu, dim=0, out=self._kv_cpu[1:])
-        # Only the live prefix of kv_indices: the wrapper snapshots and
-        # copies whatever is passed.
+        # The forward writes kv_indices after planning, but FlashInfer records
+        # the planned page range from them: stale slots from a step over a
+        # larger cache would reject this step's smaller one (the HiSparse
+        # staging workspace).
         num_indices = max(int(self._kv_cpu[-1]), 1)
+        kv_indices = self.kv_indices[:num_indices]
+        kv_indices.zero_()
         self.wrapper.plan(
             self._qo_cpu,
             self._kv_cpu,
-            self.kv_indices[:num_indices],
+            kv_indices,
             self._lens_cpu,
             self.num_heads,
             self.kv_lora_rank,  # head_dim_ckv
