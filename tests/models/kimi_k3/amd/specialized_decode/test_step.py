@@ -173,7 +173,7 @@ def _worker(rank: int, port: int, out_dir: str, dcp: int, k: int) -> None:
     import vllm.benchmarks.forward.capture as capture
     import vllm.benchmarks.forward.kv_init as kv_init
 
-    capture.ForwardBench._capture_and_time = _capture_and_check # type: ignore[method-assign]
+    capture.ForwardBench._capture_and_time = _capture_and_check  # type: ignore[method-assign]
     kv_init.zero_kv_blocks = _random_kv_blocks
     _zero_routed_experts()
 
