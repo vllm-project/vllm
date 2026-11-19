@@ -143,6 +143,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_DCP_VUP_RS: bool = False
     VLLM_ROCM_DSA_MULTISTREAM: bool = False
     VLLM_ROCM_MEM_HEADROOM_GIB: float = 0.0
+    VLLM_SWA_FINE_GRAINED_PREFIX_HITS: bool = True
+    VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG: bool = False
     VLLM_PREFILL_CADENCE_NO_ESCAPE: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1360,6 +1362,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # After KV cache and CUDA graph allocation, cap the torch caching
     # allocator so >= this many GiB of device memory stay free for ROCr queue
     # scratch and RCCL buffers, which grow lazily. 0 disables the cap.
+    # Let sliding-window KV cache groups serve fine-grained (prefix_match_unit)
+    # prefix-cache hits, so hybrid models keep sub-block hits with an SWA group.
+    "VLLM_SWA_FINE_GRAINED_PREFIX_HITS": lambda: bool(
+        int(os.getenv("VLLM_SWA_FINE_GRAINED_PREFIX_HITS", "1"))
+    ),
+    # Log every fine-grained sliding-window / offload-tier hit (debug).
+    "VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG": lambda: bool(
+        int(os.getenv("VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG", "0"))
+    ),
     "VLLM_ROCM_MEM_HEADROOM_GIB": lambda: float(
         os.getenv("VLLM_ROCM_MEM_HEADROOM_GIB", "0")
     ),

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -424,6 +425,14 @@ class SimpleCPUOffloadScheduler:
         )
 
         if hit_length > 0:
+            if envs.VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG:
+                logger.info(
+                    "SimpleCPU external hit: %d tokens after %d local "
+                    "(scheduler-block offset %d)",
+                    hit_length,
+                    num_computed_tokens,
+                    (num_computed_tokens + hit_length) % self.block_size,
+                )
             pin_blocks = [
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]
@@ -1290,20 +1299,22 @@ class SimpleCPUOffloadScheduler:
             return
         gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
         partial_tail = self._find_fa_partial_tail_source(request, block_ids)
-        if (
-            partial_tail is not None
-            # Decode tokens can fill the boundary block, in which case the
-            # positional scan above already selected it. Appending again would
-            # allocate two CPU blocks for one GPU block.
-            and partial_tail not in gpu_ids
-            and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
-        ):
-            gpu_ids.append(partial_tail)
-            if block_meta is not None:
-                # The block's own hashes are registered at completion, so no
-                # capture is needed here; emit the event without a payload, as
-                # the size-mismatch fallback above already does.
-                block_meta.append({})
+        partial_tails = [partial_tail] if partial_tail is not None else []
+        partial_tails.extend(self._find_swa_partial_tail_sources(request, block_ids))
+        for partial_tail in partial_tails:
+            if (
+                # Decode tokens can fill the boundary block, in which case the
+                # positional scan above already selected it. Appending again
+                # would allocate two CPU blocks for one GPU block.
+                partial_tail not in gpu_ids
+                and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
+            ):
+                gpu_ids.append(partial_tail)
+                if block_meta is not None:
+                    # The block's own hashes are registered at completion, so
+                    # no capture is needed here; emit the event without a
+                    # payload, as the size-mismatch fallback above already does.
+                    block_meta.append({})
         if not gpu_ids:
             return
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
@@ -1365,6 +1376,73 @@ class SimpleCPUOffloadScheduler:
         if self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash):
             return None
         return gpu_block_id
+
+    def _find_swa_partial_tail_sources(
+        self, request: "Request", block_ids: tuple[list[int], ...]
+    ) -> list[int]:
+        """Locate sliding-window prompt-tail blocks for fine-grained hits.
+
+        Mirrors ``SlidingWindowManager._cache_partial_tail_block``. The
+        window's full blocks are stored by the positional scan; the tail block
+        holding the boundary is still partial when the request finishes before
+        filling it. It may already have left the window (the scheduler nulls
+        such pages before handing over the table), in which case it is
+        recovered from the GPU prefix cache by its boundary key.
+        """
+        if not self.cpu_coordinator.enable_partial_hash_hits:
+            return []
+        assert self._gpu_block_pool is not None
+        gpu_pool = self._gpu_block_pool
+        sources: list[int] = []
+        for g in self.prefix_cacheable_group_ids:
+            spec = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec
+            if not isinstance(spec, SlidingWindowSpec):
+                continue
+            manager = self.cpu_coordinator.single_type_managers[g]
+            if not manager.supports_fine_grained_hash_lookup:
+                continue
+            g_block_size = self.group_block_sizes[g]
+            token_limit = (
+                request.num_prompt_tokens
+                if manager.use_eagle
+                else request.num_prompt_tokens - 1
+            )
+            boundary_tokens = (
+                min(token_limit // self.hash_block_size, len(request.block_hashes))
+                * self.hash_block_size
+            )
+            if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
+                continue
+            if boundary_tokens % g_block_size == 0:
+                continue
+            block_hash = make_block_hash_with_group_id(
+                request.block_hashes[boundary_tokens // self.hash_block_size - 1], g
+            )
+            if self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                block_hash
+            ):
+                continue
+            block_idx = boundary_tokens // g_block_size
+            group_ids = block_ids[g] if g < len(block_ids) else []
+            gpu_block = None
+            if block_idx < len(group_ids):
+                gpu_block = gpu_pool.blocks[group_ids[block_idx]]
+            if gpu_block is None or gpu_block.is_null:
+                cached = gpu_pool.get_cached_block(get_block_hash(block_hash), [g])
+                gpu_block = cached[0] if cached else None
+            if gpu_block is None or gpu_block.is_null:
+                continue
+            if gpu_block.block_id in self._in_flight_store_gpu_blocks:
+                continue
+            if gpu_block.block_hash != block_hash and (
+                block_hash
+                not in gpu_pool.cached_block_hashes_by_block.get(
+                    gpu_block.block_id, ()
+                )
+            ):
+                continue
+            sources.append(gpu_block.block_id)
+        return sources
 
     def _free_pending_cpu_hit(
         self, pending: tuple[tuple[list["KVCacheBlock"], ...], int, int]

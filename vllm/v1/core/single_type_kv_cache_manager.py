@@ -6,7 +6,9 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
+import vllm.envs as envs
 from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -41,6 +43,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
@@ -944,6 +949,14 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    # Fine-grained hits end inside a block: the window's full blocks match by
+    # their block hash, the block holding the last token by its block hash or
+    # by a partial entry at the hit boundary (the prompt tail), and the shared
+    # tail block is copy-on-written like a full-attention partial hit.
+    supports_fine_grained_hash_lookup: ClassVar[bool] = (
+        envs.VLLM_SWA_FINE_GRAINED_PREFIX_HITS
+    )
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
@@ -951,6 +964,180 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # multi-module MTP store-side lag can still reconstruct the window from
         # cached blocks.
         self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
+
+    @classmethod
+    def _fine_grained(cls, block_size: int, alignment_tokens: int | None) -> bool:
+        return (
+            cls.supports_fine_grained_hash_lookup
+            and alignment_tokens is not None
+            and alignment_tokens < block_size
+            and block_size % alignment_tokens == 0
+        )
+
+    @classmethod
+    def _find_fine_grained_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: SlidingWindowSpec,
+        drop_eagle_block: bool,
+        unit: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Longest hit ``L`` (a multiple of ``unit``) whose window
+        ``[L - sliding_window + 1, L)`` is cached.
+
+        ``block_hashes`` are the raw ``unit``-granular hashes. The hash of block
+        ``j`` is the unit hash at ``(j + 1) * block_size``. The block holding
+        token ``L - 1`` matches by its block hash or, when ``L`` ends inside it,
+        by a partial entry registered at ``L``. EAGLE matches one unit past the
+        hit and drops it.
+        """
+        block_size = kv_cache_spec.block_size
+        scale = block_size // unit
+        # Retained span below the hit, as ``get_num_skipped_tokens`` keeps it.
+        window = kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+        num_units = len(block_hashes)
+        peek = unit if drop_eagle_block else 0
+        full_hits: dict[int, list[KVCacheBlock] | None] = {}
+
+        def full_block(j: int) -> list[KVCacheBlock] | None:
+            if j not in full_hits:
+                idx = (j + 1) * scale - 1
+                full_hits[j] = (
+                    block_pool.get_cached_block(block_hashes[idx], kv_cache_group_ids)
+                    if idx < num_units
+                    else None
+                )
+            return full_hits[j]
+
+        null_block = block_pool.null_block
+        empty: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in kv_cache_group_ids
+        )
+        for u in range(min(max_length // unit, num_units), 0, -1):
+            end = u * unit
+            hit_length = end - peek
+            if hit_length <= 0:
+                break
+            last = (end - 1) // block_size
+            tail = None
+            if end % block_size:
+                tail = block_pool.get_cached_block(
+                    block_hashes[u - 1], kv_cache_group_ids
+                )
+            if not tail:
+                tail = full_block(last)
+            if not tail:
+                continue
+            first = max(0, hit_length - (window - 1)) // block_size
+            window_blocks = []
+            for j in range(first, last):
+                blocks = full_block(j)
+                if not blocks:
+                    break
+                window_blocks.append(blocks)
+            else:
+                window_blocks.append(tail)
+                if envs.VLLM_SWA_FINE_GRAINED_PREFIX_HITS_LOG:
+                    logger.info(
+                        "SWA fine-grained hit: %d tokens (block offset %d, "
+                        "tail by %s, pool %s)",
+                        hit_length,
+                        hit_length % block_size,
+                        "partial entry"
+                        if end % block_size and tail is not full_hits.get(last)
+                        else "block hash",
+                        block_pool.medium if hasattr(block_pool, "medium") else "?",
+                    )
+                num_blocks = cdiv(hit_length, block_size)
+                computed_blocks = tuple(
+                    ([null_block] * first + [b[g] for b in window_blocks])[:num_blocks]
+                    for g in range(len(kv_cache_group_ids))
+                )
+                return computed_blocks, hit_length
+        return empty, 0
+
+    @classmethod
+    def _fine_grained_block_mask(
+        cls,
+        start_block: int,
+        end_block: int,
+        unit: int,
+        block_size: int,
+        kv_cache_spec: SlidingWindowSpec,
+        use_eagle: bool,
+        retention_interval: int | None,
+        reachable_boundaries: Sequence[int],
+    ) -> list[bool] | None:
+        """Blocks a fine-grained hit can need: the window ending at each
+        reachable boundary (plus the EAGLE peek unit)."""
+        if retention_interval is None:
+            # Dense: every unit boundary is a hit point.
+            return None
+        window = kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+        peek = unit if use_eagle else 0
+        ends = [b // unit * unit for b in reachable_boundaries]
+        if retention_interval > 0:
+            lo = start_block * block_size // retention_interval
+            hi = (end_block * block_size + window) // retention_interval + 1
+            ends.extend(k * retention_interval for k in range(max(lo, 1), hi + 1))
+        mask = [False] * (end_block - start_block)
+        for hit_length in ends:
+            if hit_length <= 0:
+                continue
+            first = max(0, hit_length - (window - 1)) // block_size
+            last = (hit_length + peek - 1) // block_size
+            for i in range(max(first, start_block), min(last + 1, end_block)):
+                mask[i - start_block] = True
+        return mask
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
+        if self.kv_cache_spec.prefix_cacheable and self._fine_grained(
+            self.block_size, self.cache_hit_alignment_tokens
+        ):
+            self._cache_partial_tail_block(request, num_tokens)
+
+    def _cache_partial_tail_block(self, request: Request, num_tokens: int) -> None:
+        """Register the prompt tail when it ends inside a block, as
+        ``FullAttentionManager._cache_partial_tail_block`` does; the window's
+        full blocks before it are kept by ``reachable_block_mask``."""
+        unit = self.block_pool.hash_block_size
+        token_limit = (
+            request.num_prompt_tokens
+            if self.use_eagle
+            else request.num_prompt_tokens - 1
+        )
+        boundary_tokens = min(token_limit // unit, len(request.block_hashes)) * unit
+        if boundary_tokens == 0 or boundary_tokens > num_tokens:
+            return
+        if boundary_tokens % self.block_size == 0:
+            return
+        blocks = self.req_to_blocks[request.request_id]
+        block_idx = boundary_tokens // self.block_size
+        if block_idx >= len(blocks) or blocks[block_idx].is_null:
+            return
+        self.block_pool.cache_partial_block(
+            request=request,
+            block=blocks[block_idx],
+            num_tokens=boundary_tokens,
+            kv_cache_group_id=self.kv_cache_group_id,
+            block_size=self.block_size,
+        )
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -983,6 +1170,20 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        if (
+            cls._fine_grained(kv_cache_spec.block_size, alignment_tokens)
+            and block_pool.hash_block_size == alignment_tokens
+            and isinstance(block_hashes, Sequence)
+        ):
+            return cls._find_fine_grained_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                kv_cache_spec,
+                drop_eagle_block,
+                alignment_tokens,
+            )
         # Sliding-window cache hits must stay at the group's physical block
         # granularity. resolve_block_hashes() converts finer-grained hashes to
         # that view when the hybrid-cache alignment is smaller than block_size.
@@ -1081,6 +1282,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
         block_size = kv_cache_spec.block_size * dcp_world_size
+        if cls._fine_grained(block_size, alignment_tokens):
+            return cls._fine_grained_block_mask(
+                start_block,
+                end_block,
+                alignment_tokens,
+                block_size,
+                kv_cache_spec,
+                use_eagle,
+                retention_interval,
+                reachable_boundaries,
+            )
         if alignment_tokens % block_size != 0:
             # The mask is block-granular, so a sub-block alignment cannot be
             # represented exactly. This happens for hybrid offloading, where
