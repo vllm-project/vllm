@@ -955,6 +955,49 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     assert {4, 5} <= coordinator.request_states[request.request_id].pinned_clean
 
 
+@pytest.mark.parametrize("reserved_blocks,admitted", [(0, True), (1, False)])
+def test_hisparse_reclaim_must_fund_full_sequence(reserved_blocks, admitted):
+    """Reclaim must cover the full-sequence deficit, not just the next chunk.
+
+    With 10 blocks free, the next chunk is 4 blocks short and the full sequence
+    12. Exactly 12 resident blocks are reclaimable, so reserving one block for
+    another request must reject admission.
+    """
+    manager = make_hisparse_kv_cache_manager(
+        35,
+        64,
+        max_model_len=512,
+        max_in_flight_tokens=8 * HISPARSE_BLOCK_SIZE,
+        num_resident_groups=3,
+    )
+    request = make_request(
+        "full", list(range(16 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert _allocate_scheduled(manager, request, 6 * HISPARSE_BLOCK_SIZE) is not None
+    request.num_computed_tokens = 6 * HISPARSE_BLOCK_SIZE
+    _publish_hisparse_pages(manager)
+    coordinator = get_hisparse_coordinator(manager)
+    for hot in coordinator.hot_managers:
+        hot.require_hot(request.request_id)
+    assert manager.block_pool.get_num_free_blocks() == 10
+    assert coordinator.get_num_reclaimable_blocks(request.request_id) == 12
+
+    blocks = manager.allocate_slots(
+        request,
+        2 * HISPARSE_BLOCK_SIZE,
+        full_sequence_must_fit=True,
+        reserved_blocks=reserved_blocks,
+    )
+
+    assert (blocks is not None) == admitted
+    assert (
+        all(hot.has_hot(request.request_id) for hot in coordinator.hot_managers)
+        == admitted
+    )
+    if not admitted:
+        assert manager.block_pool.get_num_free_blocks() == 10
+
+
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     """Without room for a hot buffer, admission must defer instead of losing KV."""
     manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)

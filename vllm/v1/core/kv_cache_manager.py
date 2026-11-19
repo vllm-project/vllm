@@ -574,6 +574,8 @@ class KVCacheManager:
             full_sequence_shortfall = (
                 required_blocks - self.block_pool.get_num_free_blocks()
             )
+            if full_sequence_shortfall > 0 and self.try_preallocate is None:
+                return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
@@ -589,13 +591,11 @@ class KVCacheManager:
         # Free on the processed-token basis: in-flight steps' attention windows
         # still read blocks below the optimistic boundary, and rejected spec
         # tokens can roll it back.
-        # Preserve existing allocations when full-sequence admission failed.
-        if full_sequence_shortfall <= 0:
-            self.coordinator.remove_skipped_blocks(
-                request.request_id,
-                max(0, total_computed_tokens - request.num_in_flight_tokens),
-                num_prompt_tokens=request.num_prompt_tokens,
-            )
+        self.coordinator.remove_skipped_blocks(
+            request.request_id,
+            max(0, total_computed_tokens - request.num_in_flight_tokens),
+            num_prompt_tokens=request.num_prompt_tokens,
+        )
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
