@@ -125,10 +125,17 @@ def test_sparse_indexer_topk_is_canonical(
     expected = _reference(logits, seq_lens, k)
     indices = torch.full((rows, k), -1, dtype=torch.int32, device=DEVICE)
     selector = get_indexer_topk(backend)
+    logits_dev = logits.to(DEVICE)
     try:
-        selector(logits.to(DEVICE), seq_lens.to(DEVICE), 1, indices, k, cols)
-    except RuntimeError as e:  # backend not available on this device
-        pytest.skip(str(e))
+        # Only the availability check may skip; kernel errors must fail.
+        try:
+            selector.resolve_backend(logits_dev, k, rows)
+        except RuntimeError as e:  # backend not available on this device
+            pytest.skip(str(e))
+        # As the indexer does: FP32 logits unless this backend takes BF16 here.
+        if not selector.takes_bf16_logits(logits_dev, k, rows):
+            logits_dev = logits_dev.float()
+        selector(logits_dev, seq_lens.to(DEVICE), 1, indices, k, cols)
     finally:
         get_indexer_topk.cache_clear()
     torch.testing.assert_close(indices.cpu(), expected, rtol=0, atol=0)
