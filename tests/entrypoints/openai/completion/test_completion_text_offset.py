@@ -199,3 +199,38 @@ async def test_stream_echo_logprobs_of_request_aborted_mid_prefill(prompt_logpro
                 tokens += choice["logprobs"]["tokens"]
 
     assert len(tokens) == len(PROMPT_IDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_tokens", [0, 8])
+async def test_stream_echo_without_logprobs_skips_prompt_padding(
+    monkeypatch, max_tokens
+):
+    def pad(*args):
+        raise AssertionError("prompt logprobs padded without logprobs requested")
+
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.completion.serving._padded_prompt_logprobs", pad
+    )
+    request = _echo_request(stream=True)
+    request.logprobs = None
+    request.max_tokens = max_tokens
+
+    async def results():
+        yield 0, _aborted_output(None)
+
+    async for line in _serving().completion_stream_generator(
+        request,
+        [tokens_input(PROMPT_IDS, prompt="Hi")],
+        results(),
+        "r",
+        0,
+        "m",
+        num_prompts=1,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="r"),
+    ):
+        data = line.removeprefix("data: ").strip()
+        assert '"error"' not in data
+        if data != "[DONE]":
+            assert all(c["logprobs"] is None for c in json.loads(data)["choices"])

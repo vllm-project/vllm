@@ -434,8 +434,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             # only return the prompt
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
-                            out_logprobs = _padded_prompt_logprobs(
-                                prompt_logprobs, len(prompt_token_ids)
+                            out_logprobs = (
+                                _padded_prompt_logprobs(
+                                    prompt_logprobs, len(prompt_token_ids)
+                                )
+                                if request.logprobs is not None
+                                else None
                             )
                         else:
                             # echo the prompt and first token
@@ -444,12 +448,16 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 *prompt_token_ids,
                                 *output.token_ids,
                             ]
-                            out_logprobs = [
-                                *_padded_prompt_logprobs(
-                                    prompt_logprobs, len(prompt_token_ids)
-                                ),
-                                *(output.logprobs or []),
-                            ]
+                            out_logprobs = (
+                                [
+                                    *_padded_prompt_logprobs(
+                                        prompt_logprobs, len(prompt_token_ids)
+                                    ),
+                                    *(output.logprobs or []),
+                                ]
+                                if request.logprobs is not None
+                                else None
+                            )
                         prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
@@ -676,8 +684,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
-                        out_logprobs = _padded_prompt_logprobs(
-                            prompt_logprobs, len(prompt_token_ids)
+                        out_logprobs = (
+                            _padded_prompt_logprobs(
+                                prompt_logprobs, len(prompt_token_ids)
+                            )
+                            if request.logprobs is not None
+                            else None
                         )
                         output_text = prompt_text
                     else:
