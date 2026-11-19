@@ -148,6 +148,46 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         torch.set_num_threads(original_threads)
 
 
+@pytest.mark.parametrize(
+    "weights_bytes,expected",
+    [(14 * GiB_bytes, "The model weights take 14.0 GiB."), (0, "0.09 GiB of 14.56")],
+)
+def test_load_model_oom_names_the_cause(monkeypatch, weights_bytes, expected):
+    """An OOM while loading must not surface as PyTorch's fragmentation hint."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+    )
+
+    def load_model(**kwargs):
+        if weights_bytes:
+            runner.model_memory_usage = weights_bytes
+        raise torch.OutOfMemoryError("CUDA out of memory.")
+
+    monkeypatch.setattr(
+        gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
+    )
+    monkeypatch.setattr(
+        torch.accelerator,
+        "get_memory_info",
+        lambda *args: (int(0.09 * GiB_bytes), int(14.56 * GiB_bytes)),
+    )
+    runner = SimpleNamespace(load_model=load_model)
+    worker = SimpleNamespace(
+        vllm_config=None,
+        model_runner=runner,
+        _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _external_weight_charges=ExternalWeightCharges(),
+    )
+
+    with pytest.raises(ValueError, match="Not enough GPU memory") as exc_info:
+        gpu_worker.Worker.load_model(worker)
+
+    assert expected in str(exc_info.value)
+    assert "quantized" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, torch.OutOfMemoryError)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike()
     or not torch.accelerator.is_available()
