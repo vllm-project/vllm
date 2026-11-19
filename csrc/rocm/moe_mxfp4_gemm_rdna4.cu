@@ -75,20 +75,22 @@ struct MoeArgs {
   int top_k;
   int N, K;
   size_t w_stride, s_stride;  // per-expert strides (elements)
-  const uint8_t* b_base;      // [E][N] per-column E5M2 fold base (hybrid)
+  const uint8_t* b_base;      // [E][N] per-column E5M2 fold base
 };
 
 #if defined(__HIP__MXFP4_RDNA4__) || !defined(__HIP_DEVICE_COMPILE__)
 using v8f32 = float __attribute__((ext_vector_type(8)));
 using v2i32 = int __attribute__((ext_vector_type(2)));
 using v4i32 = int __attribute__((ext_vector_type(4)));
-using mxfp4_rdna4::dequant_mxfp4_8_e4m3;
 using mxfp4_rdna4::dequant_mxfp4_8_e5m2;
 using mxfp4_rdna4::mxfp4_e5m2_tables;
-using mxfp4_rdna4::mxfp4_e8m0_to_f32;
 
-__device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
-  return __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a, b, c);
+// All MoE kernels consume the weights as E5M2 with the E8M0 group scale
+// folded into the exponent around a per-column base (mxfp4_moe_fold_base_rdna4,
+// base = column max - 13): shift = scale - base selects the perm table, and
+// the epilogue applies 2^(base-127). A = E4M3 activations, B = E5M2 weights.
+__device__ __forceinline__ v8f32 wmma_fp8_bf8(v2i32 a, v2i32 b, v8f32 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_fp8_bf8_w32_gfx12(a, b, c);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,7 @@ __global__ void __launch_bounds__(32 * KW)
   const uint32_t a_sel = odd ? 0x07060302u : 0x05040100u;
   const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
   const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
+  const int dbase = ar.b_base[(size_t)e * N + n_ld];
   const int ngroups = K / kGroup;
   const int g_begin = (ngroups * wave) / KW;
   const int g_end = (ngroups * (wave + 1)) / KW;
@@ -151,9 +154,10 @@ __global__ void __launch_bounds__(32 * KW)
     for (int d = 0; d < PF; d++) {
       const int g = g0 + d;
       if (g >= g_end) break;
-      uint32_t l0, h0, l1, h1;
-      dequant_mxfp4_8_e4m3((uint32_t)b_r[d], l0, h0);
-      dequant_mxfp4_8_e4m3((uint32_t)(b_r[d] >> 32), l1, h1);
+      uint32_t lut_lo, lut_hi, l0, h0, l1, h1;
+      mxfp4_e5m2_tables((int)w_r[d] - dbase, lut_lo, lut_hi);
+      dequant_mxfp4_8_e5m2((uint32_t)b_r[d], lut_lo, lut_hi, l0, h0);
+      dequant_mxfp4_8_e5m2((uint32_t)(b_r[d] >> 32), lut_lo, lut_hi, l1, h1);
       v4i32 b;
       b[0] = (int)l0;
       b[1] = (int)h0;
@@ -162,11 +166,7 @@ __global__ void __launch_bounds__(32 * KW)
       v2i32 a;
       a[0] = (int)__builtin_amdgcn_perm(a_r_[d].y, a_r_[d].x, a_sel);
       a[1] = (int)__builtin_amdgcn_perm(a_r_[d].w, a_r_[d].z, a_sel);
-      v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
-      grp = __builtin_amdgcn_swmmac_f32_16x16x32_fp8_fp8_w32(a, b, grp, idx);
-      const float ws = mxfp4_e8m0_to_f32(w_r[d]);
-  #pragma unroll
-      for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], ws, acc[i]);
+      acc = __builtin_amdgcn_swmmac_f32_16x16x32_fp8_bf8_w32(a, b, acc, idx);
       load(g + PF, a_r_[d], b_r[d], w_r[d]);
     }
   }
@@ -186,13 +186,14 @@ __global__ void __launch_bounds__(32 * KW)
   }
   if (!n_ok) return;
   const float bv = bias ? to_f<T>(bias[(size_t)e * N + n_col]) : 0.0f;
+  const float bsc = __uint_as_float((uint32_t)dbase << 23);
   #pragma unroll
   for (int i = 0; i < 4; i++) {
     const int r = 4 * hi + i;  // logical row within the block
     const int s = ar.sorted_token_ids[blk * 8 + r];
     if (s >= ar.total_slots) continue;
     const int arow = s / ar.top_k;
-    float v = part[i] * ar.ascale[arow];
+    float v = part[i] * bsc * ar.ascale[arow];
     if (ar.topk_w) v *= ar.topk_w[s];
     c[(size_t)s * N + n_col] = from_f<T>(v + bv);
   }
@@ -220,6 +221,7 @@ __global__ void __launch_bounds__(32 * KW)
   const int n_ld = min(n_col, N - 1);
   const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
   const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
+  const int dbase = ar.b_base[(size_t)e * N + n_ld];
   const int ngroups = K / kGroup;
   const int g_begin = (ngroups * wave) / KW;
   const int g_end = (ngroups * (wave + 1)) / KW;
@@ -266,28 +268,26 @@ __global__ void __launch_bounds__(32 * KW)
       const int g = g0 + d;
       if (g >= g_end) break;
       const Slot sl = ring[d];
-      const float ws = mxfp4_e8m0_to_f32(sl.sc);
+      uint32_t lut_lo, lut_hi;
+      mxfp4_e5m2_tables((int)sl.sc - dbase, lut_lo, lut_hi);
       v2i32 bf[2];
   #pragma unroll
       for (int st = 0; st < 2; st++) {
         uint32_t blo, bhi;
-        dequant_mxfp4_8_e4m3((uint32_t)(st == 0 ? sl.b : (sl.b >> 32)), blo,
-                             bhi);
+        dequant_mxfp4_8_e5m2((uint32_t)(st == 0 ? sl.b : (sl.b >> 32)), lut_lo,
+                             lut_hi, blo, bhi);
         bf[st][0] = (int)blo;
         bf[st][1] = (int)bhi;
       }
   #pragma unroll
       for (int t = 0; t < MT; t++) {
-        v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
         v2i32 af0, af1;
         af0[0] = (int)sl.a[t].x;
         af0[1] = (int)sl.a[t].y;
         af1[0] = (int)sl.a[t].z;
         af1[1] = (int)sl.a[t].w;
-        grp = wmma_fp8(af0, bf[0], grp);
-        grp = wmma_fp8(af1, bf[1], grp);
-  #pragma unroll
-        for (int q = 0; q < 8; q++) acc[t][q] = fmaf(grp[q], ws, acc[t][q]);
+        acc[t] = wmma_fp8_bf8(af0, bf[0], acc[t]);
+        acc[t] = wmma_fp8_bf8(af1, bf[1], acc[t]);
       }
       load(g + PF, ring[d]);
     }
@@ -310,6 +310,7 @@ __global__ void __launch_bounds__(32 * KW)
   }
   if (!n_ok) return;
   const float bv = bias ? to_f<T>(bias[(size_t)e * N + n_col]) : 0.0f;
+  const float bsc = __uint_as_float((uint32_t)dbase << 23);
   // gfx12 accumulator: lane -> n = lo, slot i -> row 8*hi + i of the tile.
   #pragma unroll
   for (int t = 0; t < MT; t++) {
@@ -319,7 +320,7 @@ __global__ void __launch_bounds__(32 * KW)
       const int s = ar.sorted_token_ids[blk * 16 * MT + r];
       if (s >= ar.total_slots) continue;
       const int arow = s / ar.top_k;
-      float v = acc[t][i] * ar.ascale[arow];
+      float v = acc[t][i] * bsc * ar.ascale[arow];
       if (ar.topk_w) v *= ar.topk_w[s];
       c[(size_t)s * N + n_col] = from_f<T>(v + bv);
     }
@@ -343,10 +344,6 @@ __global__ void __launch_bounds__(32 * KW)
 // every load stays in flight (no execz regions).
 // grid = (token blocks, ceil(N/BN)), block = 256.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ v8f32 wmma_fp8_bf8(v2i32 a, v2i32 b, v8f32 c) {
-  return __builtin_amdgcn_wmma_f32_16x16x16_fp8_bf8_w32_gfx12(a, b, c);
-}
-
 template <typename T, int BN>
 __global__ void __launch_bounds__(256)
     moe_hybrid_kernel(MoeArgs ar, T* __restrict__ c,
@@ -642,12 +639,14 @@ torch::Tensor mxfp4_moe_fold_base_rdna4(torch::Tensor const& b_scales) {
   const auto si = b_scales.to(at::kInt);
   const auto base = (si.amax(1) - 13).clamp_min(1);
   // Lossless iff every group scale is within [base-13, base+13] (the shifted
-  // E2M1 magnitudes 0.5..6 stay E5M2 normals). Measured spans: <= 10 (dense
-  // Qwen3.8-27B), <= 8 (gpt-oss-120b experts), so this never fires on real
-  // checkpoints; callers that hit it must use block_size_m <= 64.
+  // E2M1 magnitudes 0.5..6 stay E5M2 normals), i.e. a per-column E8M0 span of
+  // at most 26 steps. Measured spans: <= 10 (dense Qwen3.8-27B), <= 8
+  // (gpt-oss-120b experts). A checkpoint exceeding it is rejected here; the
+  // MoE op has no unfolded (E4M3) path to fall back to.
   TORCH_CHECK((si.amin(1) - base >= -13).all().item<bool>(),
               "mxfp4_moe_fold_base_rdna4: an E8M0 column span exceeds the "
-              "E5M2 fold range; use block_size_m <= 64 for this weight");
+              "E5M2 fold range (26 steps); this checkpoint is not supported "
+              "by the RDNA4 MXFP4 MoE kernels");
   return base.to(at::kByte).contiguous();
 }
 
@@ -658,8 +657,7 @@ void moe_mxfp4_gemm_rdna4(
     torch::Tensor const& expert_ids,
     torch::Tensor const& num_tokens_post_padded, int64_t top_k,
     int64_t block_size_m, bool mul_topk_weight,
-    const std::optional<torch::Tensor>& bias,
-    const std::optional<torch::Tensor>& b_base) {
+    const std::optional<torch::Tensor>& bias, torch::Tensor const& b_base) {
   using namespace vllm::moe_mxfp4_rdna4;
   TORCH_CHECK(a_fp8.is_cuda() && a_fp8.dim() == 2 &&
                   a_fp8.scalar_type() == at::kByte && a_fp8.is_contiguous(),
@@ -719,23 +717,15 @@ void moe_mxfp4_gemm_rdna4(
   ar.top_k = (int)top_k;
   ar.N = N;
   ar.K = K;
-  // Hybrid (block_size_m 256) folds the E8M0 scale into E5M2 weights around a
-  // per-column base = max - 13 (mxfp4_moe_fold_base_rdna4). Fold is lossless
-  // while every group scale is within [base-13, base+13]; if a checkpoint ever
-  // violates that (none measured do), fall back to the E4M3 64-row kernel.
-  torch::Tensor base_t;
-  if (block_size_m == 256) {
-    // A supplied b_base is trusted (validated once by mxfp4_moe_fold_base_rdna4
-    // at weight load); computing it here per call costs two reductions.
-    base_t = b_base ? *b_base : mxfp4_moe_fold_base_rdna4(b_scales);
-    TORCH_CHECK(base_t.dim() == 2 && base_t.size(0) == b_q.size(0) &&
-                    base_t.size(1) == N && base_t.is_contiguous() &&
-                    base_t.scalar_type() == at::kByte,
-                "b_base must be contiguous uint8 [E, N]");
-    ar.b_base = reinterpret_cast<const uint8_t*>(base_t.data_ptr());
-  } else {
-    ar.b_base = nullptr;
-  }
+  // Weights are consumed as E5M2 with the E8M0 scale folded around the
+  // per-column base from mxfp4_moe_fold_base_rdna4 (computed once at repack).
+  // That op's span check is the only guard: there is no E4M3 fallback.
+  TORCH_CHECK(b_base.is_cuda() && b_base.dim() == 2 &&
+                  b_base.size(0) == b_q.size(0) && b_base.size(1) == N &&
+                  b_base.is_contiguous() && b_base.scalar_type() == at::kByte,
+              "b_base must be contiguous uint8 [E, N] from "
+              "mxfp4_moe_fold_base_rdna4");
+  ar.b_base = reinterpret_cast<const uint8_t*>(b_base.data_ptr());
   ar.w_stride = (size_t)b_q.size(1) * N * 4;
   ar.s_stride = (size_t)b_scales.size(1) * N;
   if (num_token_blocks == 0) return;

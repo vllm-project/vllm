@@ -56,8 +56,7 @@ void moe_mxfp4_gemm_rdna4(
     torch::Tensor const& expert_ids,
     torch::Tensor const& num_tokens_post_padded, int64_t top_k,
     int64_t block_size_m, bool mul_topk_weight,
-    const std::optional<torch::Tensor>& bias,
-    const std::optional<torch::Tensor>& b_base);
+    const std::optional<torch::Tensor>& bias, torch::Tensor const& b_base);
 
 torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
                                torch::Tensor const& a_fp8,
