@@ -114,7 +114,7 @@ def test_unsupported_groups_are_rejected():
 
 
 def test_dcp_model_name_uses_the_interleave_vllm_resolves():
-    """vLLM resolves the interleave from the groups; its config is restored."""
+    """The name carries the interleave vLLM resolves; its config is restored."""
     groups = [_attention_group()]
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=2, cp_kv_cache_interleave_size=1

@@ -1435,7 +1435,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1, SupportsHMA):
                     **(tracker.request_configs or {}),
                     "lmcache.hint.engine_computed_tokens": num_computed_tokens,
                 },
-                ):
+            ):
                 tracker.lookup_started_at = time.monotonic()
             return None, True
 
