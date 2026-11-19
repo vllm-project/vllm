@@ -27,7 +27,11 @@ permuted per layer to avoid systematically assigning hot experts to the lowest
 EP ranks.
 The fixture is seeded by `--seed`, fixed across timing replays, and generated
 outside the timed forward. Sequence-parallel TP ranks use their corresponding
-token rows. Zipf allows EP load imbalance; `--routing balanced` gives equal
+token rows. When replacing expert IDs, both synthetic modes preserve inactive
+`-1` slots and leave routing weights unchanged, so padded rows remain unrouted.
+The expert-ID hook performs this mask selection inside the timed forward; the
+gate-logits hook relies on the model's downstream padding mask.
+Zipf allows EP load imbalance; `--routing balanced` gives equal
 load per EP rank. Neither synthetic mode supports grouped top-k routing;
 Zipf also does not support prefill context parallelism.
 
@@ -36,6 +40,11 @@ otherwise. When the model or parallel layout does not support the synthetic
 fixture, `auto` warns and falls back to real routing. Use `--routing balanced`
 to explicitly request equal EP load. Zipf is a synthetic workload, not a fit
 to a particular model's routing or speculative-token correlations.
+
+The standard forward benchmark captures an exact-shape, one-shot graph with
+the runner's CUDA graph manager disabled. It does not add serving capture-bucket
+padding; model-level padding, such as sequence-parallel alignment, can still
+occur. Use native serving graphs when evaluating capture-bucket padding costs.
 
 ## Attention Kernel Benchmark
 
@@ -50,6 +59,33 @@ python3 benchmarks/attention_benchmarks/benchmark.py \
 If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
+
+Sparse MLA benchmarks use the metadata builder's prefill route by default.
+The `mha_vs_mqa` comparison mode forces the selected `dense_mha`, `masked_mha`,
+and `mqa` variants. When calling the benchmark runner from Python, set
+`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.DENSE_MHA`,
+`MASKED_MHA`, or `SPARSE_MQA` to force a route, or leave it as `None` to use the
+builder's decision. Import `SparseMLAPrefillRoute` from
+`vllm.v1.attention.backends.mla.sparse_utils`. This replaces
+the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+The runner's FP8 options `output_scale` and `fuse_quant_op` are keyword-only;
+old positional route overrides raise `TypeError` instead of being interpreted
+as quantization options. Move route overrides into `BenchmarkConfig`.
+`BenchmarkResult.actual_sparse_mla_route` records the executed prefill route
+(or `SPARSE_MQA` for decode-only sparse batches). The result table shows this
+route below each timing; JSON and CSV include its enum name in
+`actual_sparse_mla_route`. Decodes in mixed batches always use MQA.
+If automatic routing chooses MQA despite an explicit `prefill_backend`, the
+runner warns that the requested prefill backend was not executed. Set the route
+enum explicitly when measuring an MHA kernel.
+
+The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
+it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,
+and masked MHA otherwise. Masked MHA requires `fa4`.
+Unsupported prefill backends report an error instead
+of falling back to sparse MQA and labeling its timing as the requested backend.
+FP8 output comparisons also require an MHA prefill route; an automatic sparse
+MQA route reports an error instead of silently omitting output quantization.
 
 ## Dataset Overview
 
@@ -1383,6 +1419,7 @@ Flags specific to `random-mm`:
 - `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
 - `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
 - `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+- `--random-mm-video-encode-fps`: encode rate (fps) for the synthetic video container. Container metadata only -- set to match the target model's native sampling fps so `num_frames` reflects the frame count the model actually processes. Defaults to 30.0.
 
 Behavioral notes:
 

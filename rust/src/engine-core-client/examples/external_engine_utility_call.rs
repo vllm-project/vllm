@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
         println!("sleep_wake=skipped");
     } else {
         let sleep_level = SleepLevel::try_from(args.sleep_level).map_err(anyhow::Error::msg)?;
-        client.sleep(sleep_level, args.sleep_mode).await.with_context(|| {
+        client.sleep(sleep_level, args.sleep_mode, true).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode

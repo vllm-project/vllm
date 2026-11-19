@@ -238,33 +238,63 @@ D (PP=1),    block b: | L0 | L1 | L2 | L3 | L4 | L5 |
 P (stage 2), block b: | L3 | L4 | L5 |
 ```
 
-`PP=1` peers transfer whole rows. They also advertise where each layer's page
-sits in the row (`NixlAgentMetadata.packed_member_layouts`). A PP producer
+`PP=1` packed MLA peers transfer whole rows. They also advertise where each layer's page
+sits in the row (`NixlAgentMetadata.packed_member_layouts`). A PP **push** producer
 registers one region per layer, so it views each of D's rows as one region per
 layer and pairs its pages with those. Page sizes must match; offsets, row
 strides, and block counts may differ. Because PP stages can list the same
 attention backends in a different order, packed push compares the sorted set of
-backend names during the handshake.
+backend names during the handshake. Pull does not split PP stages' packed rows
+this way. Packed pull PP is rejected on either endpoint, independently of HMA;
+other packed combinations, including dense views that can register strided
+per-layer regions, remain unvalidated for pull PP.
 
 Invariants enforced when pairing:
 
-* the remote must hold every local layer; a missing layer fails the
-  handshake rather than silently leaving that layer's KV stale. Layers
-  only the remote holds are skipped on a PP stage (other stages own
-  them) and fail the handshake otherwise;
+* for push, the remote D must hold every layer of the local P stage; remote
+  layers owned by other P stages are skipped;
+* for pull from a PP1 peer, the remote must hold every required local layer;
+* for pull from a PP producer, each remote stage holds a subset of the local
+  D's layers. `_add_remote_stage` checks that all stages together hold every
+  required local KV layer exactly once when all stages are known. A missing or
+  duplicated layer fails the handshake instead of leaving stale KV;
 * a remote that does not advertise its layers fails the handshake
   instead of falling back to pairing by index;
 * a layer must span the same number of regions on both sides;
-* every TP rank of one remote engine must pair the same way;
+* TP ranks within one remote stage must pair the same way; different stages
+  hold different layer subsets, recorded separately in `_remote_stages`;
 * a layer in different cache groups on P and D is refused by push. Each
   worker advertises every layer's cache group
   (`NixlAgentMetadata.layer_group_ids`), so this is caught even when the
   layer's region is shared by several groups.
 
 Decode-side PP is unsupported because completions are counted per
-consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
+consumer TP rank. Both connectors therefore require `kv_role="kv_producer"`
+under PP and reject bidirectional transfer, which would make P a receiver.
+Mamba/SSM hybrids are unsupported under PP. Packed PP push
 requires MLA caches and equal P/D block sizes. MLA pages are replicated
 across TP ranks, so producer TP1 to consumer TP2 is supported.
+
+### Pull from pipeline stages
+
+The PP1 decoder handshakes with the source TP ranks it needs in every P stage.
+For each TP `ReadSpec`, it submits READs using that stage's region pairs,
+capacities, descriptor handle and agent. Thus the number of READs depends on
+the TP mapping and the groups with blocks to transfer; it is not always one
+READ per stage. A stage with no blocks to read still receives a completion
+notification, including on a full D prefix-cache hit.
+
+A notification completes the request on its P worker. The P scheduler releases
+the request's blocks only after completion is aggregated across all P TP and
+PP workers; one stage's notification does not independently release its blocks.
+On a READ error, D retains destination blocks and keeps renewing P leases while
+outstanding sibling READs drain. Terminal receive completion, including failure,
+or a request abort stops renewal. Workers missing completion notifications finish
+when their leases expire, after which aggregation permits release. An aborted
+request's destination blocks also remain reserved until outstanding READs drain.
+A READ stuck in `PROC` can keep an unaborted request renewing its P lease;
+lease expiry does not cancel remote DMA. With the `recompute` load failure policy,
+D recomputes locally; this does not retry the network READ.
 
 ## Scheduler-side responsibilities
 
