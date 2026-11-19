@@ -20,6 +20,9 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_graph import (
+    RejectionSamplerGraph,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -187,6 +190,18 @@ class RejectionSampler:
         elif rejection_sample_method == "fly":
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
+        # Graph capture only applies to the plain probabilistic path; every
+        # other verification mode keeps the eager kernels.
+        self._graph = (
+            RejectionSamplerGraph(device)
+            if (
+                self.synthetic_conditional_rates is None
+                and not self.use_block_verification
+                and self.fly_window_size == 0
+                and watermark_key is None
+            )
+            else None
+        )
 
     def _get_logprobs_tensors(
         self,
@@ -301,6 +316,7 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
+            graph=self._graph,
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
