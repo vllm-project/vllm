@@ -50,6 +50,17 @@ def _is_capturing_or_compiling() -> bool:
     )
 
 
+def _moe_td_shape_allowed(
+    max_num_tokens: int, block_m: int, td_override: bool | None
+) -> bool:
+    return (
+        td_override is not None
+        or not current_platform.is_cuda()
+        or not current_platform.has_device_capability(100)
+        or max_num_tokens > block_m
+    )
+
+
 @triton.jit
 def moe_mmk(
     a_ptrs,
@@ -669,12 +680,7 @@ def invoke_moe_batched_triton_kernel(
         and (BLOCK_M & (BLOCK_M - 1)) == 0
         and (BLOCK_N & (BLOCK_N - 1)) == 0
         and (BLOCK_K & (BLOCK_K - 1)) == 0
-        and (
-            td_override is not None
-            or not current_platform.is_cuda()
-            or not current_platform.has_device_capability(100)
-            or max_num_tokens > BLOCK_M
-        )
+        and _moe_td_shape_allowed(max_num_tokens, BLOCK_M, td_override)
     )
     if use_td:
         set_triton_allocator(A.device)

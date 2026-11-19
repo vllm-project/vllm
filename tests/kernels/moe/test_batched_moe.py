@@ -480,6 +480,18 @@ def test_tensor_descriptor_explicit_override(monkeypatch, override):
     assert use_tensor_descriptor(override) is override
 
 
+@pytest.mark.parametrize(("max_num_tokens", "expected"), [(64, False), (128, True)])
+def test_moe_td_shape_policy(monkeypatch, max_num_tokens, expected):
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        _moe_td_shape_allowed,
+    )
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
+
+    assert _moe_td_shape_allowed(max_num_tokens, 64, None) is expected
+
+
 def _td_supported() -> bool:
     return current_platform.is_xpu() or (
         current_platform.is_cuda() and current_platform.has_device_capability(90)
