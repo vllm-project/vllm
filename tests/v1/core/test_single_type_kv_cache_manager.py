@@ -312,6 +312,65 @@ def get_sliding_window_manager(
     )
 
 
+@pytest.mark.parametrize("pinned", [False, True])
+def test_external_hit_refreshes_skipped_local_swa_without_retaining_reference(pinned):
+    block_size = 4
+    layer = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        sliding_window=block_size,
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=block_size)
+    manager = get_sliding_window_manager(layer, pool)
+    hot, other = pool.get_new_blocks(2)
+    hot.set_block_hash(make_block_hash_with_group_id(BlockHash(b"hot"), 0))
+    other.set_block_hash(make_block_hash_with_group_id(BlockHash(b"other"), 0))
+    pool.free_blocks([hot, other])
+    if pinned:
+        pool.touch([hot])
+
+    manager.add_local_computed_blocks(
+        "r",
+        [pool.null_block, hot],
+        num_local_computed_tokens=2 * block_size,
+        num_external_computed_tokens=2 * block_size,
+    )
+    assert hot.ref_cnt == int(pinned)
+    assert manager.req_to_blocks["r"] == [pool.null_block] * 3
+    if not pinned:
+        free_blocks = pool.free_block_queue.get_all_free_blocks()
+        assert free_blocks.index(other) < free_blocks.index(hot)
+
+
+def test_external_hit_refreshes_skipped_swa_but_retains_current_window():
+    block_size = 4
+    layer = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+        sliding_window=2 * block_size,
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=block_size)
+    manager = get_sliding_window_manager(layer, pool)
+    skipped, retained, other = pool.get_new_blocks(3)
+    for block, name in zip((skipped, retained, other), (b"skip", b"keep", b"other")):
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(name), 0))
+    pool.free_blocks([skipped, retained, other])
+
+    manager.add_local_computed_blocks(
+        "r",
+        [pool.null_block, skipped, retained],
+        num_local_computed_tokens=3 * block_size,
+        num_external_computed_tokens=block_size,
+    )
+    assert manager.req_to_blocks["r"] == [pool.null_block, pool.null_block, retained]
+    assert skipped.ref_cnt == 0
+    assert retained.ref_cnt == 1
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    assert free_blocks.index(other) < free_blocks.index(skipped)
+
+
 def new_dflash_window_layer(num_speculative_tokens=2, **params):
     # A 10-token tail by default: the 8-token window plus 2 drafts.
     return DFlashSlidingWindowManager.layer_config(

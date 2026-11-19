@@ -412,6 +412,29 @@ class SingleTypeKVCacheManager(ABC):
         )
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
+        # A longer external hit can skip the matched local SWA window.
+        # Refresh its eviction priority without retaining an active reference.
+        if (
+            isinstance(self, SlidingWindowManager)
+            and num_external_computed_tokens > 0
+            and num_skipped_blocks > 0
+            and new_computed_blocks
+        ):
+            # SWA lookup returns null padding followed by a contiguous tail.
+            # Walk that tail only; long prefixes may have many null blocks.
+            cached_skipped = []
+            end = min(num_skipped_blocks, len(new_computed_blocks))
+            for idx in range(end - 1, -1, -1):
+                block = new_computed_blocks[idx]
+                if block.is_null:
+                    break
+                if block.block_hash is not None:
+                    cached_skipped.append(block)
+            if cached_skipped:
+                cached_skipped.reverse()
+                self.block_pool.touch(cached_skipped)
+                self.block_pool.free_blocks(cached_skipped)
+
         if num_skipped_blocks > 0:
             # It is possible that all new computed blocks are skipped when
             # num_skipped_blocks > len(new_computed_blocks).
