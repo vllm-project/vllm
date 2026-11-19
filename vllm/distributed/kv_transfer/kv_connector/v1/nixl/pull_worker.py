@@ -110,6 +110,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         transfers = {r: self._recving_transfers.pop(r) for r in eligible}
         done, failed = self._pop_done_transfers(transfers)
         self._recving_transfers.update(transfers)
+        # Reads that may have overlapped the remote's lease expiry fail through
+        # the step output, like transfer failures.
+        failed |= self._get_lease_lapsed_recvs(done - failed)
         self._recv_failures.update(failed)
         if done := done - failed:
             self._finish_recved(done, set())

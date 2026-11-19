@@ -4717,6 +4717,26 @@ def test_early_recv_leaves_failures_to_the_step(recv_worker):
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
 
 
+@pytest.mark.cpu_test
+def test_early_recv_leaves_lease_lapsed_reads_to_the_step(recv_worker):
+    """A read that may have outlived the remote's lease is never reported as
+    loaded early; the step output reports it failed."""
+    worker = recv_worker
+    worker._early_recved = set()
+    worker._lease_safety_margin = 0.0
+    remote = worker._recving_metadata["request"].remote
+    remote.blocks_expiry_time = 0.0
+    worker._engine_clock_offset[remote.engine_id] = 0.0
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    with patch.object(worker.xfer_stats, "record_declined_expired_read") as declined:
+        assert worker.poll_finished_recving() == set()
+        results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    assert declined.call_count == 1
+
+
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
     """A polling exception and failed release do not prove that DMA has stopped."""
     worker = recv_worker
