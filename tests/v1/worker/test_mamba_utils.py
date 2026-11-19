@@ -14,6 +14,9 @@ from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaConfig
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base import (
+    MambaReplaySSMLayerState,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncsByType,
@@ -388,7 +391,7 @@ def _make_mock_attention(
     conv_state: torch.Tensor, temporal_state: torch.Tensor
 ) -> MagicMock:
     """Create a mock attention object with kv_cache."""
-    attention = MagicMock(use_flashinfer_replayssm=False)
+    attention = MagicMock()
     attention.kv_cache = [conv_state, temporal_state]
     return attention
 
@@ -598,7 +601,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
     for mixer in mixers:
         mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
         mixer.A = -torch.ones(1)
-        mixer.replayssm_buffer_len = 16
 
     with pytest.raises(AssertionError, match="equal materialization geometry"):
         ReplaySSMModelContext.create(
@@ -680,7 +682,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     forward_context = {}
     for name in layer_names:
         mixer = PackedReplaySSMMixer()
-        mixer.replayssm_buffer_len = 16
         mixer.A = -torch.ones(1, device=device)
         forward_context[name] = mixer
     bind_kv_cache_to_layers(pages, forward_context)
@@ -696,10 +697,10 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
                 .add_(100 * state_index)
             )
         original[name] = [tensor.clone() for tensor in mixer.kv_cache]
-        mixer._replayssm_ring_start.fill_(2)
-        mixer._replayssm_prev_num_accepted.fill_(3)
-        mixer._replayssm_ring_start[source_slot] = 7
-        mixer._replayssm_prev_num_accepted[source_slot] = 9
+        mixer.ssu_state.ring_start.fill_(2)
+        mixer.ssu_state.prev_num_accepted.fill_(3)
+        mixer.ssu_state.ring_start[source_slot] = 7
+        mixer.ssu_state.prev_num_accepted[source_slot] = 9
     cfg = _TestConfig(num_layers=2, max_num_reqs=2)
     ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
     batch_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
@@ -740,11 +741,9 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
             expected_start, expected_committed = (
                 (0, 0) if previous_column < 0 else (7, 9)
             )
+            assert mixer.ssu_state.ring_start[destination_slot].item() == expected_start
             assert (
-                mixer._replayssm_ring_start[destination_slot].item() == expected_start
-            )
-            assert (
-                mixer._replayssm_prev_num_accepted[destination_slot].item()
+                mixer.ssu_state.prev_num_accepted[destination_slot].item()
                 == expected_committed
             )
             continue
@@ -766,8 +765,8 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
                 torch.testing.assert_close(
                     tensor[destination_slot], source[index][source_slot], rtol=0, atol=0
                 )
-        assert mixer._replayssm_ring_start[destination_slot].item() == 7
-        assert mixer._replayssm_prev_num_accepted[destination_slot].item() == 9
+        assert mixer.ssu_state.ring_start[destination_slot].item() == 7
+        assert mixer.ssu_state.prev_num_accepted[destination_slot].item() == 9
 
 
 def test_mamba_groups_support_different_state_specs():
@@ -817,13 +816,13 @@ def test_mamba_groups_support_different_state_specs():
     forward_context = {}
     gdn_spec_layer_names = ["gdn.0", "gdn.1"]
     for layer_name in gdn_spec_layer_names:
-        attention = MagicMock(use_flashinfer_replayssm=False)
+        attention = MagicMock()
         attention.kv_cache = (
             torch.empty(8, 4, 4, dtype=torch.float16),
             torch.empty(8, 2, 4, 4, dtype=torch.float32),
         )
         forward_context[layer_name] = attention
-    ple_attention = MagicMock(use_flashinfer_replayssm=False)
+    ple_attention = MagicMock()
     ple_attention.kv_cache = (torch.empty(8, 12, 8, dtype=torch.float16),)
     forward_context["ple.0"] = ple_attention
     assert gdn_spec_layer_names == kv_cache_config.kv_cache_groups[0].layer_names
@@ -895,21 +894,18 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
 
     forward_context = {
         "gdn.0": MagicMock(
-            use_flashinfer_replayssm=False,
             kv_cache=(
                 torch.empty(8, 4, 4, dtype=torch.float16),
                 torch.empty(8, 2, 4, 4, dtype=torch.float32),
             ),
         ),
         "gdn.1": MagicMock(
-            use_flashinfer_replayssm=False,
             kv_cache=(
                 torch.empty(8, 4, 4, dtype=torch.float16),
                 torch.empty(8, 2, 4, 4, dtype=torch.float32),
             ),
         ),
         "ple.0": MagicMock(
-            use_flashinfer_replayssm=False,
             kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),),
         ),
     }
@@ -999,9 +995,9 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(
     mixer = SimpleNamespace(
         kv_cache=[torch.empty(3, 1, device=device), state, x_ring, dt_ring, B_ring],
         A=-torch.ones(heads, device=device),
-        _replayssm_ring_start=starts,
-        _replayssm_prev_num_accepted=committed,
-        replayssm_buffer_len=16,
+        ssu_state=MambaReplaySSMLayerState(
+            buffer_len=16, num_spec=0, ring_start=starts, prev_num_accepted=committed
+        ),
         mamba_config=MambaConfig(),
         cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
     )
@@ -1064,7 +1060,7 @@ def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
     temporal_state = torch.empty(
         config.num_blocks, config.temporal_state_dim, dtype=config.dtype
     )
-    attention = MagicMock(use_flashinfer_replayssm=False)
+    attention = MagicMock()
     attention.kv_cache = [
         conv_state,
         temporal_state,

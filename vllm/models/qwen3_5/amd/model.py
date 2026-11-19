@@ -646,6 +646,11 @@ class Qwen3_5ForCausalLMBase(
         return hidden_states
 
     @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        # Gated DeltaNet's ReplaySSM is Triton-only and needs no state alignment.
+        return 1
+
+    @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
@@ -853,6 +858,11 @@ class Qwen3_5ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    @classmethod
+    def get_mamba_state_alignment_from_config(cls, vllm_config: "VllmConfig") -> int:
+        # Gated DeltaNet's ReplaySSM is Triton-only and needs no state alignment.
+        return 1
 
     @classmethod
     def get_mamba_state_dtype_from_config(

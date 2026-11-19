@@ -18,6 +18,33 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadata
 
 
+def triton_stochastic_rounding_reasons(cfg: LinearAttnSelectorConfig) -> list[str]:
+    """Why the Triton SSU kernels' `convert_rs_fp16x2` can't round the SSM
+    state stochastically here, if it is enabled."""
+    if not cfg.use_stochastic_rounding:
+        return []
+    reasons = []
+    spec = cfg.kv_cache_spec
+    if isinstance(spec, MambaSpec) and spec.dtypes[1] != torch.float16:
+        reasons.append(
+            f"stochastic rounding requires a float16 SSM cache, got {spec.dtypes[1]}"
+        )
+    # The `cvt.rs` PTX instruction (SM10x), or gfx950's (capability 9.5).
+    capability = cfg.device_capability
+    if capability is None or not (
+        (cfg.platform == PlatformEnum.CUDA and capability.major == 10)
+        or (
+            cfg.platform == PlatformEnum.ROCM
+            and (capability.major, capability.minor) == (9, 5)
+        )
+    ):
+        reasons.append(
+            "Triton stochastic rounding requires compute capability 10.x "
+            "on CUDA or gfx950 on ROCm"
+        )
+    return reasons
+
+
 class TritonSSUKernel(MambaSSUKernel):
     backend = MambaBackendEnum.TRITON
 
@@ -30,30 +57,16 @@ class TritonSSUKernel(MambaSSUKernel):
         return True
 
     @classmethod
+    def supports_spec_decode(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_pipeline_parallel(cls) -> bool:
+        return True
+
+    @classmethod
     def validate_kernel(cls, cfg: LinearAttnSelectorConfig) -> list[str]:
-        if not cfg.use_stochastic_rounding:
-            return []
-        reasons = []
-        spec = cfg.kv_cache_spec
-        if isinstance(spec, MambaSpec) and spec.dtypes[1] != torch.float16:
-            reasons.append(
-                f"stochastic rounding requires a float16 SSM cache, got "
-                f"{spec.dtypes[1]}"
-            )
-        # The `cvt.rs` PTX instruction (SM10x), or gfx950's (capability 9.5).
-        capability = cfg.device_capability
-        if capability is None or not (
-            (cfg.platform == PlatformEnum.CUDA and capability.major == 10)
-            or (
-                cfg.platform == PlatformEnum.ROCM
-                and (capability.major, capability.minor) == (9, 5)
-            )
-        ):
-            reasons.append(
-                "Triton stochastic rounding requires compute capability 10.x "
-                "on CUDA or gfx950 on ROCm"
-            )
-        return reasons
+        return triton_stochastic_rounding_reasons(cfg)
 
     @staticmethod
     @cache

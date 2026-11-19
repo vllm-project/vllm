@@ -9,7 +9,15 @@ from typing import Any, NamedTuple
 
 import torch
 
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base import (
+    MambaReplaySSMLayerState,
+)
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
+)
+from vllm.model_executor.layers.linear_attention.replayssm.state import (
+    ReplaySSMLayerState,
+)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
     replayssm_materialize,
 )
@@ -17,6 +25,28 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+
+
+def uses_replayssm(layer: Any) -> bool:
+    """Whether `layer` decodes with a ReplaySSM kernel."""
+    return isinstance(getattr(layer, "ssu_state", None), ReplaySSMLayerState)
+
+
+def uses_ring_trackers(layer: Any) -> bool:
+    """Whether the runner commits `layer`'s ReplaySSM ring trackers. Gated
+    DeltaNet's ReplaySSM runs without an SSU kernel and commits none."""
+    return (
+        uses_replayssm(layer)
+        and layer.ssu_kernel is not None
+        and layer.ssu_kernel.uses_ring_trackers
+    )
+
+
+def replayssm_state(layer: Any) -> ReplaySSMLayerState:
+    """The runtime state of a layer that decodes with a ReplaySSM kernel."""
+    state = layer.ssu_state
+    assert isinstance(state, ReplaySSMLayerState)
+    return state
 
 
 def initialize_replayssm_ring_trackers(
@@ -30,42 +60,34 @@ def initialize_replayssm_ring_trackers(
         names = [
             name
             for name in group.layer_names
-            if isinstance(layer := forward_context.get(name), MambaBase)
-            and layer.use_replayssm
+            if uses_replayssm(forward_context.get(name))
         ]
         if not names:
             continue
         layers = [forward_context[name] for name in names]
-        state = layers[0].kv_cache[0]
-        num_blocks, device = state.shape[0], state.device
-        trackers = (
-            layers[0]._replayssm_ring_start,
-            layers[0]._replayssm_prev_num_accepted,
-        )
+        states = [replayssm_state(layer) for layer in layers]
+        conv_state = layers[0].kv_cache[0]
+        num_blocks, device = conv_state.shape[0], conv_state.device
+        trackers = (states[0].ring_start, states[0].prev_num_accepted)
         # Extensible caches rebind after capture. Keep the captured addresses.
         if all(
             t.numel() >= num_blocks and t.device == device for t in trackers
         ) and all(
-            layer._replayssm_ring_start is trackers[0]
-            and layer._replayssm_prev_num_accepted is trackers[1]
-            for layer in layers
+            state.ring_start is trackers[0] and state.prev_num_accepted is trackers[1]
+            for state in states
         ):
             ring_start, num_committed = (t[:num_blocks] for t in trackers)
         else:
             ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
             num_committed = torch.zeros_like(ring_start)
-        for layer in layers:
-            layer._replayssm_ring_start = ring_start
-            layer._replayssm_prev_num_accepted = num_committed
-            layer._plans_replayssm_decode = False
-        # Triton plans each decode step in the group's first executed layer.
-        planner = min(names, key=extract_layer_index)
-        forward_context[planner]._plans_replayssm_decode = True
+        for state in states:
+            state.ring_start = ring_start
+            state.prev_num_accepted = num_committed
         seeded.extend(
             name
             for name, layer in zip(names, layers)
-            if layer.use_flashinfer_replayssm
-            and layer.mamba_config.enable_stochastic_rounding
+            if layer.ssu_kernel is not None
+            and layer.ssu_kernel.uses_rand_seed_slot(layer.mamba_config)
         )
     _bind_replayssm_rand_seeds(forward_context, seeded)
 
@@ -81,15 +103,17 @@ def _bind_replayssm_rand_seeds(
     if not names:
         return
     layers = [forward_context[name] for name in sorted(names, key=extract_layer_index)]
+    states = [layer.ssu_state for layer in layers]
+    assert all(isinstance(state, MambaReplaySSMLayerState) for state in states)
     device = layers[0].kv_cache[1].device
-    seeds = layers[0]._replayssm_rand_seeds
+    seeds = states[0].rand_seeds
     # Extensible caches rebind after capture. Keep the captured address.
     if seeds is None or seeds.numel() != len(layers) or seeds.device != device:
         seeds = torch.zeros(len(layers), dtype=torch.int64, device=device)
-    for slot, layer in enumerate(layers):
-        layer._replayssm_rand_seed = seeds[slot : slot + 1]
-        layer._replayssm_rand_seeds = None
-    layers[0]._replayssm_rand_seeds = seeds
+    for slot, state in enumerate(states):
+        state.rand_seed = seeds[slot : slot + 1]
+        state.rand_seeds = None
+    states[0].rand_seeds = seeds
 
 
 def get_replayssm_block_copy_tensors(
@@ -98,10 +122,9 @@ def get_replayssm_block_copy_tensors(
     """Include shared trackers in scheduler block copies alongside packed pages."""
     tensors: list[torch.Tensor] = []
     for layer in forward_context.values():
-        if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
-            tensors.extend(
-                (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
-            )
+        if uses_ring_trackers(layer):
+            state = replayssm_state(layer)
+            tensors.extend((state.ring_start, state.prev_num_accepted))
     return tensors
 
 
@@ -432,7 +455,7 @@ class ReplaySSMModelContext:
         assert all(
             [(state.shape[1:], state.dtype) for state in mixer.kv_cache[1:]] == geometry
             and mixer.A.dtype == first.A.dtype
-            and mixer.replayssm_buffer_len == first.replayssm_buffer_len
+            and replayssm_state(mixer).buffer_len == replayssm_state(first).buffer_len
             for mixer in mixers
         ), "ReplaySSM trackers require equal materialization geometry"
 
@@ -457,10 +480,10 @@ class ReplaySSMModelContext:
             block_table_ptrs=_cuda_i64_ptrs(block_tables),
             block_table_strides=_cuda_i64_slot_strides(block_tables),
             ring_start_ptrs=_cuda_i64_ptrs(
-                [group[0]._replayssm_ring_start for group, _, _ in grouped]
+                [replayssm_state(group[0]).ring_start for group, _, _ in grouped]
             ),
             num_committed_ptrs=_cuda_i64_ptrs(
-                [group[0]._replayssm_prev_num_accepted for group, _, _ in grouped]
+                [replayssm_state(group[0]).prev_num_accepted for group, _, _ in grouped]
             ),
             src_slots_ptrs=_cuda_i64_ptrs(
                 [src_slots[offset] for offset in layer_offsets[:-1]]
@@ -505,7 +528,7 @@ class ReplaySSMModelContext:
             ),
             max_num_reqs=max_num_reqs,
             mamba_block_size=first_spec.block_size,
-            logical_window=int(first.replayssm_buffer_len),
+            logical_window=int(replayssm_state(first).buffer_len),
             ring_buffer_len=first.kv_cache[2].size(2),
             materialize_prefixes=materialize_prefixes,
         )
@@ -514,7 +537,7 @@ class ReplaySSMModelContext:
         """Publish all canonical prefix snapshots in one kernel launch."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
-        if not first.use_flashinfer_replayssm:
+        if first.ssu_kernel is not FlashInferReplaySSMKernel:
             replayssm_materialize(
                 *self.materialize_tables[:9],
                 self.src_slots,

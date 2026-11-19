@@ -4,13 +4,12 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import torch
 
 import vllm.envs as envs
 from vllm.config.cache import MambaDType
-from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
 from vllm.logger import init_logger
@@ -20,17 +19,9 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
-
-
-def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
-    # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
-    return 16 if vllm_config.use_flashinfer_replayssm else 1
 
 
 @functools.lru_cache
@@ -80,16 +71,13 @@ class MambaStateDtypeCalculator:
         )
 
     @classmethod
-    def append_replayssm_ring(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
+    def replayssm_ring_dtypes(
+        cls, model_dtype: ModelDType | torch.dtype
     ) -> tuple[torch.dtype, ...]:
-        """Append the ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
-        `(x_cache, dt_cache, B_cache)` = `(activation, fp32, activation)`.
-        """
+        """The ReplaySSM ring dtypes `(x_cache, dt_cache, B_cache)`:
+        `(activation, fp32, activation)`."""
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+        return (activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
     def _mamba_state_dtype(
@@ -205,38 +193,25 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
-    def append_replayssm_ring(
+    def replayssm_ring_shapes(
         cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
+        ssm_state_shape: tuple[int, ...],
         n_groups: int,
         tp_world_size: int,
-        logical_window: int,
-        backend: MambaBackendEnum | None,
-        num_speculative_tokens: int = 0,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-        tuple[int, int, int],
-    ]:
-        """Append the physical ReplaySSM ring shapes.
-
-        `base_shapes[1]` is `(nheads // tp, head_dim, state_size)`;
-        B_cache extends `n_groups` for head shards as in `mamba2_state_shape`.
+        ring_len: int,
+    ) -> tuple[tuple[int, int, int], tuple[int, int], tuple[int, int, int]]:
+        """The ReplaySSM ring shapes `(x_cache, dt_cache, B_cache)`, `ring_len`
+        long, for an SSM state of `ssm_state_shape` (`(nheads // tp, head_dim,
+        state_size)`); B_cache extends `n_groups` for head shards as in
+        `mamba2_state_shape`.
         """
-        ring_buffer_len = logical_window
-        if backend == MambaBackendEnum.FLASHINFER or num_speculative_tokens > 0:
-            # The tracker contract keeps the live and current verify windows.
-            ring_buffer_len += 1 + num_speculative_tokens
-        local_nheads, head_dim, state_size = base_shapes[1]
+        local_nheads, head_dim, state_size = ssm_state_shape
         n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
-            *base_shapes,
-            (local_nheads, ring_buffer_len, head_dim),
-            (local_nheads, ring_buffer_len),
-            (local_ngroups, ring_buffer_len, state_size),
+            (local_nheads, ring_len, head_dim),
+            (local_nheads, ring_len),
+            (local_ngroups, ring_len, state_size),
         )
 
     @classmethod
