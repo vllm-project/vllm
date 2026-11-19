@@ -20,20 +20,8 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.v1.attention.ops import rocm_aiter_mla_sparse as sparse_mod
 
 
-@pytest.mark.parametrize(
-    ("next_n", "dcp_world_size", "expected"),
-    [
-        (1, 1, "dispatch"),
-        (2, 1, "dispatch"),
-        (1, 2, "dispatch"),
-        # DCP localizes MTP row lengths per rank; FlyDSL would leave the
-        # column top-k reads stale, so this stays on Gluon.
-        (2, 2, "gluon"),
-    ],
-)
-def test_rocm_fp8_paged_mqa_logits_keeps_gluon_for_mtp_with_dcp(
-    monkeypatch, next_n, dcp_world_size, expected
-):
+@pytest.mark.parametrize("next_n", [1, 2])
+def test_rocm_fp8_paged_mqa_logits_uses_aiter_dispatch(monkeypatch, next_n):
     calls = []
     out = torch.empty((2 * next_n, 128), dtype=torch.float32)
 
@@ -73,19 +61,14 @@ def test_rocm_fp8_paged_mqa_logits_keeps_gluon_for_mtp_with_dcp(
         block_tables,
         torch.empty(0),
         max_model_len=128,
-        dcp_world_size=dcp_world_size,
     )
 
     assert result is out
     assert len(calls) == 1
     backend, args, kwargs = calls[0]
-    assert backend == expected
+    assert backend == "dispatch"
     assert args[3] is out
     assert kwargs["Preshuffle"] is True
     assert kwargs["KVBlockSize"] == block_size
-    if expected == "gluon":
-        assert kwargs["ChunkK"] == 256
-        assert kwargs["WavePerEU"] == 2
-    else:
-        assert "ChunkK" not in kwargs
-        assert "WavePerEU" not in kwargs
+    assert "ChunkK" not in kwargs
+    assert "WavePerEU" not in kwargs
