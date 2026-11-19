@@ -2364,7 +2364,9 @@ class rocm_aiter_ops:
     @classmethod
     def _is_cdna_fused_moe_enabled(cls) -> bool:
         return (
-            is_aiter_found_and_supported() and cls._AITER_ENABLED and cls._FMOE_ENABLED
+            is_aiter_found_and_supported()
+            and cls._AITER_ENABLED
+            and cls._FMOE_ENABLED
         )
 
     @classmethod
