@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.models.inkling2.nvidia.ops import use_sm100_kernels
 from vllm.models.inkling2.nvidia.ops.vision import (
     apply_rotary_qk_,
     embed_tokens,
@@ -60,13 +61,7 @@ class Inkling2VisionAttention(nn.Module):
         qkv = self.qkv_proj(hidden)
         apply_rotary_qk_(qkv, metadata.meta, self.num_heads)
         q, k, v = qkv.view(-1, 3, self.num_heads, self.head_dim).unbind(1)
-        # Built only for SM100 CUDA targets, so imported where it runs.
-        from vllm.third_party.tml_fa4 import flash_attn_varlen_func
-
-        out, _ = flash_attn_varlen_func(
-            q,
-            k,
-            v,
+        kwargs = dict(
             cu_seqlens_q=metadata.cu_seqlens,
             cu_seqlens_k=metadata.cu_seqlens,
             max_seqlen_q=metadata.max_seqlen,
@@ -74,6 +69,15 @@ class Inkling2VisionAttention(nn.Module):
             softmax_scale=self.head_dim**-0.5,
             causal=False,
         )
+        if use_sm100_kernels():
+            # Built only for SM100 CUDA targets, so imported where it runs.
+            from vllm.third_party.tml_fa4 import flash_attn_varlen_func as fa4
+
+            out, _ = fa4(q, k, v, **kwargs)
+        else:
+            from vllm.vllm_flash_attn import flash_attn_varlen_func as fa3
+
+            out = fa3(q, k, v, fa_version=3, **kwargs)
         return self.out_proj(out.view(hidden.shape))
 
 
