@@ -183,7 +183,14 @@ def triton_attn_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = torch.empty_like(q, memory_format=torch.contiguous_format)
+    # Encoder CUDA-graph replay padding rows are never written; zero them so
+    # they cannot reach a per-tensor activation scale downstream.
+    alloc = (
+        torch.zeros_like
+        if current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing()
+        else torch.empty_like
+    )
+    output = alloc(q, memory_format=torch.contiguous_format)
     context_attention_fwd(
         q,
         k,
@@ -372,7 +379,12 @@ def flashinfer_wrapper(
     with gpu_sync_allowed():
         max_seqlen = max_seqlen.item()
 
-    output_buffer = torch.empty_like(
+    alloc = (
+        torch.zeros_like
+        if current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing()
+        else torch.empty_like
+    )
+    output_buffer = alloc(
         q,
         dtype=o_data_type,
         memory_format=torch.contiguous_format,
