@@ -87,6 +87,7 @@ def kernel_paged_attention_2d(
     INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    SINGLE_BLOCK_TILE: tl.constexpr = False,
 ):
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -159,10 +160,17 @@ def kernel_paged_attention_2d(
         # Supports non-contiguous mapping
         # from logical blocks to physical blocks
         abs_token_idx = start_n + offs_n
-        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
-        # Vectorized loading of physical block IDs
-        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
-        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
+        if SINGLE_BLOCK_TILE:
+            # The tile lies inside one physical block: load its ID once.
+            p_block_idx = tl.load(
+                block_tables_ptr + block_table_offset + start_n // PHYSICAL_BLOCK_SIZE
+            ) + tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+            internal_offsets = start_n % PHYSICAL_BLOCK_SIZE + offs_n
+        else:
+            l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
+            # Vectorized loading of physical block IDs
+            p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+            internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
         # 5D addressing logic of K
         k_offset = (
@@ -388,7 +396,11 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
-    from vllm.platforms.rocm import on_rdna, use_rocm_custom_paged_attention
+    from vllm.platforms.rocm import (
+        on_gfx115x,
+        on_rdna,
+        use_rocm_custom_paged_attention,
+    )
 
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
@@ -464,6 +476,18 @@ def chunked_prefill_paged_decode(
         # via the l_block_idx/internal_offsets addressing logic.
         MAX_TRITON_BLOCK_SIZE = 128
         TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
+        # gfx115x: heads wider than 128 decode faster with 16-token tiles, and
+        # for heads of 128 and wider a tile that never crosses a physical block
+        # can read its block ID once (slower for 64-wide heads). Both are slower
+        # on gfx1201, so they stay off on other GPUs.
+        if on_gfx115x() and head_size > 128:
+            TRITON_BLOCK_SIZE = min(TRITON_BLOCK_SIZE, 16)
+        single_block_tile = (
+            on_gfx115x()
+            and head_size >= 128
+            and real_block_size > TRITON_BLOCK_SIZE
+            and real_block_size % TRITON_BLOCK_SIZE == 0
+        )
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()
@@ -534,5 +558,6 @@ def chunked_prefill_paged_decode(
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
             INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
+            SINGLE_BLOCK_TILE=single_block_tile,
             **launch_kwargs,
         )
