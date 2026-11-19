@@ -560,19 +560,18 @@ def extend_kv_cache(
         ]
         # Host-resident layers do not move: they stay bound as at allocation,
         # and their views resolve the layers sharing their KV.
-        host_resident = {
-            name
-            for tensor in runner.kv_cache_config.kv_cache_tensors
-            if tensor.host_resident
-            for name in tensor.layers
+        host_resident_layers: set[str] = set()
+        for tensor in runner.kv_cache_config.kv_cache_tensors:
+            if tensor.host_resident:
+                host_resident_layers.update(tensor.layers)
+        layers_to_rebind = {
+            name: layer
+            for name, layer in forward_context.items()
+            if name not in host_resident_layers
         }
         runner.kv_caches_by_layer = bind_kv_caches(
             runner.kv_caches_by_layer | committed,
-            {
-                name: layer
-                for name, layer in forward_context.items()
-                if name not in host_resident
-            },
+            layers_to_rebind,
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
