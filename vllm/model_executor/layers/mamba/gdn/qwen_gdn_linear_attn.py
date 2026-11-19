@@ -45,6 +45,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
@@ -684,7 +685,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], ...]:
-        base_shape = MambaStateShapeCalculator.gated_delta_net_state_shape(
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
             self.num_k_heads,
             self.num_v_heads,
@@ -692,15 +693,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.conv_kernel_size,
             self.num_spec,
+            self.cache_config.replayssm_buffer_len
+            if self.cache_config.use_replayssm
+            else None,
         )
-        if self.cache_config.use_replayssm:
-            return MambaStateShapeCalculator.append_gated_delta_net_replayssm_ring(
-                base_shape,
-                self.num_k_heads,
-                self.tp_size,
-                self.cache_config.replayssm_buffer_len,
-            )
-        return base_shape
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+            self.cache_config.use_replayssm,
+        )
 
     def __init__(
         self,

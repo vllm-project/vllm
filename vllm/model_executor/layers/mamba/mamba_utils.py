@@ -132,26 +132,22 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType = "auto",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return cls._mamba_state_dtype(
+        use_replayssm: bool = False,
+    ) -> tuple[torch.dtype, ...]:
+        """`(conv, ssm)`, plus the ReplaySSM `(d, k, g)` rings when enabled.
+
+        The `d`/`k` rings use fp16 for bf16 activations; `g` is float32.
+        """
+        base_dtypes = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
-
-    @classmethod
-    def append_gated_delta_net_replayssm_ring(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        """Append the GDN ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
-        `(d_cache, k_cache, g_cache)`. The `d`/`k` input caches use fp16
-        for bf16 activations; `g_cache` is float32.
-        """
+        if not use_replayssm:
+            return base_dtypes
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        cache_dtype = (
+        ring_dtype = (
             torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
         )
-        return (*base_dtypes, cache_dtype, cache_dtype, torch.float32)
+        return (*base_dtypes, ring_dtype, ring_dtype, torch.float32)
 
     @classmethod
     def kda_state_dtype(
@@ -302,45 +298,25 @@ class MambaStateShapeCalculator:
         head_v_dim: int,
         conv_kernel_size: int,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        replayssm_buffer_len: int | None = None,
+    ):
+        """Append the ReplaySSM rings of length `replayssm_buffer_len` when
+        it is set."""
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
         conv_state_shape = cls._orient_conv_shape(
             divide(conv_dim, tp_world_size),
             conv_kernel_size - 1 + num_spec,
         )
 
-        temporal_state_shape = (
-            divide(num_v_heads, tp_world_size),
-            head_v_dim,
-            head_k_dim,
-        )
-        return conv_state_shape, temporal_state_shape
-
-    @classmethod
-    def append_gated_delta_net_replayssm_ring(
-        cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
-        num_k_heads: int,
-        tp_world_size: int,
-        replayssm_buffer_len: int,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
-    ]:
-        """Append the GDN ReplaySSM ring shapes (d_cache, k_cache, g_cache) to a
-        base `(conv, ssm)` tuple. `base_shapes[1]` is the ssm shape
-        `(num_v_heads // tp, head_v_dim, head_k_dim)`; k_cache uses the
-        un-extended `num_k_heads`.
-        """
-        local_v_heads, head_v_dim, head_k_dim = base_shapes[1]
-        local_k_heads = divide(num_k_heads, tp_world_size)
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        temporal_state_shape = (local_v_heads, head_v_dim, head_k_dim)
+        if replayssm_buffer_len is None:
+            return conv_state_shape, temporal_state_shape
         return (
-            *base_shapes,
+            conv_state_shape,
+            temporal_state_shape,
             (local_v_heads, replayssm_buffer_len, head_v_dim),
-            (local_k_heads, replayssm_buffer_len, head_k_dim),
+            (divide(num_k_heads, tp_world_size), replayssm_buffer_len, head_k_dim),
             (local_v_heads, replayssm_buffer_len),
         )
 
