@@ -291,6 +291,10 @@ class EngineClient(ABC):
         """Return shared external Elastic EP operation status, if enabled."""
         return None
 
+    async def check_worker_liveness(self, timeout: float) -> None:
+        """Round-trip a worker health RPC through every managed engine."""
+        raise NotImplementedError
+
     async def collective_rpc(
         self,
         method: str,
