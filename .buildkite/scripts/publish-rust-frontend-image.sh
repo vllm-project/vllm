@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-staging=public.ecr.aws/q9t5s3a7/vllm-release-repo
+staging=${VLLM_STAGING_IMAGE_REPO:-public.ecr.aws/q9t5s3a7/vllm-release-repo}
 hub=vllm/vllm-rust-frontend
 
 manifest_digest() {
