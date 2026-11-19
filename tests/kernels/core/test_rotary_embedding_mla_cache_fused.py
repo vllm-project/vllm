@@ -10,6 +10,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
+from vllm import ir
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -187,8 +188,12 @@ def test_concat_and_cache_mla_rope_fused(
         # when dtype is FP16. The torch-native implementation implicitly upcasts
         # FP16 x FP16 multiplications to FP32 before downcasting them, which leads
         # to notable output divergences.
-        # Clone the tensors because the implementation modifies them in-place
-        ref_q_pe, ref_k_pe = rope.forward_hip(positions, query.clone(), k_pe.clone())
+        # Clone the tensors because the implementation modifies them in-place.
+        # RoPE dispatches through vLLM IR, so pin the reference to AITER.
+        with ir.ops.rotary_embedding.set_priority(["aiter", "vllm_c", "native"]):
+            ref_q_pe, ref_k_pe = rope.forward_hip(
+                positions, query.clone(), k_pe.clone()
+            )
     else:
         # NOTE(woosuk): The reference implementation should be executed first
         # because the custom kernel is in-place.

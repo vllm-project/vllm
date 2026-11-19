@@ -1853,6 +1853,22 @@ class RocmCacheTest(unittest.TestCase):
                 self.assertIn(text, github.comments[0])
                 self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
+    def test_cache_waits_for_a_running_build_to_push_the_base_image(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        running = ci_build(
+            number=5,
+            state="running",
+            meta_data={},
+            web_url="https://buildkite.example/ci/builds/5",
+        )
+
+        amd = self.comment(github, ci_builds=[running])
+
+        self.assertEqual(amd.created_builds + self.ci.created_builds, [])
+        self.assertIn("still running", github.comments[0])
+        self.assertIn("ci/builds/5", github.comments[0])
+        self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
+
     def test_prs_that_keep_the_base_image_have_nothing_to_do(self) -> None:
         github = FakeGitHub(files=["vllm/foo.py"])
 

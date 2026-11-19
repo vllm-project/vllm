@@ -449,7 +449,7 @@ A transfer completion or abort acknowledgement already received when the
 connection closes still settles its load. Disconnect suppresses messages that
 would start new work; it does not discard these buffered terminal confirmations.
 
-In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so before the initial nonempty fetch is submitted, every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. After that submission, subsequent PD-tier lookups return MISS. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
 
@@ -563,6 +563,14 @@ For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
 end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
+
+## Core dumps
+
+On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
+KV caches out of core dumps (`MADV_DONTDUMP`). A crashing worker still writes a
+core file, but it no longer grows with `cpu_bytes_to_use`. The exception is the
+single-tier `OffloadingConnector` on platforms other than CUDA and XPU, where
+the CPU tier is a plain pinned tensor.
 
 ## Further Reading
 
