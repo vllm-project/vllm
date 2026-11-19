@@ -11,8 +11,8 @@ class FlintConfig(PreTrainedConfig):
     """Decoder-only MoE transformer with hybrid sliding/full attention.
 
     Sliding layers use RoPE; full-attention layers listed in
-    ``no_rope_layer_indices`` use no positional encoding. Every attention head
-    has a learned sink logit. ``sliding_window`` counts the current token.
+    `no_rope_layer_indices` use no positional encoding. Every attention head
+    has a learned sink logit. `sliding_window` counts the current token.
     """
 
     model_type = "flint"

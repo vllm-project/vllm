@@ -3,6 +3,7 @@
 """K3 dense MLA draft model for DSpark speculative decoding."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -25,10 +26,13 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, is_quantized_kv_cache
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 _GROUPED_KV_CACHE_DTYPES = frozenset(
@@ -58,6 +62,15 @@ def _duplicate_context_kv_weights(
         yield f"context_kv_proj.{param_name}", fused_weight
 
 
+class K3DSparkAttention(MultiHeadLatentAttention):
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        # DFlash derives the slots of every draft KV write from the block table.
+        layer_config = super().get_kv_cache_config(vllm_config)
+        return replace(
+            layer_config, spec=SelfAddressedMLASpec.from_spec(layer_config.spec)
+        )
+
+
 class K3DSparkDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -70,7 +83,7 @@ class K3DSparkDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         quant_config = get_draft_quant_config(vllm_config)
-        self.self_attn = MultiHeadLatentAttention(
+        self.self_attn = K3DSparkAttention(
             config=config,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -222,8 +235,6 @@ class K3DSparkModel(nn.Module):
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         """Project target-derived context into each draft layer's latent cache."""
-        if not hasattr(self, "_num_context_layers"):
-            self._build_fused_context_kv_metadata()
         self._precompute_fused_context_kv(
             context_states, context_positions, context_slot_mapping
         )
@@ -244,21 +255,21 @@ class K3DSparkModel(nn.Module):
                 and attn.kv_a_layernorm.variance_epsilon
                 == attn0.kv_a_layernorm.variance_epsilon
             ), "All MLA DSpark layers must share their latent KV geometry."
-        self._context_kv_norm_weights = torch.stack(
-            [attn.kv_a_layernorm.weight.detach() for attn in attentions], dim=0
-        ).contiguous()
+        norms = [attn.kv_a_layernorm.weight.detach() for attn in attentions]
+        refill_derived(
+            self, "_context_kv_norm_weights", torch.stack(norms, dim=0).contiguous()
+        )
         self._num_context_layers = len(attentions)
         self._context_kv_width = kv_width
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_kv_scales: torch.Tensor | None = None
+        kv_scales = None
         if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
             attn0.kv_cache_dtype
         ):
-            self._context_kv_scales = torch.stack(
-                [attn._k_scale.reshape(()) for attn in attentions]
-            )
+            kv_scales = torch.stack([attn._k_scale.reshape(()) for attn in attentions])
+        refill_derived(self, "_context_kv_scales", kv_scales)
 
     def _precompute_fused_context_kv(
         self,
@@ -431,6 +442,9 @@ class K3DSparkModel(nn.Module):
 
 
 class K3DSparkForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
+
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None

@@ -24,6 +24,9 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Lease renewal notification, D worker -> P worker: HB_NOTIF_PREFIX + "req1,req2".
+HB_NOTIF_PREFIX = "HB:"
 #
 # NIXL Connector Version
 #
@@ -51,11 +54,15 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
 #  15: Add remote_registration_generation to kv_transfer_params
+#  16: Pair regions by the layers both sides hold: every peer advertises
+#      region_members and the cache group of each layer
+#  17: Export remote_blocks_expiry_time for P blocks too, plus
+#      remote_lease_extension; the consumer gates every remote read on it
 #
-NIXL_CONNECTOR_VERSION: int = 15
+NIXL_CONNECTOR_VERSION: int = 17
 
 
-@dataclass
+@dataclass(slots=True)
 class NixlAgentMetadata:
     engine_id: str
     agent_metadata: bytes
@@ -79,6 +86,8 @@ class NixlAgentMetadata:
     ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Cache group of each layer in region_members.
+    layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -105,7 +114,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config
@@ -135,7 +144,6 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
-        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
@@ -216,7 +224,7 @@ def compute_nixl_compatibility_hash(
     return compat_hash
 
 
-@dataclass
+@dataclass(slots=True)
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""
 
@@ -226,9 +234,12 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
+    # remote req id -> (exported lease deadline, seconds per renewal), when the
+    # remote exports both; used to model the lease (`_record_heartbeat_sent`).
+    leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteMeta:
     block_ids: BlockIds
     host: str
@@ -241,7 +252,7 @@ class RemoteMeta:
     registration_generation: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     local_block_ids: BlockIds
     # To be used when logical block size does not match the kernel block size
@@ -264,6 +275,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Worker-only, per-group range of the remote-sized sub-blocks of each local
+    # group a pull covers. None derives it from the block counts.
+    covered_sub_blocks: list[range] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

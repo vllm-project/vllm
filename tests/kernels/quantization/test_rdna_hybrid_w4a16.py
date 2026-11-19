@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x, on_gfx115x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx115x, on_gfx1151  # noqa: E402
 
 device = "cuda"
 
@@ -29,6 +29,7 @@ hybrid_module = importlib.import_module(
 RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 dequantize_w4a16 = hybrid_module.dequantize_w4a16
+pack_scale_zp_carrier = hybrid_module.pack_scale_zp_carrier
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
@@ -267,8 +268,8 @@ def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypat
 def _make_prefill_case(M, K, N, G, dtype, has_zp):
     """Random [M,K] activations + skinny [N,K//8] weights and their metadata.
 
-    Zero points come back twice: ``zp_raw`` as [N, K//G] int32 nibbles for the
-    float32 oracle, and ``zp_packed`` as [N//8, K//G] int32 in the packed layout
+    Zero points come back twice: `zp_raw` as [N, K//G] int32 nibbles for the
+    float32 oracle, and `zp_packed` as [N//8, K//G] int32 in the packed layout
     the kernel reads.
     """
     x = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
@@ -287,7 +288,7 @@ def _make_prefill_case(M, K, N, G, dtype, has_zp):
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("zp_mode", ["sym", "zp", "scale_zp_carrier"])
 @pytest.mark.parametrize(
     "M,K,N,G",
     [
@@ -296,25 +297,36 @@ def _make_prefill_case(M, K, N, G, dtype, has_zp):
         (33, 512, 512, 128),
         (64, 1024, 256, 128),
         (129, 256, 512, 32),
+        (160, 256, 1024, 64),
         (256, 512, 512, 128),
         (257, 512, 512, 128),
     ],
 )
-def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
-    """The Triton prefill GEMM matches a float32 dequantize-then-matmul reference.
-
-    Covers fp16 and bf16, with and without zero points, at M values on both
-    sides of where gfx1151 switches fp16 to the packed dequant.
-    """
+def test_triton_prefill_gemm_matches_reference(dtype, zp_mode, M, K, N, G):
+    """Prefill GEMM against a float32 oracle, over the symmetric, scalar
+    zero-point and scale/zero-point carrier dequants, at M values on both sides
+    of where gfx1151 switches fp16 to the packed dequant."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
+    if zp_mode == "scale_zp_carrier" and dtype != torch.float16:
+        pytest.skip("The scale/zero-point carrier is fp16 only")
     set_random_seed(0)
 
     x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
-        M, K, N, G, dtype, has_zp
+        M, K, N, G, dtype, has_zp=zp_mode != "sym"
+    )
+    scale_zp_carrier = (
+        pack_scale_zp_carrier(scales, zp_packed)
+        if zp_mode == "scale_zp_carrier"
+        else None
     )
     out = triton_w4a16_skinny_fmt_gemm(
-        a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed
+        a=x,
+        b_q=b_q,
+        scales=scales,
+        group_size=G,
+        zp=zp_packed,
+        scale_zp_carrier=scale_zp_carrier,
     )
     ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
@@ -535,6 +547,77 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     torch.testing.assert_close(w_q_i32, expected_packed)
 
 
+@pytest.mark.skipif(not on_gfx1151(), reason="The carrier is gfx1151 only")
+@pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
+def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(
+    reload_mode, default_vllm_config, dist_init, monkeypatch
+):
+    """A weight reload rebuilds the carrier from the new scales and zero-points
+    in its original storage, which captured graphs point at."""
+    from vllm.config.model import ModelConfig
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        finish_direct_reload,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    class KernelMethod(QuantizeMethodBase):
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+            pass
+
+        def apply(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def process_weights_after_loading(self, layer):
+            self.kernel.process_weights_after_loading(layer)
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
+    model_config = ModelConfig()
+    set_random_seed(0)
+    K, N, G = 256, 128, 128
+    layer, kernel, *_ = _build_prefill_dequant_case(K, N, G, has_zp=True)
+    new_layer, *_ = _build_prefill_dequant_case(K, N, G, has_zp=True)
+    new_ckpt = {name: p.data for name, p in new_layer.named_parameters()}
+    for param in layer.parameters():
+        param.weight_loader = default_weight_loader
+    layer.quant_method = KernelMethod(kernel)
+
+    with torch.device(device):
+        record_metadata_for_reloading(layer)
+    process_weights_after_loading(layer, model_config, torch.device(device))
+    carrier = layer._hybrid_w_scale_zp_carrier
+    old_carrier = carrier.clone()
+
+    if reload_mode == "direct":
+        begin_direct_reload(layer)
+    else:
+        initialize_layerwise_reload(layer)
+    for name, value in new_ckpt.items():
+        param = getattr(layer, name)
+        param.weight_loader(param, value)
+    if reload_mode == "direct":
+        finish_direct_reload(layer, model_config, torch.device(device))
+    else:
+        finalize_layerwise_reload(layer, model_config)
+
+    assert layer._hybrid_w_scale_zp_carrier.data_ptr() == carrier.data_ptr()
+    expected = pack_scale_zp_carrier(layer.weight_scale, layer.weight_zero_point)
+    assert torch.equal(layer._hybrid_w_scale_zp_carrier, expected)
+    assert not torch.equal(expected, old_carrier)
+
+
 # ---------------------------------------------------------------------------
 # process_weights_after_loading: rdna_hybrid_w4a16_prefill_dequant cache
 # ---------------------------------------------------------------------------
@@ -580,12 +663,11 @@ def _build_prefill_dequant_case(K: int, N: int, G: int, has_zp: bool):
     return layer, kernel, w_int4_kn.t().contiguous(), scales_nkg, zp_nkg
 
 
-def _prefill_dequant_vllm_config(mode: str, gpu_memory_utilization: float):
-    from vllm.config import CacheConfig, KernelConfig, VllmConfig
+def _prefill_dequant_vllm_config(mode: str):
+    from vllm.config import KernelConfig, VllmConfig
 
     return VllmConfig(
-        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode),
-        cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
+        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode)
     )
 
 
@@ -610,7 +692,7 @@ def test_rdna_hybrid_w4a16_prefill_dequant_mode_normalized(value, expected):
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize("mode", ["disable", "enable"])
 def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
-    """Within budget, enabling caches the dense copy; disabled caches nothing."""
+    """Enabling caches the dense copy; disabled caches nothing."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -622,8 +704,7 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
         K, N, G, has_zp
     )
 
-    # Utilization 1.0 leaves all free memory in budget, so the tiny layer fits.
-    with set_current_vllm_config(_prefill_dequant_vllm_config(mode, 1.0)):
+    with set_current_vllm_config(_prefill_dequant_vllm_config(mode)):
         kernel.process_weights_after_loading(layer)
 
     if mode == "disable":
@@ -635,71 +716,6 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
         getattr(layer, _W_DEQUANT_ATTR), expected, rtol=0, atol=0
     )
     assert _W_DEQUANT_ATTR not in layer.state_dict()
-
-
-def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(dist_init, monkeypatch):
-    """Over budget, enabling the cache raises instead of caching a subset."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
-
-    from types import SimpleNamespace
-
-    from vllm.config import set_current_vllm_config
-
-    # The real free memory is machine dependent; 40 GiB free with 50 GiB
-    # outside a 0.5 budget leaves nothing to spend.
-    monkeypatch.setattr(
-        hybrid_module,
-        "MemorySnapshot",
-        lambda device: SimpleNamespace(
-            free_memory=40 * 2**30, total_memory=100 * 2**30
-        ),
-    )
-    set_random_seed(0)
-    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
-
-    with (
-        set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)),
-        pytest.raises(ValueError, match="gpu_memory_utilization"),
-    ):
-        kernel.process_weights_after_loading(layer)
-
-
-@pytest.mark.parametrize("min_kv_gib, fits", [(0, True), (8, False)])
-def test_rdna_hybrid_w4a16_prefill_dequant_reserves_min_kv(
-    min_kv_gib, fits, dist_init, monkeypatch
-):
-    """The budget keeps room for one max_model_len request of KV cache."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
-
-    from types import SimpleNamespace
-
-    from vllm.config import set_current_vllm_config
-
-    # 60 GiB free with 50 GiB outside a 0.5 budget leaves 10 GiB, 6 GiB after
-    # the activation headroom: enough for the layer unless KV claims 8 GiB.
-    monkeypatch.setattr(
-        hybrid_module,
-        "MemorySnapshot",
-        lambda device: SimpleNamespace(
-            free_memory=60 * 2**30, total_memory=100 * 2**30
-        ),
-    )
-    monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
-        lambda vllm_config, specs: min_kv_gib * 2**30,
-    )
-    set_random_seed(0)
-    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
-
-    with set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)):
-        if fits:
-            kernel.process_weights_after_loading(layer)
-            assert hasattr(layer, _W_DEQUANT_ATTR)
-        else:
-            with pytest.raises(ValueError, match="gpu_memory_utilization"):
-                kernel.process_weights_after_loading(layer)
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +761,7 @@ def _hip_skinny_reference(
 ) -> torch.Tensor:
     """Reference for HIP skinny: C = A @ (W - zp) * S.
 
-    ``zp_nkg`` is [N, K//G] int32 raw zero points for the asymmetric case, or
+    `zp_nkg` is [N, K//G] int32 raw zero points for the asymmetric case, or
     None for symmetric uint4b8, where the kernel subtracts a constant 8.
     """
     K = a_mk.shape[1]
@@ -794,6 +810,14 @@ def _hip_skinny_reference(
         (1, 4096, 256, 32),
         (1, 8192, 256, 128),
         (1, 16384, 256, 64),
+        # Wider outputs reach the gfx1150 / gfx1151 per-target tuples; K
+        # values that are not a multiple of their K step hit the ragged tail.
+        (1, 1536, 2560, 32),
+        (1, 896, 1152, 128),
+        (2, 2048, 1024, 32),
+        (2, 1024, 1024, 64),
+        (4, 1024, 2048, 128),
+        (5, 1024, 2048, 32),
         # K * batch beyond what LDS holds (32768 fp16 elements), so gfx115x
         # walks K in chunks; elsewhere the op rejects these, as the layer
         # routes them to Triton. The per-row window shrinks as the batch grows,
@@ -1039,7 +1063,7 @@ def test_act_pad_bytes_only_moves_strides_on_the_cliff():
 
 
 def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
-    """Copy of ``t`` whose stride(0) is ``t.shape[1] + pad_cols``."""
+    """Copy of `t` whose stride(0) is `t.shape[1] + pad_cols`."""
     rows, cols = t.shape
     buf = torch.empty((rows, cols + pad_cols), dtype=t.dtype, device=t.device)
     buf[:, :cols].copy_(t)
@@ -1227,3 +1251,33 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
 
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# Row offsets past int32
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+def test_triton_prefill_gemm_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    M = 2**31 // max(K, N) + 128
+    G = 128
+
+    set_random_seed(0)
+    x, w_int4, b_q, scales, _, _ = _make_prefill_case(M, K, N, G, torch.bfloat16, False)
+    out = triton_w4a16_skinny_fmt_gemm(a=x, b_q=b_q, scales=scales, group_size=G)
+
+    # Dequantize in bf16 like the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=1)
+    ref = (x[-64:].float() @ w.float().t()).to(torch.bfloat16)
+    torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=5e-2)
