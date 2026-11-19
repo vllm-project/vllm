@@ -77,6 +77,10 @@ RFC #64380 described an earlier protocol (manifests, per-trajectory copies, a wr
 
 ## Branches
 
-- `rl/aux-output`: this branch, the integration branch with these documents.
-- `rl/aux-output-session-wise`: the session design, the five layers of the PR stack.
-- `rl/aux-output-request-wise`: the request-wise prototype on top of the session stack ([request-wise design](request_wise.md)).
+Both design branches start from the same commit of the session stack, `cfcec38b62`, and each carries documents that describe its own code.
+
+| Branch | Head | Status |
+| --- | --- | --- |
+| `rl/aux-output` | | This branch: the integration branch with these documents. |
+| `rl/aux-output-session-wise` | `04495f3806` | The five layers of the PR stack, plus one commit that makes aborted session requests list their keys. Its protocol and consumer contract add the rule for building a trajectory from several responses, and the limits found in validation. Validated on six of the eight scenarios; two are running ([evidence](request_wise.md#evidence)). |
+| `rl/aux-output-request-wise` | `7a3f62ba55` | The request-wise design ([request-wise design](request_wise.md)): 19 code commits and one document commit on the same base. Its own `request_wise.md` describes the code. Validated on all eight scenarios ([evidence](request_wise.md#evidence)). |

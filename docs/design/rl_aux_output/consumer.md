@@ -2,6 +2,8 @@
 
 This page is the contract between the engine and the trainer for session requests. How the engine names and writes objects is in the [protocol](protocol.md).
 
+The `rl/aux-output-session-wise` branch (head `04495f3806`) carries the version of this page that matches its code, including how a trajectory built from several responses takes each position's row and how an aborted request is continued.
+
 ## What the rollout keeps
 
 For every request of a session, keep from the final output:
