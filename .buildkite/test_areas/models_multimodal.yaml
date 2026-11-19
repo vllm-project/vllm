@@ -133,8 +133,9 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":computer: (CPU) Multimodal Processor Shard %N"
+- label: ":computer: (CPU) Multimodal Processor"
   key: multi-modal-processor-cpu
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 125
@@ -149,8 +150,6 @@ steps:
       pytest -v -s
       models/multimodal/processing
       --ignore models/multimodal/processing/test_tensor_schema.py
-      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 4
 
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
   key: multi-modal-processor
