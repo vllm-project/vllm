@@ -215,9 +215,13 @@ class Executor(ABC):
         """Have every worker choose the KV cache block size from the attention
         backends of the layers of all workers, since a pipeline stage holds only
         some layers. Workers reply in rank order, which follows the layer order."""
-        worker_paths = self.collective_rpc("get_attn_backend_cls_paths")
+        worker_paths: list[list[str]] = self.collective_rpc(
+            "get_attn_backend_cls_paths"
+        )
         paths = list(dict.fromkeys(p for worker in worker_paths for p in worker))
-        choices = self.collective_rpc("update_block_size", args=(paths,))
+        choices: list[dict[str, Any]] = self.collective_rpc(
+            "update_block_size", args=(paths,)
+        )
         if any(choice != choices[0] for choice in choices):
             raise RuntimeError(
                 f"Workers chose different KV cache block sizes: {choices}"
