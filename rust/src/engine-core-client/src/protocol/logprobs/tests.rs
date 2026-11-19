@@ -224,7 +224,7 @@ fn decodes_2d_token_ranks() {
         ])),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(
         logprobs,
