@@ -172,6 +172,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_DSA_DCP_GLOBAL_KEY_PREFILL: bool = False
     VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL: bool = False
+    VLLM_ROCM_DCP_AITER_ALLGATHER: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1540,6 +1541,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # on every rank.
     "VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL": lambda: (
         os.getenv("VLLM_ROCM_DSA_DCP_ROWSHARD_PREFILL", "0").lower() in ("true", "1")
+    ),
+    # Borrow the TP group's AITER IPC comm for the DCP all-gathers of the
+    # global-key indexer prefill, when the DCP group holds the TP ranks.
+    "VLLM_ROCM_DCP_AITER_ALLGATHER": lambda: (
+        os.getenv("VLLM_ROCM_DCP_AITER_ALLGATHER", "0").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE

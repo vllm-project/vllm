@@ -6,6 +6,7 @@ import math
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -247,6 +248,9 @@ def gather_global_indexer_keys(
     chunk, so a row scored against them needs no candidate merge afterwards.
     """
     from vllm.distributed import get_dcp_group
+    from vllm.distributed.device_communicators.aiter_all_gather import (
+        all_gather as gather_over_group,
+    )
 
     width = head_dim + 4
     page = kv_cache.shape[1]
@@ -281,7 +285,11 @@ def gather_global_indexer_keys(
         WIDTH=width,
         TILE=triton.next_power_of_2(width),
     )
-    gathered = get_dcp_group().all_gather(packed, dim=0)
+    gathered = gather_over_group(
+        packed,
+        get_dcp_group(),
+        use_aiter=envs.VLLM_ROCM_DCP_AITER_ALLGATHER,
+    ).view(-1, width)
     total = chunk.total_seq_lens
     keys = torch.empty((total, head_dim), dtype=FP8_DTYPE, device=device)
     scales = torch.empty((total,), dtype=torch.float32, device=device)
