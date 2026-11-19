@@ -87,6 +87,10 @@ SPARSE_MLA_ARCHS = (
     "GlmMoeDsaForCausalLM",
     "HYV4ForCausalLM",
 )
+# Their CUDA attention has no path below Hopper.
+CUDA_SM90_ARCHS = {
+    "InklingForCausalLM": "Inkling's FA4 attention (SM8x support: #55078)",
+}
 # Architectures whose model raises on ROCm.
 CUDA_ONLY_ARCHS = {"HYV4FlashForCausalLM": "HYV4 Flash requires NVIDIA CUDA"}
 
@@ -285,6 +289,14 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
                 not _sparse_mla_supported(),
                 reason="Sparse MLA needs compute capability 9.0 or newer, "
                 "or AITER on ROCm",
+            )
+        )
+    if arch in CUDA_SM90_ARCHS:
+        marks.append(
+            pytest.mark.skipif(
+                current_platform.is_cuda()
+                and not current_platform.has_device_capability(90),
+                reason=f"{CUDA_SM90_ARCHS[arch]} needs compute capability 9.0 or newer",
             )
         )
     if arch in CUDA_ONLY_ARCHS:
