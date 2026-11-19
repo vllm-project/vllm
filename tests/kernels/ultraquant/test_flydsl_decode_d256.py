@@ -219,9 +219,12 @@ def test_flydsl_verify_ragged_and_padded_matches_reference():
         assert row == real_rows
 
 
+@pytest.mark.parametrize("query_group_size", [6, 8, 16])
 @pytest.mark.parametrize("width", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize(("num_reqs", "seq_len"), [(1, 1024), (4, 8192), (12, 4096)])
-def test_flydsl_verify_matches_single_token_launches(width, num_reqs, seq_len):
+def test_flydsl_verify_matches_single_token_launches(
+    query_group_size, width, num_reqs, seq_len
+):
     """One verify launch scores the same values as one launch per token.
 
     The shipping split launches the single-token kernel once per verify token.
@@ -229,7 +232,7 @@ def test_flydsl_verify_matches_single_token_launches(width, num_reqs, seq_len):
     """
     if not ultraquant_flydsl_decode_eligible(
         head_size=256,
-        num_kv_groups=6,
+        num_kv_groups=query_group_size,
         has_sinks=False,
         sliding_window=None,
         flydsl_loaded=is_ultraquant_flydsl_available(),
@@ -238,7 +241,8 @@ def test_flydsl_verify_matches_single_token_launches(width, num_reqs, seq_len):
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
-    Hk, Hq, D = 1, 6, 256
+    Hk, D = 1, 256
+    Hq = Hk * query_group_size
     block_size = 64
     scale = D**-0.5
     hadamard = hadamard_matrix(D, device)
@@ -250,9 +254,7 @@ def test_flydsl_verify_matches_single_token_launches(width, num_reqs, seq_len):
         kv_cache, block_table = _build_paged_cache(key, value, block_size)
         seq_lens = torch.full((num_reqs,), seq_len, dtype=torch.int32, device=device)
         # A peaked softmax exposes score errors that a flat one hides.
-        query = 4 * torch.randn(
-            num_reqs * width, Hq, D, dtype=dtype, device=device
-        )
+        query = 4 * torch.randn(num_reqs * width, Hq, D, dtype=dtype, device=device)
         query_start_loc = torch.arange(
             0, (num_reqs + 1) * width, width, dtype=torch.int32, device=device
         )

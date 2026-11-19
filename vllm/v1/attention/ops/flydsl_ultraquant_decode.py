@@ -15,6 +15,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
+
 logger = init_logger(__name__)
 
 
@@ -30,6 +31,7 @@ def _run_ultraquant(launcher, waves_per_eu: int, *args) -> None:
         launcher._cf = _FLYC.compile[{"waves_per_eu": waves_per_eu}](launcher, *args)
     else:
         launcher._cf = _FLYC.compile(launcher, *args)
+
 
 _FLYDSL_AVAILABLE: bool | None = None
 _ULTRAQUANT_MOD: Any = None
@@ -72,6 +74,9 @@ def is_ultraquant_flydsl_available() -> bool:
 
 
 _ULTRAQUANT_FLYDSL_GQA = (6, 8, 16)
+# Packed verify is compiled and tested for these groups only. 8 is the per-rank
+# group at TP=4 on Qwen3.5-397B (32 Q heads, 2 KV heads, each rank 8 Q / 1 KV).
+_ULTRAQUANT_VERIFY_GQA = (6, 8, 16)
 
 
 def ultraquant_flydsl_decode_eligible(
@@ -174,6 +179,12 @@ def _qperm_index(
 
 
 def _detect_max_capture_B() -> int:
+    """Largest decode row count the partial-output pool must hold.
+
+    Capture sizes are capped (512 on ROCm). A verify step has one row per
+    token, so the first allocation has to cover max_num_seqs times the
+    verify width. A later grow frees buffers CUDA graphs already captured.
+    """
     try:
         from vllm.config import get_current_vllm_config
 
@@ -183,8 +194,27 @@ def _detect_max_capture_B() -> int:
         if sizes:
             candidates.append(int(max(sizes)))
         sched = getattr(cfg, "scheduler_config", None)
-        if sched is not None and getattr(sched, "max_num_seqs", None):
-            candidates.append(int(sched.max_num_seqs))
+        max_seqs = 0
+        max_tokens = 0
+        if sched is not None:
+            if getattr(sched, "max_num_seqs", None):
+                max_seqs = int(sched.max_num_seqs)
+                candidates.append(max_seqs)
+            if getattr(sched, "max_num_batched_tokens", None):
+                max_tokens = int(sched.max_num_batched_tokens)
+        rows_per_req = max(1, int(getattr(cfg, "uniform_decode_query_len", 1) or 1))
+        spec = getattr(cfg, "speculative_config", None)
+        nspec = 0
+        if spec is not None:
+            nspec = int(getattr(spec, "num_speculative_tokens", 0) or 0)
+        # The verify kernel accepts widths 2..8, which can exceed 1+k.
+        if nspec > 0 and nspec + 1 <= 8:
+            rows_per_req = max(rows_per_req, 8)
+        if max_seqs:
+            rows = max_seqs * rows_per_req
+            if max_tokens:
+                rows = min(rows, max_tokens)
+            candidates.append(rows)
         if candidates:
             return max(candidates)
     except Exception:  # noqa: BLE001
@@ -376,38 +406,60 @@ def _get_kernel(
     )
     flyc = _FLYC
     fx = _FX
-    # Block size belongs to the module that built the kernel: the four-wave
-    # verify schedule needs 256 threads, the single-token kernel needs 64.
-    if int(num_verify_tokens) > 1:
-        from vllm.v1.attention.ops.flydsl_kernels import (
-            ultraquant_decode_hd256_verify as verify_mod,
-        )
+    # Width 1 is the single-wave kernel: 64 threads, no query_start_loc.
+    # Widths 2..8 are the four-wave kernel: 256 threads, one KV read.
+    wide = int(num_verify_tokens) > 1
+    block_threads = (
+        _ULTRAQUANT_MOD.VERIFY_BLOCK_THREADS if wide else _ULTRAQUANT_MOD.BLOCK_THREADS
+    )
 
-        block_threads = verify_mod.BLOCK_THREADS
+    if wide:
+
+        @flyc.jit
+        def _launch(
+            out,
+            es,
+            ml,
+            q,
+            kvc,
+            cents,
+            bt,
+            sl,
+            qsl,
+            gx: fx.Int32,  # type: ignore[name-defined]
+            gy: fx.Int32,  # type: ignore[name-defined]
+            gz: fx.Int32,  # type: ignore[name-defined]
+            stream: fx.Stream,  # type: ignore[name-defined]
+        ):
+            kfn(out, es, ml, q, kvc, cents, bt, sl, qsl).launch(
+                grid=(gx, gy, gz),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
+
     else:
-        block_threads = _ULTRAQUANT_MOD.BLOCK_THREADS
 
-    @flyc.jit
-    def _launch(
-        out,
-        es,
-        ml,
-        q,
-        kvc,
-        cents,
-        bt,
-        sl,
-        qsl,
-        gx: fx.Int32,  # type: ignore[name-defined]
-        gy: fx.Int32,  # type: ignore[name-defined]
-        gz: fx.Int32,  # type: ignore[name-defined]
-        stream: fx.Stream,  # type: ignore[name-defined]
-    ):
-        kfn(out, es, ml, q, kvc, cents, bt, sl, qsl).launch(
-            grid=(gx, gy, gz),
-            block=(block_threads, 1, 1),
-            stream=stream,
-        )
+        @flyc.jit
+        def _launch(
+            out,
+            es,
+            ml,
+            q,
+            kvc,
+            cents,
+            bt,
+            sl,
+            qsl,
+            gx: fx.Int32,  # type: ignore[name-defined]
+            gy: fx.Int32,  # type: ignore[name-defined]
+            gz: fx.Int32,  # type: ignore[name-defined]
+            stream: fx.Stream,  # type: ignore[name-defined]
+        ):
+            kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
+                grid=(gx, gy, gz),
+                block=(block_threads, 1, 1),
+                stream=stream,
+            )
 
     _KERN_CACHE[key] = _launch
     build_time = time.perf_counter() - build_start
@@ -621,8 +673,11 @@ def flydsl_ultraquant_decode_attention(
     )
     num_verify_tokens = int(num_verify_tokens)
     if num_verify_tokens > 1:
-        if QG != 6:
-            raise ValueError(f"UltraQuant verify decode requires GQA 6, got {QG}")
+        if QG not in _ULTRAQUANT_VERIFY_GQA:
+            raise ValueError(
+                "UltraQuant verify decode requires GQA "
+                f"{' or '.join(map(str, _ULTRAQUANT_VERIFY_GQA))}, got {QG}"
+            )
         if not 2 <= num_verify_tokens <= 8:
             raise ValueError(
                 f"UltraQuant verify width must be 2..8; got {num_verify_tokens}"
@@ -690,7 +745,7 @@ def flydsl_ultraquant_decode_attention(
     if num_verify_tokens > 1:
         # A verify launch has one workgroup column per request, not per row, so
         # the width-1 grid sizing above leaves it with 1/width of the workgroups
-        # per partition. Swept at the serving shape (Hk=4, QG=6, block 128,
+        # per partition. Swept at the serving shape (Hk=4, QG=6, block 64,
         # 32k-196k context, 2-24 requests): the best partition count tracks a
         # grid of about 1024 workgroups, so it falls as requests rise. 256 at
         # one request, 64 from four. That is 1.1-1.4x faster than 256 across
