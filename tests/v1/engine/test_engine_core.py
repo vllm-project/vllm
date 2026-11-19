@@ -476,6 +476,7 @@ def test_prefill_interval_counts_only_executed_steps(step_fn):
     core = MagicMock()
     core.batch_queue = deque()
     core.batch_queue_size = 2
+    core.deferred_step = None
     core.is_mm_encoder_only = False
     core.is_pooling_model = False
     core.prefill_schedule_interval = 3
