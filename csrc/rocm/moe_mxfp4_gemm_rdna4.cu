@@ -104,7 +104,7 @@ __global__ void __launch_bounds__(32 * KW)
   const int blk = blockIdx.y;
   if (blk * 8 >= ar.num_tokens_post_padded[0]) return;
   const int e = ar.expert_ids[blk];
-  const int wave = threadIdx.x >> 5;
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x >> 5);
   const int lane = threadIdx.x & 31;
   const int lo = lane & 15;
   const int hi = lane >> 4;
@@ -113,47 +113,39 @@ __global__ void __launch_bounds__(32 * KW)
   const int K = ar.K, N = ar.N;
   const int a_r = lo >> 1;
   const int slot = ar.sorted_token_ids[blk * 8 + a_r];
-  const bool a_ok = slot < ar.total_slots;
-  const int a_row = a_ok ? slot / ar.top_k : 0;
+  // Padding rows read row 0 (valid memory); their results are dropped at the
+  // store, and out-of-range columns read column N-1 for the same reason, so
+  // every load is unconditional (no execz regions, loads stay in flight).
+  const int a_row = slot < ar.total_slots ? slot / ar.top_k : 0;
+  const int n_ld = min(n_col, N - 1);
   const bool odd = (lo & 1) != 0;
   const int idx = odd ? (int)0xEEEEEEEEu : (int)0x44444444u;
+  // Even lanes take the low halves of each dword pair, odd lanes the high.
+  const uint32_t a_sel = odd ? 0x07060302u : 0x05040100u;
   const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
   const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
   const int ngroups = K / kGroup;
   const int g_begin = (ngroups * wave) / KW;
   const int g_end = (ngroups * (wave + 1)) / KW;
 
-  auto load = [&](int g, v2i32& a, unsigned long long& b, float& ws) {
+  // Raw loads only: the row-pair perm and the E8M0 conversion happen at
+  // consume time so a refill never waits on its own loads.
+  auto load = [&](int g, uint4& a, unsigned long long& b, uint32_t& sc) {
+    g = min(g, ngroups - 1);  // tail refills re-read the last group
     const int k_g = g * kGroup;
-    a = {0, 0};
-    if (a_ok) {
-      uint4 w;
-      __builtin_memcpy(&w, ar.aq + (size_t)a_row * K + k_g + 16 * hi, 16);
-      if (!odd) {
-        a[0] = (int)((w.x & 0xFFFFu) | (w.y << 16));
-        a[1] = (int)((w.z & 0xFFFFu) | (w.w << 16));
-      } else {
-        a[0] = (int)((w.x >> 16) | (w.y & 0xFFFF0000u));
-        a[1] = (int)((w.z >> 16) | (w.w & 0xFFFF0000u));
-      }
-    }
-    b = 0ull;
-    ws = 0.0f;
-    if (n_ok) {
-      const auto* bp = reinterpret_cast<const unsigned long long*>(
-          bq + ((size_t)g * N + n_col) * 4 + 2 * hi);
-      b = __builtin_nontemporal_load(bp);
-      ws = mxfp4_e8m0_to_f32(bs[(size_t)g * N + n_col]);
-    }
+    __builtin_memcpy(&a, ar.aq + (size_t)a_row * K + k_g + 16 * hi, 16);
+    const auto* bp = reinterpret_cast<const unsigned long long*>(
+        bq + ((size_t)g * N + n_ld) * 4 + 2 * hi);
+    b = __builtin_nontemporal_load(bp);
+    sc = bs[(size_t)g * N + n_ld];
   };
 
   v8f32 acc = {0, 0, 0, 0, 0, 0, 0, 0};
-  v2i32 a_r_[PF];
+  uint4 a_r_[PF];
   unsigned long long b_r[PF];
-  float w_r[PF];
+  uint32_t w_r[PF];
   #pragma unroll
-  for (int d = 0; d < PF; d++)
-    if (g_begin + d < g_end) load(g_begin + d, a_r_[d], b_r[d], w_r[d]);
+  for (int d = 0; d < PF; d++) load(g_begin + d, a_r_[d], b_r[d], w_r[d]);
   for (int g0 = g_begin; g0 < g_end; g0 += PF) {
   #pragma unroll
     for (int d = 0; d < PF; d++) {
@@ -167,13 +159,15 @@ __global__ void __launch_bounds__(32 * KW)
       b[1] = (int)h0;
       b[2] = (int)l1;
       b[3] = (int)h1;
+      v2i32 a;
+      a[0] = (int)__builtin_amdgcn_perm(a_r_[d].y, a_r_[d].x, a_sel);
+      a[1] = (int)__builtin_amdgcn_perm(a_r_[d].w, a_r_[d].z, a_sel);
       v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
-      grp = __builtin_amdgcn_swmmac_f32_16x16x32_fp8_fp8_w32(a_r_[d], b, grp,
-                                                             idx);
-      const float ws = w_r[d];
+      grp = __builtin_amdgcn_swmmac_f32_16x16x32_fp8_fp8_w32(a, b, grp, idx);
+      const float ws = mxfp4_e8m0_to_f32(w_r[d]);
   #pragma unroll
       for (int i = 0; i < 8; i++) acc[i] = fmaf(grp[i], ws, acc[i]);
-      if (g + PF < g_end) load(g + PF, a_r_[d], b_r[d], w_r[d]);
+      load(g + PF, a_r_[d], b_r[d], w_r[d]);
     }
   }
   float part[4];
@@ -216,72 +210,63 @@ __global__ void __launch_bounds__(32 * KW)
   const int blk = blockIdx.y;
   if (blk * 16 * MT >= ar.num_tokens_post_padded[0]) return;
   const int e = ar.expert_ids[blk];
-  const int wave = threadIdx.x >> 5;
+  const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x >> 5);
   const int lane = threadIdx.x & 31;
   const int lo = lane & 15;
   const int hi = lane >> 4;
   const int n_col = blockIdx.x * 16 + lo;
   const bool n_ok = n_col < ar.N;
   const int K = ar.K, N = ar.N;
+  const int n_ld = min(n_col, N - 1);
   const uint32_t* bq = ar.b_q + (size_t)e * ar.w_stride;
   const uint8_t* bs = ar.b_scales + (size_t)e * ar.s_stride;
   const int ngroups = K / kGroup;
   const int g_begin = (ngroups * wave) / KW;
   const int g_end = (ngroups * (wave + 1)) / KW;
 
+  // Padding rows read row 0 and out-of-range columns read column N-1; both
+  // are discarded at the store, so no load is predicated (see the SWMMAC
+  // kernel). The ring holds PF groups of A and B, each slot refilled right
+  // after its WMMAs so no load ever lands on a live register.
   int a_row[MT];
-  bool a_ok[MT];
   #pragma unroll
   for (int t = 0; t < MT; t++) {
     const int s = ar.sorted_token_ids[blk * 16 * MT + 16 * t + lo];
-    a_ok[t] = s < ar.total_slots;
-    a_row[t] = a_ok[t] ? s / ar.top_k : 0;
+    a_row[t] = s < ar.total_slots ? s / ar.top_k : 0;
   }
 
   struct Slot {
+    uint4 a[MT];
     unsigned long long b;
-    float ws;
+    uint32_t sc;
   };
   Slot ring[PF];
-  auto load_b = [&](int g, Slot& sl) {
-    sl.b = 0ull;
-    sl.ws = 0.0f;
-    if (n_ok) {
-      const auto* bp = reinterpret_cast<const unsigned long long*>(
-          bq + ((size_t)g * N + n_col) * 4 + 2 * hi);
-      sl.b = __builtin_nontemporal_load(bp);
-      sl.ws = mxfp4_e8m0_to_f32(bs[(size_t)g * N + n_col]);
-    }
-  };
-  auto load_a = [&](int g, uint4(&a)[MT]) {
+  auto load = [&](int g, Slot& sl) {
+    g = min(g, ngroups - 1);
     const int k_g = g * kGroup;
   #pragma unroll
-    for (int t = 0; t < MT; t++) {
-      uint4 aw = {0u, 0u, 0u, 0u};
-      if (a_ok[t])
-        __builtin_memcpy(&aw, ar.aq + (size_t)a_row[t] * K + k_g + 16 * hi, 16);
-      a[t] = aw;
-    }
+    for (int t = 0; t < MT; t++)
+      __builtin_memcpy(&sl.a[t], ar.aq + (size_t)a_row[t] * K + k_g + 16 * hi,
+                       16);
+    const auto* bp = reinterpret_cast<const unsigned long long*>(
+        bq + ((size_t)g * N + n_ld) * 4 + 2 * hi);
+    sl.b = __builtin_nontemporal_load(bp);
+    sl.sc = bs[(size_t)g * N + n_ld];
   };
 
   v8f32 acc[MT];
   #pragma unroll
   for (int t = 0; t < MT; t++) acc[t] = {0, 0, 0, 0, 0, 0, 0, 0};
   #pragma unroll
-  for (int d = 0; d < PF; d++)
-    if (g_begin + d < g_end) load_b(g_begin + d, ring[d]);
-  uint4 a_cur[MT], a_nx[MT];
-  if (g_begin < g_end) load_a(g_begin, a_cur);
+  for (int d = 0; d < PF; d++) load(g_begin + d, ring[d]);
 
   for (int g0 = g_begin; g0 < g_end; g0 += PF) {
   #pragma unroll
     for (int d = 0; d < PF; d++) {
       const int g = g0 + d;
       if (g >= g_end) break;
-      const bool has_next = (g + 1 < g_end);
-      if (has_next) load_a(g + 1, a_nx);
       const Slot sl = ring[d];
-      if (g + PF < g_end) load_b(g + PF, ring[d]);
+      const float ws = mxfp4_e8m0_to_f32(sl.sc);
       v2i32 bf[2];
   #pragma unroll
       for (int st = 0; st < 2; st++) {
@@ -295,19 +280,16 @@ __global__ void __launch_bounds__(32 * KW)
       for (int t = 0; t < MT; t++) {
         v8f32 grp = {0, 0, 0, 0, 0, 0, 0, 0};
         v2i32 af0, af1;
-        af0[0] = (int)a_cur[t].x;
-        af0[1] = (int)a_cur[t].y;
-        af1[0] = (int)a_cur[t].z;
-        af1[1] = (int)a_cur[t].w;
+        af0[0] = (int)sl.a[t].x;
+        af0[1] = (int)sl.a[t].y;
+        af1[0] = (int)sl.a[t].z;
+        af1[1] = (int)sl.a[t].w;
         grp = wmma_fp8(af0, bf[0], grp);
         grp = wmma_fp8(af1, bf[1], grp);
   #pragma unroll
-        for (int q = 0; q < 8; q++) acc[t][q] = fmaf(grp[q], sl.ws, acc[t][q]);
+        for (int q = 0; q < 8; q++) acc[t][q] = fmaf(grp[q], ws, acc[t][q]);
       }
-      if (has_next) {
-  #pragma unroll
-        for (int t = 0; t < MT; t++) a_cur[t] = a_nx[t];
-      }
+      load(g + PF, ring[d]);
     }
   }
 
@@ -569,9 +551,10 @@ void launch(const MoeArgs& ar, T* c, const T* bias, int block_size_m,
   const dim3 grd((unsigned)col_tiles, (unsigned)num_token_blocks);
   const long blocks = col_tiles * (long)num_token_blocks;
 #define L_SW(KW_) \
-  moe_swmmac_kernel<T, KW_, 4><<<grd, 32 * (KW_), 0, st>>>(ar, c, bias)
-#define L_WM(MT_, KW_) \
-  moe_wmma_kernel<T, MT_, KW_, 4><<<grd, 32 * (KW_), 0, st>>>(ar, c, bias)
+  moe_swmmac_kernel<T, KW_, 8><<<grd, 32 * (KW_), 0, st>>>(ar, c, bias)
+#define L_WM(MT_, KW_)                               \
+  moe_wmma_kernel<T, MT_, KW_, ((MT_) >= 2 ? 4 : 8)> \
+      <<<grd, 32 * (KW_), 0, st>>>(ar, c, bias)
 #define SW_KW(kw)     \
   do {                \
     if (kw == 1)      \
