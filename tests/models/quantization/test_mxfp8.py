@@ -267,3 +267,96 @@ def test_mxfp8_generation(vllm_runner, model: str) -> None:
     assert len(generated) > len(prompt), (
         f"MXFP8 model produced no new tokens. Output: {generated!r}"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Exercises CUDA weight-only MXFP8 kernels."
+)
+def test_quark_mxfp8_weight_only_checkpoint(vllm_runner, tmp_path, enable_pickle):
+    """Loading a weight-only checkpoint must not add activation quantization."""
+    from safetensors.torch import save_file
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from vllm import SamplingParams
+    from vllm.model_executor.kernels.linear import (
+        EmulationMxfp8LinearKernel,
+        MarlinMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        _mxfp8_e4m3_quantize_torch,
+    )
+
+    torch.manual_seed(65193)
+    config = LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        vocab_size=64,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=64,
+        tie_word_embeddings=False,
+    )
+    model = LlamaForCausalLM(config).to(torch.bfloat16)
+    state = dict(model.state_dict())
+    for name, weight in list(state.items()):
+        if weight.ndim == 2 and name not in (
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+        ):
+            quantized, scale = _mxfp8_e4m3_quantize_torch(weight)
+            state[name] = quantized.contiguous()
+            state[name.removesuffix("weight") + "weight_scale"] = scale.contiguous()
+    config.quantization_config = {
+        "quant_method": "quark",
+        "export": {"kv_cache_group": [], "pack_method": "reorder"},
+        "global_quant_config": {
+            "weight": {
+                "dtype": "fp8_e4m3",
+                "qscheme": "per_group",
+                "group_size": 32,
+                "scale_format": "e8m0",
+                "is_dynamic": False,
+            },
+        },
+        "layer_type_quant_config": {},
+        "layer_quant_config": {},
+        "exclude": ["lm_head"],
+    }
+    config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / "model.safetensors")
+
+    def check_kernels(loaded_model):
+        kernels = [
+            layer.scheme.ocp_mx_linear
+            for layer in loaded_model.modules()
+            if isinstance(getattr(layer, "scheme", None), QuarkOCP_MX)
+        ]
+        assert kernels
+        assert all(
+            isinstance(k, (MarlinMxfp8LinearKernel, EmulationMxfp8LinearKernel))
+            for k in kernels
+        )
+
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        max_model_len=64,
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        enable_chunked_prefill=True,
+        kv_cache_memory_bytes=16 * 1024**2,
+        gpu_memory_utilization=0.1,
+        load_format="safetensors",
+        trust_remote_code=False,
+    ) as runner:
+        runner.apply_model(check_kernels)
+        result = runner.llm.generate(
+            [{"prompt_token_ids": [1, 3, 5]}],
+            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True),
+        )
+        assert len(result[0].outputs[0].token_ids) == 2

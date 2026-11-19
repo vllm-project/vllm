@@ -14,7 +14,7 @@ import torch
 sys_byteorder = sys.byteorder
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DTypeInfo:
     torch_dtype: torch.dtype
 
@@ -69,6 +69,13 @@ def numpy2base64(array: np.ndarray) -> str:
     with io.BytesIO() as buffer:
         np.save(buffer, array, allow_pickle=False)
         return pybase64.b64encode(buffer.getbuffer()).decode("ascii")
+
+
+def numpy2tensor(array: np.ndarray) -> torch.Tensor:
+    """Convert NumPy values to a tensor, accepting either byte order."""
+    if not array.dtype.isnative:
+        array = array.astype(array.dtype.newbyteorder("="))
+    return torch.from_numpy(array)
 
 
 def tensor2binary(
