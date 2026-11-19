@@ -114,6 +114,8 @@ To adapt a trainer that is not a plain `nn.Module` (a Megatron export, a raw sha
 | `gather_lookahead` | 2 | Units the gather loop runs ahead of the workers; at most `gather_lookahead + 1` units are resident on a trainer rank |
 | `stall_timeout_s` | 300.0 | Seconds without progress before the sync fails. A liveness backstop for a worker that dies mid-sync, not a latency target |
 
+**Several deployments.** Set `workers_per_replica` on the trainer. Each deployment then sets `replica_rank` (its index, from 0) and `num_replicas` in the init info it forwards to its workers. Two deployments with the same `replica_rank` fail the sync at their first repeated pull.
+
 Each trainer rank's GPU holds its arena, `(num_buffers × workers pulling from it + 1) × buffer_bytes` bytes, and up to `gather_lookahead + 1` gathered units. With EP every worker may pull from every rank, so the arena grows with the number of workers.
 
 For example, a 235B model with `pp=2` and one TP=2 deployment has two workers pulling from each rank. At the defaults (1 GiB, 2 buffers, lookahead 2), that is a 5 GiB arena plus up to three gathered units (≤ 3 GiB, unless a single tensor is larger than `buffer_bytes`) per trainer rank, and a receive arena of at most 2 GiB per worker.

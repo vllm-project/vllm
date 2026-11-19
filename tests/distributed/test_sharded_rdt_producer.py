@@ -340,7 +340,8 @@ def test_publish_checks_the_metadata(server):
 
 
 def test_a_unit_waits_for_every_live_consumer(server):
-    """A consumer left out of the sync is refused, not left waiting."""
+    """A consumer left out of the sync, or pulling a bucket twice (a shared
+    id), is refused, not left waiting."""
     s = server()
     for c in (0, 1, 2):
         s.register_consumer(c, [WHOLE_N])
@@ -348,11 +349,15 @@ def test_a_unit_waits_for_every_live_consumer(server):
     _publish(s, _weights(), 0)
     s.bucket(0, 0, 0)
     s.bucket(1, 0, 0)
+    with pytest.raises(ValueError, match="twice"):
+        s.bucket(1, 0, 0)
     future = _call(s.end_sync)
     s.free(1)
     assert 0 in s._resident and not future.done()
     s.free()
     assert future.result(timeout=5) == [0]
+    with pytest.raises(ValueError, match="twice"):  # after the unit's release
+        _call(s.bucket, 0, 0, 0).result(timeout=5)
     with pytest.raises(ValueError, match="not in sync"):
         _call(s.bucket, 2, 0, 0).result(timeout=5)
 

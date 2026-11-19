@@ -282,6 +282,7 @@ class _RDTProducerServer:
         self._sync_idx = -1
         self._live: frozenset[int] = frozenset()
         self._freed: dict[int, Counter[int]] = {}
+        self._pulled: set[tuple[int, int]] = set()  # (consumer, seq) served
         self._resident: list[int] = []  # published, not released
         self._freed_pending: list[int] = []  # released, not yet collected
         # the registered arena, and its served, unfreed blocks by offset
@@ -374,6 +375,7 @@ class _RDTProducerServer:
             self._sync_idx = int(sync_idx)
             self._live = frozenset(int(c) for c in live_consumer_ids)
             self._freed = {c: Counter() for c in self._live}
+            self._pulled = set()
             self._serve_wait, self._served_count = 0.0, 0
             for unit in self._resident:  # left by a failed sync
                 self._drop_import(unit)
@@ -568,6 +570,8 @@ class _RDTProducerServer:
                     "never registered here"
                 ) from None
             sources = self._sources[consumer_id]  # the same registration
+            if self._sync_idx == sync_idx:  # before waiting on a released unit
+                self._check_first_pull(consumer_id, seq, sync_idx)
             self._wait_for(
                 self._unit_cond(spec.unit),
                 lambda: (
@@ -581,8 +585,13 @@ class _RDTProducerServer:
                 f"unit {spec.unit} of sync {sync_idx}",
                 sync_idx,
             )
-            if self._sync_idx == sync_idx and consumer_id not in self._live:
-                raise ValueError(f"consumer {consumer_id} is not in sync {sync_idx}")
+            if self._sync_idx == sync_idx:
+                if consumer_id not in self._live:
+                    raise ValueError(
+                        f"consumer {consumer_id} is not in sync {sync_idx}"
+                    )
+                self._check_first_pull(consumer_id, seq, sync_idx)
+                self._pulled.add((consumer_id, seq))
             # the unit stays resident until this bucket is served and freed
             self._wait_for(
                 self._room,
@@ -614,6 +623,15 @@ class _RDTProducerServer:
         del published, tensors
         self._track_free(flat, consumer_id, spec.unit, sync_idx, offset)
         return [flat]
+
+    def _check_first_pull(self, consumer_id: int, seq: int, sync_idx: int) -> None:
+        """Refuse a second pull of a bucket in a sync: two workers share the
+        consumer id. Caller holds `_lock`."""
+        if (consumer_id, seq) in self._pulled:
+            raise ValueError(
+                f"consumer {consumer_id} pulled bucket {seq} twice in sync "
+                f"{sync_idx}; is replica_rank unique per deployment?"
+            )
 
     def _carve(self, nbytes: int, *, dry_run: bool = False) -> int:
         """First fit for `nbytes` in the arena: its offset, or -1 (no room).
