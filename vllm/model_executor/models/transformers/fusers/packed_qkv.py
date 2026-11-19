@@ -22,6 +22,7 @@ from vllm.model_executor.models.transformers.fusers.base import (
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     is_fn,
+    is_linear,
     is_method,
     recover_forward,
     replace_expr,
@@ -58,7 +59,7 @@ class PackedQKVFuser(RewriteFuser):
         )
 
     @staticmethod
-    def _packed_sizes(node: fx.Node) -> tuple[int, int] | None:
+    def _split_sizes(node: fx.Node) -> tuple[int, int] | None:
         """`(q, kv)` from a `split((q, kv, kv), ...)` call, if it is one."""
         if not is_method(node, "split") or len(node.args) < 2:
             return None
@@ -73,17 +74,14 @@ class PackedQKVFuser(RewriteFuser):
         return q_size, k_size
 
     @staticmethod
-    def _sliced_sizes(node: fx.Node, module: nn.Module) -> tuple[int, int] | None:
-        """`(q, kv)` if `node` is a linear whose output is only sliced into q, k, v.
+    def _sliced_sizes(node: fx.Node) -> tuple[int, int] | None:
+        """`(q, kv)` if the output of `node` is only sliced into q, k and v.
 
         The three users must be `x[..., :q]`, `x[..., q:q + kv]` and
-        `x[..., q + kv:]` on the linear itself, so slices of anything derived from
+        `x[..., q + kv:]` on `node` itself, so slices of anything derived from
         it (e.g. rotary) never match.
         """
-        if node.op != "call_module":
-            return None
-        linear = module.get_submodule(str(node.target))
-        if not isinstance(linear, nn.Linear) or len(node.users) != 3:
+        if len(node.users) != 3:
             return None
         bounds = []
         for user in node.users:
@@ -108,7 +106,7 @@ class PackedQKVFuser(RewriteFuser):
         if q_lo is not None or v_hi is not None or None in (q_hi, k_lo, k_hi, v_lo):
             return None
         q_size, kv_size = q_hi, k_hi - q_hi
-        if k_lo != q_size or v_lo != k_hi or kv_size != linear.out_features - k_hi:
+        if k_lo != q_size or v_lo != k_hi:
             return None
         if kv_size <= 0 or q_size < kv_size:
             return None
@@ -117,49 +115,36 @@ class PackedQKVFuser(RewriteFuser):
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "PackedQKVFuser | None":
         for node in graph.nodes:
-            if (sizes := cls._packed_sizes(node)) is None:
+            form: Literal["split", "slice"]
+            if (sizes := cls._split_sizes(node)) is not None:
+                form, qkv_node = "split", upstream_linear(node.args[0], module)
+            elif (sizes := cls._sliced_sizes(node)) is not None:
+                form, qkv_node = "slice", node if is_linear(node, module) else None
+            else:
                 continue
-            q_size, kv_size = sizes
-            qkv_node = upstream_linear(node.args[0], module)
             if qkv_node is None:
                 continue
+            q_size, kv_size = sizes
             qkv_name = str(qkv_node.target)
-            # The split must consume the whole projection.
+            # q, k and v must consume the whole projection.
             if module.get_submodule(qkv_name).out_features != q_size + 2 * kv_size:
                 continue
-            return cls._build(graph, module, qkv_name, q_size, kv_size, "split")
-        for node in graph.nodes:
-            if (sizes := cls._sliced_sizes(node, module)) is not None:
-                q_size, kv_size = sizes
-                return cls._build(
-                    graph, module, str(node.target), q_size, kv_size, "slice"
-                )
+            # o_proj produces the module's output and consumes the query width.
+            o_name = returned_linear(graph, module)
+            if o_name == qkv_name or (
+                o_name is not None
+                and module.get_submodule(o_name).in_features != q_size
+            ):
+                o_name = None
+            return cls(
+                source_cls=type(module).__name__,
+                qkv_name=qkv_name,
+                o_name=o_name,
+                q_size=q_size,
+                kv_size=kv_size,
+                form=form,
+            )
         return None
-
-    @classmethod
-    def _build(
-        cls,
-        graph: fx.Graph,
-        module: nn.Module,
-        qkv_name: str,
-        q_size: int,
-        kv_size: int,
-        form: Literal["split", "slice"],
-    ) -> "PackedQKVFuser":
-        # o_proj produces the module's output and consumes the query width.
-        o_name = returned_linear(graph, module)
-        if o_name == qkv_name or (
-            o_name is not None and module.get_submodule(o_name).in_features != q_size
-        ):
-            o_name = None
-        return cls(
-            source_cls=type(module).__name__,
-            qkv_name=qkv_name,
-            o_name=o_name,
-            q_size=q_size,
-            kv_size=kv_size,
-            form=form,
-        )
 
     def _split_call(self, funcdef: ast.FunctionDef) -> ast.Call:
         """The unique `self.<qkv_name>(...)....split((a, b, c), ...)` call."""
