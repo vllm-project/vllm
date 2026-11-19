@@ -209,9 +209,13 @@ a file the engines meet through once at startup: give every engine the same
 path, reachable by all of them (a shared filesystem across nodes) and fresh per
 launch. `peer_group_transport` picks how rows move:
 
-- `nvlink` (default): GPUs load rows straight from their owner's HBM. Requires
-  CUDA FABRIC handles (an IMEX channel, as on NVL72) and `cpu_offload`
-  disabled.
+- `nvlink` (default): GPUs load rows from their owner's HBM when
+  `cpu_offload=false`. Set `peer_group_egm=true` to explicitly place each shard
+  in Extended GPU Memory (EGM) on the GPU's local Grace NUMA node, regardless
+  of `cpu_offload`. NVLink with `cpu_offload=true` requires this explicit EGM
+  opt-in. Both modes require CUDA FABRIC handles, an IMEX channel, and peer
+  access over NVLink. EGM also requires host NUMA VMM support and enough free
+  Grace memory.
 - `rdma`: the owner's NIC gathers rows from its HBM, or from its host memory
   with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
   libibverbs) that the fetching GPU builds and hands to the owner itself (it

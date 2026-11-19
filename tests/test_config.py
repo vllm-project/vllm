@@ -2200,7 +2200,20 @@ _PEER_GROUP = {
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_egm=True"),
+        (_PEER_GROUP | {"cpu_offload": True, "peer_group_egm": True}, {}, None),
+        (_PEER_GROUP | {"peer_group_egm": True}, {}, None),
+        ({"peer_group_egm": True}, {}, "requires an NVLink peer group"),
+        (
+            _PEER_GROUP | {"peer_group_transport": "rdma", "peer_group_egm": True},
+            {},
+            "requires an NVLink peer group",
+        ),
+        (
+            _PEER_GROUP | {"cpu_offload": True, "dp_shared_memory": True},
+            {},
+            "does not support dp_shared_memory",
+        ),
         (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),

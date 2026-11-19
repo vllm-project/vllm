@@ -297,7 +297,21 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
 def _check_pool_tables(store_dir: str):
     """GPUs of independent engines split one table in an Engram pool and read
     each other's rows, over every transport this machine has."""
-    modes = [("nvlink", False, 4)] if imex_channel_available() else []
+    modes = []
+    if current_platform.is_cuda() and imex_channel_available():
+        from cuda.bindings import driver as cu
+
+        modes.append(("nvlink", False, 4))
+        # Every rank must take the same collective path in a mixed GPU group.
+        attrs = cu.CUdevice_attribute
+        egm_attr = (
+            attrs.CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
+        )
+        if all(
+            cu.cuDeviceGetAttribute(egm_attr, device) == (cu.CUresult.CUDA_SUCCESS, 1)
+            for device in range(WORLD_SIZE)
+        ):
+            modes.append(("nvlink", True, 4))
     if verbs.active_devices():
         # GPUs of a node map each other's host shards; nodes of one use RDMA.
         modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
@@ -311,12 +325,34 @@ def _check_pool_tables(store_dir: str):
         # node == 1: each GPU as its own machine, so rows move over RDMA.
         machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
         with patch.object(rdma, "node_id", lambda machine=machine: machine):
-            pool = EngramPool(group, transport, host, max_items, 72)
+            pool = EngramPool(
+                group,
+                transport,
+                host and transport == "rdma",
+                max_items,
+                72,
+                egm=host and transport == "nvlink",
+            )
         with torch.device("cuda"):
             table = PoolEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
             )
         assert table.dp_size == 1
+        if transport == "nvlink" and host:
+            error, handle = cu.cuMemRetainAllocationHandle(table.weight.data_ptr())
+            assert error == cu.CUresult.CUDA_SUCCESS
+            try:
+                error, prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)
+                assert error == cu.CUresult.CUDA_SUCCESS
+                assert (
+                    prop.location.type
+                    == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA
+                )
+                assert prop.location.id == current_platform.get_device_numa_node(
+                    torch.accelerator.current_device_index()
+                )
+            finally:
+                cu.cuMemRelease(handle)
         table.weight.weight_loader(table.weight, weight)
         table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
         table.process_weights_after_loading()
@@ -1200,3 +1236,92 @@ def test_engram_hash_padding_ignores_other_nodes(tp_size, uniform, monkeypatch):
         torch.testing.assert_close(
             gathered, expected.repeat(group_size, 1, 1), msg=f"DP rank {dp_rank}"
         )
+
+
+@pytest.mark.parametrize(
+    "failure", ["numa", "allocate", "export", "import", "map", "timeout"]
+)
+def test_egm_startup_failure_propagates(monkeypatch, failure: str) -> None:
+    """A rank-local EGM failure reaches both ranks and frees local allocations."""
+    import threading
+
+    from vllm.distributed.engram_pool import nvlink
+
+    local = threading.local()
+    barrier = threading.Barrier(2, timeout=5)
+    values = [b"", b""]
+    allocated = []
+
+    class Group:
+        def __init__(self, rank):
+            self.rank_in_group = rank
+
+        def all_gather(self, value):
+            if failure == "timeout" and value == b"":
+                raise TimeoutError("injected mapping status timeout")
+            values[self.rank_in_group] = value
+            barrier.wait()
+            result = values.copy()
+            barrier.wait()
+            return result
+
+    class Memory:
+        def __init__(self, *args, **kwargs):
+            if failure == "allocate" and local.rank == 0:
+                raise RuntimeError("injected allocation failure")
+            self.rank = local.rank
+            self.handle = f"allocation-{self.rank}"
+            self.mapped = []
+            self.released = []
+            allocated.append(self)
+
+        def export_fabric(self):
+            if failure == "export" and self.rank == 0:
+                raise RuntimeError("injected export failure")
+            return str(self.rank).encode()
+
+        def import_fabric(self, handle):
+            if failure == "import" and self.rank == 0:
+                raise RuntimeError("injected import failure")
+            return handle
+
+        def map(self, handle=None, **kwargs):
+            if failure == "map" and self.rank == 0 and handle is not None:
+                raise RuntimeError("injected map failure")
+            address = (self.rank, handle)
+            self.mapped.append(address)
+            return address
+
+        def unmap(self, address):
+            self.mapped.remove(address)
+
+        def release(self, handle):
+            self.released.append(handle)
+
+    def numa(device):
+        return None if failure == "numa" and local.rank == 0 else 0
+
+    monkeypatch.setattr(nvlink, "CuMem", Memory)
+    monkeypatch.setattr(nvlink.current_platform, "get_device_numa_node", numa)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(
+        nvlink.torch,
+        "tensor",
+        lambda *args, **kwargs: SimpleNamespace(data_ptr=lambda: 0),
+    )
+    monkeypatch.setattr(nvlink, "device_view", lambda *args: None)
+
+    def run(rank):
+        local.rank = rank
+        error = (
+            pytest.raises(TimeoutError, match="mapping status timeout")
+            if failure == "timeout"
+            else pytest.raises(RuntimeError, match="rank 0")
+        )
+        with error:
+            nvlink.NvlinkTransport(Group(rank), True).shard(8, "test")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(run, range(2)))
+    assert all(not memory.mapped for memory in allocated)
+    assert all(memory.handle in memory.released for memory in allocated)

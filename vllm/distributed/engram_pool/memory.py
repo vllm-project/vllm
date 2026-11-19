@@ -198,9 +198,16 @@ def device_view(address: int, num_bytes: int, owner: object = None) -> torch.Ten
 
 
 class CuMem:
-    """cuMem HBM: FABRIC-exportable for NVLink peers, or GPUDirect-RDMA capable."""
+    """CUDA VMM backing in HBM or on a Grace host NUMA node."""
 
-    def __init__(self, num_bytes: int, fabric: bool = False, rdma: bool = False):
+    def __init__(
+        self,
+        num_bytes: int,
+        fabric: bool = False,
+        rdma: bool = False,
+        *,
+        host_numa: int | None = None,
+    ):
         from cuda.bindings import driver as cu
 
         self.cu = cu
@@ -209,6 +216,9 @@ class CuMem:
         prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
         prop.location.id = device
+        if host_numa is not None:
+            prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA
+            prop.location.id = host_numa
         if fabric:
             prop.requestedHandleTypes = (
                 cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
@@ -231,20 +241,35 @@ class CuMem:
             self.call(self.cu.cuMemExportToShareableHandle, self.handle, fabric, 0).data
         )
 
-    def map(self, handle=None) -> int:
-        """Map `handle` read-write for this GPU; by default this allocation, at
-        `self.address`."""
+    def map(self, handle=None, *, read_only: bool = False) -> int:
+        """Map `handle` (this allocation by default) for this GPU."""
         cu = self.cu
         address = int(self.call(cu.cuMemAddressReserve, self.size, 0, 0, 0))
-        self.call(cu.cuMemMap, address, self.size, 0, handle or self.handle, 0)
+        try:
+            self.call(cu.cuMemMap, address, self.size, 0, handle or self.handle, 0)
+        except RuntimeError:
+            self.call(cu.cuMemAddressFree, address, self.size)
+            raise
         access = cu.CUmemAccessDesc()
         access.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
         access.location.id = torch.accelerator.current_device_index()
-        access.flags = cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
-        self.call(cu.cuMemSetAccess, address, self.size, [access], 1)
+        access.flags = (
+            cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READ
+            if read_only
+            else cu.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+        )
+        try:
+            self.call(cu.cuMemSetAccess, address, self.size, [access], 1)
+        except RuntimeError:
+            self.unmap(address)
+            raise
         if handle is None:
             self.address = address
         return address
+
+    def unmap(self, address: int) -> None:
+        self.call(self.cu.cuMemUnmap, address, self.size)
+        self.call(self.cu.cuMemAddressFree, address, self.size)
 
     def import_fabric(self, exported: bytes):
         fabric = self.cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC

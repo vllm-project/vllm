@@ -497,7 +497,10 @@ class NgramHashState(nn.Module):
 
 
 def _engram_head_shard_weight_loader(
-    param: torch.nn.Parameter, loaded_weight: torch.Tensor
+    param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    *,
+    max_copy_bytes: int | None = None,
 ) -> None:
     """Load this rank's complete head buckets. ue8m0 scales arrive as
     float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
@@ -508,7 +511,19 @@ def _engram_head_shard_weight_loader(
     assert shard.shape == param.shape, (
         f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
     )
-    param.data.copy_(shard)
+    if (
+        max_copy_bytes is not None
+        and param.is_cuda
+        and not param.is_contiguous()
+        and shard.device.type == "cpu"
+    ):
+        # PyTorch may stage CPU-to-strided-CUDA copies in device memory.
+        rows = max(1, max_copy_bytes // (param.shape[1] * param.element_size()))
+        for first in range(0, part_rows, rows):
+            part = slice(first, first + rows)
+            param.data[part].copy_(shard[part])
+    else:
+        param.data.copy_(shard)
 
 
 # Branching on SORTED at runtime intermittently crashes Triton 3.8's
@@ -986,7 +1001,9 @@ class ParallelEngramEmbedding(nn.Module):
     4-bit dtype.
     """
 
-    _weight_loader = staticmethod(_engram_head_shard_weight_loader)
+    _weight_loader: Callable[[nn.Parameter, torch.Tensor], None] = staticmethod(
+        _engram_head_shard_weight_loader
+    )
     _shared_memory: DPSharedEngramStorage | None = None
     _packed: torch.Tensor | None = None
     packed_fp4: bool = False
