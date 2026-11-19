@@ -503,11 +503,14 @@ class LlavaOnevisionMultiModalProcessor(
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 assert isinstance(videos, VideoProcessorItems)
-                image_size = videos.get_frame_size(item_idx)
+                pixel_values = out_mm_kwargs["video"][item_idx][
+                    "pixel_values_videos"
+                ].data
+                assert isinstance(pixel_values, torch.Tensor)
                 num_video_tokens = self.info.get_num_video_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    num_frames=videos.get_num_frames(item_idx),
+                    image_width=pixel_values.shape[-1],
+                    image_height=pixel_values.shape[-2],
+                    num_frames=pixel_values.shape[0],
                 )
 
             return [video_token_id] * num_video_tokens

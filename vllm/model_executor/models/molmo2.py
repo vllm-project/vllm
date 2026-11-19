@@ -2051,6 +2051,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             video_num_patches_lst = []
             video_tokens_lst = []
             num_video_tokens_lst = []
+            video_prompt_ids = []
 
             for item in videos:
                 assert isinstance(item, tuple) and len(item) == 2
@@ -2066,7 +2067,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 # NOTE: a copy of hf_kwargs is created to update
                 # do_sample_frames, otherwise mm_hash for the object will be
                 # incorrect.
-                video_mm_kwargs = dict(**hf_kwargs)
+                video_mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
                 if "do_sample_frames" not in video_mm_kwargs:
                     # molmo_utils already has "do_sample_frames" in
                     # hf_kwargs, don't overwrite it.
@@ -2092,6 +2093,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 if input_ids[0, 0] == bos_token_id:
                     input_ids = input_ids[:, 1:]
 
+                video_prompt_ids.append(input_ids[0])
                 video_string = tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(VIDEO_PROMPT, video_string, 1)
 
@@ -2128,6 +2130,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 video_num_patches=torch.cat(video_num_patches_lst),
                 video_tokens=torch.cat(video_tokens_lst),
                 num_video_tokens=torch.cat(num_video_tokens_lst),
+                video_prompt_ids=video_prompt_ids,
             )
         else:
             all_video_outputs = dict()
@@ -2217,6 +2220,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 "video", num_video_tokens
             ),
             num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_prompt_ids=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -2247,13 +2251,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         ]
 
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        video_use_col_tokens = processor.video_use_col_tokens
-        use_frame_special_tokens = processor.use_frame_special_tokens
 
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
-
-        video_processor = processor.video_processor
 
         def get_image_replacement_molmo2(item_idx: int):
             image_tokens = out_mm_kwargs["image"][item_idx]["image_tokens"].data
@@ -2263,40 +2263,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             )
 
         def get_video_replacement_molmo2(item_idx: int):
-            video, metadata = mm_items["video"][item_idx]
-            do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
-            assert do_sample_frames is None or isinstance(do_sample_frames, bool)
-
-            timestamps = self.info._get_video_second_idx(metadata, do_sample_frames)
-            ncols, nrows = self.info.get_base_grid_size(video_processor)
-
-            if use_frame_special_tokens:
-                start_id = frame_start_id
-                end_id = frame_end_id
-            else:
-                start_id = img_start_id
-                end_id = img_end_id
-
-            img_token_ids = []
-
-            for frame_idx, frame_time in enumerate(timestamps):
-                prev_space = " " if frame_idx > 0 else ""
-                frame_prefix = (
-                    prev_space + f"{frame_time:.1f} "
-                )  # explicit whitespace before/after image tokens
-
-                img_token_ids += tokenizer.encode(
-                    frame_prefix,
-                    add_special_tokens=False,
-                )
-
-                joint_row = [img_patch_id] * ncols + [img_col_id] * int(
-                    video_use_col_tokens
-                )
-                joint = [start_id] + nrows * joint_row + [end_id]
-                img_token_ids += joint
-
-            return PromptUpdateDetails.select_token_ids(img_token_ids, emb_tok_ids)
+            token_ids = out_mm_kwargs["video"][item_idx]["video_prompt_ids"].data
+            assert isinstance(token_ids, torch.Tensor)
+            return PromptUpdateDetails.select_token_ids(token_ids.tolist(), emb_tok_ids)
 
         return [
             PromptReplacement(

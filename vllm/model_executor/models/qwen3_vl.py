@@ -25,6 +25,7 @@
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from copy import copy
 from dataclasses import replace
 from functools import lru_cache, partial
 from itertools import islice
@@ -937,10 +938,22 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return self.ctx.get_hf_config(Qwen3VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
-        return self.ctx.get_hf_processor(
-            Qwen3VLProcessor,
-            **kwargs,
-        )
+        processor = self.ctx.get_hf_processor(Qwen3VLProcessor, **kwargs)
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        video_kwargs = {**merged_kwargs, **merged_kwargs.get("videos_kwargs", {})}
+        frame_limits = {
+            key: video_kwargs[key]
+            for key in ("min_frames", "max_frames")
+            if key in video_kwargs
+        }
+        if frame_limits:
+            # HF's sampler reads these from the instance, not call kwargs.
+            # Copy both objects so request overrides cannot mutate the cache.
+            processor = copy(processor)
+            processor.video_processor = copy(processor.video_processor)
+            for key, value in frame_limits.items():
+                setattr(processor.video_processor, key, value)
+        return processor
 
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
@@ -1098,8 +1111,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         do_sample_frames: bool | None = None,
         sampled_fps: float | None = None,
         sampled_num_frames: int | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
     ) -> list[int]:
-        video_processor = self.get_video_processor()
+        video_processor = self.get_video_processor(**(hf_processor_mm_kwargs or {}))
         temporal_patch_size = video_processor.temporal_patch_size
         indices = metadata["frames_indices"]
 
@@ -1126,13 +1140,11 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 sampled_fps = sampled_fps if sampled_fps else video_processor.fps
                 num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
 
-            num_frames = min(
-                min(
+                num_frames = min(
                     max(num_frames, video_processor.min_frames),
                     video_processor.max_frames,
-                ),
-                total_num_frames,
-            )
+                    total_num_frames,
+                )
             indices = (
                 np.linspace(0, total_num_frames - 1, num_frames)
                 .round()
@@ -1526,6 +1538,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     do_sample_frames=video_scoped_kwargs["do_sample_frames"],
                     sampled_fps=video_scoped_kwargs.get("fps"),
                     sampled_num_frames=video_scoped_kwargs.get("num_frames"),
+                    hf_processor_mm_kwargs=video_scoped_kwargs,
                 )
                 timestamps_per_video.append(timestamps)
 

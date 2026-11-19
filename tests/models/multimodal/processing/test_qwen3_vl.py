@@ -788,3 +788,116 @@ def test_processor_image_hash_survives_video_partitioning(
     )["image"]
     assert list(parent_hashes) == list(media)
     assert parent_hashes["image"] == child_hashes["image"] == upstream_image_hash
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"num_frames": 2},
+        {"num_frames": 3},
+        {"num_frames": 16},
+        {"max_frames": 4},
+        {"min_frames": 8},
+    ],
+)
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+@pytest.mark.parametrize("token_prompt", [False, True])
+def test_video_sampling_matches_hf_timestamps(
+    kwargs: dict[str, Any],
+    kwargs_on_init: bool,
+    token_prompt: bool,
+) -> None:
+    """Frame counts, limits and timestamps must follow the same HF sampling."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"video": 1},
+        mm_processor_cache_gb=1,
+        mm_processor_kwargs=kwargs if kwargs_on_init else None,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_data = _build_video_mm_data(num_frames=12, original_fps=4.0)
+    frames, metadata = mm_data["video"][0]
+    hf_processor = processor.info.get_hf_processor(**kwargs)
+    reference = hf_processor(
+        text=prompt,
+        videos=[frames],
+        video_metadata=[{k: v for k, v in metadata.items() if k != "do_sample_frames"}],
+        do_sample_frames=True,
+        return_tensors="pt",
+        **({"fps": None} | kwargs if "num_frames" in kwargs else kwargs),
+    )
+    if token_prompt:
+        prompt = ctx.tokenizer.encode(prompt, add_special_tokens=False)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    for _ in range(2):
+        processed = processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(deepcopy(mm_data)),
+            hf_processor_mm_kwargs={} if kwargs_on_init else kwargs,
+            cache=cache,
+        )
+        data = processed["mm_kwargs"].get_data()
+        assert torch.equal(data["video_grid_thw"], reference["video_grid_thw"])
+        expected_embeds = int(reference["video_grid_thw"].prod()) // 4
+        assert (
+            processed["mm_placeholders"]["video"][0].get_num_embeds() == expected_embeds
+        )
+        assert processed["prompt_token_ids"] == reference["input_ids"][0].tolist()
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs,request_kwargs,expected_frames",
+    [
+        ({"max_frames": 4}, {}, 4),
+        ({"max_frames": 4}, {"max_frames": 2}, 2),
+        ({"max_frames": 4}, {"videos_kwargs": {"max_frames": 2}}, 2),
+        ({"max_frames": 4}, {"max_frames": 8}, 6),
+        ({"max_frames": 4}, {"videos_kwargs": {"max_frames": 8}}, 6),
+        ({"min_frames": 8}, {}, 8),
+        ({"min_frames": 8}, {"min_frames": 10}, 10),
+        ({"min_frames": 8}, {"videos_kwargs": {"min_frames": 10}}, 10),
+    ],
+)
+@pytest.mark.parametrize("token_prompt", [False, True])
+def test_video_scoped_frame_limits(
+    engine_kwargs, request_kwargs, expected_frames, token_prompt
+):
+    """Engine video limits and request overrides must change the sampled frames."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"video": 1},
+        mm_processor_cache_gb=1,
+        mm_processor_kwargs={"videos_kwargs": engine_kwargs},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    if token_prompt:
+        prompt = ctx.tokenizer.encode(prompt, add_special_tokens=False)
+    mm_data = _build_video_mm_data(num_frames=12, original_fps=4.0)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    # At 2 fps this three-second clip has six frames before applying limits.
+    # Check a request override, then the engine default, including cache hits.
+    default_frames = engine_kwargs.get("max_frames", engine_kwargs.get("min_frames"))
+    for kwargs, num_frames in [(request_kwargs, expected_frames), ({}, default_frames)]:
+        indices = np.linspace(0, 11, num_frames).round().astype(int)
+        timestamps = indices.reshape(-1, 2).mean(axis=1) / 4.0
+        for _ in range(2):
+            processed = processor(
+                prompt,
+                mm_items=processor.info.parse_mm_data(deepcopy(mm_data)),
+                hf_processor_mm_kwargs=kwargs,
+                cache=cache,
+            )
+            data = processed["mm_kwargs"].get_data()
+            grid = data["video_grid_thw"][0]
+            pixels = data["pixel_values_videos"]
+            assert isinstance(grid, torch.Tensor)
+            assert isinstance(pixels, torch.Tensor)
+            # Qwen3-VL groups two sampled frames into each temporal patch.
+            assert int(grid[0]) * 2 == num_frames
+            assert pixels.shape[0] == int(grid.prod())
+            assert data["timestamps"][0] == timestamps.tolist()
+            assert processed["mm_placeholders"]["video"][0].get_num_embeds() == (
+                int(grid.prod()) // 4
+            )
