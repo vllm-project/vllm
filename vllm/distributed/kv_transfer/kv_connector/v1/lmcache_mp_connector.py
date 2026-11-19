@@ -47,11 +47,6 @@ from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
 )
-from lmcache.integration.vllm.vllm_multi_process_adapter import (
-    LMCacheMPSchedulerAdapter,
-    LMCacheMPWorkerAdapter,
-    ParallelStrategy,
-)
 from lmcache.utils import CacheRemoveEvent, EngineType
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.gpu_connector.utils import (
@@ -61,9 +56,6 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     group_layers_by_identity,
-)
-from lmcache.v1.multiprocess.custom_types import (
-    BlockAllocationRecord as RequestAllocationRecord,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from packaging.version import InvalidVersion, Version
@@ -98,6 +90,30 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
+
+try:
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        ParallelStrategy,
+    )
+
+    try:
+        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
+    except ImportError:
+        from lmcache.v1.multiprocess.custom_types import (
+            BlockAllocationRecord as RequestAllocationRecord,
+        )
+except ImportError:
+    from lmcache.v1.multiprocess.custom_types import (
+        BlockAllocationRecord as RequestAllocationRecord,
+    )
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+        LMCacheMPSchedulerAdapter,
+        LMCacheMPWorkerAdapter,
+        ParallelStrategy,
+    )
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
