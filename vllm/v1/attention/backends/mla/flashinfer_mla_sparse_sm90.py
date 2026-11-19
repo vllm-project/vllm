@@ -323,13 +323,13 @@ class _SM90State:
         self._int_ws: torch.Tensor | None = None
         self._plan_offsets: tuple[int, int, int, int] | None = None
 
-    def clone(self) -> "_SM90State":
+    def clone(self, max_tokens: int) -> "_SM90State":
         """A second plan state for another chunk, sharing the float workspace."""
         return _SM90State(
             self.device,
             self.num_heads,
             self.kv_dtype,
-            self.max_tokens,
+            max_tokens,
             self.topk_width,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
@@ -524,16 +524,13 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
         )
-        # One planner state per chunk, all sharing the float workspace. Create
-        # the ones a full max_num_batched_tokens batch can need here so their
-        # index buffers are allocated before the KV-cache profiler sizes the
-        # cache, instead of on the first oversized step of a live server.
-        num_chunks = triton.cdiv(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            self.state.max_tokens,
-        )
+        # Allocate the index buffers at builder construction, with just enough
+        # space for the tail. Each plan has private indices and shares scratch.
+        budget = vllm_config.scheduler_config.max_num_batched_tokens
+        chunk_rows = self.state.max_tokens
         self._chunk_states = [self.state] + [
-            self.state.clone() for _ in range(max(num_chunks - 1, 0))
+            self.state.clone(min(chunk_rows, budget - start))
+            for start in range(chunk_rows, budget, chunk_rows)
         ]
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
@@ -611,11 +608,13 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # One plan per chunk of at most `state.max_tokens` rows, so no plan can
         # exceed FlashInfer's work-list capacity. A small batch is one chunk.
         metadata.chunk_states = []
-        for i, start in enumerate(range(0, num_rows, self.state.max_tokens)):
-            end = min(start + self.state.max_tokens, num_rows)
+        start = 0
+        while start < num_rows:
+            i = len(metadata.chunk_states)
             if i == len(self._chunk_states):
-                self._chunk_states.append(self.state.clone())
+                self._chunk_states.append(self.state.clone(self.state.max_tokens))
             state = self._chunk_states[i]
+            end = min(start + state.max_tokens, num_rows)
             state.plan(
                 end - start,
                 kv_lens[start:end],
@@ -624,6 +623,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
                 row_offset=start,
             )
             metadata.chunk_states.append((start, end, state))
+            start = end
         return metadata
 
 

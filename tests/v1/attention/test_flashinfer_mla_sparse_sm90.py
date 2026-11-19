@@ -200,7 +200,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decod
     builder._adaptive_verification = False
     state = FakeState(TOPK)
     builder.state = state
-    builder._chunk_states = [state]
+    monkeypatch.setattr(builder, "_chunk_states", [state], raising=False)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
     metadata.prefill = SimpleNamespace(route=route)
     metadata.state = None
@@ -406,11 +406,6 @@ def test_builder_kpool_from_model_config(
             self.index_topk = kwargs["index_topk"]
             self.index_kpool = kwargs["index_kpool"]
 
-        def clone(self):
-            clone = object.__new__(type(self))
-            clone.__dict__.update(self.__dict__)
-            return clone
-
     monkeypatch.setattr(sm90_mod, "_SM90State", _RecordingState)
     impl, _ = make_impl(64)
     spec = MLAAttentionSpec(
@@ -612,7 +607,7 @@ def test_chunked_plan_matches_exact_and_replays(
         scheduler_config=SchedulerConfig(
             is_encoder_decoder=False,
             max_model_len=32768,
-            max_num_batched_tokens=32768,
+            max_num_batched_tokens=16601,
             max_num_seqs=4,
         ),
         attention_config=AttentionConfig(sparse_mla_force_mqa=True),
@@ -653,6 +648,8 @@ def test_chunked_plan_matches_exact_and_replays(
             config,
             device,
         )
+        reserved = tuple(builder._chunk_states)
+        assert [state.max_tokens for state in reserved] == [8192, 8192, 217]
         batch = BatchSpec(
             seq_lens=[4096, 12000, 10000],
             query_lens=[1, 8192, rows - 8193] if rows > 8193 else [1, 5, 7],
@@ -668,7 +665,10 @@ def test_chunked_plan_matches_exact_and_replays(
         impl = layer.impl
         assert isinstance(impl, FlashInferMLASparseSM90Impl)
         chunks = meta.chunk_states
-        assert len(chunks) == (3 if rows > 16384 else 1)
+        assert [end for _, end, _ in chunks] == (
+            [8192, 16384, rows] if rows > 16384 else [rows]
+        )
+        assert tuple(state for _, _, state in chunks) == reserved[: len(chunks)]
         assert all(state.workspace is builder.state.workspace for _, _, state in chunks)
         assert builder.get_varlen_cudagraph_max_query_len(config, spec) == 3
 
@@ -876,12 +876,15 @@ def test_large_mqa_step_matches_scheduler_chunking(tmp_path, vllm_runner):
         name_1="planner chunks",
         always_check_logprobs=True,
     )
-    for reference, actual in zip(*results):
+    for reference, actual in zip(*results, strict=True):
         assert reference[2] is not None and actual[2] is not None
-        for expected, observed in zip(reference[2], actual[2]):
+        for expected, observed in zip(reference[2], actual[2], strict=True):
+            # A bf16 near-tie can change which token occupies the last top-k slot.
+            common_tokens = expected.keys() & observed.keys()
+            assert common_tokens
             torch.testing.assert_close(
-                torch.tensor([observed[token].logprob for token in expected]),
-                torch.tensor([expected[token].logprob for token in expected]),
+                torch.tensor([observed[token].logprob for token in common_tokens]),
+                torch.tensor([expected[token].logprob for token in common_tokens]),
                 atol=1e-2,
                 rtol=1e-2,
             )
