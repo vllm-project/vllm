@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_processing,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 SCHEME = "int4_per_group_32_asym"
@@ -73,7 +74,7 @@ def _kernel_available() -> bool:
         choose_mp_linear_kernel(config)
     except (ValueError, RuntimeError):
         return False
-    return torch.cuda.is_available()
+    return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
 
 requires_kernel = pytest.mark.skipif(
@@ -257,7 +258,10 @@ def online_head_config(dist_init, monkeypatch):
         lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
     config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
-    with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+    with (
+        set_current_vllm_config(VllmConfig()),
+        torch.device(current_platform.device_type),
+    ):
         yield config
 
 
@@ -280,12 +284,16 @@ def test_untied_head_matches_reference(online_head_config, num_tokens):
     )
     assert isinstance(head.quant_method, Int4PerGroup32AsymLMHeadMethod)
     assert head.weight.is_meta  # materialized while loading
-    loaded = (torch.randn(VOCAB, HIDDEN, device="cuda") * 0.02).to(torch.bfloat16)
+    loaded = (
+        torch.randn(VOCAB, HIDDEN, device=current_platform.device_type) * 0.02
+    ).to(torch.bfloat16)
     head.weight.weight_loader(head.weight, loaded)
     # The padded vocab rows are never loaded: processing waits for finalize.
     finalize_layerwise_processing(head, model_config=None)
     assert head.weight.dtype == torch.int8 or head.weight.dtype == torch.int32
-    x = torch.randn(num_tokens, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(
+        num_tokens, HIDDEN, device=current_platform.device_type, dtype=torch.bfloat16
+    )
     out = head.quant_method.apply(head, x)
     assert out.shape == (num_tokens, head.num_embeddings_per_partition)
     ref = _reference_logits(x, loaded)
@@ -319,9 +327,11 @@ def test_tied_head_keeps_the_embedding(online_head_config):
     assert head.weight is not embed.weight
     assert embed.weight.dtype == torch.bfloat16
     torch.testing.assert_close(embed.weight.data, original, rtol=0, atol=0)
-    tokens = torch.arange(16, device="cuda")
+    tokens = torch.arange(16, device=current_platform.device_type)
     torch.testing.assert_close(embed(tokens), original[tokens], rtol=0, atol=0)
-    x = torch.randn(4, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(
+        4, HIDDEN, device=current_platform.device_type, dtype=torch.bfloat16
+    )
     out = head.quant_method.apply(head, x)
     ref = _reference_logits(x, original[:VOCAB])
     err = (out[:, :VOCAB].float() - ref).norm() / ref.norm()

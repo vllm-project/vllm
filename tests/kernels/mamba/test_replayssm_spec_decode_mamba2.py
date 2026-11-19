@@ -17,6 +17,7 @@ from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec 
     replayssm_materialize,
     selective_state_update_replayssm_spec,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.worker.replayssm_utils import _cuda_i64_ptrs, _cuda_i64_slot_strides
@@ -47,7 +48,7 @@ def test_replayssm_spec_decode_matches_recurrence(
     state_dtype, act_dtype, num_spec, max_window
 ):
     set_random_seed(0)
-    device = "cuda"
+    device = current_platform.device_type
     T = 1 + num_spec
     ring_len = max_window + T
     batch, num_slots, num_steps = 4, 8, 24
