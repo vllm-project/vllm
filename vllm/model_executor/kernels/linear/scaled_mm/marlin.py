@@ -15,9 +15,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    create_fp8_quant_key,
     kFp8Static128BlockSym,
-    kFp8Static128GroupSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -62,7 +63,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         super().__init__(c, layer_param_names)
         self.block_quant = self.config.weight_quant_key in {
             kFp8Static128BlockSym,
-            kFp8Static128GroupSym,
+            create_fp8_quant_key(static=True, group_shape=GroupShape(1, 128)),
         }
         self.size_k_first = not self.block_quant
 

@@ -91,11 +91,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             format == CompressionFormat.float_quantized.value
             and quant_config._is_fp8_w8a16_group(weight_quant, input_quant)
         ):
-            from .compressed_tensors_moe_w8a16_fp8 import (
-                CompressedTensorsW8A16Fp8MoEMethod,
+            from vllm.model_executor.layers.quantization.fp8 import (
+                Fp8Config,
+                Fp8MoEMethod,
             )
 
-            return CompressedTensorsW8A16Fp8MoEMethod(layer)
+            method = Fp8MoEMethod(Fp8Config(weight_block_size=[1, 128]), layer)
+            method.weight_scale_name = "weight_scale"
+            return method
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             valid_format_and_bits = (

@@ -39,9 +39,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    create_fp8_quant_key,
     kFp8Static128BlockSym,
-    kFp8Static128GroupSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
@@ -561,7 +562,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         # are migrated to use the oracle one-by-one.
         SUPPORTED_W = [
             kFp8Static128BlockSym,
-            kFp8Static128GroupSym,
+            create_fp8_quant_key(static=True, group_shape=GroupShape(1, 128)),
             kFp8StaticChannelSym,
             kFp8StaticTensorSym,
             kMxfp4Static,
