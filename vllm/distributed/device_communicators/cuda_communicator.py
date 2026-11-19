@@ -152,6 +152,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
                 register_graph_buffers=register,
+                device_group=self.device_group,
             )
 
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
