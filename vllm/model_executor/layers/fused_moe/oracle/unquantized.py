@@ -283,7 +283,7 @@ def select_unquantized_moe_backend(
             oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
             kernel_cls, _ = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, is_lora=True))
+                logger.debug_once(oracle.make_log_backend(backend, is_lora=True))
                 return backend, kernel_cls
 
         return UnquantizedMoEKernelOracle(moe_config, None, None).return_or_raise(
@@ -333,7 +333,7 @@ def select_unquantized_moe_backend(
             backend = UnquantizedMoeBackend.AITER
             kernel_cls, rejected = oracle.try_backend(backend)
             if kernel_cls is not None:
-                logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+                logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
                 return backend, kernel_cls
             # AITER was explicitly requested but does not support this
             # deployment configuration (e.g. a non-gated MoE activation,
@@ -360,7 +360,7 @@ def select_unquantized_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
     raise NotImplementedError(
