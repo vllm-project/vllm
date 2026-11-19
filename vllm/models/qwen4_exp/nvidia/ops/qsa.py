@@ -70,6 +70,12 @@ def _is_sm90() -> bool:
     return current_platform.get_device_capability() == (9, 0)
 
 
+@lru_cache(maxsize=1)
+def _is_sm100() -> bool:
+    """True on sm_100 (B200/GB200): selects the sm_100 small-batch overrides."""
+    return current_platform.get_device_capability() == (10, 0)
+
+
 @triton.jit(do_not_specialize=["num_rows", "num_requests", "num_cache_blocks"])
 def _qsa_sparse_paged_gqa_splitk_kernel(
     q_ptr,
@@ -583,6 +589,22 @@ def _select_sm90_config(
     return 32, 4, 1
 
 
+def _select_sm100_config(
+    base_programs: int, is_fp8: bool
+) -> tuple[int, int, int] | None:
+    """(block_n, target_splits, num_warps) tuned on sm_100 (B200) for small
+    batches, or None to keep the default entry. fp8 above 64 programs takes the
+    qsa_fp8 kernel.
+    """
+    if base_programs <= 24:
+        if is_fp8 and base_programs <= 4:
+            return None
+        return 64, 64, 2
+    if not is_fp8 or base_programs > 64:
+        return None
+    return (32, 32, 1) if base_programs <= 32 else (32, 16, 1)
+
+
 def _select_config(
     num_rows: int,
     num_kv_heads: int,
@@ -596,9 +618,11 @@ def _select_config(
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
     the uniform decode/verify length). This default table was tuned on GB300;
     sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
-    and sm_90 (Hopper) to _select_sm90_config.
+    sm_90 (Hopper) to _select_sm90_config, and sm_100 (B200/GB200) overrides
+    small batches with _select_sm100_config.
     """
     base_programs = num_rows * num_kv_heads
+    sm100_config = _select_sm100_config(base_programs, is_fp8) if _is_sm100() else None
     if _is_sm120():
         BLOCK_N, target_splits, num_warps = _select_sm120_config(
             base_programs, use_prefill_config, is_fp8
@@ -607,6 +631,8 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = _select_sm90_config(
             base_programs, use_prefill_config, is_fp8
         )
+    elif sm100_config is not None:
+        BLOCK_N, target_splits, num_warps = sm100_config
     elif base_programs > 2048:
         BLOCK_N, target_splits, num_warps = (
             (32, 1, 1) if use_prefill_config else (64, 1, 2)
