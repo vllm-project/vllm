@@ -24,6 +24,21 @@ Each release is built from a dedicated release branch.
 * Final tag: `vX.Y.Z` does not trigger the build but used for Release notes and assets.
 * After branch cut is created, we monitor the main branch for any reverts and apply these reverts to a release branch.
 
+### Standalone Rust frontend image
+
+The release pipeline stages a frontend image on each native CPU queue. It
+records both ECR digests as build metadata and runs a completion through the
+staged AMD64 frontend and CUDA engine before the Docker Hub publish gate.
+The release matrix promotes those digests to the selected release version.
+A nightly publishes the same commit as the engine and keeps 14 commit tags.
+
+Before enabling the first nightly, provision `vllm/vllm-rust-frontend` on
+Docker Hub and grant the existing release identity push and nightly cleanup
+access. For a failed promotion, retry the publish job in the same Buildkite
+build. A missing architecture requires retrying its build and smoke test first.
+See [Using Docker](../deployment/docker.md#standalone-rust-frontend) for image
+names and deployment examples.
+
 ### Cherry-Pick Criteria
 
 After branch cut, we approach finalizing the release branch with clear criteria on what cherry picks are allowed in. Note: a cherry pick is a process to land a PR in the release branch after branch cut. These are typically limited to ensure that the team has sufficient time to complete a thorough round of testing on a stable code base.

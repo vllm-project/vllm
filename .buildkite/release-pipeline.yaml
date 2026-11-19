@@ -184,6 +184,16 @@ steps:
     depends_on: block-build-release-images
     allow_dependency_failure: true
     steps:
+      - label: "Build Rust frontend - x86_64"
+        key: build-rust-frontend-x86
+        agents: {queue: cpu_queue_release}
+        command: bash .buildkite/scripts/build-rust-frontend-image.sh
+
+      - label: "Build Rust frontend - aarch64"
+        key: build-rust-frontend-arm64
+        agents: {queue: arm64_cpu_queue_release}
+        command: bash .buildkite/scripts/build-rust-frontend-image.sh
+
       - label: "Build release image - x86_64 - CUDA 13.0"
         depends_on: ~
         id: build-release-image-x86
@@ -504,7 +514,31 @@ steps:
           - "bash .buildkite/scripts/xpu/create-xpu-ecr-manifest.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu" release-manifests'
 
+      - label: "Test standalone Rust frontend against the release engine"
+        key: test-rust-frontend-release
+        depends_on: [build-rust-frontend-x86, build-release-image-x86]
+        agents: {queue: gpu_1_queue}
+        timeout_in_minutes: 35
+        command: bash .buildkite/scripts/test-rust-frontend-external-engine.sh
+
+      - label: "Publish nightly Rust frontend to Docker Hub"
+        depends_on: [test-rust-frontend-release, build-rust-frontend-arm64, publish-nightly-engine-dockerhub]
+        if: build.env("NIGHTLY") == "1"
+        agents: {queue: small_cpu_queue_release}
+        concurrency: 1
+        concurrency_group: rust-frontend-nightly-publish
+        commands:
+          - bash .buildkite/scripts/publish-rust-frontend-image.sh
+          - bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-rust-frontend
+        secrets: {RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN}
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
+        env: {DOCKERHUB_USERNAME: vllm}
+
       - label: "Publish nightly multi-arch image to DockerHub"
+        key: publish-nightly-engine-dockerhub
         depends_on:
           - create-multi-arch-manifest
         if: build.env("NIGHTLY") == "1"
@@ -719,6 +753,8 @@ steps:
   - block: "Publish release images to DockerHub"
     key: block-publish-release-images
     depends_on:
+      - test-rust-frontend-release
+      - build-rust-frontend-arm64
       - create-multi-arch-manifest
       - create-manifest-xpu
       - build-rocm100-release-image
@@ -745,6 +781,7 @@ steps:
     commands:
       - "bash .buildkite/scripts/publish-release-images.sh {{matrix}}"
     matrix:
+      - "rust-frontend"
       - "cuda-13-0"
       # AWS EFA variant; skipped if no EFA image was built, fails on a partial build.
       - "cuda-13-0-efa"
