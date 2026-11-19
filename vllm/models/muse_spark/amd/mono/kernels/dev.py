@@ -216,6 +216,42 @@ def bf16_pair(a, b):
     )
 
 
+E4M3_MAX = 448.0
+
+
+def e4m3_dword(a, b, inv):
+    """VLLM's ROCm fp8 KV insert of a lane's pair: bf16(a), bf16(b) times ``inv``,
+    saturated to +-448, RNE to e4m3. Lane 2i returns the dword of lanes 2i and
+    2i + 1 (4 bytes in lane order); odd lanes return garbage. Both lanes of a
+    pair must be active."""
+    top = fx.Float32(E4M3_MAX)
+
+    def sat(x):
+        return as_ir_value(fx.Float32(fx.max(fx.min(bf16_round(x) * inv, top), -top)))
+
+    pair = fx.Int32(
+        rocdl.cvt_pk_fp8_f32(T.i32, sat(a), sat(b), as_ir_value(fx.Int32(0)), False)
+    )
+    lo = pair & fx.Int32(0xFFFF)
+    return lo | (xshfl(lo, 1) << 16)
+
+
+def e4m3x4_bf16(w):
+    """One dword of 4 e4m3 (low byte first) -> 2 bf16 pair words (exact)."""
+    out = []
+    for hi in (False, True):
+        f = fx.Vector(
+            rocdl.cvt_pk_f32_fp8(T.vec(2, T.f32), as_ir_value(fx.Int32(w)), hi)
+        )
+        out.append(bf16_pair(f[0], f[1]))
+    return out
+
+
+def inv_kv_scale(ptr):
+    """``1 / *ptr`` (fp32, wave-uniform): the stock insert's ``1.0f / *k_scale``."""
+    return fx.Float32(1.0) / uniform(ld_i32(ptr, 0)).bitcast(fx.Float32)
+
+
 def bf_lo(w):
     return (w << 16).bitcast(fx.Float32)
 

@@ -324,10 +324,10 @@ class KernelConfig:
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
-    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
+    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8 or 4, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
-    deployment that cannot run it is refused at startup.
+    requests at TP 8 and 1-8 at TP 4, with bf16 MoE activations instead of the
+    checkpoint's MXFP4). A deployment that cannot run it is refused at startup.
 
     Same switch as `--additional-config '{"decode_backend":
     "latency_specialized"}'`, the specialized decode of RFC #60904: setting
