@@ -478,6 +478,9 @@ steps:
       source_file_dependencies:
       - csrc/attention/
       - csrc/core/vec_dtypes/
+      - csrc/rocm/attention_dispatch.cu
+      - csrc/rocm/attention_kernels.cuh
+      - csrc/rocm/generate_paged_attn.py
       - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
       - vllm/v1/attention
       - vllm/model_executor/layers/attention

@@ -11,6 +11,7 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 
@@ -330,6 +331,93 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(not on_mi3xx(), reason="FP8 MFMA needs gfx942 or gfx950")
+@pytest.mark.parametrize("num_heads", [(40, 8), (64, 8), (64, 4)])
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_paged_attention_fp8_mfma(
+    kv_cache_factory,
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+) -> None:
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
+    seq_lens_lst = [1, 17, 255, 257, 1000, 3000, 4096]
+    num_seqs = len(seq_lens_lst)
+    max_seq_len = max(seq_lens_lst)
+    seq_lens = torch.tensor(seq_lens_lst, dtype=torch.int)
+    query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int
+    )
+
+    key_caches, value_caches = kv_cache_factory(
+        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, "fp8", dtype, 0
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+    fp8_dtype = current_platform.fp8_dtype()
+    key = torch.randn(key_cache.shape) * 4
+    value = torch.randn(value_cache.shape)
+    k_scale_value = key.abs().max().item() / 224.0
+    v_scale_value = value.abs().max().item() / 224.0
+    key_cache.copy_((key / k_scale_value).to(fp8_dtype).view(torch.uint8))
+    value_cache.copy_((value / v_scale_value).to(fp8_dtype).view(torch.uint8))
+    k_scale = torch.tensor(k_scale_value, dtype=torch.float32)
+    v_scale = torch.tensor(v_scale_value, dtype=torch.float32)
+
+    output = torch.empty_like(query)
+    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
+    tmp_output = torch.empty(
+        num_seqs, num_query_heads, num_partitions, head_size, dtype=dtype
+    )
+    exp_sums = torch.empty(
+        num_seqs, num_query_heads, num_partitions, dtype=torch.float32
+    )
+    ops.paged_attention_rocm(
+        output,
+        exp_sums,
+        torch.empty_like(exp_sums),
+        tmp_output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        None,
+        block_size,
+        max_seq_len,
+        None,
+        "fp8",
+        k_scale,
+        v_scale,
+        mfma_type="fp8",
+    )
+
+    ref_output = torch.empty(num_seqs, num_query_heads, head_size)
+    ref_single_query_cached_kv_attention(
+        ref_output,
+        query.float(),
+        num_query_heads // num_kv_heads,
+        key_cache.view(fp8_dtype).float() * k_scale_value,
+        value_cache.view(fp8_dtype).float() * v_scale_value,
+        block_tables,
+        seq_lens,
+        scale,
+        None,
+    )
+    error = (output.float() - ref_output).pow(2).sum()
+    snr_db = 10 * torch.log10(ref_output.pow(2).sum() / error).item()
+    assert snr_db > 20, f"FP8 MFMA paged attention SNR {snr_db:.1f} dB"
 
 
 @pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])

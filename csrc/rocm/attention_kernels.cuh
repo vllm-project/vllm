@@ -356,8 +356,7 @@ typedef union u64_cvt {
 // built with RDC or device LTO (today -fno-gpu-rdc internalizes it).
 __device__ __forceinline__ float warpReduceMax(float val) {
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-    val = max(
-        val, __shfl_down(val, offset, WARP_SIZE));  // Using max() for reduction
+    val = max(val, __shfl_xor(val, offset, WARP_SIZE));
   }
   return val;
 }
@@ -672,8 +671,8 @@ __launch_bounds__(NUM_THREADS, 4) void paged_attention_ll4mi_QKV_mfma16_kernel(
     q_max = warpReduceMax(q_max);
     constexpr float FP8_E4M3_SCALE_TARGET = 224.0f;
     if constexpr (MFMA_TYPE == MFMAType::Fp8) {
-      q_scale = q_max > 0 ? FP8_E4M3_SCALE_TARGET / q_max : 1.0f;
-      scale2 /= q_scale;
+      q_scale = q_max > 0 ? q_max / FP8_E4M3_SCALE_TARGET : 1.0f;
+      scale2 *= q_scale;
     }
   #endif
   }
