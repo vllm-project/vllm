@@ -1219,7 +1219,9 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 metadata = builder.build(0, step)
                 index_metadata = index_builder.build(0, index_step)
                 # Before admitting short pieces, MLA decodes kept the DCP path.
-                assert metadata.num_decodes == _leading(lens, 1024), name
+                assert metadata.num_decodes == _leading(
+                    lens, builder.reorder_batch_threshold
+                ), name
                 # The indexer scores the one-token rows as decodes, the rest
                 # as prefill rows.
                 assert index_metadata.num_decode_tokens == num_decode_tokens, name
