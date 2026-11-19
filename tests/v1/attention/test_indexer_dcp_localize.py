@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
@@ -1192,3 +1194,159 @@ def test_pcp_plan_deinterleave_restores_global_order(
             restored[row_start[row] : row_start[row] + g, 0],
             torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
         )
+
+
+requires_dense_mqa_logits = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="DeepGEMM MQA logits (SM90/SM100) required",
+)
+
+INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
+
+
+def _quantized_k_cache(num_keys: int, block_size: int = 64):
+    """A paged indexer K cache of `num_keys` keys, quantized as the layer
+    stores them, and the block table of the request that owns them."""
+    from vllm import _custom_ops as ops
+    from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+
+    num_blocks = num_keys // block_size
+    kv_cache = torch.zeros(
+        num_blocks, block_size, 132, dtype=torch.uint8, device=DEVICE_TYPE
+    )
+    ops.indexer_k_quant_and_cache(
+        torch.randn(num_keys, 128, device=DEVICE_TYPE, dtype=torch.bfloat16),
+        kv_cache,
+        torch.arange(num_keys, device=DEVICE_TYPE),
+        128,
+        "mxfp8" if mqa_logits_use_mx_scales() else "ue8m0",
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=DEVICE_TYPE)
+    return kv_cache, block_table[None]
+
+
+def _run_prefill_indexer(
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_slices: list[slice],
+    pcp_dcp: bool,
+) -> torch.Tensor:
+    """Score the last query rows of one request whose context fills the cache,
+    in the query sub-chunks the planner would build, on the real indexer."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadata,
+        DeepseekV32IndexerPrefillMetadata,
+        build_pcp_global_chunk_plan,
+    )
+
+    rows = query_slices[-1].stop
+    num_keys = kv_cache.shape[0] * kv_cache.shape[1]
+    query_start_loc_cpu = torch.tensor([0, rows], dtype=torch.int32)
+    seq_lens_cpu = torch.tensor([num_keys], dtype=torch.int32)
+    query_start_loc = query_start_loc_cpu.to(DEVICE_TYPE)
+    seq_lens = seq_lens_cpu.to(DEVICE_TYPE)
+    # Single-rank DCP: the all-gather of the PCP + DCP path is a copy.
+    pcp_plan = (
+        build_pcp_global_chunk_plan(
+            np.zeros(1, dtype=np.int64), np.array([num_keys]), 1, seq_lens.device
+        )
+        if pcp_dcp
+        else None
+    )
+    chunks = [
+        build_prefill_chunk_metadata(
+            0,
+            1,
+            query_start_loc,
+            query_start_loc_cpu,
+            seq_lens,
+            seq_lens,
+            seq_lens_cpu,
+            block_table,
+            1,
+            query_slice=query_slice,
+            skip_kv_gather=query_slice.start > 0,
+            pcp_plan=pcp_plan,
+        )
+        for query_slice in query_slices
+    ]
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=seq_lens,
+        max_seq_len=num_keys,
+        slot_mapping=torch.zeros(rows, dtype=torch.long, device=DEVICE_TYPE),
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_prefill_tokens=rows,
+        prefill=DeepseekV32IndexerPrefillMetadata(
+            chunks=chunks, max_prefill_seq_len=num_keys
+        ),
+    )
+    q = torch.randn(rows, 32, 128, device=DEVICE_TYPE).to(torch.float8_e4m3fn)
+    weights = torch.randn(rows, 32, device=DEVICE_TYPE) / 32
+    topk_indices = torch.empty(rows, 2048, dtype=torch.int32, device=DEVICE_TYPE)
+    attn_metadata: dict[str, Any] = {INDEXER_LAYER: metadata}
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata=attn_metadata, slot_mapping={}
+    )
+    with override_forward_context(context):
+        sparse_indexer.sparse_attn_indexer(
+            hidden_states=torch.empty(rows, 1, device=DEVICE_TYPE),
+            k_cache_prefix=INDEXER_LAYER,
+            kv_cache=kv_cache,
+            q_quant=q,
+            q_scale=None,
+            k=None,
+            weights=weights,
+            quant_block_size=128,
+            scale_fmt="ue8m0",
+            topk_tokens=2048,
+            head_dim=128,
+            max_model_len=num_keys,
+            total_seq_lens=num_keys,
+            topk_indices_buffer=topk_indices,
+            skip_k_cache_insert=True,
+            use_pcp=pcp_dcp,
+            pcp_shard_decode_requests=False,
+            dense_mha_metadata_layer_name="",
+        )
+    return topk_indices
+
+
+@requires_dense_mqa_logits
+@pytest.mark.parametrize("pcp_dcp", [False, True])
+def test_dense_row_split_frees_each_logits_window(
+    dist_init, workspace_init, monkeypatch: pytest.MonkeyPatch, pcp_dcp: bool
+) -> None:
+    """Startup reserves the logits of one dense window. A chunk planned for
+    fused_mqa_topk is not bounded by that budget; when it takes the dense
+    path, each window must be freed before the next one is allocated."""
+    import vllm.envs as envs
+
+    torch.manual_seed(0)
+    num_keys, rows = 8192, 512
+    window_bytes = 1024 * 1024  # 32 rows of 8192 FP32 logits
+    monkeypatch.setattr(envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
+    monkeypatch.setattr(envs, "VLLM_USE_FUSED_MQA_TOPK", False)
+    kv_cache, block_table = _quantized_k_cache(num_keys)
+
+    live_before_window: list[int] = []
+    dense_logits = sparse_indexer.fp8_fp4_mqa_logits
+
+    def record_live_memory(*args, **kwargs):
+        live_before_window.append(torch.accelerator.memory_allocated())
+        return dense_logits(*args, **kwargs)
+
+    monkeypatch.setattr(sparse_indexer, "fp8_fp4_mqa_logits", record_live_memory)
+    topk_indices = _run_prefill_indexer(
+        kv_cache, block_table, [slice(0, rows)], pcp_dcp
+    )
+
+    assert len(live_before_window) == rows // 32
+    assert max(live_before_window) - live_before_window[0] < window_bytes // 2
+    assert ((topk_indices >= 0).sum(1) == 2048).all()
