@@ -4,13 +4,13 @@
 
 from __future__ import annotations
 
-import functools
 import math
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -720,15 +720,6 @@ def _compress_qsa_groups_kernel(
     )
 
 
-@functools.cache
-def _on_gfx942() -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx942
-
-    return on_gfx942()
-
-
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -748,12 +739,13 @@ def qsa_mqa_paged(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute QSA scores directly from a paged compressed-key cache.
 
-    ``single_row_decode`` marks a batch of decode requests with one query row
+    `single_row_decode` marks a batch of decode requests with one query row
     each and no prefill. Small ones are scored row by row on gfx942.
 
     Returns:
-        ``logits`` [rows, columns] fp32 and ``visible_blocks`` [rows] int32.
-        Logits at or past ``visible_blocks[row]`` are not written.
+        `logits` `[rows, columns]` fp32 and `visible_blocks` `[rows]` int32.
+        Logits at or past `visible_blocks[row]` are undefined; read only
+        `[0, visible_blocks[row])`.
 
     """
     _validate_mqa(q)
@@ -763,6 +755,8 @@ def qsa_mqa_paged(
         raise ValueError("QSA cache must be [pages, page_size, 1, head_dim]")
     if k_cache.shape[3] != q.shape[2]:
         raise ValueError("QSA query and cache dimensions must match")
+    if torch.float32 in (q.dtype, k_cache.dtype):
+        raise ValueError("QSA paged scoring takes bf16, fp16 or fp8 inputs")
     if page_table.ndim != 2:
         raise ValueError("QSA page table must be two-dimensional")
     if q.shape[0] and (not all(k_cache.shape[:2]) or not all(page_table.shape)):
@@ -787,7 +781,11 @@ def qsa_mqa_paged(
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
         return logits, visible_blocks
-    if single_row_decode and q.shape[0] <= _QSA_ROWS_KERNEL_MAX_ROWS and _on_gfx942():
+    if (
+        single_row_decode
+        and q.shape[0] <= _QSA_ROWS_KERNEL_MAX_ROWS
+        and get_cdna_version() == 3
+    ):
         # Rows from different requests share no keys, so a 16-row tl.dot tile is
         # mostly padding.
         block_n = 32
@@ -1080,8 +1078,6 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
-        from vllm.platforms.rocm import get_cdna_version
-
         # One warp per program is faster on CDNA3 and CDNA4, except BF16
         # K/V with BLOCK_M >= 16 on CDNA3, where BLOCK_N=32 is faster
         # (BLOCK_N=32 with one warp faults there).

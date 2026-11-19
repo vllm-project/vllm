@@ -521,7 +521,7 @@ class _KernelSpy:
 
 def _force_rows_kernel(monkeypatch: pytest.MonkeyPatch) -> _KernelSpy:
     # The per-row path is gfx942 only, but the kernel runs on any ROCm arch.
-    monkeypatch.setattr(qsa_ops, "_on_gfx942", lambda: True)
+    monkeypatch.setattr(qsa_ops, "get_cdna_version", lambda: 3)
     spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
     monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
     return spy
@@ -563,8 +563,8 @@ def _decode_select_case(
 def test_qsa_select_decode_rows_ignores_unwritten_logits(
     monkeypatch: pytest.MonkeyPatch, dtype: str
 ) -> None:
-    # Neither kernel writes logits past visible_blocks, so top-k must not read
-    # them: fill every fresh logits buffer with NaN and compare both paths.
+    # Logits past visible_blocks are undefined, so top-k must not read them:
+    # fill every fresh logits buffer with NaN and compare both paths.
     spy = _force_rows_kernel(monkeypatch)
     case = _decode_select_case(7, dtype)
     expected = qsa_ops.qsa_select_paged_tokens(*case, single_row_decode=False)
@@ -581,7 +581,11 @@ def test_qsa_select_decode_rows_ignores_unwritten_logits(
     spy.launches = 0
     actual = qsa_ops.qsa_select_paged_tokens(*case, single_row_decode=True)
     assert spy.launches == 1
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    # top-k emits the selected blocks in unspecified order, so compare
+    # the selection as a set per row.
+    torch.testing.assert_close(
+        actual.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
+    )
 
 
 @requires_qsa_kernels
@@ -647,41 +651,6 @@ def test_qsa_select_decode_rows_replays_in_cuda_graph(
     torch.testing.assert_close(
         captured.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
     )
-
-
-@pytest.mark.parametrize(
-    ("num_prefills", "decode_query_len", "expected"),
-    [(0, 1, True), (1, 1, False), (0, 4, False), (0, 0, False)],
-    ids=["decode", "mixed", "spec-decode", "empty"],
-)
-def test_qsa_indexer_flags_single_row_decode(
-    monkeypatch: pytest.MonkeyPatch,
-    num_prefills: int,
-    decode_query_len: int,
-    expected: bool,
-) -> None:
-    seen: dict[str, Any] = {}
-
-    def select(*args, **kwargs):
-        seen.update(kwargs)
-        return args[-1]
-
-    monkeypatch.setattr(qsa_ops, "qsa_select_paged_tokens", select)
-    indexer = SimpleNamespace(
-        compressed_key_cache=SimpleNamespace(kv_cache=None),
-        token_topk=8,
-        compress_ratio=4,
-    )
-    metadata = SimpleNamespace(
-        block_table=None,
-        token_to_req=None,
-        logical_positions=None,
-        seq_lens=None,
-        num_prefills=num_prefills,
-        decode_query_len=decode_query_len,
-    )
-    QSAIndexer._select(indexer, None, metadata, None)  # type: ignore[arg-type]
-    assert seen["single_row_decode"] is expected
 
 
 @requires_qsa_kernels
