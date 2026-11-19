@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import InitVar, field
+from dataclasses import InitVar, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -195,7 +195,9 @@ class ModelConfig:
     - "glm5_next" uses the "hf" tokenizer and renderer on the Python frontend;
       the Rust frontend renders GLM-5.3 and GLM-5.3-Flash prompts natively,
       and selects this under "auto" for the `glm5_next` model type
-      (GLM-5.3-Flash).
+      (GLM-5.3-Flash). GLM-5.3-Flash multimodal inputs require the Rust
+      frontend; Python supports text-only inference with image and video
+      limits set to zero.
     - "cohere" uses the standard HF tokenizer but renders the chat template
       via the `cohere_melody` library (cmd3 / cmd4 templates) instead of
       Jinja, and surfaces grounded-citation metadata on responses.
@@ -356,7 +358,7 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str | None = Field(default=None, repr=False, exclude=True)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
@@ -449,7 +451,7 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     language_model_only: InitVar[bool] = False
-    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int | bool]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
@@ -591,7 +593,7 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         language_model_only: bool,
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
+        limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
@@ -763,6 +765,21 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Backend pooling classes wrap encoders and decoders, so default per model
+        if (
+            model_info.is_pooling_model
+            and not model_info.supports_multimodal
+            and self.using_transformers_backend()
+        ):
+            from vllm.model_executor.models.transformers.utils import (
+                get_default_seq_pooling_type,
+            )
+
+            seq_pooling_type = get_default_seq_pooling_type(self)
+            self._model_info = replace(
+                model_info, default_seq_pooling_type=seq_pooling_type
+            )
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
@@ -785,7 +802,11 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v4"
             elif arch == "DeepseekV41ForCausalLM":
                 self.tokenizer_mode = "deepseek_v41"
-            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+            elif arch in (
+                "InklingForCausalLM",
+                "InklingForConditionalGeneration",
+                "Inkling2ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
@@ -1425,6 +1446,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
+                "inkling2",
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",

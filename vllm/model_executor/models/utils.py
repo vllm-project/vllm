@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -51,7 +52,7 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
@@ -699,16 +700,41 @@ def init_vllm_registered_model(
     """Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.model_executor.model_loader.utils import (
+        convert_model_cls,
+        initialize_model,
+    )
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
         hf_config = vllm_config.model_config.hf_config
 
+    model_class = None
     if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        # Top-level Qwen2 and Llama use the Transformers backend, but inner Qwen2 and
+        # Llama models stay native so that composite models can keep using their
+        # submodules. `with_hf_config` infers missing architectures from `model_type`
+        if (archs := architectures or hf_config.architectures) is not None:
+            is_qwen2 = "Qwen2ForCausalLM" in archs
+            is_llama = "LlamaForCausalLM" in archs
+        else:
+            is_qwen2 = hf_config.model_type == "qwen2"
+            is_llama = hf_config.model_type == "llama"
+        if is_qwen2:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
 
-    return initialize_model(vllm_config=vllm_config, prefix=prefix)
+            hf_config = copy.deepcopy(hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            architectures = ["Qwen3ForCausalLM"]
+        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        if is_llama:
+            from vllm.model_executor.models.llama import LlamaForCausalLM
+
+            model_class = convert_model_cls(LlamaForCausalLM, vllm_config.model_config)
+
+    return initialize_model(
+        vllm_config=vllm_config, prefix=prefix, model_class=model_class
+    )
 
 
 @overload

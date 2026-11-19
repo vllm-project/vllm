@@ -53,7 +53,7 @@ def kernel_launcher(call_fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WarmupIntRange:
     """Expand integers with range semantics or a custom monotonic progression."""
 
@@ -95,7 +95,7 @@ def _eval_local_exprs(
     return evaluated_values
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _WarmupInputRows:
     """Warmup dispatch inputs expanded in lockstep."""
 
@@ -174,7 +174,7 @@ def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CompileKeyDispatchTrace:
     local_exprs: _LocalExprs
     field_exprs: tuple[tuple[str, ast.AST], ...]
@@ -213,7 +213,7 @@ class _CompileKeyDispatchTrace:
         return compile_key_type(**fields)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _WarmupPredicateTrace:
     local_exprs: _LocalExprs
     return_expr: ast.AST

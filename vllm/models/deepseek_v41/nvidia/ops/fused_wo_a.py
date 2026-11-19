@@ -83,7 +83,7 @@ def _scale(amax: Float32):
 
 
 class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         # T=1..96 uses at most 46 keys per (n_groups, heads_per_group, o_lora_rank).
         tokens_per_tile: int

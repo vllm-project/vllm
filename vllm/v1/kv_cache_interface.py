@@ -165,7 +165,7 @@ class SparseCacheRole(StrEnum):
     INDEXER = "indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManagerConfig:
     """Allocation policy of a layer: the `SingleTypeKVCacheManager` that
     enforces it and that manager's `Params`. Layers whose configs compare
@@ -619,18 +619,18 @@ def is_mamba_prefill_checkpoint_valid(
         return False
     assert checkpoint_alignment > 0
 
-    initial_state_col = (query_start - 1) // mamba_block_size
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        # A mid-block query may export into its first column (private copy).
+        and checkpoint_col >= query_start // mamba_block_size
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheTensor:
     """A class for specifying how the workers should initialize the KV cache.
 
@@ -659,7 +659,7 @@ class KVCacheGroupRole(StrEnum):
     HISPARSE_INDEXER = "hisparse_indexer"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KVCacheLayerConfig:
     """What one layer needs from the KV cache: the manager that allocates its
     blocks, that manager's policy, and the layer's tensor layout."""
@@ -684,7 +684,7 @@ class KVCacheLayerConfig:
         return blocks * self.spec.page_size_bytes
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheGroup:
     """Represents a group of model layers that share the same KV cache block table.
     These layers are regarded as one layer in the KV cache manager.
