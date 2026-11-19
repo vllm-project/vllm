@@ -204,6 +204,44 @@ def test_triton_replayssm_spec_decode_validates_config(
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "backend", "stochastic_rounding", "error"),
+    [
+        (0, MambaBackendEnum.TRITON, False, None),
+        (2, MambaBackendEnum.TRITON, False, "does not support speculative decoding"),
+        (0, MambaBackendEnum.FLASHINFER, False, "requires --mamba-backend triton"),
+        (0, MambaBackendEnum.TRITON, True, "stochastic-rounding"),
+    ],
+    ids=["stp", "spec-rejected", "flashinfer-rejected", "stochastic-rejected"],
+)
+def test_gdn_replayssm_validates_config(
+    num_speculative_tokens, backend, stochastic_rounding, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="align",
+            replayssm_buffer_len=16,
+        ),
+        num_speculative_tokens=num_speculative_tokens,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="Qwen3_5ForConditionalGeneration",
+            dtype=torch.bfloat16,
+        ),
+        mamba_config=SimpleNamespace(
+            backend=backend, enable_stochastic_rounding=stochastic_rounding
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1, use_ubatching=False),
+        kv_transfer_config=None,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

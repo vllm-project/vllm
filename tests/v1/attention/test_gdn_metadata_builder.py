@@ -18,7 +18,6 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.config.mamba import MambaBackendEnum
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -636,33 +635,6 @@ def test_replayssm_decode_plan_inputs(mamba_cache_mode: str):
     else:
         assert meta.replayssm_seq_lens_d is None
         assert meta.replayssm_align_block_size == 0
-
-
-def test_replayssm_rejects_stochastic_rounding():
-    # The GDN cached kernel has no stochastic rounding; the builder must reject
-    # the combination rather than silently ignore it.
-    builder = _create_replayssm_gdn_builder()
-    vllm_config = builder.vllm_config
-    vllm_config.mamba_config.enable_stochastic_rounding = True
-    with pytest.raises(ValueError, match="stochastic rounding"):
-        GDNAttentionMetadataBuilder(
-            kv_cache_spec=builder.kv_cache_spec,
-            layer_names=["layer.0"],
-            vllm_config=vllm_config,
-            device=DEVICE,
-        )
-
-
-def test_replayssm_rejects_flashinfer_backend():
-    builder = _create_replayssm_gdn_builder()
-    builder.vllm_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    with pytest.raises(ValueError, match="GDN ReplaySSM requires.*triton"):
-        GDNAttentionMetadataBuilder(
-            kv_cache_spec=builder.kv_cache_spec,
-            layer_names=["layer.0"],
-            vllm_config=builder.vllm_config,
-            device=DEVICE,
-        )
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])

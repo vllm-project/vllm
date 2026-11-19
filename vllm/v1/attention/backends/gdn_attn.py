@@ -10,7 +10,6 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
@@ -285,17 +284,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if self.use_replayssm
             else None
         )
-        if self.use_replayssm and vllm_config.mamba_config.enable_stochastic_rounding:
-            # The GDN cached decode kernel does not implement stochastic
-            # rounding yet (planned in the CuteDSL follow-up).
-            raise ValueError(
-                "--use-replayssm with --enable-mamba-cache-stochastic-rounding "
-                "is not supported for GDN models yet; use fp32 SSM state or drop "
-                "stochastic rounding."
-            )
         if self.use_replayssm:
-            if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
-                raise ValueError("GDN ReplaySSM requires --mamba-backend triton")
             # Filled on the GPU each step by plan_replayssm_decode; persistent
             # so full CUDA graphs keep reading the same addresses.
             replayssm_max_bs = max(

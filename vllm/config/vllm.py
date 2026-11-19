@@ -3799,6 +3799,27 @@ class VllmConfig:
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
+        gdn_architectures = (
+            "Qwen3_5ForCausalLM",
+            "Qwen3_5MoeForCausalLM",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+        )
+        if (
+            self.model_config is not None
+            and self.model_config.architecture in gdn_architectures
+        ):
+            if self.num_speculative_tokens > 0:
+                raise ValueError(
+                    "GDN ReplaySSM does not support speculative decoding yet"
+                )
+            if self.mamba_config.backend != MambaBackendEnum.TRITON:
+                raise ValueError("GDN ReplaySSM requires --mamba-backend triton")
+            if self.mamba_config.enable_stochastic_rounding:
+                raise ValueError(
+                    "GDN ReplaySSM does not support "
+                    "--enable-mamba-cache-stochastic-rounding"
+                )
         if (
             self.mamba_config.backend == MambaBackendEnum.FLASHINFER
             and self.cache_config.replayssm_buffer_len > 16
