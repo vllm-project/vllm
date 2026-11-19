@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -20,6 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import NgramHashState
+from vllm.models.hy_v4_flash.nvidia.engram_ops import gated_update, lookup_norm
 from vllm.models.qwen4_exp.common.ngram_embedding import (
     _lookup_ple_embedding_from_pinned_kernel,
 )
@@ -335,21 +337,31 @@ class FlashEmbedding(nn.Module):
         )
 
     def forward(self, hashes):
+        """Returns the local `[T, heads, dim]` rows and their FP8 row scales."""
         indices = hashes[:, self.head_start : self.head_end].long().contiguous()
         shape = (*indices.shape, self.dim)
         rows = torch.empty(
             shape, dtype=self.embedding.weight.dtype, device=hashes.device
         )
-        if indices.numel() == 0:
-            return rows.float()
-        self._lookup(self.embedding.weight, indices, rows)
+        scales = None
         if self.fp8:
             scales = torch.empty(
                 indices.shape, dtype=torch.bfloat16, device=hashes.device
             )
+        if indices.numel() == 0:
+            return rows, scales
+        self._lookup(self.embedding.weight, indices, rows)
+        if scales is not None:
             self._lookup(self.embedding.weight_scale_inv, indices, scales, scale=True)
-            return rows.float() * scales.float().unsqueeze(-1)
-        return rows.float()
+        return rows, scales
+
+
+def _stack_parameters(modules, name="weight"):
+    """Re-point `name` of each module at a row of one stacked tensor."""
+    stacked = torch.stack([getattr(module, name).data for module in modules])
+    for module, row in zip(modules, stacked):
+        setattr(module, name, nn.Parameter(row, requires_grad=False))
+    return stacked
 
 
 class FlashEngram(nn.Module):
@@ -400,6 +412,18 @@ class FlashEngram(nn.Module):
         self.unified_per_hc_scales = nn.ParameterList(
             [nn.Parameter(torch.empty(self.hidden_size)) for _ in range(self.hc_mult)]
         )
+        # The fused kernels read each family as one stacked tensor; the
+        # per-module parameters are views into it, so loading is unchanged.
+        projections = [*self.key_projs, self.value_proj]
+        self.proj_weight = _stack_parameters(projections, "weight")
+        self.proj_bias = _stack_parameters(projections, "bias")
+        self.lookup_norm_weight = _stack_parameters(self.lookup_per_head_norms)
+        self.key_norm_weight = _stack_parameters(self.norm_key)
+        self.query_norm_weight = _stack_parameters(self.norm_query)
+        self.hc_scale_weight = torch.stack(list(self.unified_per_hc_scales))
+        self.unified_per_hc_scales = nn.ParameterList(
+            [nn.Parameter(row) for row in self.hc_scale_weight]
+        )
         self.total_width = len(sizes) * layout.head_dim
         self.start = self.multi_head_embedding.head_start * layout.head_dim
         self.stop = self.multi_head_embedding.head_end * layout.head_dim
@@ -446,41 +470,24 @@ class FlashEngram(nn.Module):
         )
 
     def forward(self, hidden, hashes):
-        rows = self.multi_head_embedding(hashes)
-        eps = torch.finfo(torch.float32).eps
-        gamma = torch.stack(
-            [norm.weight for norm in self.lookup_per_head_norms]
-        ).float()
         local = self.multi_head_embedding
-        local_hashes = hashes[:, local.head_start : local.head_end]
-        x = rows.masked_fill(local_hashes.unsqueeze(-1) < 0, 0)
-        x = (x * (x.square().mean(-1, keepdim=True) + eps).rsqrt() * gamma).to(
-            hidden.dtype
+        rows, scales = local(hashes)
+        x = lookup_norm(
+            rows,
+            scales,
+            hashes[:, local.head_start : local.head_end],
+            self.lookup_norm_weight,
+            hidden.dtype,
         )
-        x = x.flatten(1)
-        gates = []
-        for channel in range(self.hc_mult):
-            key = self.key_projs[channel](x)
-            if local.tp_size > 1:
-                key = tensor_model_parallel_all_reduce(key)
-            gate = (
-                self.norm_key[channel](key)
-                * self.norm_query[channel](hidden[:, channel])
-            ).sum(-1)
-            gate = gate * self.hidden_size**-0.5
-            gates.append((gate.abs().clamp_min(1e-6).sqrt() * gate.sign()).sigmoid())
-        gate = torch.stack(gates, dim=1)
-        value = self.value_proj(x)
+        proj = F.linear(x, self.proj_weight.flatten(0, 1), self.proj_bias.flatten())
         if local.tp_size > 1:
-            value = tensor_model_parallel_all_reduce(value)
-        value = value.float()
-        signal = (
-            self.unified_pre_gamma.float()
-            * value
-            * (value.square().mean(-1, keepdim=True) + eps).rsqrt()
+            proj = tensor_model_parallel_all_reduce(proj)
+        return gated_update(
+            hidden,
+            proj,
+            hashes,
+            self.key_norm_weight,
+            self.query_norm_weight,
+            self.unified_pre_gamma,
+            self.hc_scale_weight,
         )
-        scales = torch.stack(list(self.unified_per_hc_scales)).float()
-        result = ((gate.float().unsqueeze(-1) + scales) * signal.unsqueeze(1)).to(
-            hidden.dtype
-        )
-        return hidden + result.masked_fill((hashes < 0).all(-1)[:, None, None], 0)
