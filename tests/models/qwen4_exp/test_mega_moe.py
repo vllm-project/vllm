@@ -29,13 +29,18 @@ from vllm.models.qwen4_exp.nvidia.mega_moe import (
     Qwen4ExpMegaMoEExperts,
     mega_moe_expert_formats,
 )
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.deep_gemm import _import_deep_gemm, is_deep_gemm_supported
 
 HIDDEN, INTER = 512, 256
 pytestmark = pytest.mark.skipif(
     not is_deep_gemm_supported(), reason="Requires DeepGEMM"
 )
-dg_math = pytest.importorskip("vllm.third_party.deep_gemm.utils.math")
+deep_gemm = _import_deep_gemm()
+dg_math = pytest.importorskip(
+    f"{deep_gemm.__name__}.utils.math"
+    if deep_gemm is not None
+    else "vllm.third_party.deep_gemm.utils.math"
+)
 CASTS = {
     "mxfp8": dg_math.per_token_cast_to_fp8,
     "mxfp4": dg_math.per_token_cast_to_fp4,
@@ -144,7 +149,7 @@ def any_device_mega_moe(monkeypatch):
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
-        lambda *args: None,
+        lambda *args: args[-1],
     )
 
 

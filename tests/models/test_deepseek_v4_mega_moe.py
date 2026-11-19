@@ -7,7 +7,12 @@ import pytest
 import torch
 from transformers import DeepseekV4Config
 
+from tests.models.utils import check_logprobs_close
+from tests.utils import multi_gpu_test
+from vllm import SamplingParams
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_MXFP4,
+    MEGA_MOE_MXFP4_SM90,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
 )
@@ -29,6 +34,7 @@ from vllm.models.deepseek_v41.nvidia.dspark import (
 from vllm.models.deepseek_v41.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
@@ -45,12 +51,23 @@ requires_mega_moe_gpu = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def skip_mega_moe_support_check(monkeypatch):
-    """Skip the MegaMoE support check; kernels are gated per test."""
+def skip_mega_moe_support_check(monkeypatch, request):
+    """Skip support checks for layout tests, not real model loading."""
+    if "vllm_runner" in request.fixturenames:
+        return
+
+    def format_for_layout(*args):
+        device, weight_format = args[0], args[-1]
+        if weight_format == MEGA_MOE_MXFP4 and current_platform.is_device_capability(
+            90, device_id=device.index or 0
+        ):
+            return MEGA_MOE_MXFP4_SM90
+        return weight_format
+
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
-        lambda *args: None,
+        format_for_layout,
     )
 
 
@@ -482,3 +499,70 @@ def test_dspark_draft_registers_mixture_of_experts(dspark_draft_config, monkeypa
     assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
     assert draft.num_routed_experts == dspark_draft_config.num_routed_experts
     assert draft.num_redundant_experts == 4
+
+
+def _inspect_sm120_mega_moe_backend(model):
+    layers = [layer for layer in model.modules() if isinstance(layer, DeepseekV4MoE)]
+    assert layers
+    for layer in layers:
+        assert isinstance(layer.experts, DeepGemmMegaMoEExperts)
+        assert not layer.use_mega_gate
+        assert not layer.experts.has_fused_shared_experts
+        assert layer.shared_experts is not None
+    return len(layers)
+
+
+@pytest.mark.slow_test
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120),
+    reason="Requires SM120-family GPUs",
+)
+@multi_gpu_test(num_gpus=4)
+def test_sm120_deepseek_v41_mega_moe_generates_with_real_weights(
+    vllm_runner, example_prompts, monkeypatch
+):
+    """The explicit backend loads real weights and preserves generation quality."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = [f"{prompt}\n{prompt}" for prompt in example_prompts]
+    model_name = maybe_model_redirect("deepseek-ai/DeepSeek-V4.1-Flash-1017")
+    outputs = {}
+    for backend in ("deep_gemm_mega_moe", "deep_gemm"):
+        with vllm_runner(
+            model_name,
+            tokenizer_mode="deepseek_v41",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            block_size=64,
+            max_model_len=1024,
+            max_num_batched_tokens=512,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            kv_cache_dtype="fp8",
+            gpu_memory_utilization=0.9,
+            engram_config={"cpu_offload": True},
+            kernel_config={"moe_backend": backend, "enable_jit_warmup": False},
+        ) as runner:
+            if backend == "deep_gemm_mega_moe":
+                assert all(runner.apply_model(_inspect_sm120_mega_moe_backend))
+            results = runner.get_llm().chat(
+                [[{"role": "user", "content": prompt}] for prompt in prompts],
+                SamplingParams(temperature=0.0, max_tokens=32, logprobs=5),
+                chat_template_kwargs={"thinking": False},
+            )
+            outputs[backend] = [
+                (
+                    result.outputs[0].token_ids,
+                    result.outputs[0].text,
+                    result.outputs[0].logprobs,
+                )
+                for result in results
+            ]
+            assert len(outputs[backend]) == len(prompts)
+            assert all(token_ids for token_ids, _, _ in outputs[backend])
+    check_logprobs_close(
+        outputs_0_lst=outputs["deep_gemm"],
+        outputs_1_lst=outputs["deep_gemm_mega_moe"],
+        name_0="deep_gemm",
+        name_1="deep_gemm_mega_moe",
+    )

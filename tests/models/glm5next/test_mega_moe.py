@@ -34,7 +34,7 @@ def sm100_mega_moe_layout(monkeypatch):
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
-        lambda *args: None,
+        lambda *args: args[-1],
     )
 
 
