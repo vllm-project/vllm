@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use xgrammar_structural_tag::format::{Format, TagFormat};
 use xgrammar_structural_tag::tool::function_parameters;
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::output_grammar::{self, OutputGrammarContext};
+use crate::schema::JsonType;
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
 const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
@@ -79,9 +81,15 @@ impl ToolParser for Phi4MiniJsonToolParser {
             .function_tools
             .iter()
             .map(|tool| {
+                // The parser reads arguments only as an object, so free
+                // arguments still have to be one.
+                let arguments = match function_parameters(&tool.function) {
+                    Value::Bool(true) => JsonType::Object.any_schema(),
+                    schema => schema,
+                };
                 TagFormat::new(
                     format!(r#"{{"name": "{}", "arguments": "#, tool.function.name),
-                    Format::json_schema(function_parameters(&tool.function)),
+                    Format::json_schema(arguments),
                     "}",
                 )
             })
@@ -196,7 +204,10 @@ mod tests {
                       "begin": "{\"name\": \"get_weather\", \"arguments\": ",
                       "content": {
                         "type": "json_schema",
-                        "json_schema": true,
+                        "json_schema": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
                         "style": "json",
                         "any_order": false,
                         "max_whitespace_cnt": null,
@@ -209,7 +220,10 @@ mod tests {
                       "begin": "{\"name\": \"add\", \"arguments\": ",
                       "content": {
                         "type": "json_schema",
-                        "json_schema": true,
+                        "json_schema": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
                         "style": "json",
                         "any_order": false,
                         "max_whitespace_cnt": null,
@@ -245,7 +259,10 @@ mod tests {
                       "begin": "{\"name\": \"add\", \"arguments\": ",
                       "content": {
                         "type": "json_schema",
-                        "json_schema": true,
+                        "json_schema": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
                         "style": "json",
                         "any_order": false,
                         "max_whitespace_cnt": null,
@@ -268,6 +285,15 @@ mod tests {
         assert_ne!(
             build(ToolChoice::required(), false),
             build(ToolChoice::required(), true)
+        );
+
+        // A non-strict tool's free arguments must still be an object, the only
+        // shape the parser reads.
+        let required: serde_json::Value =
+            serde_json::from_str(&build(ToolChoice::required(), true).unwrap()).unwrap();
+        assert_eq!(
+            required["elements"][1]["tags"][0]["content"]["json_schema"]["type"],
+            "object"
         );
 
         // `auto` builds no grammar, as before.
