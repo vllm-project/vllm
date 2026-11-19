@@ -28,6 +28,7 @@ from vllm.distributed.parallel_state import (
     TensorMetadata,
     single_pp_stage,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -50,12 +51,12 @@ def all_reduce_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=device) * (r + 1)
         for r in range(tp_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
@@ -76,13 +77,13 @@ def reduce_scatter_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=device) * (r + 1)
         for r in range(tp_size)
     ]
 
@@ -107,7 +108,7 @@ def all_gather_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_dimensions = 3
@@ -117,7 +118,7 @@ def all_gather_test_worker(
         total_size *= s
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
-            torch.arange(total_size, dtype=torch.float32, device="cuda").reshape(
+            torch.arange(total_size, dtype=torch.float32, device=device).reshape(
                 tensor_size
             )
             * (r + 1)
@@ -141,19 +142,19 @@ def broadcast_tensor_dict_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=device),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=device),
     }
 
     if (rank % tp_size) == 0:
@@ -178,20 +179,20 @@ def send_recv_tensor_dict_test_worker(
     distributed_init_port: str,
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=device),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=device),
     }
 
     if not get_pp_group().is_first_rank:
@@ -494,30 +495,22 @@ def test_flashinfer_standalone_workspace_size(
 
 
 @pytest.mark.parametrize(
-    ("node_count", "is_blackwell", "hisparse", "expected"),
+    ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, False, ("mnnvl", True)),
-        (1, True, False, ("mnnvl", True)),
-        (2, False, False, (None, False)),
-        (2, True, False, ("mnnvl", False)),
-        (1, True, True, ("trtllm", False)),
-        (2, True, True, (None, False)),
+        (1, False, ("mnnvl", True)),
+        (1, True, ("mnnvl", True)),
+        (2, False, (None, False)),
+        (2, True, ("mnnvl", False)),
     ],
 )
 def test_flashinfer_auto_backend_uses_group_topology(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     is_blackwell: bool,
-    hisparse: bool,
     expected: tuple[str | None, bool],
 ) -> None:
     monkeypatch.setattr(
         flashinfer_all_reduce.envs, "VLLM_FLASHINFER_ALLREDUCE_BACKEND", "auto"
-    )
-    config = Mock()
-    config.attention_config.hisparse_config = Mock() if hisparse else None
-    monkeypatch.setattr(
-        flashinfer_all_reduce, "get_current_vllm_config_or_none", lambda: config
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: node_count)
     monkeypatch.setattr(
@@ -592,6 +585,24 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
 
     assert communicator.all_gatherv(torch.empty(1)) is output
+
+
+def test_reduce_scatter_falls_back_when_pynccl_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.pynccl_comm = Mock(disabled=True)
+    fallback = Mock(return_value=torch.empty(2))
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.base_device_communicator."
+        "DeviceCommunicatorBase.reduce_scatter",
+        fallback,
+    )
+
+    inp = torch.empty(4)
+    assert communicator.reduce_scatter(inp, 0) is fallback.return_value
+    fallback.assert_called_once_with(inp, 0)
 
 
 @pytest.mark.parametrize(
@@ -816,12 +827,12 @@ def send_recv_test_worker(
     distributed_init_port: str,
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     size = 64
-    test_tensor = torch.arange(64, dtype=torch.float32, device="cuda")
+    test_tensor = torch.arange(64, dtype=torch.float32, device=device)
 
     if not get_pp_group().is_first_rank:
         recv_tensor = get_pp_group().recv(size, dtype=torch.float32)

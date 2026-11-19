@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import (
         WeightCacheDaemon,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedTransport,
     )
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -83,7 +83,7 @@ class FlashInferWarmupCache(WarmupCache):
             current_platform.update_block_size_for_backend(vllm_config)
             runner = build_warmup_runner(
                 vllm_config,
-                daemon.local_rank,
+                daemon.device_index,
                 is_draft=daemon.is_draft,
                 model_config=daemon.model_config,
             )
