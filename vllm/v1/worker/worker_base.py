@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -9,11 +8,7 @@ import torch
 import torch.nn as nn
 
 import vllm.ir
-from vllm.config import (
-    VllmConfig,
-    get_layers_from_vllm_config,
-    set_current_vllm_config,
-)
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
@@ -21,10 +16,8 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.platforms import current_platform
-from vllm.platforms.interface import set_model_attn_backends
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -54,20 +47,6 @@ _BLOCK_SIZE_FIELDS = (
     "mamba_page_size_padded",
     "skip_page_size_padded",
 )
-
-
-def _importable_cls_path(cls: type) -> str:
-    """Import path of `cls`, or of the nearest base class that has one.
-
-    `subclass_attention_backend` and its variants create backend classes at run
-    time that change how the backend runs, not the block sizes it accepts.
-    """
-    base = next(
-        base
-        for base in cls.__mro__
-        if getattr(sys.modules.get(base.__module__), base.__qualname__, None) is base
-    )
-    return f"{base.__module__}.{base.__qualname__}"
 
 
 class CompilationTimes(NamedTuple):
@@ -141,31 +120,18 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def get_attn_backend_cls_paths(self) -> list[str]:
-        """Import paths of the attention backends of this worker's layers,
-        distinct and in layer order."""
-        layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-        paths = [
-            _importable_cls_path(layer.get_attn_backend()) for layer in layers.values()
-        ]
-        return list(dict.fromkeys(paths))
-
-    def update_block_size(self, attn_backend_cls_paths: list[str]) -> dict[str, Any]:
-        """Choose the KV cache block size from the attention backends of every
-        layer of the model, given as import paths in layer order.
-
-        Returns:
-            The cache config fields that the choice sets.
-
-        """
-        backends = [resolve_obj_by_qualname(path) for path in attn_backend_cls_paths]
-        with set_model_attn_backends(backends):
-            current_platform.update_block_size_for_backend(self.vllm_config)
+    def get_block_sizes(self) -> tuple[bool, dict[str, Any]]:
+        """Whether this worker chose the KV cache block sizes from attention
+        layers (`Platform.update_block_size_for_backend`), and the sizes."""
+        has_attention = bool(current_platform._find_non_ssm_backends(self.vllm_config))
         cache_config = self.vllm_config.cache_config
-        return {name: getattr(cache_config, name) for name in _BLOCK_SIZE_FIELDS}
+        sizes = {name: getattr(cache_config, name) for name in _BLOCK_SIZE_FIELDS}
+        return has_attention, sizes
+
+    def set_block_sizes(self, sizes: dict[str, Any]) -> None:
+        """Adopt the KV cache block sizes chosen by other workers."""
+        for name, value in sizes.items():
+            setattr(self.vllm_config.cache_config, name, value)
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""

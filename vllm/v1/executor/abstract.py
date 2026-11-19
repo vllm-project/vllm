@@ -211,21 +211,29 @@ class Executor(ABC):
             )
         return aligned
 
-    def update_block_size(self) -> None:
-        """Have every worker choose the KV cache block size from the attention
-        backends of the layers of all workers, since a pipeline stage holds only
-        some layers. Workers reply in rank order, which follows the layer order."""
-        worker_paths: list[list[str]] = self.collective_rpc(
-            "get_attn_backend_cls_paths"
+    def align_block_sizes(self) -> None:
+        """Give workers without attention layers the KV cache block sizes that
+        the workers with them chose. A pipeline stage holds only some layers,
+        and a stage of a hybrid model without attention layers cannot align the
+        block size to the Mamba page size.
+
+        Raises:
+            RuntimeError: Workers of a hybrid model chose different sizes.
+
+        """
+        replies: list[tuple[bool, dict[str, Any]]] = self.collective_rpc(
+            "get_block_sizes"
         )
-        paths = list(dict.fromkeys(p for worker in worker_paths for p in worker))
-        choices: list[dict[str, Any]] = self.collective_rpc(
-            "update_block_size", args=(paths,)
-        )
-        if any(choice != choices[0] for choice in choices):
-            raise RuntimeError(
-                f"Workers chose different KV cache block sizes: {choices}"
-            )
+        chosen = [sizes for has_attention, sizes in replies if has_attention]
+        if not chosen or all(sizes == chosen[0] for _, sizes in replies):
+            return
+        if any(sizes != chosen[0] for sizes in chosen):
+            if self.vllm_config.model_config.is_hybrid:
+                raise RuntimeError(
+                    f"Workers chose different KV cache block sizes: {chosen}"
+                )
+            return
+        self.collective_rpc("set_block_sizes", args=(chosen[0],))
 
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")

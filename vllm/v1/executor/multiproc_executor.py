@@ -833,6 +833,9 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
+        # Set block size based on the attention backends
+        current_platform.update_block_size_for_backend(vllm_config)
+
         # Initialize message queues after init_device() since multi-node setups
         # (nnodes_within_dp > 1) require distributed groups to be initialized
         self._init_message_queues(input_shm_handle, vllm_config)

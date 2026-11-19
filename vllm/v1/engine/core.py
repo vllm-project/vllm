@@ -169,7 +169,7 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
 
         try:
-            self.model_executor.update_block_size()
+            self.model_executor.align_block_sizes()
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 self._eep_scale_up_before_kv_init()
 
