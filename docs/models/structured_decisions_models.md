@@ -24,6 +24,7 @@ used for classification and routing.
 |-----------------------------------------|---------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
 | `ClefOmniForJointSchema`                | T + I + V                             | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
 | `D3ForSequenceClassification`           | T + I + V                             | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
+| `GlideForSequenceClassification`        | T + I                                 | `GlideStrategy`                | `classify`       | Linear (`score`)  | `fastino/GLiDE-27B`                      |
 | `Gemma4ForConditionalGeneration`        | T + I<sup>+</sup> + V + A<sup>*</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc.            |
 | `Gemma4UnifiedForConditionalGeneration` | T + I<sup>+</sup> + V + A             | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-12B-it`, etc.            |
 | `Lfm2VlForConditionalGeneration`        | T + I<sup>+</sup>                     | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
@@ -199,7 +200,7 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [GLiDE](#glide), images only; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
 
 By default, `/v1/systemone` rejects `chat_template_kwargs.chat_template` with
 HTTP 400. Start the server with `--trust-request-chat-template` to allow
@@ -369,6 +370,35 @@ vllm serve vllm-sr/d3
   1.6 megapixels and videos at 2 fps, at most 32 frames of up to
   0.2 megapixels each, as the checkpoint's runtime does. The media are read
   once and shared by every question of the request.
+- `/classify` and `/pooling` return the raw logits of all 255 codes; only the
+  first codes, one per option, belong to a question.
+
+### GLiDE
+
+[`fastino/GLiDE-27B`](https://huggingface.co/fastino/GLiDE-27B) is a Qwen3.5
+backbone with an answer-code readout, like [Decision 3.0](#decision-30), and
+recurrent depth: two blocks of middle layers run twice inside the forward
+pass. vLLM detects the checkpoint's `decision_config.json` and serves it as a
+classification model.
+
+```bash
+vllm serve fastino/GLiDE-27B
+```
+
+- Each question is one read of the prompt the checkpoint's `glide/prompt.py`
+  writes: the state, the question and one line per option under an answer
+  code, then an assistant turn that stops at the answer's opening bracket. A
+  question's probabilities are the softmax of its options' code logits at the
+  checkpoint's temperature. `confidence` and `usage` follow the definitions on
+  this page.
+- A choice can have up to 255 options. A JSON state is written as JSON text.
+- The full attention layers read the whole prompt in both directions, as the
+  checkpoint declares, so chunked prefill and prefix caching are off.
+- `instructions` returns 400, since the prompt is fixed.
+  `chat_template_kwargs` has no effect.
+- `images` are placed before the state and read at up to 1024 x 1024 pixels,
+  as the checkpoint's runtime does. Videos return 400.
+- The recurrent depth needs `pipeline_parallel_size=1`.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
 

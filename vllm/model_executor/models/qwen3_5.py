@@ -275,6 +275,14 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
+        # Set by GlideForSequenceClassificationConfig.
+        recurrent_depth = getattr(config, "recurrent_depth", None)
+        if recurrent_depth:
+            self.recurrent_blocks = {
+                last: first for first, last in recurrent_depth["blocks"]
+            }
+            self.recurrent_passes = recurrent_depth["passes"]
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
         # shared expert into the extra fused slot only when AITER FSE is both

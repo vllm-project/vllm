@@ -749,6 +749,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         },
         max_model_len=4096,
     ),
+    "GlideForSequenceClassification": _HfExamplesInfo(
+        "fastino/GLiDE-27B", max_model_len=4096
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
     ),

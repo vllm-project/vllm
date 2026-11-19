@@ -1827,6 +1827,58 @@ class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
             )
 
 
+class GlideForSequenceClassificationConfig(D3ForSequenceClassificationConfig):
+    """Apply a GLiDE `decision_config.json`, including its recurrent depth."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        D3ForSequenceClassificationConfig.verify_and_update_model_config(model_config)
+        decision = model_config.hf_config.decision_config
+        if decision.get("loop"):
+            raise ValueError("decision_config.json 'loop' is not supported")
+        midloop = decision.get("midloop")
+        if not midloop:
+            return
+
+        # Only the parameter-free form: damped Euler steps over blocks of
+        # layers, with the layers' own weights.
+        if (
+            midloop.get("strategy", "euler") != "euler"
+            or midloop.get("conv", "A") != "A"
+            or midloop.get("n_gate")
+            or midloop.get("n_lora")
+        ):
+            raise ValueError(f"unsupported decision_config.json midloop {midloop!r}")
+        blocks = sorted(
+            [int(first), int(last)]
+            for first, last in midloop.get("blocks") or [[midloop["a"], midloop["b"]]]
+        )
+        passes = int(midloop.get("passes") or 1)
+        text_config = model_config.hf_text_config
+        ends = [-1, *(last for _, last in blocks)]
+        if (
+            passes < 1
+            or any(first > last for first, last in blocks)
+            or any(first <= end for (first, _), end in zip(blocks, ends))
+            or ends[-1] >= text_config.num_hidden_layers
+        ):
+            raise ValueError(
+                "decision_config.json midloop needs passes >= 1 and disjoint "
+                f"blocks of layers, got {midloop!r}"
+            )
+        if passes > 1:
+            text_config.recurrent_depth = {"blocks": blocks, "passes": passes}
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        if (
+            hasattr(vllm_config.model_config.hf_text_config, "recurrent_depth")
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError("GLiDE's recurrent depth needs pipeline_parallel_size=1")
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1876,6 +1928,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
     "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
+    "GlideForSequenceClassification": GlideForSequenceClassificationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,

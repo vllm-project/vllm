@@ -644,6 +644,18 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 )
             elif getattr(hf_config, "modeling_overrides", None) is not None:
                 hf_config.architectures = ["Qwen3_5ForSlotDecision"]
+            elif model_path and file_or_path_exists(
+                model_path, "decision_config.json", revision
+            ):
+                # GLiDE keeps the generation architecture's name and adds a
+                # code readout described by decision_config.json.
+                decision_config = get_hf_file_to_dict(
+                    "decision_config.json", model_path, revision
+                )
+                prompt_format = (decision_config or {}).get("prompt_format")
+                if isinstance(prompt_format, str) and prompt_format.startswith("glide"):
+                    hf_config.architectures = ["GlideForSequenceClassification"]
+                    hf_config.decision_config = decision_config
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
