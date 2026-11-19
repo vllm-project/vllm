@@ -20,39 +20,38 @@ HIP_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen3.8-27B-FP8 \
     --max-model-len 32768 --max-num-batched-tokens 8192 --max-num-seqs 4
 ```
 
-The RDNA4 path is validated with ROCm 10. CMake builds the HIP libraries for
-the selected `gfx1200` and/or `gfx1201` targets and installs them in the `vllm`
-package.
-The native HIP runtime loads those precompiled libraries and never invokes
-`hipcc`. Long GQA-6 prefill expands the packed prefix once into temporary FP16
-K/V and uses vLLM's existing Triton attention implementation. This path can JIT
-compile standard Triton kernels during warmup; it does not compile HIP source.
-Decode and the native prefill paths use the packaged HIP libraries.
+The RDNA4 path is validated with ROCm 10. CMake compiles the HIP kernels
+for the selected `gfx1200` and/or `gfx1201` targets into vLLM's `_C` extension.
+Python calls cache writes, prefill, decode, and QSA via `torch.ops._C`, as on
+RDNA3. Native prefill takes the packed prefix and the current chunk's
+unquantized K/V as inputs.
 
 RDNA4 currently supports head size 256 with 64 rotary dimensions. This applies
 to dense attention and the QSA path. Other head-size/RoPE combinations are
-rejected during geometry validation. The precompiled decode library provides
+rejected during geometry validation. The specialized HIP kernels provide
 cache storage and a small fixed set of scalar and WMMA kernels for decode,
 verification, and prefill. This includes grouped-prefill fast paths for GQA
-groups 1 and 2 and GQA-6 reuse paths for all three cache formats. The geometry library provides the
-matrix kernels for the remaining multi-query prefill cases plus sparse QSA
-attention. Both use the existing Octave wire formats and causal metadata. QSA
-supports tagged exact K/V for selected tokens among the first four and last 64;
-a missing tag uses packed KV.
+groups 1 and 2 and GQA-6 reuse paths for all three cache formats. The geometry
+HIP kernels handle the remaining multi-query prefill cases and sparse QSA
+attention. Both use the existing Octave wire formats and causal
+metadata. QSA supports tagged exact K/V for selected tokens among the first
+four and last 64. A missing tag uses packed KV.
 
 To limit the number of compiled variants, scalar kernels also handle unsafe
 decode and matrix rows, and geometry prefill selects request tiling at runtime.
 The grouped-prefill guard remains separate to preserve ragged-request
 performance. These choices retain the tuned WMMA paths and numerical checks.
 
-For long GQA-6 chunks, prefix expansion, query conversion and the temporary
-page table share the existing split workspace, capped at 2 GiB. The scheduler's
-host maximum sequence length bounds allocation; no device length is copied to
-the CPU. A chunk that exceeds this workspace uses native attention. Temporary
-FP16 data does not replace the persistent packed KV cache. The raw current
-chunk stays unquantized, and a native FP32 repair pass handles unsafe or
-nonfinite rows. The expanded path uses FP16 operands with FP32 accumulation,
-not FP8 WMMA.
+The scheduler's host maximum sequence length guides prefill split selection
+within the 2 GiB split workspace budget. Native kernels resolve live lengths
+on the device.
+
+For sufficiently large GQA-6 prefill batches, one HIP kernel expands the prefix
+and lays out the new K/V in temporary FP16 buffers. A second HIP kernel uses
+WMMA with FP32 softmax and accumulation. The existing packed FP32 kernel
+recomputes unsafe output rows. The expansion uses the same reserved workspace
+as split attention. Prefill uses the packed path when the temporary buffers
+would exceed that reservation.
 
 Sliding windows, ALiBi, attention sinks, soft caps, unequal QK/V dimensions
 and fused output quantization are unsupported. Runtime validation was on
@@ -71,10 +70,8 @@ is bounded by compute. The existing options on ROCm were:
 
 Octave KV targets the same bit budget as TurboQuant with HIP kernels written for
 the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA as a contract slot),
-reading the packed cache directly in decode and native prefill, and with
+reading the packed cache directly in decode, and with
 multi-token verification (MTP / speculative decoding) as a first-class case.
-RDNA4 long GQA-6 prefill can expand the prefix into bounded temporary FP16
-storage as described above.
 
 ## Supported models on RDNA3/CDNA3
 

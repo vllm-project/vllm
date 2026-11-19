@@ -408,27 +408,20 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     endif()
   endforeach()
   if(VLLM_OCTAVE_RDNA4_ARCHES)
-    add_library(octave_rdna4_geometry SHARED
-      "csrc/attention/octave_rdna4/geometry.hip")
-    add_library(octave_rdna4_decode SHARED
-      "csrc/attention/octave_rdna4/decode.hip")
-    foreach(_target IN ITEMS octave_rdna4_geometry octave_rdna4_decode)
-      set_target_properties(${_target} PROPERTIES
-        CXX_STANDARD 20
-        CXX_STANDARD_REQUIRED ON
-        HIP_STANDARD 20
-        HIP_STANDARD_REQUIRED ON
-        HIP_ARCHITECTURES "${VLLM_OCTAVE_RDNA4_ARCHES}"
-        PREFIX "")
-    endforeach()
-    set_target_properties(octave_rdna4_geometry PROPERTIES
-      OUTPUT_NAME "_octave_rdna4_geometry")
-    set_target_properties(octave_rdna4_decode PROPERTIES
-      OUTPUT_NAME "_octave_rdna4_decode")
-    install(TARGETS octave_rdna4_geometry octave_rdna4_decode
-      LIBRARY DESTINATION vllm COMPONENT _rocm_C)
+    # Compile the native HIP kernels only for RDNA4 in multi-arch builds.
+    add_library(octave_rdna4 OBJECT
+      "csrc/attention/octave_rdna4/geometry.hip"
+      "csrc/attention/octave_rdna4/decode.hip"
+      "csrc/attention/octave_rdna4/prefill.hip")
+    set_target_properties(octave_rdna4 PROPERTIES
+      HIP_STANDARD 20
+      HIP_STANDARD_REQUIRED ON
+      HIP_ARCHITECTURES "${VLLM_OCTAVE_RDNA4_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_sources(_C PRIVATE "csrc/attention/octave_rdna4/torch_bindings.cpp")
+    target_link_libraries(_C PRIVATE octave_rdna4)
     message(STATUS
-      "Building precompiled RDNA4 Octave libraries for ${VLLM_OCTAVE_RDNA4_ARCHES}")
+      "Building RDNA4 Octave ops for ${VLLM_OCTAVE_RDNA4_ARCHES}")
   endif()
 endif() # _C HIP endif
 
@@ -1835,9 +1828,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
-  if(TARGET octave_rdna4_geometry)
-    add_dependencies(_rocm_C octave_rdna4_geometry octave_rdna4_decode)
-  endif()
   
   if(TARGET _rocm_C_skinny)
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)

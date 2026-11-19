@@ -398,21 +398,6 @@ class cmake_build_ext(build_ext):
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
-    def get_outputs(self):
-        outputs = super().get_outputs()
-        if _is_hip():
-            package_dir = (
-                Path("vllm") if self.inplace else Path(self.build_lib) / "vllm"
-            )
-            for library in (
-                "_octave_rdna4_geometry.so",
-                "_octave_rdna4_decode.so",
-            ):
-                output = package_dir / library
-                if output.is_file() and str(output) not in outputs:
-                    outputs.append(str(output))
-        return outputs
-
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
@@ -450,28 +435,6 @@ class cmake_build_ext(build_ext):
                 "vllm/third_party/triton_kernels",
                 dirs_exist_ok=True,
             )
-
-        if _is_hip() and self.inplace:
-            # The RDNA4 Octave DSOs are package data installed by CMake rather
-            # than setuptools extensions. Copy them into the source package for
-            # editable installs, where imports resolve from this checkout.
-            for library in (
-                "_octave_rdna4_geometry.so",
-                "_octave_rdna4_decode.so",
-            ):
-                built_library = Path(self.build_lib) / "vllm" / library
-                if not built_library.is_file():
-                    continue
-                source_library = Path("vllm") / library
-                if built_library.resolve() == source_library.resolve():
-                    continue
-                source_library.parent.mkdir(parents=True, exist_ok=True)
-                # A stale symlink must not redirect the copy into an unrelated
-                # build artifact (and does not represent the editable package).
-                if source_library.is_symlink():
-                    source_library.unlink()
-                print(f"Copying {built_library} to {source_library}")
-                self.copy_file(str(built_library), str(source_library))
 
         if _is_cuda():
             # copy vendored deep_gemm package from build_lib to source tree
@@ -1168,8 +1131,6 @@ class precompiled_wheel_utils:
                             "vllm/fs_io_C.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
-                            "vllm/_octave_rdna4_geometry.so",
-                            "vllm/_octave_rdna4_decode.so",
                         }
                     )
                 if extract_rust_frontend:
@@ -1660,8 +1621,6 @@ if _build_custom_ops():
 package_data = {
     "vllm": [
         "py.typed",
-        "_octave_rdna4_geometry.so",
-        "_octave_rdna4_decode.so",
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         # Tuned kernel configs must be explicit: the setuptools-scm git

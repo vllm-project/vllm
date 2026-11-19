@@ -369,7 +369,7 @@ def test_rdna4_geometry_rejects_unsupported_head_and_rope(head_dim, rope_dim):
         ("octave_k3v3_compact", [256], 8, False),
     ]
     + (
-        [(fmt, [129, 1, 517], 6, True) for fmt in CACHE_DTYPES]
+        [(cache_dtype, [129, 1, 517], 6, True) for cache_dtype in CACHE_DTYPES]
         if ARCH == "rdna4"
         else []
     ),
@@ -405,6 +405,8 @@ def test_prefill_matches_reference(
     qsl = torch.tensor([0, *query_lens], device=dev).cumsum(0).int()
     total = int(qsl[-1])
     q = (torch.randn(total, hkv * group, HEAD, device=dev) * 2).to(dtype)
+    if expanded:
+        q[0, 0].fill_(1000)  # Exercise the packed FP32 repair.
     k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
     v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
     out = _prefill(
@@ -441,6 +443,8 @@ def test_prefill_matches_reference(
         ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
     # Only attention arithmetic and output rounding differ.
     assert _rel(out, ref) < (1e-3 if expanded else 2e-2)
+    if expanded:
+        assert _rel(out[0, 0], ref[0, 0]) < 1e-3
 
 
 def _decode(
@@ -510,18 +514,10 @@ def _prefill(
     if kernel is not None:
         cache_dtype = _cache_dtype(fmt)
         if expanded:
-            blocks = (block_table.shape[1] * cache.shape[2] + 127) // 128
-            requests, heads = block_table.shape[0], cache.shape[1]
-            shape = (requests * blocks, 128, heads, HEAD)
+            capacity = math.ceil(block_table.shape[1] * cache.shape[2] / 32) * 32
+            shape = (block_table.shape[0], cache.shape[1], capacity, HEAD)
             key_tmp = torch.empty(shape, device=q.device, dtype=torch.float16)
-            value_tmp = torch.empty_like(key_tmp)
-            query_tmp = torch.empty_like(q, dtype=torch.float16)
-            table_tmp = torch.empty(
-                requests, blocks, device=q.device, dtype=torch.int32
-            )
-            out = torch.empty_like(q, dtype=torch.float32)
-
-            kernel.prefill_expanded(
+            return kernel.prefill_expanded(
                 q,
                 k,
                 v,
@@ -532,14 +528,11 @@ def _prefill(
                 signs,
                 cache_dtype,
                 key_tmp=key_tmp,
-                value_tmp=value_tmp,
-                query_tmp=query_tmp,
-                table_tmp=table_tmp,
-                out=out,
-                max_query_len=q.shape[0],
+                value_tmp=torch.empty_like(key_tmp),
+                query_tmp=torch.empty_like(q, dtype=torch.float16),
+                out=torch.empty_like(q, dtype=torch.float32),
                 scale=1 / 16,
             )
-            return out
         return kernel.prefill(
             q,
             k,
@@ -625,13 +618,12 @@ def test_rdna4_concurrent_decode_has_per_call_state(kernel):
         assert _rel(actual, expected) < 2e-2
 
 
-@pytest.mark.skipif(ARCH != "rdna4", reason="precompiled loader targets RDNA4")
+@pytest.mark.skipif(ARCH != "rdna4", reason="RDNA4-only Octave ops")
 def test_rdna4_precompiled_runtime_never_invokes_a_compiler(monkeypatch):
     """Native store/attention/prefill and replay work with compilers disabled."""
     import subprocess
 
     from vllm.v1.attention.ops.rocm_octave_rdna4 import TunedHipOctave
-    from vllm.v1.attention.ops.rocm_octave_rdna4 import hip as octave_hip
 
     def compiler_forbidden(*args, **kwargs):
         raise AssertionError("runtime Octave must not launch a compiler")
@@ -639,8 +631,6 @@ def test_rdna4_precompiled_runtime_never_invokes_a_compiler(monkeypatch):
     monkeypatch.setattr(subprocess, "run", compiler_forbidden)
     monkeypatch.setattr(subprocess, "Popen", compiler_forbidden)
     arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-    for kind in ("geometry", "decode"):
-        assert octave_hip.load_library(kind, arch).is_file()
     runtime = TunedHipOctave(HEAD, ROPE, arch)
 
     torch.manual_seed(12)

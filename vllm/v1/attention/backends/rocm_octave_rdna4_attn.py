@@ -3,12 +3,13 @@
 """Independent gfx1200/gfx1201 Octave kernels and vLLM serving adapter."""
 
 from functools import lru_cache
-from math import prod
+from math import isfinite, prod
 
 import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionImpl,
     AttentionLayer,
@@ -34,17 +35,20 @@ def _engine(head_size: int, rope_dim: int, arch: str) -> TunedHipOctave:
     return TunedHipOctave(head_size, rope_dim, arch)
 
 
+def _scratch_workspace_bytes(config: VllmConfig, head_size: int) -> int:
+    tokens = config.scheduler_config.max_num_batched_tokens
+    heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    return min(DEFAULT_WORKSPACE_BYTES, tokens * heads * 256 * (head_size + 2) * 4)
+
+
 def _reserve_workspace(config: VllmConfig, head_size: int) -> None:
     if not is_workspace_manager_initialized():
         return
     tokens = config.scheduler_config.max_num_batched_tokens
     heads = config.model_config.get_num_attention_heads(config.parallel_config)
-    scratch_bytes = min(
-        DEFAULT_WORKSPACE_BYTES, tokens * heads * 256 * (head_size + 2) * 4
-    )
     current_workspace_manager().get_simultaneous(
         ((tokens, heads, head_size), torch.float32),
-        ((scratch_bytes // 4,), torch.float32),
+        ((_scratch_workspace_bytes(config, head_size) // 4,), torch.float32),
     )
 
 
@@ -89,6 +93,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.config = get_current_vllm_config()
+        self._scratch_workspace_bytes = _scratch_workspace_bytes(self.config, head_size)
         rope_dim = sq.rope_dim_from_hf_config(
             self.config.model_config.hf_text_config, head_size
         )
@@ -150,101 +155,84 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
         key=None,
         value=None,
         context_capacity=None,
-        max_query_len=None,
     ) -> None:
+        q_shape = tuple(query.shape)
+        kv_shape = None
         if (
             key is not None
-            and self.num_heads // self.num_kv_heads == 6
+            and self.num_heads == 6 * self.num_kv_heads
             and query.shape[0] >= 256
             and context_capacity is not None
             and context_capacity > 0
-            and max_query_len is not None
-            and max_query_len > 32
+            and table.shape[1] > 0
+            and self.scale > 0
+            and isfinite(self.scale)
         ):
-            capacity = min(context_capacity, table.shape[1] * cache.shape[2])
-            blocks = (capacity + 127) // 128
-            dense_shape = (
-                table.shape[0] * blocks,
-                128,
-                self.num_kv_heads,
-                self.head_size,
+            capacity = round_up(
+                min(context_capacity, table.shape[1] * cache.shape[2]), 32
             )
-            temporary = (
-                (dense_shape, torch.float16),
-                (dense_shape, torch.float16),
-                (tuple(query.shape), torch.float16),
-                ((table.shape[0], blocks), torch.int32),
-            )
-            temporary_bytes = sum(
-                ((prod(shape) * dtype.itemsize + 255) // 256) * 256
-                for shape, dtype in temporary
-            )
-            if temporary_bytes <= DEFAULT_WORKSPACE_BYTES:
-                logger.info_once(
-                    "ROCM_OCTAVE (RDNA4) prefill uses temporary FP16 KV and "
-                    "Triton attention within the existing bounded workspace"
-                )
-                shapes = ((tuple(query.shape), torch.float32), *temporary)
-                if is_workspace_manager_initialized():
-                    buffers = current_workspace_manager().get_simultaneous(*shapes)
-                else:
-                    buffers = [
-                        torch.empty(shape, dtype=dtype, device=query.device)
-                        for shape, dtype in shapes
-                    ]
-                fp32, key_tmp, value_tmp, query_tmp, table_tmp = buffers
-                self.engine.prefill_expanded(
-                    query,
-                    key,
-                    value,
-                    cache,
-                    table,
-                    mapping,
-                    lengths,
-                    self._signs(query.device),
-                    self.kv_cache_dtype,
-                    key_tmp=key_tmp,
-                    value_tmp=value_tmp,
-                    query_tmp=query_tmp,
-                    table_tmp=table_tmp,
-                    out=fp32,
-                    max_query_len=max_query_len,
-                    scale=self.scale,
-                )
-                out.copy_(fp32)
-                out.record_stream(torch.cuda.current_stream(query.device))
-                return
-        splits = self.engine.suggest_splits(
-            query,
-            cache,
-            table,
-            self.kv_cache_dtype,
-            prefill=key is not None,
-            context_capacity=context_capacity if key is not None else None,
-        )
-        shape = (*query.shape[:2], splits, self.head_size + 2)
-        scratch_shape = shape if splits > 1 else (0,)
-        if is_workspace_manager_initialized():
-            fp32, scratch = current_workspace_manager().get_simultaneous(
-                (tuple(query.shape), torch.float32), (scratch_shape, torch.float32)
+            expanded = (table.shape[0], self.num_kv_heads, capacity, self.head_size)
+            # The FP16 views are already aligned by their 256-element rows.
+            if (
+                2 * prod(expanded) + query.numel()
+            ) * 2 <= self._scratch_workspace_bytes:
+                kv_shape = expanded
+        shapes: tuple[tuple[tuple[int, ...], torch.dtype], ...]
+        if kv_shape is not None:
+            shapes = (
+                (q_shape, torch.float32),
+                (kv_shape, torch.float16),
+                (kv_shape, torch.float16),
+                (q_shape, torch.float16),
             )
         else:
-            fp32 = torch.empty(query.shape, device=query.device, dtype=torch.float32)
-            scratch = torch.empty(
-                scratch_shape, device=query.device, dtype=torch.float32
+            splits = self.engine.suggest_splits(
+                query,
+                cache,
+                table,
+                self.kv_cache_dtype,
+                prefill=key is not None,
+                context_capacity=context_capacity if key is not None else None,
             )
+            scratch_shape = (*query.shape[:2], splits, self.head_size + 2)
+            shapes = (
+                (q_shape, torch.float32),
+                (scratch_shape if splits > 1 else (0,), torch.float32),
+            )
+        if is_workspace_manager_initialized():
+            buffers = current_workspace_manager().get_simultaneous(*shapes)
+        else:
+            buffers = [
+                torch.empty(shape, device=query.device, dtype=dtype)
+                for shape, dtype in shapes
+            ]
+        fp32 = buffers[0]
         signs = self._signs(query.device)
         args = (cache, table, mapping, lengths, signs, self.kv_cache_dtype)
-        options = dict(
-            scale=self.scale,
-            splits=splits,
-            out=fp32,
-            scratch=scratch if splits > 1 else None,
-        )
-        if key is None:
-            self.engine.decode(query, *args, **options)
+        if kv_shape is not None:
+            logger.info_once("ROCM_OCTAVE (RDNA4) prefill uses native FP16 WMMA")
+            self.engine.prefill_expanded(
+                query,
+                key,
+                value,
+                *args,
+                key_tmp=buffers[1],
+                value_tmp=buffers[2],
+                query_tmp=buffers[3],
+                out=fp32,
+                scale=self.scale,
+            )
         else:
-            self.engine.prefill(query, key, value, *args, **options)
+            options = dict(
+                scale=self.scale,
+                splits=splits,
+                out=fp32,
+                scratch=buffers[1] if splits > 1 else None,
+            )
+            if key is None:
+                self.engine.decode(query, *args, **options)
+            else:
+                self.engine.prefill(query, key, value, *args, **options)
         out.copy_(fp32)
         stream = torch.cuda.current_stream(query.device)
         for tensor in (
@@ -255,8 +243,7 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
             table,
             mapping,
             lengths,
-            fp32,
-            scratch,
+            *buffers,
         ):
             if tensor is not None:
                 tensor.record_stream(stream)
@@ -309,6 +296,5 @@ class RocmOctaveRdna4AttentionImpl(AttentionImpl):
                 key=key[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
                 value=value[ndt:n].view(n - ndt, self.num_kv_heads, self.head_size),
                 context_capacity=md.max_seq_len,
-                max_query_len=md.max_query_len,
             )
         return output

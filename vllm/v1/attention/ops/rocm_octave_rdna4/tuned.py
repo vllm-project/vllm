@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dense attention dispatch for RDNA4 Octave."""
 
+import torch
+
 from .geometry import OctaveGeometry
-from .hip import HipOctave, get_geometry_engine, load_library
-from .prefill import ExpandedPrefill
+from .hip import HipOctave
 from .splits import recommend_splits
 
 
@@ -12,13 +13,7 @@ class TunedHipOctave(HipOctave):
     """Choose precompiled scalar/decode or matrix kernels for D=256/R=64."""
 
     def __init__(self, head_dim: int, rope_dim: int, arch: str):
-        geometry = OctaveGeometry(head_dim, rope_dim)
-        super().__init__(load_library("decode", arch), geometry, sparse=False)
-        self._geometry_backend = get_geometry_engine(head_dim, rope_dim, arch)
-        self._expanded_prefill = ExpandedPrefill(self)
-
-    def prefill_expanded(self, *args, **kwargs):
-        return self._expanded_prefill(*args, **kwargs)
+        super().__init__(OctaveGeometry(head_dim, rope_dim), arch, geometry_only=False)
 
     def _use_geometry(self, query, cache, table, prefill):
         heads, kv_heads = query.shape[1], cache.shape[1]
@@ -114,41 +109,39 @@ class TunedHipOctave(HipOctave):
             specialized_fast=not self._use_geometry(query, cache, block_table, prefill),
         )
 
-    def _attention(
+    def prefill_expanded(
         self,
         query,
+        key,
+        value,
         cache,
         table,
-        mapping,
+        starts,
         lengths,
         signs,
         cache_dtype,
-        scale,
-        splits,
-        out,
-        scratch,
         *,
-        key=None,
-        value=None,
+        key_tmp,
+        value_tmp,
+        query_tmp,
+        out,
+        scale,
     ):
-        engine = (
-            self._geometry_backend
-            if self._use_geometry(query, cache, table, key is not None)
-            else self
-        )
-        attention = super()._attention if engine is self else engine._attention
-        return attention(
+        """Expand the packed prefix into FP16 workspace for HIP WMMA prefill."""
+        torch.ops._C.octave_rdna4_prefill_expanded(
+            out,
             query,
+            key,
+            value,
             cache,
             table,
-            mapping,
+            starts,
             lengths,
+            key_tmp,
+            value_tmp,
+            query_tmp,
             signs,
-            cache_dtype,
             scale,
-            splits,
-            out,
-            scratch,
-            key=key,
-            value=value,
+            self.layout(cache_dtype).kernel_code,
         )
+        return out

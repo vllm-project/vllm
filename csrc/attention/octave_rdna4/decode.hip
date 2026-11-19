@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "kernels.h"
 #include "split_merge.cuh"
 
 __device__ __forceinline__ uint32_t octave_xor_var(uint32_t value, int mask) {
@@ -60,6 +61,9 @@ __device__ __forceinline__ uint32_t octave_index(uint32_t value, int index,
 
 namespace {
 
+using octave_rdna4::Activation;
+using octave_rdna4::PagedCache;
+
 constexpr int kHead = 256;
 constexpr int kRope = 64;
 constexpr int kWave = 32;
@@ -95,26 +99,6 @@ __device__ __forceinline__ int active_decode_splits(int length, int maximum,
 #if defined(__HIP_DEVICE_COMPILE__) && !defined(__GFX12__)
   #error "Octave RDNA4 requires a gfx12 target"
 #endif
-
-struct Activation {
-  const void* data;
-  int64_t token_stride;
-  int64_t head_stride;
-};
-
-struct PagedCache {
-  uint8_t* data;
-  int64_t page_stride;
-  int64_t head_stride;
-  int64_t token_stride;
-  int page_size;
-  int heads;
-
-  __device__ uint8_t* at(int page, int head, int offset) const {
-    return data + page * page_stride + head * head_stride +
-           offset * token_stride;
-  }
-};
 
 template <bool Compact, int ValueBits>
 struct Format {
@@ -1564,22 +1548,14 @@ __global__ __launch_bounds__(384) void attention_wmma_fp16_reuse(
   }
 }
 
-// One uniform kernel entrypoint embeds six format/dtype-specialized bodies.
-// The runtime branches are CTA-uniform and retain the typed math exactly.
+// Expand one packed prefix row into unrotated K/V. The current chunk
+// already supplies unquantized K/V in the same coordinates.
 template <typename T, typename F>
-__device__ __forceinline__ void dequantize_prefill_body(
-    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
-    PagedCache cache, const int32_t* table, int64_t table_stride,
-    const int32_t* starts, const int32_t* lengths, int requests,
-    const uint32_t* signs, int capacity, int req, int kv_head, int pos,
-    int lane) {
-  if (pos >= capacity) return;
-  const int chunk_len = starts[req + 1] - starts[req];
-  const int length = lengths[req];
-  const int prefix = length - chunk_len;
-  if (pos >= length) return;
-
-  float k[kLaneValues] = {}, v[kLaneValues] = {};
+__device__ __forceinline__ void expand_prefill_row(
+    float (&k)[kLaneValues], float (&v)[kLaneValues], Activation key,
+    Activation value, PagedCache cache, const int32_t* table,
+    int64_t table_stride, const uint32_t* signs, int req, int kv_head,
+    int pos, int prefix, int chunk_start, int lane) {
   if (pos < prefix) {
     const int page = table[int64_t(req) * table_stride + pos / cache.page_size];
     const auto* slot = cache.at(page, kv_head, pos % cache.page_size);
@@ -1626,45 +1602,78 @@ __device__ __forceinline__ void dequantize_prefill_body(
     hadamard<true>(v, lane);
     flip_signs(v, signs, lane);
   } else {
-    const int token = starts[req] + pos - prefix;
+    const int token = chunk_start + pos - prefix;
     load_activation<T>(k, key, token, kv_head, lane);
     load_activation<T>(v, value, token, kv_head, lane);
   }
+}
 
-  const int64_t row =
-      (int64_t(req) * capacity + pos) * cache.heads + kv_head;
+template <typename T, typename F>
+__device__ __forceinline__ void expand_prefill_tile(
+    _Float16* key_out, _Float16* value_out, _Float16 (&transposed)[kHead][24],
+    Activation key, Activation value, PagedCache cache, const int32_t* table,
+    int64_t table_stride, const int32_t* starts, const int32_t* lengths,
+    int capacity, const uint32_t* signs) {
+  constexpr int Tile = 16;
+  constexpr int Threads = 128;
+  const int req = blockIdx.z, kv_head = blockIdx.y, first = blockIdx.x * Tile;
+  const int tid = threadIdx.x, wave = tid / kWave, lane = tid % kWave;
+  const int chunk_start = starts[req], chunk_end = starts[req + 1];
+  const int length = lengths[req], prefix = length - (chunk_end - chunk_start);
+  // The attention producer reads a full 32-token tile on the last step.
+  if (chunk_end == chunk_start || prefix < 0 || length > capacity ||
+      first >= ((length + 31) / 32) * 32)
+    return;
+
+  const int64_t head_offset =
+      (int64_t(req) * cache.heads + kv_head) * capacity * kHead;
 #pragma unroll
-  for (int i = 0; i < kLaneValues; ++i) {
-    const int dim = dim_at(lane, i);
-    key_out[row * kHead + dim] = (_Float16)k[i];
-    value_out[row * kHead + dim] = (_Float16)v[i];
+  for (int t = wave; t < Tile; t += Threads / kWave) {
+    float k[kLaneValues] = {}, v[kLaneValues] = {};
+    const int pos = first + t;
+    if (pos < length)
+      expand_prefill_row<T, F>(k, v, key, value, cache, table, table_stride,
+                               signs, req, kv_head, pos, prefix, chunk_start,
+                               lane);
+#pragma unroll
+    for (int i = 0; i < kLaneValues; ++i) {
+      const int dim = dim_at(lane, i);
+      key_out[head_offset + int64_t(pos) * kHead + dim] = (_Float16)k[i];
+      transposed[dim][t] = (_Float16)v[i];
+    }
+  }
+  __syncthreads();
+  // Store V in the vector layout consumed by the attention producer.
+  _Float16* dst = value_out + head_offset + int64_t(first) * kHead;
+#pragma unroll
+  for (int unit = tid; unit < kHead * 2; unit += Threads) {
+    const int dim = unit / 2, key_offset = unit % 2 * 8;
+    *reinterpret_cast<WmmaHalf8*>(dst + unit * 8) =
+        *reinterpret_cast<const WmmaHalf8*>(&transposed[dim][key_offset]);
   }
 }
 
-
-__global__ __launch_bounds__(128) void dequantize_prefill_cache_uniform(
+__global__ __launch_bounds__(128) void expand_prefill(
     _Float16* key_out, _Float16* value_out, Activation key, Activation value,
     PagedCache cache, const int32_t* table, int64_t table_stride,
-    const int32_t* starts, const int32_t* lengths, int requests,
-    const uint32_t* signs, int capacity, int dtype, int format) {
-  const int req = blockIdx.z, kv_head = blockIdx.y;
-  const int wave = threadIdx.x / kWave, lane = threadIdx.x % kWave;
-  const int pos = blockIdx.x * 4 + wave;
-  if (req >= requests) return;
-#define DEQUANT_CASE(T, COMPACT, BITS) \
-  dequantize_prefill_body<T, Format<COMPACT, BITS>>(key_out, value_out, key, value, cache, \
-      table, table_stride, starts, lengths, requests, signs, capacity, req, \
-      kv_head, pos, lane)
+    const int32_t* starts, const int32_t* lengths, int capacity,
+    const uint32_t* signs, int dtype, int format) {
+  __shared__ alignas(16) _Float16 transposed[kHead][24];
+  // Uniform per-workgroup dispatch keeps a single packaged kernel entry.
+#define EXPAND_PREFILL(T, Compact, Bits)                                      \
+  expand_prefill_tile<T, Format<Compact, Bits>>(                              \
+      key_out, value_out, transposed, key, value, cache, table, table_stride,   \
+      starts, lengths, capacity, signs)
   if (dtype == 0) {
-    if (format == 3) DEQUANT_CASE(__half, false, 3);
-    else if (format == 4) DEQUANT_CASE(__half, false, 4);
-    else DEQUANT_CASE(__half, true, 3);
+    if (format == 3) EXPAND_PREFILL(__half, false, 3);
+    else if (format == 4) EXPAND_PREFILL(__half, false, 4);
+    else EXPAND_PREFILL(__half, true, 3);
   } else {
-    if (format == 3) DEQUANT_CASE(hip_bfloat16, false, 3);
-    else if (format == 4) DEQUANT_CASE(hip_bfloat16, false, 4);
-    else DEQUANT_CASE(hip_bfloat16, true, 3);
+    if (format == 3) EXPAND_PREFILL(hip_bfloat16, false, 3);
+    else if (format == 4) EXPAND_PREFILL(hip_bfloat16, false, 4);
+    else EXPAND_PREFILL(hip_bfloat16, true, 3);
   }
-#undef DEQUANT_CASE
+#undef EXPAND_PREFILL
 }
 
 template <bool Prefill, bool CompactRows = false>
@@ -2432,71 +2441,7 @@ __global__ void attention(float* out, float* partials, Activation query,
                           Activation key, Activation value, PagedCache cache,
                           const int32_t* table, int64_t table_stride,
                           const int32_t* map_or_starts, const int32_t* lengths,
-                          int requests, const uint32_t* signs, float scale,
-                          bool repair_only = false) {
-  // FP32 Triton candidates can leave unsafe, non-finite, or tiny rows for
-  // this existing scalar attention path to repair from the original cache.
-  if constexpr (Prefill && Path == DecodePath::Scalar) {
-    if (repair_only) {
-      const int q = blockIdx.x, head = blockIdx.y, lane = threadIdx.x;
-      float query_max = 0.f, output_max = 0.f;
-      bool query_finite = true, output_finite = true;
-#pragma unroll
-      for (int i = 0; i < kLaneValues; ++i) {
-        const float qv = float(static_cast<const T*>(query.data)[
-            int64_t(q) * query.token_stride + int64_t(head) * query.head_stride +
-            dim_at(lane, i)]);
-        const float ov = out[(int64_t(q) * gridDim.y + head) * kHead +
-                             dim_at(lane, i)];
-        query_finite &= __builtin_isfinite(qv);
-        output_finite &= __builtin_isfinite(ov);
-        query_max = fmaxf(query_max, fabsf(qv));
-        output_max = fmaxf(output_max, fabsf(ov));
-      }
-#pragma unroll
-      for (int delta = 1; delta < kWave; delta *= 2) {
-        query_max = fmaxf(query_max, octave_xor<false>(query_max, delta, kWave));
-        output_max = fmaxf(output_max, octave_xor<false>(output_max, delta, kWave));
-      }
-      const bool query_safe = query_max == 0.f ||
-          (query_max >= 1.e-4f && query_max <= 65504.f &&
-           query_max * fabsf(scale) <= 2.f);
-      if (__all(query_finite && output_finite && query_safe &&
-                output_max >= 1.e-4f))
-        return;
-    }
-  }
-  // The decode guard and the scalar fallback share the same row calculation.
-  if constexpr (!Prefill && Path == DecodePath::Scalar) {
-    if (repair_only) {
-      const int q = blockIdx.x, head = blockIdx.y, lane = threadIdx.x;
-      if (lengths[q] > 0) {
-        float rotated[kLaneValues];
-        load_activation<T>(rotated, query, q, head, lane);
-        flip_signs(rotated, signs, lane);
-        hadamard<F::compact>(rotated, lane);
-        float maxima[2] = {};
-        bool safe = true;
-#pragma unroll
-        for (int i = 0; i < kLaneValues; ++i) {
-          maxima[i / 4] = fmaxf(maxima[i / 4], fabsf(rotated[i]));
-          safe &= __builtin_isfinite(rotated[i]);
-        }
-#pragma unroll
-        for (int delta = 1; delta < kQkGroup / 4; delta *= 2) {
-          maxima[0] =
-              fmaxf(maxima[0], octave_xor<false>(maxima[0], delta, kWave));
-          maxima[1] =
-              fmaxf(maxima[1], octave_xor<false>(maxima[1], delta, kWave));
-        }
-#pragma unroll
-        for (int i = 0; i < 2; ++i)
-          safe &= maxima[i] == 0 ||
-                  (maxima[i] >= 1e-30f && maxima[i] * fabsf(scale) <= 2.f);
-        if (__all(safe)) return;
-      }
-    }
-  }
+                          int requests, const uint32_t* signs, float scale) {
   attention_row<T, F, Prefill, Path>(
       out, partials, query, key, value, cache, table, table_stride,
       map_or_starts, lengths, requests, signs, scale, blockIdx.x, blockIdx.y,
@@ -2668,10 +2613,23 @@ int launch_attention(float* out, float* partials, Activation query,
 
 }  // namespace
 
-extern "C" int octave_rdna4_store(Activation key, Activation value,
-                                  PagedCache cache, const int64_t* slots,
-                                  const uint32_t* signs, int tokens, int dtype,
-                                  int format, hipStream_t stream) {
+int octave_rdna4::cache_slot_bytes(int64_t format) {
+  switch (format) {
+    case 3:
+      return Format<false, 3>::slot_bytes;
+    case 4:
+      return Format<false, 4>::slot_bytes;
+    case 19:
+      return Format<true, 3>::slot_bytes;
+    default:
+      return 0;
+  }
+}
+
+int octave_rdna4::launch_store(Activation key, Activation value,
+                              PagedCache cache, const int64_t* slots,
+                              const uint32_t* signs, int tokens, int dtype,
+                              int format, hipStream_t stream) {
   if (!tokens) return hipSuccess;
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
     cache_store<decltype(scalar), decltype(layout)>
@@ -2680,7 +2638,7 @@ extern "C" int octave_rdna4_store(Activation key, Activation value,
   });
 }
 
-extern "C" int octave_rdna4_decode(
+int octave_rdna4::launch_decode(
     float* out, float* partials, Activation query, PagedCache cache,
     const int32_t* table, int64_t table_stride, const int32_t* q_to_req,
     const int32_t* q_to_klen, const uint32_t* signs, int tokens, int heads,
@@ -2690,7 +2648,7 @@ extern "C" int octave_rdna4_decode(
       q_to_klen, 0, signs, tokens, heads, splits, scale, dtype, format, stream);
 }
 
-extern "C" int octave_rdna4_prefill(
+int octave_rdna4::launch_prefill(
     float* out, float* partials, Activation query, Activation key,
     Activation value, PagedCache cache, const int32_t* table,
     int64_t table_stride, const int32_t* query_starts, const int32_t* seq_lens,
@@ -2702,36 +2660,43 @@ extern "C" int octave_rdna4_prefill(
                                 format, stream);
 }
 
-extern "C" int octave_rdna4_dequantize_prefill(
-    _Float16* key_out, _Float16* value_out, Activation key, Activation value,
-    PagedCache cache, const int32_t* table, int64_t table_stride,
-    const int32_t* starts, const int32_t* lengths, int requests, int capacity,
-    const uint32_t* signs, int dtype, int format, hipStream_t stream) {
-  if (requests <= 0 || capacity <= 0 || capacity % 128 != 0)
-    return hipErrorInvalidValue;
-  if (dtype != 0 && dtype != 1) return hipErrorInvalidValue;
-  if (format != 3 && format != 4 && format != 19)
-    return hipErrorInvalidValue;
-  dequantize_prefill_cache_uniform
-      <<<dim3((capacity + 3) / 4, cache.heads, requests), 128, 0, stream>>>(
-          key_out, value_out, key, value, cache, table, table_stride, starts,
-          lengths, requests, signs, capacity, dtype, format);
-  return hipGetLastError();
-}
+namespace octave_rdna4 {
+int launch_dense_prefill(
+    float* out, const _Float16* query, const _Float16* keys,
+    const _Float16* values, const int32_t* starts, const int32_t* lengths,
+    int requests, int tokens, int kv_heads, int capacity, float scale,
+    hipStream_t stream);
+}  // namespace octave_rdna4
 
-extern "C" int octave_rdna4_prefill_repair(
-    float* out, Activation query, Activation key, Activation value,
-    PagedCache cache, const int32_t* table, int64_t table_stride,
-    const int32_t* starts, const int32_t* lengths, int requests,
-    const uint32_t* signs, int tokens, int heads, float scale, int dtype,
-    int format, hipStream_t stream) {
-  if (!tokens) return hipSuccess;
+int octave_rdna4::launch_prefill_expanded(
+    float* out, void* keys, void* values, const void* query_fp16,
+    Activation query, Activation key, Activation value, PagedCache cache,
+    const int32_t* table, int64_t table_stride, const int32_t* starts,
+    const int32_t* lengths, int requests, int capacity, const uint32_t* signs,
+    int tokens, int heads, float scale, int dtype, int format,
+    hipStream_t stream) {
+  if (requests <= 0 || tokens <= 0 || capacity <= 0 || capacity % 32 ||
+      cache.heads <= 0 || heads != cache.heads * 6 || !(scale > 0.f) ||
+      (dtype != 0 && dtype != 1) || (format != 3 && format != 4 && format != 19))
+    return hipErrorInvalidValue;
+  auto* keys_fp16 = static_cast<_Float16*>(keys);
+  auto* values_fp16 = static_cast<_Float16*>(values);
+  expand_prefill<<<dim3(capacity / 16, cache.heads, requests), 128, 0, stream>>>(
+      keys_fp16, values_fp16, key, value, cache, table, table_stride, starts, lengths,
+      capacity, signs, dtype, format);
+  int status = hipGetLastError();
+  if (status != hipSuccess) return status;
+  status = octave_rdna4::launch_dense_prefill(
+      out, static_cast<const _Float16*>(query_fp16), keys_fp16, values_fp16,
+      starts, lengths, requests, tokens, cache.heads, capacity, scale, stream);
+  if (status != hipSuccess) return status;
+
+  // A single-split merge checks the result and recomputes flagged rows
+  // directly from the packed cache using the original FP32 calculation.
   return dispatch(dtype, format, [&](auto scalar, auto layout) {
-    using T = decltype(scalar);
-    using F = decltype(layout);
-    attention<T, F, true, DecodePath::Scalar>
+    merge_splits_safe<decltype(scalar), decltype(layout), true>
         <<<dim3(tokens, heads), kWave, 0, stream>>>(
-            out, nullptr, query, key, value, cache, table, table_stride, starts,
-            lengths, requests, signs, scale, true);
+            out, nullptr, 1, query, key, value, cache, table, table_stride,
+            starts, lengths, requests, signs, scale);
   });
 }

@@ -7,22 +7,15 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include "kernels.h"
 #include "split_merge.cuh"
 
 namespace {
+using octave_rdna4::Activation;
+using octave_rdna4::PagedCache;
+using octave_rdna4::Shadow;
+
 constexpr int LD = 256, LR = 64, W = 32, Partial = LD + 2;
-struct Activation {
-  const void* data;
-  int64_t token_stride, head_stride;
-};
-struct PagedCache {
-  uint8_t* data;
-  int64_t page_stride, head_stride, token_stride;
-  int page_size, heads;
-  __device__ uint8_t* at(int p, int h, int t) const {
-    return data + p * page_stride + h * head_stride + t * token_stride;
-  }
-};
 template <bool C, int VB>
 struct Format {
   static constexpr bool compact = C;
@@ -889,48 +882,36 @@ int attention(float* out, float* partial, Activation q, Activation k,
   return hipGetLastError();
 }
 }  // namespace
-extern "C" int octave_rdna4_store(Activation k, Activation v, PagedCache c,
-                                  const int64_t* slots, const uint32_t* signs,
-                                  int tokens, int dtype, int format,
-                                  hipStream_t stream) {
+int octave_rdna4::geometry::launch_store(
+    Activation k, Activation v, PagedCache c, const int64_t* slots,
+    const uint32_t* signs, int tokens, int dtype, int format, hipStream_t stream) {
   if (!tokens) return hipSuccess;
   return dispatch(dtype, format, [&](auto t, auto f) {
     store<decltype(f), decltype(t)>
         <<<dim3(tokens, c.heads), 32, 0, stream>>>(k, v, c, slots, signs);
   });
 }
-extern "C" int octave_rdna4_decode(float* out, float* partial, Activation q,
-                                   PagedCache c, const int32_t* table,
-                                   int64_t stride, const int32_t* map,
-                                   const int32_t* lengths,
-                                   const uint32_t* signs, int tokens, int heads,
-                                   int splits, float scale, int dtype,
-                                   int format, hipStream_t stream) {
+int octave_rdna4::geometry::launch_decode(
+    float* out, float* partial, Activation q, PagedCache c, const int32_t* table,
+    int64_t stride, const int32_t* map, const int32_t* lengths,
+    const uint32_t* signs, int tokens, int heads, int splits, float scale,
+    int dtype, int format, hipStream_t stream) {
   return attention<false>(out, partial, q, {}, {}, c, table, stride, map,
                           lengths, 0, signs, tokens, heads, splits, scale,
                           dtype, format, stream);
 }
-extern "C" int octave_rdna4_prefill(float* out, float* partial, Activation q,
-                                    Activation k, Activation v, PagedCache c,
-                                    const int32_t* table, int64_t stride,
-                                    const int32_t* starts,
-                                    const int32_t* lengths, int requests,
-                                    const uint32_t* signs, int tokens,
-                                    int heads, int splits, float scale,
-                                    int dtype, int format, hipStream_t stream) {
+int octave_rdna4::geometry::launch_prefill(
+    float* out, float* partial, Activation q, Activation k, Activation v,
+    PagedCache c, const int32_t* table, int64_t stride, const int32_t* starts,
+    const int32_t* lengths, int requests, const uint32_t* signs, int tokens,
+    int heads, int splits, float scale, int dtype, int format,
+    hipStream_t stream) {
   return attention<true>(out, partial, q, k, v, c, table, stride, starts,
                          lengths, requests, signs, tokens, heads, splits, scale,
                          dtype, format, stream);
 }
 
 namespace {
-struct Shadow {
-  void* data;
-  int32_t* tags;
-  int32_t* locks;
-  int entries;
-};
-
 // One wave owns a complete shadow row while holding its entry lock. A
 // collision evicts a whole row; the tag makes readers fall back to packed KV.
 template <class T>
@@ -1292,12 +1273,10 @@ __global__ __launch_bounds__(128) void sparse_wmma(
 }
 }  // namespace
 
-extern "C" int octave_rdna4_window_store(Activation key, Activation value,
-                                         const int64_t* slots,
-                                         const int32_t* positions,
-                                         Shadow recent, Shadow sinks,
-                                         int tokens, int heads, int dtype,
-                                         hipStream_t stream) {
+int octave_rdna4::geometry::launch_window_store(
+    Activation key, Activation value, const int64_t* slots,
+    const int32_t* positions, Shadow recent, Shadow sinks, int tokens,
+    int heads, int dtype, hipStream_t stream) {
   if (tokens == 0) return hipSuccess;
   if (dtype == 0)
     window_store<__half><<<tokens, 32, 0, stream>>>(
@@ -1310,7 +1289,7 @@ extern "C" int octave_rdna4_window_store(Activation key, Activation value,
   return hipGetLastError();
 }
 
-extern "C" int octave_rdna4_decode_sparse(
+int octave_rdna4::geometry::launch_decode_sparse(
     float* out, float* partial, Activation q, PagedCache cache,
     const int32_t* table, int64_t table_stride, int columns, int requests,
     int pages, const int32_t* mapping, const int32_t* indices,
