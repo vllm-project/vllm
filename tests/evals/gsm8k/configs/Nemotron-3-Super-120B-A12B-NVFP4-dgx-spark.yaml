@@ -1,7 +1,8 @@
 # Nemotron-3-Super-120B-A12B-NVFP4.yaml at TP1 without MTP. The ~69 GiB of
 # weights leave too little KV cache at the 0.6 the other DGX Spark configs use.
 model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
-accuracy_threshold: 0.93
+accuracy_threshold: 0.935
+tolerance: 0.03
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1200
