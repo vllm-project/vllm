@@ -40,7 +40,7 @@ pub use routes::openai::utils::types::ReasoningEffort;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tonic_health::server::health_reporter;
-use tracing::info;
+use tracing::{info, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
@@ -310,6 +310,24 @@ where
         server_shutdown.clone(),
         config.keep_alive_on_engine_death,
     );
+    // At the drain deadline, abort the requests still running so their clients
+    // get `finish_reason: "abort"`, as the Python frontend does. Hold the state
+    // weakly: `AppState::shutdown` waits until every strong reference is gone.
+    let on_drain_deadline: serving::OnDrainDeadline = {
+        let state = Arc::downgrade(&state);
+        Box::new(move || {
+            async move {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                info!("drain deadline elapsed; aborting in-flight requests");
+                if let Err(error) = state.chat.abort(&[]).await {
+                    warn!(%error, "failed to abort in-flight requests at the drain deadline");
+                }
+            }
+            .boxed()
+        })
+    };
     let serve_fut = async {
         let result = serving::serve(
             "OpenAI server",
@@ -317,6 +335,7 @@ where
             http,
             grpc,
             config.shutdown_timeout,
+            Some(on_drain_deadline),
             server_shutdown.clone(),
         )
         .await;

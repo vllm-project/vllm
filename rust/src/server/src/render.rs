@@ -247,6 +247,8 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         http,
         grpc,
         config.shutdown_timeout,
+        // No engine, so no requests to abort.
+        None,
         shutdown,
     )
     .await?;

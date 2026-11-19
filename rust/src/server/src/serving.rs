@@ -12,6 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
+use futures::future::BoxFuture;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -36,6 +37,17 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long the servers keep draining after `OnDrainDeadline` runs, so the
+/// requests it ends can send their final responses. Aborted requests finish
+/// within milliseconds; this only bounds a stuck engine. Matches the Python
+/// launcher's `_ENGINE_TEARDOWN_S`.
+const DEADLINE_HOOK_GRACE: Duration = Duration::from_secs(5);
+
+/// Runs once when the drain deadline passes, before the servers are aborted,
+/// so in-flight requests can end with a final response instead of a closed
+/// connection.
+pub(crate) type OnDrainDeadline = Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send>;
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
 #[derive(Clone, Copy)]
@@ -230,14 +242,17 @@ impl GrpcServer {
 ///
 /// Caller cancellation propagates into both protocols; if either protocol
 /// exits first, the other begins a graceful drain too. Once shutdown starts,
-/// both drain for at most `shutdown_timeout` and are then aborted. Returns the
-/// drain deadline, which the caller's own cleanup should also respect.
+/// both drain for at most `shutdown_timeout`. Then `on_drain_deadline`, when
+/// set, runs and the servers drain for up to `DEADLINE_HOOK_GRACE` more before
+/// they are aborted. Returns the time the servers are aborted at the latest,
+/// which the caller's own cleanup should also respect.
 pub(crate) async fn serve(
     name: &str,
     model: &str,
     http: HttpServer,
     grpc: Option<GrpcServer>,
     shutdown_timeout: Duration,
+    on_drain_deadline: Option<OnDrainDeadline>,
     shutdown: CancellationToken,
 ) -> Result<Instant> {
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
@@ -257,14 +272,24 @@ pub(crate) async fn serve(
         async move {
             shutdown.cancelled().await;
             let deadline = Instant::now() + shutdown_timeout;
-            let _ = shutdown_deadline.set(deadline);
-
-            if shutdown_timeout.is_zero() {
-                force_shutdown.cancel();
+            // With a hook, the servers keep draining while the requests it
+            // ends send their final responses, so the caller's cleanup waits
+            // for that too.
+            let abort_at = if on_drain_deadline.is_some() {
+                deadline + DEADLINE_HOOK_GRACE
             } else {
+                deadline
+            };
+            let _ = shutdown_deadline.set(abort_at);
+
+            if !shutdown_timeout.is_zero() {
                 sleep_until(deadline).await;
-                force_shutdown.cancel();
             }
+            if let Some(on_drain_deadline) = on_drain_deadline {
+                on_drain_deadline().await;
+                sleep_until(abort_at).await;
+            }
+            force_shutdown.cancel();
         }
     });
 
@@ -334,4 +359,96 @@ pub(crate) async fn serve(
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + shutdown_timeout))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use futures::FutureExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn drain_deadline_hook_lets_in_flight_request_finish() {
+        // A request that waits until released, like one still generating at the
+        // deadline; the hook releases it, like the abort the OpenAI server runs.
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let app = Router::new().route(
+            "/wait",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "done"
+                    }
+                }
+            }),
+        );
+        let hook: OnDrainDeadline = {
+            let release = release.clone();
+            Box::new(move || async move { release.notify_one() }.boxed())
+        };
+
+        let listener = BoundListener::bind(
+            &HttpListenerMode::BindTcp {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+            },
+            None,
+        )
+        .await
+        .expect("bind");
+        let addr = listener.address().to_owned();
+        let http = HttpServer {
+            listener,
+            app,
+            timeouts: ConnectionTimeouts::for_keep_alive(Duration::ZERO),
+        };
+        let drain = Duration::from_millis(200);
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            "test server",
+            "test-model",
+            http,
+            None,
+            drain,
+            Some(hook),
+            shutdown.clone(),
+        ));
+
+        let mut stream = TcpStream::connect(&addr).await.expect("connect");
+        stream
+            .write_all(b"GET /wait HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write request");
+        entered.notified().await;
+
+        let started = Instant::now();
+        shutdown.cancel();
+
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_string(&mut response))
+            .await
+            .expect("the request must finish once the hook runs")
+            .expect("read response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("done"), "{response}");
+        // Released by the hook at the deadline, not earlier.
+        assert!(started.elapsed() >= drain, "{:?}", started.elapsed());
+
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("the servers stop once the request finishes, before the grace ends")
+            .expect("join")
+            .expect("serve");
+    }
 }
