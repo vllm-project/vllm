@@ -2368,7 +2368,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         ),
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: method == "eagle",
-        use_dflash=lambda: method == "dflash",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,

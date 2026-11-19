@@ -3311,7 +3311,7 @@ def test_parallel_drafting_is_deprecated(caplog_vllm):
         )
     assert "parallel_drafting is deprecated" in caplog_vllm.text
 
-    with pytest.raises(ValueError, match="only supported by the dflash and dspark"):
+    with pytest.raises(ValueError, match="not supported by method"):
         SpeculativeConfig(
             model="ngram", num_speculative_tokens=2, parallel_drafting=True
         )

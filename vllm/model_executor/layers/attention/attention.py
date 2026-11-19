@@ -712,11 +712,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 page_size_padded=shared_page,
             )
-            speculative_config = vllm_config.speculative_config
+            spec_config = vllm_config.speculative_config
             if (
                 self.is_draft_layer
-                and speculative_config is not None
-                and speculative_config.method in ("dflash", "dspark")
+                and spec_config is not None
+                and spec_config.speculator_config.supports_prefill_context_kv_only
             ):
                 # The DFlash context-KV writer skips null block-table entries.
                 return DFlashSlidingWindowManager.layer_config(

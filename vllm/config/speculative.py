@@ -2037,15 +2037,14 @@ class SpeculativeConfig:
         self._verify_draft_eplb_config()
 
         if self.parallel_drafting is not None:
-            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+            if self.parallel_drafting and not self.speculator_config.parallel_drafting:
                 raise ValueError(
-                    "parallel_drafting is only supported by the dflash and dspark "
-                    f"methods, not {self.method!r}."
+                    f"parallel_drafting is not supported by method {self.method!r}."
                 )
             logger.warning_once(
-                "parallel_drafting is deprecated and has no effect: dflash and "
-                "dspark always draft in parallel, and no other method supports "
-                "it. It will be removed in a future release."
+                "parallel_drafting is deprecated and has no effect: methods that "
+                "support it always draft in parallel. It will be removed in a "
+                "future release."
             )
 
         if self.rejection_sample_method == "fly":
@@ -2134,9 +2133,6 @@ class SpeculativeConfig:
         """Whether the volatile trailing prefix-cache block should be dropped."""
         return self.needs_eagle_block_drop() and not self.disable_eagle_block_drop
 
-    def use_dflash(self) -> bool:
-        return self.method == "dflash"
-
     def use_dspark(self) -> bool:
         return self.method == "dspark"
 
@@ -2145,22 +2141,6 @@ class SpeculativeConfig:
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
-
-    def uses_draft_kv_cache(self) -> bool:
-        return (
-            self.use_eagle()
-            or self.uses_draft_model()
-            or self.uses_extract_hidden_states()
-        )
-
-    def uses_extract_hidden_states(self) -> bool:
-        return self.method == "extract_hidden_states"
-
-    def use_ngram_gpu(self) -> bool:
-        return self.method == "ngram_gpu"
-
-    def use_ngram(self) -> bool:
-        return self.method in ("ngram", "ngram_gpu")
 
     def num_mtp_modules(self) -> int:
         """Number of MTP modules the drafter selects among by draft step."""
