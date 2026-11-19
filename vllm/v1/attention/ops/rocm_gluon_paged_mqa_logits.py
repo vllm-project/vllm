@@ -8,7 +8,7 @@
 
 Derived from aiter's gluon `_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle`
 (aiter e7d2453) and its host wrapper, reduced to the flattened decode path of
-the ROCm DSA indexer (gfx950, preshuffled 64-token pages, 32 heads x 128, one
+the ROCm DSA indexer (gfx950, preshuffled 16/32/64-token pages, 32 heads x 128, one
 query per row) and re-tuned:
 
 - the MTP verify rows of one request share a page table, so one program scores
@@ -85,11 +85,12 @@ def _dot_fp8(a, b, acc, CDNA_VERSION: gl.constexpr):
 
 
 # ===========================================================================
-# Sibling-fused paged MQA logits (gfx950, preshuffle, page 64, 32 heads x 128,
-# one query per row). The MTP verify rows of one request (GROUP consecutive rows,
-# lengths L+1..L+GROUP) share one page table, so every K page is read by GROUP
-# rows. Here one workgroup computes a PAIR of sibling rows: each K / scale
-# register tile is loaded once and fed to two MFMA pairs (one per row's Q); only
+# Sibling-fused paged MQA logits (gfx950, preshuffle, page 16/32/64, 32 heads x
+# 128, one query per row). The MTP verify rows of one request (GROUP consecutive
+# rows, lengths L+1..L+GROUP) share one page table, so every K page is read by
+# GROUP rows. Here one workgroup computes a PAIR of sibling rows (an odd group's
+# last row pairs with itself): each K / scale register tile is loaded once and
+# fed to two MFMA pairs (one per row's Q); only
 # the KV partition is taken from the longer row. The pairing is verified at run
 # time: the two rows' page-table entries over their whole common prefix must
 # match, else the workgroup runs two single-row passes instead (each row with its
@@ -153,7 +154,7 @@ def _gluon_paged_mqa_logits_fused2(
     layout_kcols: gl.constexpr = gl.SliceLayout(0, mfma_layout_b)
     ContextBlockPerChunkK: gl.constexpr = ChunkK // KVBlockSize
     ShuffleRows: gl.constexpr = min(KVBlockSize, 16)
-    PAIRS: gl.constexpr = GROUP // 2
+    PAIRS: gl.constexpr = (GROUP + 1) // 2
 
     # ---- work tile: (group rank, split, pair) inside each XCD slab -------------------
     pid = gl.program_id(0)
@@ -177,14 +178,14 @@ def _gluon_paged_mqa_logits_fused2(
     g_sel = gl.sum(gl.where((rank == q_rank) & (gi < ngroups), gi, 0), axis=0)
     g_sel = _uniform_i32(g_sel)
     r0 = g_sel * GROUP + 2 * p_pair
-    r1 = r0 + 1
+    r1 = gl.minimum(r0 + 1, g_sel * GROUP + GROUP - 1)
     L0 = gl.load(context_len_ptr + r0)
     L1 = gl.load(context_len_ptr + r1)
     pid_split_kv = x_id * SX + t_split
     lead_is_1 = (L1 >= L0).to(gl.int32)
     Lmax = gl.maximum(L0, L1)
     Lmin = gl.minimum(L0, L1)
-    lead = r0 + lead_is_1
+    lead = r0 + lead_is_1 * (r1 - r0)
 
     # ---- pairing check: do the two rows share every page of their common prefix?
     # Checked over the WHOLE common prefix, not just this workgroup's window, so that
@@ -548,9 +549,10 @@ def _compile_paged_mqa_logits_fused2(
 
 
 # Groups (one request's verify rows) the kernel ranks for longest-first dispatch:
-# a compile-time power of two, the smaller one when the batch fits it.
+# a compile-time power of two in [_NG2_SMALL, _NG2_MAX] that covers the batch.
+# Ranking costs O(NG2^2) per program.
 _NG2_SMALL = 32
-_NG2_MAX = 64
+_NG2_MAX = 256
 _WAVES_PER_EU = 3
 _CHUNK_K = 256
 # KV splits per pair: about _SPLIT_ROWS / rows, a power of two in
@@ -561,7 +563,7 @@ _SPLIT_ROWS = 1536
 _SPLIT_KV_MIN = 16
 _SPLIT_KV_MAX = 128
 # Validated row range (decode and MTP-verify batches of one DP rank).
-MAX_ROWS = 256
+MAX_ROWS = 1536
 
 
 def _split_kv(rows: int) -> int:
@@ -571,11 +573,11 @@ def _split_kv(rows: int) -> int:
 
 def gluon_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,  # [rows, 1, heads, hidden] fp8 e4m3fn
-    kv_cache: torch.Tensor,  # [num_pages, 64, 1, hidden + 4] preshuffled fp8 + scales
+    kv_cache: torch.Tensor,  # [num_pages, page, 1, hidden + 4] preshuffled fp8 + scales
     weights: torch.Tensor,  # [rows, heads] fp32
     out_logits: torch.Tensor,  # [rows, >= max_model_len] fp32
     context_lens: torch.Tensor,  # [rows] int32
-    kv_indices: torch.Tensor,  # [rows, max_block_len] int32
+    kv_indices: torch.Tensor,  # [rows, max_block_len] int32, unit column stride
     max_model_len: int,
     rows_per_request: int,
 ) -> None:
@@ -583,7 +585,7 @@ def gluon_fp8_paged_mqa_logits(
     `out_logits[:, :context_lens[row]]`."""
     rows, _, heads, hidden_dim = q_fp8.shape
     _, block_size, _, index_dim = kv_cache.shape
-    max_block_len = kv_indices.shape[1]
+    max_block_len = kv_indices.stride(0)
 
     kv_cache = kv_cache.view(-1, block_size * index_dim)
     kv_cache_fp8 = kv_cache[..., : block_size * hidden_dim].view(torch.float8_e4m3fn)
@@ -591,7 +593,8 @@ def gluon_fp8_paged_mqa_logits(
     is_padded_mode = kv_cache_fp8.stride(0) % 16 == 0
 
     split_kv = _split_kv(rows)
-    ng2 = _NG2_SMALL if rows // rows_per_request <= _NG2_SMALL else _NG2_MAX
+    ngroups = rows // rows_per_request
+    ng2 = max(_NG2_SMALL, 1 << (ngroups - 1).bit_length())
     kernel = _compile_paged_mqa_logits_fused2(
         heads,
         _CHUNK_K,
@@ -603,7 +606,7 @@ def gluon_fp8_paged_mqa_logits(
         ng2,
         _NUM_XCD.value,
     )
-    kernel[(rows // 2 * split_kv, 1, 1)](
+    kernel[(ngroups * ((rows_per_request + 1) // 2) * split_kv, 1, 1)](
         rows,
         q_fp8,
         q_fp8.stride(0),
@@ -641,23 +644,24 @@ def supported(
     rows_per_request: int,
 ) -> bool:
     """Whether `gluon_fp8_paged_mqa_logits` serves this call: MTP verify
-    rows of the flattened decode path, `rows_per_request` (even) consecutive
-    rows per request. `q_fp8` is `[rows, 1, 32, 128]`, `kv_cache_fp8`
-    `[num_pages, 64, 1, 132]`, `context_lens` one length per row and
-    `block_tables` one contiguous page row per row. Plain decode rows gain
-    little from this kernel and stay on aiter's."""
+    rows of the flattened decode path, `rows_per_request` (>= 2) consecutive
+    rows per request and at most `_NG2_MAX` requests. `q_fp8` is
+    `[rows, 1, 32, 128]`, `kv_cache_fp8` `[num_pages, page, 1, 132]` with a
+    page of 16, 32 or 64 tokens, `context_lens` one length per row and
+    `block_tables` one page row per row, each contiguous. Plain decode rows
+    gain little from this kernel and stay on aiter's."""
     rows = q_fp8.shape[0]
     return (
         preshuffle
         and rows_per_request >= 2
-        and rows_per_request % 2 == 0
         and rows % rows_per_request == 0
         and rows // rows_per_request <= _NG2_MAX
         and 1 <= rows <= MAX_ROWS
         and q_fp8.dim() == 4
         and q_fp8.shape[1:] == (1, 32, 128)
         and kv_cache_fp8.dim() == 4
-        and kv_cache_fp8.shape[1:] == (64, 1, 132)
+        and kv_cache_fp8.shape[1] in (16, 32, 64)
+        and kv_cache_fp8.shape[2:] == (1, 132)
         and context_lens.numel() == rows
         and context_lens.dtype == torch.int32
         and context_lens.is_contiguous()
@@ -665,6 +669,5 @@ def supported(
         and block_tables.dtype == torch.int32
         and block_tables.shape[0] == rows
         and block_tables.stride(1) == 1
-        and block_tables.stride(0) == block_tables.shape[1]
         and get_gfx() == "gfx950"
     )
