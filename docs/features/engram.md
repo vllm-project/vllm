@@ -150,8 +150,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
-`disk_offload`.
+Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload`,
+`disk_offload` and, on NVIDIA, `dp_shared_memory`.
 
 ## Sharing host tables across DP replicas
 

@@ -655,6 +655,20 @@ class DFlashQwen3Model(nn.Module):
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """The modules whose weights the context K/V path (`combine_hidden_states`
+        and `precompute_and_store_context_kv`) reads once loaded. A subclass that
+        changes that path must override this."""
+        modules: list[nn.Module] = [self.hidden_norm, *self._attn_layers]
+        if self.use_aux_hidden_state:
+            modules.append(self.fc)
+        if self._fused_kv_weight is None:  # e.g. quantized: no fused K/V copy
+            if self._context_kv_proj is not None:
+                modules.append(self._context_kv_proj)
+            else:
+                modules.extend(self._context_qkv_projs)
+        return modules
+
     def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
@@ -944,6 +958,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.model.precompute_and_store_context_kv(
             context_states, context_positions, context_slot_mapping
         )
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        """The modules whose weights `combine_hidden_states` and
+        `precompute_and_store_context_kv` read once loaded. With
+        `SpeculativeConfig.prefill_context_kv_only`, the other draft weights
+        are freed (see `DFlashSpeculator.free_unused_weights`)."""
+        return self.model.context_kv_modules()
 
     def combine_hidden_states(
         self,

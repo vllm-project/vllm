@@ -67,6 +67,7 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "moe_wna16": 0.5,
     "inc": 0.5,
     "experts_int8": 1,
+    "modelopt_int8": 1,
 }
 
 

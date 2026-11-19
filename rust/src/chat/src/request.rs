@@ -58,6 +58,10 @@ pub enum ChatContentPart {
         audio_url: String,
         uuid: Option<String>,
     },
+    /// A reference to a tool by name, as tool search returns it in a tool
+    /// result. Renderers that support it expand or name the referenced tool;
+    /// the others reject it.
+    ToolReference { name: String },
     // ImageData...
     // VideoData...
     // ImageEmbeds...
@@ -103,8 +107,13 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one tool reference content part naming the given tool.
+    pub fn tool_reference(name: impl Into<String>) -> Self {
+        Self::ToolReference { name: name.into() }
+    }
+
     /// Return the text content of this part when it's a text block, or an
-    /// "unsupported multimodal content" error otherwise.
+    /// "unsupported content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
@@ -112,6 +121,7 @@ impl ChatContentPart {
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
+            Self::ToolReference { .. } => Err(Error::UnsupportedContentPart("tool_reference")),
         }
     }
 
@@ -123,7 +133,7 @@ impl ChatContentPart {
     /// Return whether this part contains any multimodal content.
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
-            Self::Text { .. } => false,
+            Self::Text { .. } | Self::ToolReference { .. } => false,
             Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
@@ -212,6 +222,18 @@ impl ChatContent {
             Self::Text(_) => false,
             Self::Parts(parts) => parts.iter().any(ChatContentPart::is_multimodal),
         }
+    }
+
+    /// Return the names of the tools this content references, in order.
+    pub fn tool_references(&self) -> impl Iterator<Item = &str> {
+        let parts = match self {
+            Self::Text(_) => &[][..],
+            Self::Parts(parts) => parts.as_slice(),
+        };
+        parts.iter().filter_map(|part| match part {
+            ChatContentPart::ToolReference { name } => Some(name.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -390,6 +412,19 @@ impl ChatMessage {
             Self::Assistant { .. } => false,
         }
     }
+
+    /// Return the names of the tools this message references, in order.
+    fn tool_references(&self) -> impl Iterator<Item = &str> {
+        let content = match self {
+            Self::System { content }
+            | Self::Developer { content, .. }
+            | Self::User { content }
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => Some(content),
+            Self::Assistant { .. } => None,
+        };
+        content.into_iter().flat_map(ChatContent::tool_references)
+    }
 }
 
 impl From<AssistantMessage> for ChatMessage {
@@ -548,6 +583,18 @@ impl ResolvedToolContext {
                 });
             }
             effective_tools.push(tool.clone());
+        }
+
+        // Renderers look referenced tools up by name, so every reference must
+        // name a request-level or message-scoped tool.
+        if let Some(name) = messages
+            .iter()
+            .flat_map(ChatMessage::tool_references)
+            .find(|name| !names.contains(*name))
+        {
+            return Err(Error::ToolReferenceNotFound {
+                name: name.to_owned(),
+            });
         }
 
         let tool_choice = requested_tool_choice.unwrap_or({
@@ -713,6 +760,11 @@ impl ChatRequest {
     /// Return every tool available for this generation.
     pub fn tools(&self) -> &[ChatTool] {
         &self.tool_context.effective_tools
+    }
+
+    /// Return the available tool with this name, as a tool reference names it.
+    pub fn tool(&self, name: &str) -> Option<&ChatTool> {
+        self.tools().iter().find(|tool| tool.name == name)
     }
 
     /// Return request-level tools before message-scoped declarations.
@@ -979,6 +1031,24 @@ mod tests {
             ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap_err();
 
         assert!(matches!(error, Error::DuplicateToolName { name } if name == "lookup"));
+    }
+
+    #[test]
+    fn resolved_tool_context_rejects_unknown_tool_references() {
+        let messages = vec![
+            ChatMessage::developer("", Some(vec![chat_tool("scoped")])),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::tool_reference("lookup"),
+                    ChatContentPart::tool_reference("scoped"),
+                ],
+                "call_0",
+            ),
+        ];
+        ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap();
+
+        let error = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap_err();
+        assert!(matches!(error, Error::ToolReferenceNotFound { name } if name == "lookup"));
     }
 
     #[test]

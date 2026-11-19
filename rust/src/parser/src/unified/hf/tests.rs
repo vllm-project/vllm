@@ -480,7 +480,7 @@ fn gemma4_streams_text_and_starts_calls_at_the_opener() {
                         ToolCallDelta {
                             tool_index: 0,
                             name: None,
-                            arguments: "{\"location\":\"Paris\"}",
+                            arguments: "{\"location\": \"Paris\"}",
                         },
                     ),
                 ],

@@ -64,12 +64,14 @@ mod stream;
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::time::Instant;
 
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
+use vllm_metrics::{METRICS, RenderRequestType};
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -381,6 +383,13 @@ impl ChatLlm {
         Self::new(text, backend)
     }
 
+    /// Set the served model name that labels frontend metrics; see
+    /// [`TextLlm::with_served_model_name`].
+    pub fn with_served_model_name(mut self, served_model_name: impl Into<String>) -> Self {
+        self.text = self.text.with_served_model_name(served_model_name);
+        self
+    }
+
     /// Set tool-call parser selection.
     pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
         self.processor.tool_call_parser = selection;
@@ -448,6 +457,11 @@ impl ChatLlm {
         self.text.model_id()
     }
 
+    /// Return the served model name that labels frontend metrics.
+    pub fn served_model_name(&self) -> &str {
+        self.text.served_model_name()
+    }
+
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
@@ -487,11 +501,19 @@ impl ChatLlm {
         request: ChatRequest,
         n: NonZeroU32,
     ) -> Result<Vec<ChatEventStream>> {
+        // Like Python's `render_chat`, record successful renders: templating,
+        // multimodal preprocessing, and tokenization.
+        let render_start = Instant::now();
         let PreparedChatRequest {
             text_request,
             output_processors,
             prompt_text,
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
+        METRICS.renderer.observe_request_render_duration(
+            self.served_model_name(),
+            RenderRequestType::Chat,
+            render_start.elapsed(),
+        );
         let request_id = text_request.request_id.clone();
         let prepared = self.text.request_processor().prepare(text_request)?;
         let sampling = prepared.effective_sampling();

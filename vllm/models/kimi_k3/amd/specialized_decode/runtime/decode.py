@@ -177,8 +177,8 @@ class SpecializedDecode:
         self.failstop = FailStop(
             runner.health[FAILED : FAILED + 1], runner.rank, tp.world_size, tp.cpu_group
         )
-        # (data_ptr, numel) of the first KDA layer's state prepare_kv bound
-        self._kv: tuple[int, int] | None = None
+        # `_kv_key` of the KV cache prepare_kv bound
+        self._kv: tuple | None = None
         m1c = [w for w in config.widths if m1c_at(runner, w)]
         mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
         logger.info(
@@ -190,13 +190,17 @@ class SpecializedDecode:
             len(builds),
         )
 
-    def _kv_key(self) -> tuple[int, int] | None:
+    def _kv_key(self) -> tuple | None:
+        """The first KDA layer's recurrent state by all but its number of slots:
+        an extensible KV cache re-binds its views at the same addresses with the
+        final block count, which `cache_reasons` does not depend on."""
         state = self.kda[0].layer.self_attn.kv_cache
         if not isinstance(state, (list, tuple)) or len(state) != 2:
             return None
-        if state[1].numel() == 0:
+        s = state[1]
+        if s.numel() == 0:
             return None
-        return state[1].data_ptr(), state[1].numel()
+        return s.data_ptr(), s.dtype, s.shape[1:], s.stride()
 
     def prepare_kv(self) -> None:
         """Checks and binds the KDA states and MLA caches vLLM just bound (the

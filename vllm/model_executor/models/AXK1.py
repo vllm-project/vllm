@@ -118,6 +118,7 @@ class AXK1MoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        divide_shared_output_in_fp16: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -203,6 +204,7 @@ class AXK1MoE(nn.Module):
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
+            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -640,6 +642,8 @@ class AXK1DecoderLayer(nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                # forward() only compensates in FP16 when not using MHA.
+                divide_shared_output_in_fp16=not use_mha,
             )
         else:
             self.mlp = AXK1MLP(

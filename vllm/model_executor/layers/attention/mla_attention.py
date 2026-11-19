@@ -303,6 +303,7 @@ from vllm.v1.attention.ops.pcp import (
 from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
     AttentionSpec,
     KVCacheSpec,
     KVQuantMode,
@@ -637,6 +638,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(index_group, HiSparseMLAIndexGroup)
             else None
         )
+        # A dense impl would silently ignore the top-k indices.
+        if use_sparse and not self.impl.is_sparse:
+            raise RuntimeError(
+                f"{prefix}: sparse (DSA) attention layer requires a sparse "
+                f"attention backend, but got {self.attn_backend.get_name()}. "
+                "Serving with it would silently run full attention."
+            )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
         # AMX reads kv_b_proj's weight directly and never calls it live; the
@@ -796,6 +804,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.kv_cache.numel() > 0
+        ):
+            from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
+
+            if isinstance(self.impl, TritonMLAImpl):
+                self.impl.register_decode_warmup(self.kv_cache, self.kv_cache_dtype)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
             and self._uses_flat_kv_cache()
@@ -1147,6 +1163,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
                     # Convert from (N, B, L) to (B, N, L)
                     mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+                elif (
+                    fp8_attention
+                    and self.impl.supports_quant_query_input
+                    and mqa_q_pe.shape[-1] > 0
+                ):
+                    # Concatenate in place: the bmm writes the NoPE columns of
+                    # the token-major (B, N, L + R) query and the RoPE part is
+                    # copied beside it, so the FP8 query op quantizes one
+                    # contiguous tensor instead of concatenating first (that
+                    # concat is ~1 ms per layer of a 32k-token prefill).
+                    R = mqa_q_pe.shape[-1]
+                    mqa_q_cat = mqa_q_nope.new_empty((B, N, L + R))
+                    torch.bmm(
+                        mqa_q_nope, W_UK_T, out=mqa_q_cat[..., :L].transpose(0, 1)
+                    )
+                    mqa_q_cat[..., L:].copy_(mqa_q_pe)
+                    mqa_ql_nope, mqa_q_pe = mqa_q_cat, mqa_q_pe[..., :0]
                 else:
                     # Write the (N, B, L) bmm result straight into a
                     # token-major (B, N, L) buffer so the MQA query is already
@@ -1484,7 +1517,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             state_content_bytes=(
                 cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
                 if self.kv_cache_dtype == "fp8_ds_mla"
-                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
+                else DS_MLA_STATE_CONTENT_BYTES.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:

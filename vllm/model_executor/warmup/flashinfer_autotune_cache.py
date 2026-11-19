@@ -30,11 +30,27 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
 
 
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
     vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
-    return hash_factors(vllm_config.compile_factors(include_version=False))
+    factors = vllm_config.compile_factors(include_version=False)
+    # DP runs with padding skip tune TRT-LLM MoE's precomputed-routing ops
+    # instead of the logits ops; a cache from before lacks them, and a hit
+    # skips all tuning.
+    if (
+        vllm_config.parallel_config.data_parallel_size > 1
+        and envs.VLLM_MOE_SKIP_PADDING
+        and not envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        and any(
+            isinstance(m, RoutedExperts) and m.supports_precomputed_routing
+            for m in runner.get_model().modules()
+        )
+    ):
+        factors = {**factors, "moe_routed": True}
+    return hash_factors(factors)
 
 
 def flashinfer_autotune_root() -> Path:

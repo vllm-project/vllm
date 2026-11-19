@@ -327,8 +327,8 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
 
     rocm = importlib.import_module(f"vllm.models.{model}.amd.rocm")
     monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
-    assert rocm._aiter_sparse_mla_enabled(has_kv_transfer=False)
-    assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
+    assert rocm._aiter_sparse_mla_enabled(False)
+    assert not rocm._aiter_sparse_mla_enabled(True)
 
 
 def _swa_forward_mqa_case(

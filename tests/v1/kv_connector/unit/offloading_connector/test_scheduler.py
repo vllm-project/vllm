@@ -796,6 +796,78 @@ def test_shared_prefix_junction_is_not_lowered():
     assert request.shared_prefix_boundary == 24
 
 
+def test_pending_attention_outside_hit_keeps_shared_prefix_junction():
+    """A pending chunk outside the converged hit must not hide the junction."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 24},
+    )
+    config.cache_config.prefix_cache_retention_interval = 0
+    attention = dict(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    kv_config = KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], FullAttentionSpec(**attention)),
+            KVCacheGroupSpec(
+                ["window_a"], SlidingWindowSpec(**attention, sliding_window=16)
+            ),
+            KVCacheGroupSpec(
+                ["window_b"], SlidingWindowSpec(**attention, sliding_window=16)
+            ),
+        ],
+    )
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+    keys = [
+        [make_offload_key(block_hash, group) for block_hash in request.block_hashes]
+        for group in range(3)
+    ]
+    ready = [keys[0][0], keys[0][1], keys[1][0], keys[1][2], keys[2][0], keys[2][1]]
+    pending = [keys[0][2]]
+    manager = spec.get_manager()
+    producer = ReqContext("producer")
+    assert manager.prepare_store(ready, producer) is not None
+    manager.complete_store(ready, producer)
+    assert manager.prepare_store(pending, producer) is not None
+    assert manager.lookup(pending[0], producer) is LookupResult.HIT_PENDING
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert request.shared_prefix_boundary == 32
+    assert manager.lookup(pending[0], producer) is LookupResult.HIT_PENDING
+
+
+def test_unconfirmed_attention_does_not_register_junction():
+    """Another attention group cannot confirm a pending prefix on its behalf."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 24},
+    )
+    config.cache_config.prefix_cache_retention_interval = 0
+    kv_config = _make_mamba_hybrid_kv_cache_config()
+    full = kv_config.kv_cache_groups[0].kv_cache_spec
+    kv_config.kv_cache_groups.insert(1, KVCacheGroupSpec(["other_full"], full))
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+    first_hash = request.block_hashes[0]
+    pending = [make_offload_key(first_hash, 0)]
+    ready = [make_offload_key(first_hash, 1)]
+    manager = spec.get_manager()
+    producer = ReqContext("producer")
+    assert manager.prepare_store(pending, producer) is not None
+    assert manager.prepare_store(ready, producer) is not None
+    manager.complete_store(ready, producer)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert request.shared_prefix_boundary == 0
+
+
 def test_no_shared_prefix_junction_when_sparse_group_hits():
     scheduler = _make_sparse_retention_scheduler()
     request = _make_partial_tail_request(scheduler)

@@ -448,8 +448,9 @@ class MoRIIOWriter:
         if offsets is None:
             group = self.worker.layer_to_group[task.layer_name]
             assert request_info.block_ids is not None
-            local_blocks = task.local_block_ids[group]
-            remote_blocks = request_info.block_ids[group]
+            skip = request_info.num_skip_blocks
+            local_blocks = task.local_block_ids[group][skip:]
+            remote_blocks = request_info.block_ids[group][skip:]
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
@@ -628,6 +629,7 @@ class MoRIIOWriter:
 
         # Send completion notification
         for (remote_ip, remote_port), num_writers in notify_targets.items():
+            num_writers *= self.worker.pp_size
             self.worker.moriio_wrapper.send_notify(
                 transfer_id,
                 remote_ip,
@@ -635,7 +637,12 @@ class MoRIIOWriter:
                 message_type="write_done",
                 # The consumer rank has its KV once every writer reported.
                 message_fields=(
-                    {"num_writers": num_writers} if num_writers != 1 else None
+                    {
+                        "num_writers": num_writers,
+                        "sender": [self.worker.pp_rank, self.worker.tp_rank],
+                    }
+                    if num_writers != 1
+                    else None
                 ),
             )
         # mark request as done, then we can free the blocks
@@ -746,13 +753,17 @@ class MoRIIOWrapper:
         self.transfer_status: list[Any] = []
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
+        # Notify ports of the same worker in the later pipeline stages; set on
+        # the first stage of a pipeline-parallel producer only.
+        self.stage_notify_ports: list[int] = []
+        self._stage_socks: dict[int, zmq.Socket] = {}
         self.lock = threading.Lock()
         self.done_req_ids: list[MoRIIOTransferAck] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
-        # write_done messages received per transfer whose writers are not all in.
-        self._write_done_counts: dict[TransferId, int] = {}
+        # Writers that sent write_done, per transfer whose writers are not all in.
+        self._write_done_senders: dict[TransferId, set[Any]] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -1010,6 +1021,7 @@ class MoRIIOWrapper:
                 while True:
                     try:
                         identity, msg = sock.recv_multipart()
+                        self._forward_to_stages(msg)
                         self._handle_message(msg)
                     except Exception as e:
                         logger.error("Error processing message: %s", e)
@@ -1019,6 +1031,25 @@ class MoRIIOWrapper:
             target=_async_wait, daemon=True, name="moriio-notify-listener"
         )
         self.notify_thread.start()
+
+    def _forward_to_stages(self, msg: bytes) -> None:
+        """Hand a message from the decode to the later pipeline stages.
+
+        Every stage holds its own blocks of the transfer, so each needs the
+        allocation and the release. Runs on the notify listener thread, which
+        owns these sockets.
+        """
+        for port in self.stage_notify_ports:
+            sock = self._stage_socks.get(port)
+            if sock is None:
+                sock = make_zmq_socket(
+                    ctx=zmq.Context.instance(),
+                    path=make_zmq_path("tcp", "127.0.0.1", port),
+                    socket_type=zmq.DEALER,
+                    bind=False,
+                )
+                self._stage_socks[port] = sock
+            sock.send(msg)
 
     def _handle_message(self, msg: bytes):
         """Handles incoming messages from remote nodes."""
@@ -1092,6 +1123,7 @@ class MoRIIOWrapper:
                     if isinstance(block_notify_list[0], int)
                     else block_notify_list
                 ),
+                num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
             )
 
@@ -1101,19 +1133,28 @@ class MoRIIOWrapper:
         )
         transfer_id = data["transfer_id"]
         num_writers = int(data.get("num_writers", 1))
+        sender = data.get("sender")
         with self.lock:
-            received = self._write_done_counts.get(transfer_id, 0) + 1
-            if received < num_writers:
-                self._write_done_counts[transfer_id] = received
+            if self._is_transfer_terminal_locked(transfer_id):
                 return
-            self._write_done_counts.pop(transfer_id, None)
+            senders = self._write_done_senders.setdefault(transfer_id, set())
+            # Older peers do not name themselves; each of their messages counts.
+            senders.add(tuple(sender) if sender is not None else object())
+            if len(senders) < num_writers:
+                return
+            del self._write_done_senders[transfer_id]
+            self._mark_transfer_terminal_locked(transfer_id)
             self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_write_failed_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
         transfer_id = data["transfer_id"]
         with self.lock:
-            self._write_done_counts.pop(transfer_id, None)
+            # The other stages still report after the first failure.
+            if self._is_transfer_terminal_locked(transfer_id):
+                return
+            self._write_done_senders.pop(transfer_id, None)
+            self._mark_transfer_terminal_locked(transfer_id)
             self.failed_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):
@@ -1240,3 +1281,6 @@ class MoRIIOWrapper:
             except Exception as e:
                 logger.warning("Error closing ZMQ socket for path %s: %s", path, e)
         self.paths.clear()
+        for sock in self._stage_socks.values():
+            sock.close(linger=0)
+        self._stage_socks.clear()

@@ -43,6 +43,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.amd.mega_moe import finalize_mega_moe_weights
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -308,6 +309,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.linear_scale_name = _linear_scale_param_name(
             vllm_config, getattr(self.config, "expert_dtype", "fp4")
         )
@@ -421,6 +423,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=n_draft_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
         expert_scale_suffix = (
             ".weight_scale"
@@ -508,6 +511,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        if self.use_mega_moe:
+            finalize_mega_moe_weights(self)
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.

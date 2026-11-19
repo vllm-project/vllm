@@ -79,6 +79,9 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
 
         # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
         # DSA models would silently keep their FP8 one.
+        # TODO: allow Kimi-K3.1 once AITER's row-group FP4 MQA logits kernel
+        # accepts physical page strides; its decode scorer reads the merged
+        # index cache in place.
         model_config = vllm_config.model_config
         if model_config is None or model_config.hf_config.model_type not in (
             "deepseek_v4",
@@ -705,6 +708,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
 
 
 @dataclass
@@ -1854,6 +1858,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

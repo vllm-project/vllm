@@ -97,6 +97,11 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
+- `prefill_context_kv_only` in the speculative config, set on the prefill instance
+  only (DFlash-based drafters such as DSpark, Model Runner V2): its drafter only
+  writes the context K/V the decode instance reads, so it drafts nothing,
+  reserves no lookahead KV slots and, for draft models that support it, frees
+  the draft weights only drafting reads
 
 ### KV cache layout
 

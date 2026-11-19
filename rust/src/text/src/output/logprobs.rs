@@ -62,13 +62,12 @@ pub struct DecodedPromptLogprobs {
 pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: Option<&T>,
     logprobs: &Logprobs,
-    skip_special_tokens: bool,
 ) -> Result<DecodedLogprobs, Error> {
     Ok(DecodedLogprobs {
         positions: logprobs
             .positions
             .iter()
-            .map(|position| decode_position_logprobs(tokenizer, position, skip_special_tokens))
+            .map(|position| decode_position_logprobs(tokenizer, position))
             .try_collect()?,
     })
 }
@@ -83,17 +82,16 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: Option<&T>,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,
-    skip_special_tokens: bool,
 ) -> Result<DecodedPromptLogprobs, Error> {
     let first_token_id = prompt_token_ids
         .first()
         .copied()
         .expect("prompt logprobs require at least one prompt token");
-    let first_token = decode_token(tokenizer, first_token_id, skip_special_tokens)?;
+    let first_token = decode_token(tokenizer, first_token_id)?;
     let scored_positions = logprobs
         .positions
         .iter()
-        .map(|position| decode_position_logprobs(tokenizer, position, skip_special_tokens))
+        .map(|position| decode_position_logprobs(tokenizer, position))
         .try_collect()?;
 
     Ok(DecodedPromptLogprobs {
@@ -111,35 +109,35 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
 fn decode_position_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: Option<&T>,
     position: &PositionLogprobs,
-    skip_special_tokens: bool,
 ) -> Result<DecodedPositionLogprobs, Error> {
     Ok(DecodedPositionLogprobs {
         entries: position
             .entries
             .iter()
             .map(|entry| {
-                decode_token(tokenizer, entry.token_id, skip_special_tokens).map(|token| {
-                    DecodedTokenLogprob {
-                        token_id: entry.token_id,
-                        token,
-                        logprob: entry.logprob,
-                        rank: entry.rank,
-                    }
+                decode_token(tokenizer, entry.token_id).map(|token| DecodedTokenLogprob {
+                    token_id: entry.token_id,
+                    token,
+                    logprob: entry.logprob,
+                    rank: entry.rank,
                 })
             })
             .try_collect()?,
     })
 }
 
-/// Without a tokenizer the request outputs no text, so the token string stays
-/// empty.
+/// Decode one logprob token on its own.
+///
+/// Special tokens keep their spelling whatever the request's
+/// `skip_special_tokens`, which only applies to the output text, like Python's
+/// `convert_ids_list_to_tokens`. Without a tokenizer the request outputs no
+/// text, so the token string stays empty.
 fn decode_token<T: Tokenizer + ?Sized>(
     tokenizer: Option<&T>,
     token_id: u32,
-    skip_special_tokens: bool,
 ) -> vllm_tokenizer::Result<String> {
     tokenizer.map_or(Ok(String::new()), |tokenizer| {
-        tokenizer.decode(&[token_id], skip_special_tokens)
+        tokenizer.decode(&[token_id], false)
     })
 }
 
@@ -171,7 +169,7 @@ mod tests {
         };
 
         assert_eq!(
-            decode_logprobs(Some(&tokenizer), &logprobs, false).unwrap(),
+            decode_logprobs(Some(&tokenizer), &logprobs).unwrap(),
             DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
@@ -207,13 +205,8 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(
-                Some(&tokenizer),
-                &[b'p' as u32, b'x' as u32],
-                &logprobs,
-                false
-            )
-            .unwrap(),
+            decode_prompt_logprobs(Some(&tokenizer), &[b'p' as u32, b'x' as u32], &logprobs)
+                .unwrap(),
             DecodedPromptLogprobs {
                 first_token_id: b'p' as u32,
                 first_token: "p".to_string(),

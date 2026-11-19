@@ -118,16 +118,16 @@ class LoRAKernelMeta:
         no_lora = torch.all(token_lora_mapping == -1)
         self.no_lora_flag_cpu[0] = no_lora
 
-        if no_lora:
-            # Early exit. LoRA kernels will not be run.
-            return
-
         num_tokens = token_lora_mapping.size(0)
 
         # copy token lora mapping
         self.token_lora_mapping[:num_tokens].copy_(
             token_lora_mapping, non_blocking=True
         )
+
+        if no_lora:
+            # Early exit. LoRA kernels will not be run.
+            return
 
         # token_indices_sorted_by_lora_ids
         _, token_indices_sorted_by_lora_ids = torch.sort(

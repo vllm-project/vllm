@@ -337,6 +337,8 @@ def _vllm_config(
     parallel.update(parallel_overrides)
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
+            kv_connector="UMBPStoreConnector",
+            kv_connector_module_path=None,
             kv_connector_extra_config=extra,
         ),
         cache_config=SimpleNamespace(

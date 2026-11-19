@@ -729,16 +729,19 @@ class DPSharedEngramStorage:
             views = engram_host_table.share_host_table(num_bytes, group)
         # The GPU maps cuMem host memory with 2M pages, /dev/shm with 64K pages.
         self.huge_pages = views is not None
-        host, gpu = views or self._allocate_shm(num_bytes)
+        host, gpu = views or self.share_shm_table(num_bytes, group)
         self.weight, self.weight_scale_inv = split_table(host)
         self._views = split_table(gpu)
 
-    def _allocate_shm(self, num_bytes: int) -> tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def share_shm_table(
+        num_bytes: int, group: GroupCoordinator
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Map and register one /dev/shm file across a node-local DP group.
 
-        Returns CPU and GPU views of the file.
+        Returns CPU and GPU views of the file. Raises on every rank, leaving
+        nothing mapped, if any rank fails.
         """
-        group = self.group
         with ExitStack() as stack:
             path = error = None
             if group.rank_in_group == 0 and not (error := _shm_shortfall(num_bytes)):
@@ -781,7 +784,9 @@ class DPSharedEngramStorage:
                 result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
                 if result.value != 0:
                     raise RuntimeError(f"cudaHostRegister failed: {result}")
-                finalizer = weakref.finalize(owner, self._unregister, mapping, pointer)
+                finalizer = weakref.finalize(
+                    owner, DPSharedEngramStorage._unregister, mapping, pointer
+                )
                 finalizer.atexit = False  # type: ignore[misc]
                 # The UVA helper otherwise allocates a private pinned copy.
                 if not tensor.is_pinned():
