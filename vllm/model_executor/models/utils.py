@@ -124,11 +124,12 @@ class WeightsMapper:
         for pattern, new_key in self.orig_to_new_regex.items():
             # `regex` releases the GIL for every match on a str. With loader
             # threads busy, getting it back costs far more than the match.
-            if pattern.search(key, concurrent=False):
+            kw = {"concurrent": False} if isinstance(pattern, re.Pattern) else {}
+            if pattern.search(key, **kw):
                 if new_key is None:
                     return None
 
-                key = pattern.sub(new_key, key, concurrent=False)
+                key = pattern.sub(new_key, key, **kw)
 
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
