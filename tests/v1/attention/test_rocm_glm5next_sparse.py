@@ -285,15 +285,18 @@ def test_forward_mqa_fp8_kv_query_contract(
 ):
     """FP8 KV keeps NoPE Q in model dtype; every other route still quantizes Q.
 
-    The non-unit KV scale must reach whichever attention wrapper is selected.
+    The non-unit KV scale tensor must reach whichever attention wrapper is
+    selected.
     """
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: False)
     fp8_dtype = current_platform.fp8_dtype()
     num_tokens, num_heads, kv_lora_rank, k_scale = 2, 16, 512, 2.5
     calls = []
+    scale_args = []
 
     def record(name, q, kv_scale):
         calls.append((name, q.dtype, float(kv_scale)))
+        scale_args.append(kv_scale)
 
     def fake_triton_prefill(**kwargs):
         record("triton_prefill", kwargs["q"], kwargs["kv_scale"])
@@ -337,6 +340,7 @@ def test_forward_mqa_fp8_kv_query_contract(
     impl.scale = head_size**-0.5
     impl.sinks = None
     impl.use_aiter_sparse_mla = use_aiter_sparse_mla
+    impl.dcp_world_size = 1
     impl.topk_indices_buffer = torch.zeros(num_tokens, 4, dtype=torch.int32)
     impl.owns_indexer = True
     impl.index_epoch = 0
@@ -362,10 +366,10 @@ def test_forward_mqa_fp8_kv_query_contract(
         paged_kv_indptr=torch.arange(num_tokens + 1, dtype=torch.int32),
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
     )
+    # No _k_scale_float: every route must read the device tensor.
     layer = SimpleNamespace(
         _q_scale=torch.tensor(1.0),
         _k_scale=torch.tensor(k_scale),
-        _k_scale_float=k_scale,
         _decode_concat_quant_fp8_op=fake_concat_quant,
     )
     q = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
@@ -375,6 +379,8 @@ def test_forward_mqa_fp8_kv_query_contract(
 
     impl.forward_mqa(q, kv_cache, metadata, layer)
 
+    # The tensor itself, not a host copy, so a captured graph sees later updates.
+    assert all(arg is layer._k_scale for arg in scale_args)
     if route == "triton":
         wrapper = "triton_decode" if workload == "decode" else "triton_prefill"
         assert calls == [(wrapper, torch.bfloat16, k_scale)]
@@ -446,8 +452,8 @@ def _sparse_attn_fp32_reference(q, kv, indices, indptr, scale, attn_sink):
 def test_sparse_fp8_nope_matches_fp32_reference(num_splits, with_sink, kv_scale):
     """NoPE FP8 KV must dequantize in Triton, not reach 576-wide AITER asm.
 
-    ``num_splits=None`` covers the ragged kernel, otherwise split-K decode.
-    Row 1 is empty, and row 2 is shorter than ``num_splits`` so later splits
+    `num_splits=None` covers the ragged kernel, otherwise split-K decode.
+    Row 1 is empty, and row 2 is shorter than `num_splits` so later splits
     are empty.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
@@ -487,7 +493,7 @@ def test_sparse_fp8_nope_matches_fp32_reference(num_splits, with_sink, kv_scale)
         attn_sink=attn_sink,
         nope_head_dim=head_dim,
         rope_head_dim=0,
-        kv_scale=kv_scale,
+        kv_scale=torch.tensor(kv_scale, dtype=torch.float32, device=device),
     )
     if num_splits is None:
         out = _rocm_sparse_attn_prefill_ragged_triton(**common)
@@ -501,3 +507,64 @@ def test_sparse_fp8_nope_matches_fp32_reference(num_splits, with_sink, kv_scale)
     )
     assert out[1].count_nonzero() == 0
     torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+@pytest.mark.parametrize("num_splits", [None, 4])
+def test_sparse_fp8_nope_scale_update_reaches_captured_graph(num_splits):
+    """An in-place k_scale update, as a weight reload does, reaches a HIP graph.
+
+    A scale passed by value would be baked into the captured launch and replay
+    would keep dequantizing with the old one.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_bf16_triton,
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    set_random_seed(0)
+    device = "cuda"
+    num_heads, head_dim, num_kv, num_rows, topk = 16, 512, 256, 3, 64
+    q = torch.randn(num_rows, num_heads, head_dim, dtype=torch.bfloat16, device=device)
+    kv_fp8 = torch.randn(num_kv, head_dim, device=device).to(
+        current_platform.fp8_dtype()
+    )
+    indices = torch.randint(
+        0, num_kv, (num_rows * topk,), device=device, dtype=torch.int32
+    )
+    indptr = torch.arange(num_rows + 1, device=device, dtype=torch.int32) * topk
+    kv_scale = torch.tensor(1.5, dtype=torch.float32, device=device)
+    common = dict(
+        q=q,
+        kv=kv_fp8,
+        indices=indices,
+        indptr=indptr,
+        scale=head_dim**-0.5,
+        attn_sink=None,
+        nope_head_dim=head_dim,
+        rope_head_dim=0,
+        kv_scale=kv_scale,
+    )
+
+    def run():
+        if num_splits is None:
+            return _rocm_sparse_attn_prefill_ragged_triton(**common)
+        return _rocm_sparse_attn_decode_ragged_bf16_triton(
+            **common, num_splits=num_splits
+        )
+
+    run()  # compile outside the capture
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    graph.replay()
+    before_update = captured.clone()
+
+    kv_scale.fill_(0.37)
+    graph.replay()
+    expected = run()
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+    assert not torch.allclose(captured.float(), before_update.float(), atol=1e-2)

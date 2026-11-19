@@ -2529,7 +2529,7 @@ def _sparse_attn_prefill_ragged_kernel(
     head_dim,
     num_kv,
     scale,
-    kv_scale,
+    kv_scale_ptr,
     HAS_ATTN_SINK: tl.constexpr,
     IS_MXFP4: tl.constexpr,
     OUT_DV: tl.constexpr,
@@ -2555,8 +2555,11 @@ def _sparse_attn_prefill_ragged_kernel(
         other=0.0,
     )
     # K and V are the same latent row, so the FP8 scale factors out of both
-    # products: once into the QK scale, once into the accumulator.
-    qk_scale = scale * kv_scale if KV_IS_FP8 else scale
+    # products: once into the QK scale, once into the accumulator. The scale is
+    # read from device memory, not passed by value, so an in-place update of
+    # the layer's k_scale reaches an already captured HIP graph.
+    kv_scale = tl.load(kv_scale_ptr) if KV_IS_FP8 else 1.0
+    qk_scale = scale * kv_scale
 
     neg_large = -3.4028234663852886e38
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
@@ -2667,7 +2670,7 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
     head_dim,
     num_kv,
     scale,
-    kv_scale,
+    kv_scale_ptr,
     KV_IS_FP8: tl.constexpr,
     IS_MXFP4: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -2693,8 +2696,11 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
         other=0.0,
     )
     # K and V are the same latent row, so the FP8 scale factors out of both
-    # products: once into the QK scale, once into the partial accumulator.
-    qk_scale = scale * kv_scale if KV_IS_FP8 else scale
+    # products: once into the QK scale, once into the partial accumulator. The
+    # scale is read from device memory so an in-place update of the layer's
+    # k_scale reaches an already captured HIP graph.
+    kv_scale = tl.load(kv_scale_ptr) if KV_IS_FP8 else 1.0
+    qk_scale = scale * kv_scale
 
     neg_large = -3.4028234663852886e38
     m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
@@ -3935,7 +3941,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     out: torch.Tensor | None = None,
-    kv_scale: float = 1.0,
+    kv_scale: torch.Tensor | None = None,
     is_mxfp4: bool = False,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
@@ -3967,6 +3973,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     assert not (kv_is_fp8 and q.dtype == FP8_DTYPE), (
         f"FP8 KV requires model-dtype Q, got q={q.dtype}"
     )
+    assert not kv_is_fp8 or kv_scale is not None, "FP8 KV requires kv_scale"
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
@@ -3999,7 +4006,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         head_dim,
         kv.shape[0],
         float(scale),
-        float(kv_scale),
+        kv_scale,
         HAS_ATTN_SINK=has_attn_sink,
         IS_MXFP4=is_mxfp4,
         OUT_DV=out.shape[-1],
@@ -4022,7 +4029,7 @@ def _rocm_sparse_attn_prefill_triton(
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
-    kv_scale: float = 1.0,
+    kv_scale: torch.Tensor | None = None,
     is_mxfp4: bool = False,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
@@ -4320,7 +4327,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     rope_head_dim: int,
     num_splits: int,
     out: torch.Tensor | None = None,
-    kv_scale: float = 1.0,
+    kv_scale: torch.Tensor | None = None,
     is_mxfp4: bool = False,
 ) -> torch.Tensor:
     """Split-K decode over a bf16 or per-tensor-scaled FP8 ragged KV cache.
@@ -4340,7 +4347,8 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         rope_head_dim: RoPE width of `d`.
         num_splits: Number of KV splits per query.
         out: Optional destination with `d` trailing elements.
-        kv_scale: Dequantization scale of an FP8 cache; ignored otherwise.
+        kv_scale: Device tensor with the dequantization scale of an FP8 cache,
+            read inside the kernel; ignored otherwise.
         is_mxfp4: `kv` holds packed `mxfp4_mla` rows instead of bf16.
 
     Returns:
@@ -4375,6 +4383,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     assert not (kv_is_fp8 and q.dtype == FP8_DTYPE), (
         f"FP8 KV requires model-dtype Q, got q={q.dtype}"
     )
+    assert not kv_is_fp8 or kv_scale is not None, "FP8 KV requires kv_scale"
     if out is None:
         out = torch.empty_like(q)
     assert out.shape[-1] == head_dim, (
@@ -4421,7 +4430,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         head_dim,
         kv.shape[0],
         float(scale),
-        float(kv_scale),
+        kv_scale,
         KV_IS_FP8=kv_is_fp8,
         IS_MXFP4=is_mxfp4,
         BLOCK_H=block_h,
@@ -4880,7 +4889,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
-    kv_scale: float = 1.0,
+    kv_scale: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4988,7 +4997,7 @@ def rocm_sparse_attn_decode_bf16(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
     num_splits: int,
-    kv_scale: float = 1.0,
+    kv_scale: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
 ) -> None:
     """Run split-K sparse attention over decode rows on a bf16 or FP8 KV cache.
@@ -5006,7 +5015,8 @@ def rocm_sparse_attn_decode_bf16(
         ragged_indptr: Segment offsets into `ragged_indices`, `[sq + 1]`.
         num_splits: KV splits per query, from
             `rocm_sparse_decode_bf16_num_splits`.
-        kv_scale: Dequantization scale of an FP8 cache; ignored otherwise.
+        kv_scale: Device tensor with the dequantization scale of an FP8 cache,
+            read inside the kernel; ignored otherwise.
         kv_cache_dtype: `"mxfp4_mla"` reads `kv` as packed rows.
 
     """

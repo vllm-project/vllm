@@ -1214,11 +1214,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             is_mxfp4 = self.kv_cache_dtype == "mxfp4_mla"
             row_width = mxfp4_row_bytes(self.kv_lora_rank) if is_mxfp4 else q.shape[-1]
             kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
-            kv_scale = (
-                float(layer._k_scale_float)
-                if self.kv_cache_dtype.startswith("fp8")
-                else 1.0
-            )
+            # A device tensor, not layer._k_scale_float: an in-place weight
+            # reload rewrites the tensor, which a captured HIP graph still reads.
+            kv_scale = layer._k_scale if self.kv_cache_dtype.startswith("fp8") else None
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -1454,12 +1452,17 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         # and it wants a bf16 query.
         fp8_ds_mla_cache = self.kv_cache_dtype == "fp8_ds_mla"
         head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
-        # The AITER sparse MLA opt-in takes precedence and reads FP8 Q.
-        use_triton_sparse = not self.use_aiter_sparse_mla and _use_rocm_sparse_triton(
-            head_size=head_size,
-            kv_lora_rank=self.kv_lora_rank,
-            num_prefills=attn_metadata.num_prefills,
-            num_decodes=attn_metadata.num_decodes,
+        # The AITER sparse MLA opt-in takes precedence and reads FP8 Q. fp8_ds_mla
+        # has its own branch below and never reads the NoPE geometry route.
+        use_triton_sparse = (
+            not fp8_ds_mla_cache
+            and not self.use_aiter_sparse_mla
+            and _use_rocm_sparse_triton(
+                head_size=head_size,
+                kv_lora_rank=self.kv_lora_rank,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+            )
         )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
