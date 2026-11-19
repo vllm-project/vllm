@@ -650,7 +650,7 @@ class VllmConfig:
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
-            return pp_size + 1
+            return pp_size + self.scheduler_config.async_scheduling_depth - 1
         return pp_size
 
     @property
@@ -2004,11 +2004,15 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
-            if self.model_config is not None and not hasattr(
-                self.model_config.hf_text_config, "index_topk"
+            if (
+                self.model_config is not None
+                and not hasattr(self.model_config.hf_text_config, "index_topk")
+                and getattr(self.model_config.hf_text_config, "indexer_budget", None)
+                is None
             ):
                 raise ValueError(
-                    "HiSparse is only supported for DSA models with index_topk."
+                    "HiSparse is only supported for DSA models with index_topk "
+                    "and QSA models with indexer_budget."
                 )
 
         self._normalize_piecewise_cudagraph_mode(
