@@ -364,6 +364,7 @@ def test_measured_sizing_leaves_room_for_prompt_embeds_rows(monkeypatch):
             dtype=torch.bfloat16,
             get_inputs_embeds_size=lambda: 1024,
         ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192),
         parallel_config=SimpleNamespace(),
         cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,

@@ -610,10 +610,14 @@ def _new_req_ids(output: SchedulerOutput) -> list[str]:
 
 def test_prompt_embeds_admission_waits_for_gpu_budget():
     """A prompt_embeds request waits while its rows would push the rows held on
-    the GPU past the budget, max_model_len. Requests
+    the GPU past the budget. Requests
     without embeds are admitted past it, and it is admitted once a held prompt
     is fully computed, before that request finishes."""
-    scheduler = create_scheduler(max_model_len=64, enable_prompt_embeds=True)
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.max_num_prompt_embeds_tokens = 64
     scheduler.add_request(_prompt_embeds_request("a", 40))
     scheduler.add_request(_prompt_embeds_request("b", 40))
     scheduler.add_request(create_requests(1, num_tokens=10, req_ids=["c"])[0])
@@ -624,11 +628,28 @@ def test_prompt_embeds_admission_waits_for_gpu_budget():
     assert "a" in scheduler.requests
 
 
+def test_prompt_embeds_budget_covers_a_full_step():
+    """The budget leaves room for a full step of new prompts besides one
+    max-length prompt, so prompt_embeds requests can fill steps longer than
+    max_model_len."""
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=256, enable_prompt_embeds=True
+    )
+    for request_id in "abcd":
+        scheduler.add_request(_prompt_embeds_request(request_id, 60))
+
+    assert _new_req_ids(scheduler.schedule()) == ["a", "b", "c", "d"]
+
+
 def test_prompt_embeds_waiting_request_is_not_starved():
     """A prompt_embeds request that does not fit holds back later prompt_embeds
     requests, even ones that fit, so short prompts cannot keep a long one
     waiting. Requests without prompt_embeds still go ahead."""
-    scheduler = create_scheduler(max_model_len=64, enable_prompt_embeds=True)
+    scheduler = create_scheduler(
+        max_model_len=64, max_num_batched_tokens=64, enable_prompt_embeds=True
+    )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.max_num_prompt_embeds_tokens = 64
     scheduler.add_request(_prompt_embeds_request("a", 40))
     scheduler.add_request(_prompt_embeds_request("b", 60))
     scheduler.add_request(_prompt_embeds_request("c", 16))
@@ -645,6 +666,8 @@ def test_prompt_embeds_budget_released_on_preemption():
     scheduler = create_scheduler(
         max_model_len=64, max_num_batched_tokens=16, enable_prompt_embeds=True
     )
+    # Budget as if prompts could not hold more rows than they compute.
+    scheduler.max_num_prompt_embeds_tokens = 64
     request = _prompt_embeds_request("a", 40)
     scheduler.add_request(request)
     scheduler.add_request(_prompt_embeds_request("b", 40))

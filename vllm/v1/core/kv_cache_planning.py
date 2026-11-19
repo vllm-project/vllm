@@ -22,7 +22,10 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
-from vllm.v1.core.sched.utils import prompt_embeds_bytes_per_token
+from vllm.v1.core.sched.utils import (
+    prompt_embeds_budget_bytes,
+    prompt_embeds_row_bytes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -1523,6 +1526,25 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    def set_aside(memory: list[int], num_bytes: int) -> list[int]:
+        """Take `num_bytes` from each worker's memory, if it has a KV cache."""
+        return [
+            avail_mem - num_bytes if groups else avail_mem
+            for groups, avail_mem in zip(projected_groups_per_worker, memory)
+        ]
+
+    # Workers hold up to max_model_len + max_num_batched_tokens prompt_embeds
+    # rows, set aside in two parts:
+    # 1. Before auto-fit, the max_num_batched_tokens rows, which do not depend
+    #    on max_model_len, so auto-fit plans against what is left.
+    # 2. After auto-fit, the max_model_len rows, once max_model_len is known.
+    prompt_embeds_bytes_per_token = 0
+    if override is None and vllm_config.cache_config.kv_cache_memory_bytes is None:
+        prompt_embeds_bytes_per_token = prompt_embeds_row_bytes(vllm_config)
+        available_memory = set_aside(
+            available_memory, prompt_embeds_budget_bytes(vllm_config, 0)
+        )
+
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
@@ -1535,33 +1557,21 @@ def get_kv_cache_configs(
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
-    # Workers hold up to `max_model_len` prompt_embeds rows. Explicit KV cache
-    # sizes replace the profiled memory, so they leave this out.
-    prompt_embeds_bytes = 0
-    if override is None and vllm_config.cache_config.kv_cache_memory_bytes is None:
-        prompt_embeds_bytes = prompt_embeds_bytes_per_token(vllm_config)
-
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
             builder,
             vllm_config,
             projected_groups_per_worker,
             check_memory,
-            extra_bytes_per_token=prompt_embeds_bytes,
+            extra_bytes_per_token=prompt_embeds_bytes_per_token,
         )
 
+    # set aside the max_model_len prompt_embeds rows, now that max_model_len is final.
     prompt_embeds_rows_bytes = (
-        vllm_config.model_config.max_model_len * prompt_embeds_bytes
+        vllm_config.model_config.max_model_len * prompt_embeds_bytes_per_token
     )
-    if prompt_embeds_rows_bytes:
-        available_memory = [
-            avail_mem - prompt_embeds_rows_bytes if groups else avail_mem
-            for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
-        ]
-        check_memory = [
-            avail_mem - prompt_embeds_rows_bytes if groups else avail_mem
-            for groups, avail_mem in zip(projected_groups_per_worker, check_memory)
-        ]
+    available_memory = set_aside(available_memory, prompt_embeds_rows_bytes)
+    check_memory = set_aside(check_memory, prompt_embeds_rows_bytes)
 
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
