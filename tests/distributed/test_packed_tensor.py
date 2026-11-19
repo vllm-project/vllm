@@ -414,6 +414,7 @@ class TestPackedIpcProducer:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid="test-uuid",
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=12_000,
             )
@@ -432,6 +433,7 @@ class TestPackedIpcProducer:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid="my-gpu-uuid",
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=16,
             )
@@ -453,6 +455,7 @@ class TestPackedIpcProducer:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid="uuid",
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
             )
@@ -468,6 +471,7 @@ class TestPackedIpcProducer:
             packed_ipc_producer(
                 iterator=iter([(n, torch.empty(0, 3).cuda()) for n in names]),
                 gpu_uuid="uuid",
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=1000,
             )
@@ -599,6 +603,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=staged(params) if stage else iter(params),
                 gpu_uuid=gpu_uuid,
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
             ),
@@ -627,6 +632,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=iter(params_cuda),
                 gpu_uuid=gpu_uuid,
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
             ),
@@ -654,6 +660,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=50_000,
             ),
@@ -682,6 +689,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
             ),
@@ -711,6 +719,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=self._get_gpu_uuid(),
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=buffer_size_bytes,
             ),
@@ -733,6 +742,7 @@ class TestPackedIpcRoundtrip:
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
+                device_index=torch.cuda.current_device(),
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
             )

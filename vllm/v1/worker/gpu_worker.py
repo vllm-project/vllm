@@ -1784,23 +1784,22 @@ class Worker(WorkerBase):
             # restores them.
             self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
+            # Engines may receive kernel-format weights, needing no room; so
+            # warn rather than fail when short.
+            self._weight_update_kv_cache_loan.enter_context(
+                kv_cache_lent_for_weight_update(
+                    getattr(self.model_runner, "extensible_kv_cache", None),
+                    draft_model or self.model_runner.get_model(),
+                    reclaimable=self._kv_cache_reclaimable,
+                    fail_if_short=False,
+                )
+            )
         except BaseException:
-            if direct_reload_enabled():  # the engine may have begun a reload
-                abort_reload(self.weight_transfer_engine.model)
-            self.weight_transfer_engine.reset_weight_update_target()
+            # the engine may have begun a reload
+            self._reset_weight_update_target(abort=True)
             if draft_model is not None:
                 restore_quantized_lm_heads(draft_model, refresh=False)
             raise
-        # Engines may receive kernel-format weights, needing no room; so warn
-        # rather than fail when short.
-        self._weight_update_kv_cache_loan.enter_context(
-            kv_cache_lent_for_weight_update(
-                getattr(self.model_runner, "extensible_kv_cache", None),
-                draft_model or self.model_runner.get_model(),
-                reclaimable=self._kv_cache_reclaimable,
-                fail_if_short=False,
-            )
-        )
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
@@ -1840,13 +1839,19 @@ class Worker(WorkerBase):
                 self._end_weight_update(refresh=False)
                 raise
 
+    def _reset_weight_update_target(self, abort: bool) -> None:
+        """Reset the engine's update target, first aborting a direct reload if
+        `abort`."""
+        assert self.weight_transfer_engine is not None
+        if abort and direct_reload_enabled():
+            abort_reload(self.weight_transfer_engine.model)
+        self.weight_transfer_engine.reset_weight_update_target()
+
     def _end_weight_update(self, refresh: bool) -> None:
         assert self.weight_transfer_engine is not None
         self._weight_update_active = False
         self._weight_update_kv_cache_loan.close()
-        if not refresh and direct_reload_enabled():
-            abort_reload(self.weight_transfer_engine.model)
-        self.weight_transfer_engine.reset_weight_update_target()
+        self._reset_weight_update_target(abort=not refresh)
         if self._weight_update_is_draft and (
             (draft_model := self.get_draft_model()) is not None
         ):

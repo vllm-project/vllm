@@ -17,6 +17,9 @@ from vllm.utils.math_utils import round_down, round_up
 # Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+# Smallest buffer `grow_buffer` allocates (unless the capacity is smaller), so a
+# large transfer grows each buffer only a few times.
+MIN_PACKED_BUFFER_BYTES = 64 * 1024 * 1024
 
 
 # Streams are cached across calls: the caching allocator keys cached blocks by the
@@ -84,11 +87,14 @@ def grow_buffer(
     keep: int = 0,
 ) -> torch.Tensor:
     """`buf` if it holds `nbytes`, else a new buffer with its first `keep` bytes:
-    `buf`'s size (at first, `nbytes` rounded up) doubled to hold `nbytes`, at most
-    `capacity`."""
+    `buf`'s size (at first, `MIN_PACKED_BUFFER_BYTES`) doubled to hold `nbytes`,
+    at most `capacity`."""
     if buf is not None and buf.numel() >= nbytes:
         return buf
-    size = buf.numel() if buf is not None else round_up(nbytes, ALIGN)
+    if buf is None:
+        size = max(MIN_PACKED_BUFFER_BYTES, round_up(nbytes, ALIGN))
+    else:
+        size = buf.numel()
     while size < nbytes:
         size *= 2
     size = min(size, capacity)
@@ -99,21 +105,16 @@ def grow_buffer(
     return grown
 
 
-def _current_device() -> torch.device:
-    """The current accelerator device, where packed buffers are allocated."""
-    accelerator = torch.accelerator.current_accelerator()
-    assert accelerator is not None
-    return torch.device(accelerator.type, torch.accelerator.current_device_index())
-
-
 def _record_sources(
     srcs: list[torch.Tensor], device: torch.device, stream: torch.cuda.Stream
 ) -> None:
-    """Keep same-device `srcs` alive until `stream`'s copies end; `copy_` already
-    syncs copies from the host or another GPU with their source."""
+    """Keep GPU `srcs` alive until their copies end: on `stream` on `device`, on
+    the source device's current stream (where `copy_` runs) on another GPU."""
     for t in srcs:
         if t.device == device:
             t.record_stream(stream)
+        elif t.device.type != "cpu":  # host copies are synchronous
+            t.record_stream(torch.cuda.current_stream(t.device))
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -285,9 +286,9 @@ def packed_nccl_broadcast_producer(
             yield t.shape, t.dtype
 
     capacity = chunk_capacity(buffer_size_bytes)
-    device = _current_device()
+    device = group.device
     streams = _get_streams(device.index, num_buffers)
-    caller_stream = torch.accelerator.current_stream()
+    caller_stream = torch.cuda.current_stream(device)
     done: list[torch.Event | None] = [None] * num_buffers
     bufs: list[torch.Tensor | None] = [None] * num_buffers
     k = 0  # the chunk being packed
@@ -433,6 +434,7 @@ class PackedIpcChunk:
 def packed_ipc_producer(
     iterator: Iterator[tuple[str, torch.Tensor]],
     gpu_uuid: str,
+    device_index: int,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
 ) -> Iterator[PackedIpcChunk]:
@@ -444,15 +446,16 @@ def packed_ipc_producer(
 
     Args:
         iterator: Iterator of (name, tensor) pairs.
-        gpu_uuid: Physical GPU UUID string for this rank.
+        gpu_uuid: Physical GPU UUID string of `device_index`.
+        device_index: The CUDA device the IPC buffer is allocated on.
         post_iter_func: Applied to each (name, tensor) before packing.
-        buffer_size_bytes: Chunk size; the IPC buffer, on the current device,
-            doubles up to it while the first chunk is packed.
+        buffer_size_bytes: Chunk size; the IPC buffer grows up to it while the
+            first chunk is packed.
 
     """
     capacity = chunk_capacity(buffer_size_bytes)
-    device = _current_device()  # where `gpu_uuid` maps the buffer
-    caller_stream = torch.accelerator.current_stream()
+    device = torch.device("cuda", device_index)
+    caller_stream = torch.cuda.current_stream(device)
     buf: torch.Tensor | None = None  # at the first byte: none for no bytes
     filled = 0  # the bytes of the current chunk's copied pieces end at
     items = iter(iterator)

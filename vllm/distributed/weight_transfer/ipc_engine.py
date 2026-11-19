@@ -390,6 +390,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         for chunk in packed_ipc_producer(
             iterator=source.iter_full(),
             gpu_uuid=self.gpu_uuid,
+            device_index=self.device_index,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
         ):

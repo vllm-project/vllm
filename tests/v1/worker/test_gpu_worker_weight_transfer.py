@@ -328,17 +328,24 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
     assert hasattr(engine.model, "_direct_reload_begun") is not direct
 
 
-def test_failed_start_aborts_direct_reload(monkeypatch):
+@pytest.mark.parametrize("failing", ["engine", "kv_cache_loan"])
+def test_failed_start_aborts_direct_reload(failing, monkeypatch):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     engine = _RecordingEngine()
     worker = _make_worker(engine)
 
-    def fail_after_start_reload() -> None:
+    def start_reload() -> None:
         monkeypatch.setattr(lifecycle, "_weight_update_active", True)
         engine.model._direct_reload_begun = True
+        if failing == "engine":
+            raise ValueError("boom")
+
+    def fail_loan(*args, **kwargs):
         raise ValueError("boom")
 
-    monkeypatch.setattr(engine, "start_weight_update", fail_after_start_reload)
+    monkeypatch.setattr(engine, "start_weight_update", start_reload)
+    if failing == "kv_cache_loan":
+        monkeypatch.setattr(gpu_worker, "kv_cache_lent_for_weight_update", fail_loan)
     with pytest.raises(ValueError, match="boom"):
         Worker.start_weight_update(worker)
 

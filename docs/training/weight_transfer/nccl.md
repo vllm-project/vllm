@@ -103,15 +103,16 @@ decodes with exactly the values the trainer encoded with. They are not per-round
 `update_weights` fields.
 
 !!! note "Memory"
-    On the trainer, each rotating buffer starts at the size of the first bytes
-    packed into it and doubles, up to `packed_buffer_size_bytes`, when a chunk
-    needs more, so a small transfer holds at most twice its bytes; the workers
-    size each receive buffer to its chunk. That
-    is up to `packed_buffer_size_bytes * packed_num_buffers` on each side (2 GiB
-    at the defaults). Lower
-    `packed_buffer_size_bytes` if that is too much headroom. A non-contiguous
-    tensor split across chunks also needs a contiguous copy of its full size
-    on the trainer while it is sent.
+    Each side holds a buffer of up to `packed_buffer_size_bytes` per rotating
+    buffer, so up to `packed_buffer_size_bytes * packed_num_buffers` (2 GiB at
+    the defaults); it is smaller for small transfers. On the trainer, each
+    buffer starts at 64 MiB (or its first bytes, if more) and doubles as
+    needed; while growing, the old buffer is briefly held too and may stay
+    reserved by PyTorch's caching allocator. The workers size each receive
+    buffer to its chunk. Lower `packed_buffer_size_bytes` if that is too much
+    headroom. CPU-resident sources work but are copied synchronously, which is
+    slower. A non-contiguous tensor split across chunks also needs a contiguous
+    copy of its full size on the trainer while it is sent.
 
 ### Metadata and `iter_full()` must agree
 
