@@ -131,11 +131,11 @@ class SchedulerOffloadConfig(NamedTuple):
     def max_eagle_proof_margin(self) -> int:
         return max(self.eagle_proof_margins, default=0)
 
-    def partial_tail_key_tokens(self, config_idx: int, boundary: int) -> int:
+    def partial_tail_key_tokens(self, config_group_idx: int, boundary: int) -> int:
         """Token position whose hash keys a group's partial-tail block."""
         if not self.eagle_proof_margins:
             return boundary
-        return boundary + self.eagle_proof_margins[config_idx]
+        return boundary + self.eagle_proof_margins[config_group_idx]
 
     @classmethod
     def from_spec(
@@ -327,7 +327,7 @@ class SchedulerOffloadConfig(NamedTuple):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestGroupState:
     offload_keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)

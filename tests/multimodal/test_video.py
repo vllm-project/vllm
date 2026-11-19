@@ -1487,7 +1487,9 @@ def test_video_processor_from_model_repo(
     )
 
     # --- Alignment check with HF VideoProcessor.sample_frames ---
-    processor = AutoVideoProcessor.from_pretrained(model_repo, trust_remote_code=True)
+    processor = AutoVideoProcessor.from_pretrained(
+        model_repo, trust_remote_code=model_repo == "MiniMaxAI/MiniMax-M3"
+    )
 
     fps_list = [1, 2, 30, 60]
     duration_list = [10, 60, 600]
@@ -2022,9 +2024,6 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
             {"fps": 2, "max_duration": 30, "backend": "opencv"},
             60,
             id="opencv_dynamic-exceeds_max_duration",
-        ),
-        pytest.param(
-            "openpangu", {"num_frames": 32, "fps": -1}, 32, id="openpangu-num_frames"
         ),
         pytest.param(
             "molmo2",

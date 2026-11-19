@@ -50,7 +50,7 @@ WIDE_LOW_LATENCY_MAX_ROWS = 48
 MIN_FLASHINFER_VERSION = "0.7.2"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodeConfig:
     # Tune the executor's FlashInfer GEMMs at build
     # (kernel_config.enable_flashinfer_autotune is not False).
@@ -171,6 +171,25 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     return DecodeConfig(
         autotune=kernel.enable_flashinfer_autotune is not False,
         jit_warmup=bool(kernel.enable_jit_warmup),
+    )
+
+
+def records_decode_metadata(vllm_config: VllmConfig) -> bool:
+    """Whether SM80 or SM90 records the attention metadata builds of FULL
+    decode steps (`runtime/metadata_graphs.py`): with FULL decode CUDA
+    graphs, without micro-batching or context parallelism."""
+    from .ampere import is_ampere
+    from .hopper import is_hopper
+
+    parallel = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    return (
+        (is_ampere() or is_hopper())
+        and cudagraph_mode is not None
+        and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        and not parallel.use_ubatching
+        and parallel.decode_context_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
     )
 
 
