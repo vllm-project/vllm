@@ -553,8 +553,8 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
   // negative length would otherwise emit indices 0..TopK-1 as valid instead
   // of the -1 padding.
   const int32_t sl = params.lengths[row] > 0 ? params.lengths[row] : 0;
-  int32_t* out = params.output + row * TopK;
-  const InT* in = params.input + row * params.stride;
+  int32_t* out = params.output + static_cast<int64_t>(row) * TopK;
+  const InT* in = params.input + static_cast<int64_t>(row) * params.stride;
 
   // Trivial: seq_len <= TopK
   if (sl <= static_cast<int32_t>(TopK)) {
