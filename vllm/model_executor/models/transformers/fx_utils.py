@@ -40,6 +40,9 @@ _MODULE_GETATTR = nn.Module.__getattr__
 `get_attr` nodes; reading one while inferring a `get_attr`'s own value would
 recurse until the stack runs out, truncating the graph."""
 
+_ALWAYS_NONE = frozenset({"past_key_values", "cache"})
+"""Cache arguments vLLM never passes, made concrete `None` to simplify tracing."""
+
 
 @contextlib.contextmanager
 def _unpatched_modules():
@@ -256,12 +259,7 @@ def _leaf_attention_interfaces():
 def trace(module: nn.Module) -> fx.Graph | None:
     """Trace `module.forward`, returning the partial graph on failure."""
     parameters = forward_parameters(type(module))
-    # vLLM never passes the cache (`past_key_values`, renamed `cache` in Transformers
-    # v5.24) so it is always the default value of `None`. Make this concrete to
-    # simplify tracing.
-    concrete_args = {
-        name: None for name in ("past_key_values", "cache") if name in parameters
-    } or None
+    concrete_args = {name: None for name in _ALWAYS_NONE & parameters.keys()} or None
     # Get the name of the kwargs parameter passed to module.forward (usually "kwargs")
     tracer = _AllLeafTracer()
     tracer.varkw = next(
