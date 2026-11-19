@@ -172,10 +172,6 @@ pub struct RenderArgs {
         default_value = "0"
     )]
     skip_model_name_validation: bool,
-    /// Upper bound on a request's `n` (default 16384). Like Python, it is set
-    /// only through `VLLM_MAX_N_SEQUENCES`.
-    #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
-    max_n_sequences: Option<i64>,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -244,8 +240,8 @@ pub struct RenderArgs {
     dtype: DtypeArg,
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
-    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
-    /// unlimited.
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities
+    /// default to 999 items.
     ///
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
@@ -278,7 +274,6 @@ impl RenderArgs {
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
-            max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
             grpc_port: self.grpc_port,
@@ -489,7 +484,7 @@ pub struct SharedRuntimeArgs {
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
     /// profiling options are forwarded to the engine untouched.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to 999 items.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,

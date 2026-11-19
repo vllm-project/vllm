@@ -90,6 +90,110 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_shared_expert_decode(tmp_path):
+    """FP8 shared-expert B1 decode uses the native kernel and matches stock MoE."""
+    from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
+
+    from vllm.config import ModelConfig
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    text_config = Qwen3_5MoeTextConfig(
+        hidden_size=128,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=8,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=32,
+        vocab_size=128,
+        layer_types=["full_attention"],
+    )
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
+    config = VllmConfig(
+        additional_config={"decode_backend": "latency_specialized"},
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype=torch.float16,
+            max_model_len=128,
+        ),
+        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True),
+    )
+    try:
+        with set_current_vllm_config(config), set_default_torch_dtype(torch.float16):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                backend=current_platform.dist_backend,
+                distributed_init_method=f"file://{tmp_path / 'distributed'}",
+            )
+            initialize_model_parallel(1, 1)
+            init_workspace_manager(torch.device(DEVICE_TYPE))
+            with torch.device(DEVICE_TYPE):
+                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
+                torch.manual_seed(7)
+                with torch.no_grad():
+                    for name, param in block.named_parameters():
+                        if "scale" in name:
+                            param.fill_(0.0625)
+                        else:
+                            values = torch.randn(param.shape, dtype=torch.float32)
+                            if param.dtype != torch.float8_e4m3fn:
+                                values *= 0.0625
+                            param.copy_(values.to(param.dtype))
+                for layer in block.modules():
+                    method = getattr(layer, "quant_method", None)
+                    if method is not None:
+                        method.process_weights_after_loading(layer)
+                kernel = block.experts.routed_experts.quant_method.moe_kernel
+                assert kernel is not None
+                experts = kernel.fused_experts
+                assert isinstance(experts, XPUExpertsFp8)
+                provider = experts.fused_moe_impl
+                assert provider is not None
+                initialize_specialized_decode(block)
+                assert block._decode is not None
+                block._decode.runtime.prepare_capture(1, 1)
+                x = torch.randn(1, 128, dtype=torch.float16)
+            with set_forward_context(None, config), torch.inference_mode():
+                expected = Qwen3NextSparseMoeBlock.forward(block, x)
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as profiler:
+                    actual = block(x)
+            assert experts.fused_moe_impl is provider
+            assert (
+                sum(
+                    event.count
+                    for event in profiler.key_averages()
+                    if event.key == "_xpu_C::moe_shared_fused_decode_interface"
+                )
+                == 1
+            )
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
+
+
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
     captured: dict[str, torch.Tensor] = {}
 

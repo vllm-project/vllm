@@ -628,9 +628,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300 DPX) Quantization Kernels"
+      label: ":amd: (MI300) Quantization Kernels"
       dind: false
-      device: mi300_dpx
+      device: mi300_1
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -663,6 +663,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -684,6 +685,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/single_rank_group.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
