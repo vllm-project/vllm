@@ -25,7 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
