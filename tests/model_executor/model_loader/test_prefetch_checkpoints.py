@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -23,7 +24,6 @@ TENSORS = {
     ]
     for i in range(11)
 }
-FILES = list(TENSORS)
 
 
 class _InlineThread:
@@ -36,7 +36,9 @@ class _InlineThread:
 
 @pytest.mark.parametrize("ep", [False, True])
 @pytest.mark.parametrize("num_nodes,ranks_per_node", [(1, 1), (1, 4), (2, 4), (4, 2)])
-def test_each_node_prefetches_what_it_reads(monkeypatch, num_nodes, ranks_per_node, ep):
+def test_each_node_prefetches_what_it_reads(
+    monkeypatch, tmp_path, num_nodes, ranks_per_node, ep
+):
     world_size = num_nodes * ranks_per_node
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: world_size > 1)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: world_size)
@@ -46,15 +48,32 @@ def test_each_node_prefetches_what_it_reads(monkeypatch, num_nodes, ranks_per_no
     monkeypatch.setattr(
         weight_utils, "threading", SimpleNamespace(Thread=_InlineThread)
     )
-    prefetched: set[str] = set()
+    files = [str(tmp_path / f) for f in TENSORS]
+    for i, (path, names) in enumerate(zip(files, TENSORS.values())):
+        save_file({n: torch.zeros(i + 1) for n in names}, path)
 
-    def fake_prefetch(path, block_size, keep=None):
-        prefetched.update(n for n in TENSORS[path] if keep is None or keep(n))
+    def tensor_bytes(path, ids=None):
+        with open(path, "rb") as f:
+            offsets = weight_utils._tensor_offsets(f).items()
+        return {
+            (path, b)
+            for n, (start, end) in offsets
+            if not should_skip_weight(n, ids)
+            for b in range(start, end)
+        }
+
+    prefetched: set[tuple[str, int]] = set()
+
+    def fake_prefetch(path, block_size, ranges=None):
+        if ranges is None:
+            prefetched.update(tensor_bytes(path))
+        else:
+            prefetched.update((path, b) for o, n in ranges for b in range(o, o + n))
 
     monkeypatch.setattr(weight_utils, "_prefetch_checkpoint", fake_prefetch)
     for node in range(num_nodes):
         prefetched.clear()
-        needed: set[str] = set()
+        needed: set[tuple[str, int]] = set()
         for local_rank in range(ranks_per_node):
             rank = node * ranks_per_node + local_rank
             ids = (
@@ -65,13 +84,13 @@ def test_each_node_prefetches_what_it_reads(monkeypatch, num_nodes, ranks_per_no
             )
             monkeypatch.setattr(torch.distributed, "get_rank", lambda r=rank: r)
             monkeypatch.setattr(weight_utils, "get_world_group", lambda w=world: w)
-            weight_utils._prefetch_all_checkpoints(FILES, 1, local_expert_ids=ids)
-            needed.update(
-                n
-                for ns in TENSORS.values()
-                for n in ns
-                if not should_skip_weight(n, ids)
-            )
-        # The page cache is per node: each node must prefetch exactly what its
-        # ranks read, no more and no less.
+            ranges = None
+            if ids is not None:
+                ranges, node_bytes = weight_utils._node_prefetch_ranges(files, ids)
+            weight_utils._prefetch_all_checkpoints(files, 1, ranges=ranges)
+            needed.update(b for p in files for b in tensor_bytes(p, ids))
+        # The page cache is per node: each node must prefetch exactly the bytes
+        # its ranks read, no more and no less, and estimate them exactly.
         assert prefetched == needed, f"node {node}"
+        if ids is not None:
+            assert node_bytes == len(needed), f"node {node}"
