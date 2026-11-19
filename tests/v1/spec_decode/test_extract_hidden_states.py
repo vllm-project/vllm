@@ -174,9 +174,11 @@ def test_extract_hidden_states_config_invalid_text_config():
 
 
 def _create_config_without_decode_drafts(
-    schedule: list[tuple[int, int, int]] | None = None, **vllm_config_kwargs
+    schedule: list[tuple[int, int, int]] | None = None,
+    model: str = model_dir,
+    **vllm_config_kwargs,
 ) -> VllmConfig:
-    model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
+    model_config = ModelConfig(model=model, runner="generate", max_model_len=100)
     return VllmConfig(
         model_config=model_config,
         speculative_config=SpeculativeConfig(
@@ -208,10 +210,21 @@ def test_no_decode_drafts_maps_to_zero_schedule():
     assert not any(lookup)
 
 
-def test_no_decode_drafts_rejects_data_parallelism():
+def test_no_decode_drafts_keeps_schedule_for_dense_data_parallelism():
+    vllm_config = _create_config_without_decode_drafts(
+        parallel_config=ParallelConfig(data_parallel_size=2)
+    )
+
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    assert speculative_config.num_speculative_tokens_per_batch_size == [(1, 1, 0)]
+
+
+def test_no_decode_drafts_rejects_moe_data_parallelism():
     with pytest.raises(ValueError, match="not supported with data parallelism"):
         _create_config_without_decode_drafts(
-            parallel_config=ParallelConfig(data_parallel_size=2)
+            model="ibm-research/PowerMoE-3b",
+            parallel_config=ParallelConfig(data_parallel_size=2),
         )
 
 

@@ -1213,11 +1213,17 @@ class VllmConfig:
         ):
             return
 
-        if self.parallel_config.data_parallel_size > 1:
+        # Mirrors _maybe_disable_dynamic_sd_for_data_parallel, which would
+        # otherwise drop the K=0 schedule with only a warning.
+        if (
+            self.parallel_config.data_parallel_size > 1
+            and self.model_config is not None
+            and self.model_config.is_moe
+        ):
             raise ValueError(
                 "disable_extract_hidden_states_decode_drafts=True is not supported "
-                "with data parallelism, because it relies on dynamic speculative "
-                "decoding."
+                "with data parallelism for MoE models, because it relies on dynamic "
+                "speculative decoding."
             )
 
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:

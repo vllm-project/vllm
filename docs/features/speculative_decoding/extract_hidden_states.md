@@ -132,7 +132,7 @@ speculative_config={
 }
 ```
 
-This sets `num_speculative_tokens_per_batch_size` to K=0 for all batch sizes, so it cannot be combined with another schedule. It raises an error with `data_parallel_size` greater than 1.
+This sets `num_speculative_tokens_per_batch_size` to K=0 for all batch sizes, so it cannot be combined with another schedule. It raises an error for MoE models with `data_parallel_size` greater than 1.
 
 ## Output Format
 
