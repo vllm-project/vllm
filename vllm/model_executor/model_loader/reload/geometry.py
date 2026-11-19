@@ -162,6 +162,15 @@ def _merge(a: Write, b: Write) -> Write | None:
 _MAX_RUNS = 1 << 16
 
 
+def byte_span(
+    byte_offset: int, shape: tuple[int, ...], stride: tuple[int, ...], itemsize: int
+) -> tuple[int, int]:
+    """The [start, stop) bytes from the first to the last element of a
+    non-empty strided write with non-negative strides."""
+    span = sum((n - 1) * s for n, s in zip(shape, stride)) + 1
+    return byte_offset, byte_offset + span * itemsize
+
+
 def byte_runs(
     byte_offset: int, shape: tuple[int, ...], stride: tuple[int, ...], itemsize: int
 ) -> list[tuple[int, int]]:
@@ -172,8 +181,7 @@ def byte_runs(
     while dims and dims[-1][1] == run:
         run *= dims.pop()[0]
     if prod(n for n, _ in dims) > _MAX_RUNS:
-        span = sum((n - 1) * s for n, s in dims) + run
-        return [(byte_offset, byte_offset + span * itemsize)]
+        return [byte_span(byte_offset, shape, stride, itemsize)]
     return [
         (byte_offset + sum(o) * itemsize, byte_offset + (sum(o) + run) * itemsize)
         for o in itertools.product(*(range(0, n * s, s) for n, s in dims))
