@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::{Format, TagFormat};
+use xgrammar_structural_tag::tool::function_parameters;
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
 const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
@@ -58,6 +61,39 @@ impl ToolParser for Phi4MiniJsonToolParser {
         self.inner.parse_into(chunk, output)
     }
 
+    /// Build the `functools[..]` call list for a tool choice that obliges a call.
+    ///
+    /// `auto` builds no grammar.
+    fn build_call_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(tools) = output_grammar::normalize_tool_choice(ctx)? else {
+            return Ok(None);
+        };
+        if !tools.choice.requires_tool_call() {
+            return Ok(None);
+        }
+
+        let calls = tools
+            .function_tools
+            .iter()
+            .map(|tool| {
+                TagFormat::new(
+                    format!(r#"{{"name": "{}", "arguments": "#, tool.function.name),
+                    Format::json_schema(function_parameters(&tool.function)),
+                    "}",
+                )
+            })
+            .collect();
+        let single_call = tools.choice.is_forced() || !ctx.parallel_tool_calls;
+        Ok(Some(Format::sequence(vec![
+            Format::const_string("functools["),
+            Format::tags_with_separator(calls, ", ", true, single_call),
+            Format::const_string("]"),
+        ])))
+    }
+
     /// Flush any buffered partial state at end of stream.
     fn finish(&mut self) -> Result<ToolParserOutput> {
         self.inner.finish()
@@ -73,8 +109,10 @@ impl ToolParser for Phi4MiniJsonToolParser {
 mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
+    use xgrammar_structural_tag::ToolChoice;
 
     use super::Phi4MiniJsonToolParser;
+    use crate::output_grammar::{OutputGrammarContext, ToolStrictLevel};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
@@ -122,6 +160,119 @@ mod tests {
         assert_eq!(result.calls().len(), 1);
         assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(result.calls()[0].arguments, arguments);
+    }
+
+    #[test]
+    fn phi4mini_forced_tool_choice_builds_the_call_list_grammar() {
+        let tools = test_tools()[..2].to_vec();
+        let parser = Phi4MiniJsonToolParser::new(&tools);
+        let build = |tool_choice: ToolChoice, parallel_tool_calls| {
+            parser
+                .build_visible_format(&OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice: &tool_choice,
+                    tool_strict_level: ToolStrictLevel::Auto,
+                    parallel_tool_calls,
+                    answer: None,
+                })
+                .unwrap()
+                .map(|format| serde_json::to_string_pretty(&format).unwrap())
+        };
+
+        // A choice that obliges a call holds the model to the `functools[..]` list.
+        expect![[r#"
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "functools["
+                },
+                {
+                  "type": "tags_with_separator",
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "{\"name\": \"get_weather\", \"arguments\": ",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": true,
+                        "style": "json",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "}"
+                    },
+                    {
+                      "type": "tag",
+                      "begin": "{\"name\": \"add\", \"arguments\": ",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": true,
+                        "style": "json",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "}"
+                    }
+                  ],
+                  "separator": ", ",
+                  "at_least_one": true,
+                  "stop_after_first": false
+                },
+                {
+                  "type": "const_string",
+                  "value": "]"
+                }
+              ]
+            }"#]]
+        .assert_eq(&build(ToolChoice::required(), true).unwrap());
+        expect![[r#"
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "functools["
+                },
+                {
+                  "type": "tags_with_separator",
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "{\"name\": \"add\", \"arguments\": ",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": true,
+                        "style": "json",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "}"
+                    }
+                  ],
+                  "separator": ", ",
+                  "at_least_one": true,
+                  "stop_after_first": true
+                },
+                {
+                  "type": "const_string",
+                  "value": "]"
+                }
+              ]
+            }"#]]
+        .assert_eq(&build(ToolChoice::function("add"), true).unwrap());
+        assert_ne!(
+            build(ToolChoice::required(), false),
+            build(ToolChoice::required(), true)
+        );
+
+        // `auto` builds no grammar, as before.
+        assert!(build(ToolChoice::auto(), true).is_none());
+        assert!(build(ToolChoice::auto(), false).is_none());
     }
 
     #[test]
