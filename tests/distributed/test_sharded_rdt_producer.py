@@ -6,6 +6,7 @@ import contextlib
 import gc
 import os
 import sys
+import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -413,19 +414,26 @@ def test_a_gather_error_releases_every_wait(server):
 
 
 def test_a_dead_consumer_trips_the_watchdog(server, monkeypatch):
-    """A pull that arrives before its sync begins is not a stall."""
+    """Neither a consumer still planning nor a pull ahead of its sync is a
+    stall."""
     monkeypatch.setattr(trainer_mod, "_STALL_POLL_S", 0.05)
     s = server(stall_timeout_s=0.2)
-    s.register_consumer(0, [WHOLE_N])
-    early = _call(s.bucket, 0, 0, 0)
-    with pytest.raises(FuturesTimeout):
-        early.result(timeout=0.5)
-    assert s._error is None
     s.begin_sync([0], 0)
     _publish(s, _weights(), 0)
-    early.result(timeout=5)  # never freed: the consumer died
+    done = _call(s.end_sync)
+    time.sleep(0.5)  # consumer 0 is still planning
+    assert s._error is None
+    s.register_consumer(0, [WHOLE_N])
+    s.bucket(0, 0, 0)  # never freed: the consumer died
     with pytest.raises(RuntimeError, match="stall"):
-        s.end_sync()
+        done.result(timeout=5)
+    error = s._error
+    early = _call(s.bucket, 0, 0, 1)
+    time.sleep(0.5)  # sync 1 has not begun here
+    assert s._error is error
+    s.begin_sync([0], 1)
+    _publish(s, _weights(1), 0)
+    early.result(timeout=5)
 
 
 # ------------------------------------------------------------ frees (Ray's)

@@ -290,8 +290,8 @@ class ShardedRDTWeightTransferEngine(
             self.parallel_config.world_size_across_dp
         )
         per_replica = init_info.workers_per_replica or num_consumers
-        if init_info.num_replicas > 1 and per_replica * init_info.num_replicas != (
-            num_consumers
+        if init_info.num_replicas > 1 and (
+            per_replica * init_info.num_replicas != num_consumers
         ):
             raise ValueError(
                 f"Sharded RDT: num_replicas={init_info.num_replicas}, but the "

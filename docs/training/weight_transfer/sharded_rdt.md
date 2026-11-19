@@ -10,7 +10,7 @@ The sharded RDT weight transfer engine moves weights point-to-point over [NIXL](
 
 Requirements:
 
-- [`VLLM_RELOAD_MODE=direct`](../direct_reload.md) on the inference server; under layerwise reload the engine refuses at `init_transfer_engine`, when the trainer first connects (the server itself starts)
+- [`VLLM_RELOAD_MODE=direct`](../direct_reload.md) on the inference server; without it the server refuses to start
 - `distributed_executor_backend="ray"`: the workers must be Ray actors
 - Ray `>= 2.56.0` on both the trainer and the workers
 - `nixl` installed in the environment shared by trainer and workers

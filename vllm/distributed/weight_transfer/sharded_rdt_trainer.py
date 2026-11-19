@@ -350,8 +350,16 @@ class _RDTProducerServer:
         while blocked() and not failed():
             cond.wait(_STALL_POLL_S)
             stalled = time.monotonic() - self._last_progress
-            begun = sync_idx is None or sync_idx <= self._sync_idx
-            if blocked() and not failed() and begun and stalled >= self._stall_timeout:
+            # a sync not begun here, or a consumer still planning, is no stall
+            waiting = (
+                sync_idx is None or sync_idx <= self._sync_idx
+            ) and self._live <= self._buckets.keys()
+            if (
+                blocked()
+                and not failed()
+                and waiting
+                and stalled >= self._stall_timeout
+            ):
                 msg = (
                     f"RDT stall: no progress for {stalled:.0f}s waiting for "
                     f"{what}. A consumer most likely died mid-sync: "
@@ -633,12 +641,8 @@ class _RDTProducerServer:
         gen: int,
         ready: torch.cuda.Event | None,
     ) -> torch.Tensor:
-        """Pack bucket `seq` into its arena block, one pack at a time, and
-        wait for its copies: the contiguous boxes as words or bytes with one
-        fused copy each, each kind cut from the block with one split, and the
-        strided ones (e.g. TP column slices) typed, in runs. One strided box
-        or a second dtype would otherwise put every box on the per-tensor
-        path, a kernel each."""
+        """Pack bucket `seq` into its arena block with one fused copy per kind
+        of box (words, bytes, strided runs), and wait for the copies."""
         assert self._arena is not None
         flat = self._arena[offset : offset + spec.nbytes]
         with self._pack_lock:
@@ -879,7 +883,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._owner_sets, self._name_owner_class = [], []
         for m in self._meta:
             owners = everyone if m.owners is None else tuple(m.owners)
-            if max(owners) >= world:
+            if not owners or max(owners) >= world:
                 raise ValueError(
                     f"parameter {m.name!r} is owned by trainer ranks {owners}, "
                     f"but there are only {world} trainer ranks."
