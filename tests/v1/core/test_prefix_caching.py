@@ -1283,8 +1283,11 @@ def _finish_hisparse_step(scheduler, output, sampled_tokens):
     )
 
 
-def test_hisparse_streaming_resume_under_pressure(tmp_path):
-    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=96)
+@pytest.mark.parametrize("batch_tokens,resume_tokens", [(96, 32), (160, 64), (160, 80)])
+def test_hisparse_streaming_resume_under_pressure(
+    tmp_path, batch_tokens, resume_tokens
+):
+    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=batch_tokens)
 
     def chunk(tokens):
         request = make_request(
@@ -1305,8 +1308,27 @@ def test_hisparse_streaming_resume_under_pressure(tmp_path):
     assert first.status == RequestStatus.WAITING_FOR_STREAMING_REQ
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 13
 
-    scheduler.add_request(chunk(list(range(1000, 1032))))
-    assert scheduler.schedule().num_scheduled_tokens == {"A": 32}
+    scheduler.add_request(chunk(list(range(1000, 1000 + resume_tokens))))
+    scheduler.add_request(make_request("B", [2000], HISPARSE_BLOCK_SIZE, sha256))
+    output = scheduler.schedule()
+    if resume_tokens == 80:
+        # Twenty new blocks plus six Hot exceed thirteen free plus twelve
+        # reclaimable. A rejected admission must not allocate or request Hot.
+        assert not output.num_scheduled_tokens
+        manager = scheduler.kv_cache_manager
+        assert manager.block_pool.get_num_free_blocks() == 13
+        assert all(
+            "A" not in hot.hot_required
+            for hot in get_hisparse_coordinator(manager).hot_managers
+        )
+        return
+
+    assert output.num_scheduled_tokens["A"] == resume_tokens
+    _finish_hisparse_step(
+        scheduler, output, {req_id: [7] for req_id in output.num_scheduled_tokens}
+    )
+    if "B" not in output.num_scheduled_tokens:
+        assert scheduler.schedule().num_scheduled_tokens["B"] == 1
 
 
 @pytest.mark.parametrize("prompt_length", [144, 160])

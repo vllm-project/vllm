@@ -552,8 +552,9 @@ class KVCacheManager:
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
+        admission_blocks = 0
         if full_sequence_must_fit:
-            # First check and fail if the full request sequence won't fit.
+            # First check whether the full request sequence fits.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -569,7 +570,11 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
-                return None
+                if self.try_preallocate is None:
+                    return None
+                # Let preallocation reclaim retained blocks, but require it to
+                # fund the full admission as well as the current step.
+                admission_blocks = num_blocks_to_allocate
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
@@ -605,6 +610,7 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
+        num_blocks_to_allocate = max(num_blocks_to_allocate, admission_blocks)
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
         preallocated = None
