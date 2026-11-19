@@ -4,13 +4,14 @@
 
 See: qwen3_dspark.py for base architecture. This one is specialized to the
 DSV4.1 DSpark, which reuses the target model's architecture similarly to MTP.
-Its weights ship in the target checkpoint under the ``mtp.{0,1,2}.*`` prefix.
+Its weights ship in the target checkpoint under the `mtp.{0,1,2}.*` prefix.
 
 To implement non-causal attention, we leverage the sparse attention implementation to
 include the future query tokens in the top-k indices for each query token.
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -18,7 +19,6 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -34,8 +34,12 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -49,18 +53,38 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
+    DeepseekV4MoE,
+    DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
+    _use_mega_gate,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
     maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
+from .ops.fused_markov import FusedMarkovSampler
+from .ops.mhc import (
+    ampere_all_reduce_ready,
+    boundary_all_reduce,
+    mhc_all_reduce_ready,
+    supports_ampere_mhc_overlap,
+)
+from .specialized_decode import decode_backend, register_draft
+from .specialized_decode.ampere import is_ampere
+from .specialized_decode.hopper import is_hopper
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
+    from .specialized_decode.runtime.draft import DraftDecode
+    from .specialized_decode.sampling.sharded_markov import ShardedMarkovSampling
 
 logger = init_logger(__name__)
 
@@ -81,9 +105,7 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
-        self.use_native_mega_moe = (
-            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = (
@@ -121,6 +143,22 @@ class DSparkDeepseekV4Model(nn.Module):
         run_gemm_rs = maybe_init_gemm_rs(
             current_vllm_config, self.use_sequence_parallel
         )
+        # SM80 and SM90 compute the draft layers' mHC coefficients on a side
+        # stream too, as the target's.
+        mhc_stream = (
+            torch.cuda.Stream()
+            if supports_ampere_mhc_overlap(current_vllm_config)
+            else None
+        )
+        # The draft layers' boundaries take the TP all-reduce with the
+        # target's kernel: SM80's two-shot one, and SM90's fused one up to its
+        # rows. Their MoE (top-3) finalizes itself: the kernels' fused top-k
+        # finalize is built for the target's top-6.
+        self.fuse_mhc_all_reduce = (
+            mhc_stream is not None
+            and not self.use_sequence_parallel
+            and (ampere_all_reduce_ready() or mhc_all_reduce_ready())
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
@@ -128,16 +166,35 @@ class DSparkDeepseekV4Model(nn.Module):
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
                     run_gemm_rs=run_gemm_rs,
+                    mhc_stream=mhc_stream,
+                    fuse_mhc_all_reduce=self.fuse_mhc_all_reduce,
                 )
                 for i in range(self.num_dspark_layers)
             ]
+        )
+        quant_config = vllm_config.quant_config
+        ignored_layers = getattr(quant_config, "ignored_layers", None)
+        wkv_quant_config = (
+            None
+            if quant_config is not None
+            and ignored_layers
+            and hasattr(quant_config, "ignored_layers_match_mode")
+            and is_layer_skipped(
+                prefix=maybe_prefix(
+                    prefix, f"layers.{self.num_hidden_layers}.attn.wkv"
+                ),
+                ignored_layers=ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+            else quant_config
         )
         self.context_wkv_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [config.head_dim] * self.num_dspark_layers,
             bias=False,
             return_bias=False,
-            quant_config=vllm_config.quant_config,
+            quant_config=wkv_quant_config,
             prefix=maybe_prefix(prefix, "context_wkv_proj"),
             disable_tp=True,
         )
@@ -165,12 +222,16 @@ class DSparkDeepseekV4Model(nn.Module):
             )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        x = self.embed_tokens(input_ids)
+        # The target's embedding leaves the shards' sum to its caller on SM80.
+        if not self.embed_tokens.reduce_results:
+            x = boundary_all_reduce(x)
+        return x
 
     def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         """main_x = main_norm(main_proj(concat of target aux hidden states)).
 
-        ``aux_hidden_states`` is [T, hidden_size * len(target_layer_ids)].
+        `aux_hidden_states` is [T, hidden_size * len(target_layer_ids)].
         """
         return self.main_norm(self.main_proj(aux_hidden_states))
 
@@ -184,13 +245,13 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
-        from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        from the SAME projected target hidden `main_x`, via that layer's own
+        `wkv` + `kv_norm` + RoPE + quant, then writes it at the
         layer's context slots.
 
-        ``context_slot_mappings`` is a per-layer list (each entry is the context
+        `context_slot_mappings` is a per-layer list (each entry is the context
         slot mapping for that layer's kv-cache group, since the hybrid manager may
-        place draft layers in different groups). ``None`` (or a ``None`` entry)
+        place draft layers in different groups). `None` (or a `None` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
         all_kv = self.context_wkv_proj(main_x).view(
@@ -213,6 +274,7 @@ class DSparkDeepseekV4Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
@@ -226,7 +288,7 @@ class DSparkDeepseekV4Model(nn.Module):
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=False,
@@ -236,6 +298,10 @@ class DSparkDeepseekV4Model(nn.Module):
             )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        if decode_step is not None:
+            hidden_states = decode_step.run(hidden_states, positions, input_ids)
+            assert isinstance(hidden_states, torch.Tensor)
+            return hidden_states
 
         residual = post_mix = res_mix = pre_mix = None
         for layer in self.layers:
@@ -249,6 +315,8 @@ class DSparkDeepseekV4Model(nn.Module):
                 residual,
                 mega_gate_metadata=mega_gate_metadata,
             )
+        if self.fuse_mhc_all_reduce:
+            hidden_states = boundary_all_reduce(hidden_states)
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         # Collapse the hc copies with the pre-mix from the last layer's FFN
         # mixes — the mix the reference forward_head applies (hc_pre with the
@@ -287,13 +355,15 @@ def _insert_context_kv(
     )
 
 
-class DSparkDeepseekV4ForCausalLM(nn.Module):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
     # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+
+    packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -316,7 +386,85 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        logits_processor_cls = LogitsProcessor
+        if is_ampere() or is_hopper():
+            from .specialized_decode.ampere.columns import (
+                AmpereLogitsProcessor,
+                column_gathers_ready,
+            )
+
+            if column_gathers_ready():
+                # The target's Lamport gather of the vocabulary shards (same
+                # head).
+                logits_processor_cls = AmpereLogitsProcessor
+        self.logits_processor = logits_processor_cls(self.config.vocab_size)
+        # decode_backend=latency_specialized: a decode executor over self.model, built
+        # by the target model's state on the target's executor.
+        specialized_decode_requested = (
+            decode_backend(vllm_config) == "latency_specialized"
+        )
+        self.specialized_decode: DraftDecode | None = None
+        if specialized_decode_requested:
+            register_draft(self)
+        # additional_config={"dspark_fused_markov": true}, implied by the
+        # specialized decode, replaces the speculator's loop when it would
+        # sample a full draft-logits cache with plain Gumbel noise. SM80 and
+        # SM90 replace it unless the option is false.
+        spec_config = vllm_config.speculative_config
+        extra = vllm_config.additional_config
+        if not isinstance(extra, dict):
+            extra = {}
+        if (
+            (
+                specialized_decode_requested
+                or extra.get("dspark_fused_markov", is_ampere() or is_hopper())
+            )
+            and spec_config.draft_sample_method == "probabilistic"
+            and not spec_config.enable_adaptive_verification
+            and not vllm_config.model_config.use_fp64_gumbel
+            and getattr(vllm_config, "watermark_config", None) is None
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            self.sample_sequential: FusedMarkovSampler | ShardedMarkovSampling
+            self.sample_sequential = FusedMarkovSampler(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.config.vocab_size,
+                self.config.dspark_markov_rank,
+                self.draft_model_config.dtype,
+            )
+            # The sharded chain's settings, for build_specialized_decode.
+            self.markov_cache_dtype = vllm_config.model_config.head_dtype
+            self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.num_speculative_steps = spec_config.num_speculative_tokens
+
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
+        )
+
+    def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
+        """Build this model's decode executor on `target`, the target
+        model's, compute logits with the low-batch LM head and, at small
+        batches, sample on the vocabulary-sharded Markov chain. Every TP rank
+        calls it, in the same order: the chain's set-up is collective."""
+        from .specialized_decode.logits.logits import SpecializedDecodeLogitsProcessor
+
+        self.specialized_decode = target.for_draft(self.model)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        fused = getattr(self, "sample_sequential", None)
+        if isinstance(fused, FusedMarkovSampler):
+            from .specialized_decode.sampling.sharded_markov import (
+                build_sharded_markov_sampling,
+            )
+
+            self.sample_sequential = build_sharded_markov_sampling(self, fused)
+        return self.specialized_decode
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -348,7 +496,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Returns the pre-norm collapsed head hidden ([T, hidden_size]).
-        return self.model(input_ids, positions, inputs_embeds)
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions)
+        return self.model(input_ids, positions, inputs_embeds, decode_step=step)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
@@ -358,6 +508,29 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
 
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
+        return self.logits_processor(
+            self.lm_head, self.model.norm(hidden_states), skip_gather=True
+        )
+
+    def draft_logits_shard(self) -> tuple[int, int] | None:
+        """`(first column, width)` of `compute_draft_logits_local` within
+        the full draft logits, or None when it is not a plain slice of them
+        (vocabulary padding or added vocabulary in the shard)."""
+        head = self.lm_head
+        shard = head.shard_indices
+        width = shard.num_org_elements
+        if (
+            self.logits_processor.logits_as_input
+            or self.logits_processor.org_vocab_size != self.config.vocab_size
+            or shard.num_elements_padded != width
+            or head.num_embeddings_per_partition != width
+            or shard.org_vocab_start_index != head.tp_rank * width
+        ):
+            return None
+        return shard.org_vocab_start_index, width
+
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
 
@@ -366,6 +539,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+
+    def markov_bias_weight(self) -> torch.Tensor | None:
+        """The `[vocab, rank]` matrix `markov_bias` multiplies by, for the
+        vocabulary-sharded Markov chain, when `markov_bias` is a plain BF16
+        product with it (else None)."""
+        head = self.model.markov_head.markov_w2
+        processor = self.logits_processor
+        if (
+            not isinstance(head.quant_method, UnquantizedEmbeddingMethod)
+            or head.weight.dtype != torch.bfloat16
+            or processor.scale != 1.0
+            or processor.soft_cap is not None
+            or processor.logits_as_input
+            or processor.head_dtype not in (None, torch.bfloat16)
+        ):
+            return None
+        return head.weight
 
     def compute_confidence(
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
@@ -377,10 +567,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     # --- Weight loading ----------------------------------------------------
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
+        """Load the `mtp.{0,1,2}.*` draft weights from the target checkpoint.
 
         Non-mtp weights (embed/head/main layers) belong to the target model and
-        are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
+        are skipped here. `embed_tokens`/`lm_head` are aliased from the target.
         """
         first_layer = self.model.layers[0]
         use_native_mega_moe = first_layer.ffn.use_native_mega_moe
@@ -400,6 +590,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
                 num_experts=n_draft_experts,
+                num_redundant_experts=first_layer.ffn.n_redundant_experts,
             )
         expert_scale_suffix = (
             ".weight_scale"
@@ -417,7 +608,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        loaded_confidence_head = False
 
         weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
@@ -425,9 +615,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             if mapped is None:
                 continue
             name = mapped
-            if "confidence_head." in name:
-                loaded_confidence_head = True
-
             # ``.scale`` -> per-method scale suffix.
             if name.endswith(".scale"):
                 suffix = (
@@ -463,6 +650,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     and loaded_weight.dtype == torch.float8_e8m0fnu
                 ):
                     loaded_weight = loaded_weight.view(torch.uint8)
+                # A checkpoint expert can map to multiple local physical replicas.
+                # Load every local slot or the remaining replicas stay uninitialized.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
@@ -478,7 +667,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     )
                     if success:
                         loaded_params.add(name_mapped)
-                        break
                 continue
 
             # Stacked rules only apply to decoder-layer weights. Head-stack params
@@ -503,13 +691,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if self.model.confidence_head is not None and not loaded_confidence_head:
-            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
+        """Map a checkpoint `mtp.{i}.*` name to this model's parameter path.
 
         Returns None for non-mtp weights (owned by the target model).
         """

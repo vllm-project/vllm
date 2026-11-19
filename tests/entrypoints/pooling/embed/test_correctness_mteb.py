@@ -11,10 +11,11 @@ from tests.models.language.pooling_mteb_test.mteb_embed_utils import (
     run_mteb_embed_task,
 )
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
-MODEL_NAME = "intfloat/e5-small"
+MODEL_NAME = "vllm-project/e5-small"
 MAIN_SCORE = 0.7422994752439667
 
 
@@ -28,7 +29,9 @@ def server():
 
 def test_mteb_embed(server):
     client = server.get_client()
-    encoder = OpenAIClientMtebEncoder(MODEL_NAME, client)
+    encoder = OpenAIClientMtebEncoder(
+        MODEL_NAME, client, batch_size=envs.VLLM_MAX_COMPLETION_PROMPTS
+    )
     vllm_main_score = run_mteb_embed_task(encoder, MTEB_EMBED_TASKS)
     st_main_score = MAIN_SCORE
 

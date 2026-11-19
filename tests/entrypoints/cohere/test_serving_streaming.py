@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Cohere v2 SSE stream conversion in
-``vllm/entrypoints/cohere/serving.py``.
+`vllm/entrypoints/cohere/serving.py`.
 
 The stream-translation entry point is
-:meth:`CohereServingChatV2._chat_completion_stream_to_v2`, which turns an
+`CohereServingChatV2._chat_completion_stream_to_v2`, which turns an
 async iterable of OpenAI chunk objects into Cohere's
-``message-start → (content|tool-call|citation)* → message-end → [DONE]``
+`message-start → (content|tool-call|citation)* → message-end → [DONE]`
 event stream.
 
-We test the helpers (``_StreamState``, ``_handle_*_delta``, etc.) in
+We test the helpers (`_StreamState`, `_handle_*_delta`, etc.) in
 isolation, plus a handful of end-to-end scenarios that exercise the
 state machine.
 """
@@ -46,12 +46,12 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 
 class _FakeServing(CohereServingChatV2):
-    """Lightweight stand-in for :class:`CohereServingChatV2` that skips
-    the heavy ``OpenAIServingChat.__init__`` chain (which would need a
+    """Lightweight stand-in for `CohereServingChatV2` that skips
+    the heavy `OpenAIServingChat.__init__` chain (which would need a
     real engine client, model registry, render service, etc.).
 
-    Only ``_is_reasoning_model`` is read by the methods under test
-    (``_chat_completion_stream_to_v2`` and the per-delta handlers); the
+    Only `_is_reasoning_model` is read by the methods under test
+    (`_chat_completion_stream_to_v2` and the per-delta handlers); the
     rest is dead weight for unit testing.
     """
 
@@ -65,7 +65,7 @@ def _serving(is_reasoning_model: bool = True) -> CohereServingChatV2:
 
 
 def _parse_event(frame: str) -> dict[str, Any]:
-    """Strip the ``data: ... \\n\\n`` wrapper and parse the JSON payload."""
+    """Strip the `data: ... \\n\\n` wrapper and parse the JSON payload."""
     assert frame.startswith("data: ")
     assert frame.endswith("\n\n")
     return json.loads(frame[len("data: ") : -2])
@@ -130,7 +130,7 @@ async def _drain(
     serving: CohereServingChatV2,
     items: Sequence[ChatCompletionStreamResponse | ErrorResponse],
 ) -> list[str]:
-    """Drive ``_chat_completion_stream_to_v2`` over ``items`` and collect
+    """Drive `_chat_completion_stream_to_v2` over `items` and collect
     the emitted SSE frames."""
     gen = serving._chat_completion_stream_to_v2(_stream_from(items))
     return [frame async for frame in gen]
@@ -421,10 +421,10 @@ class TestHandleToolCallDeltas:
 class TestHandleCitationDeltas:
     """Test the per-delta emitter. Sources are pre-resolved by the
     reasoning parser via the position map forwarded through
-    ``chat_template_kwargs`` (see :func:`_melody_sources_to_vllm` in
-    ``vllm/reasoning/cohere_command_reasoning_parser.py``), so the
+    `chat_template_kwargs` (see `_melody_sources_to_vllm` in
+    `vllm/reasoning/cohere_command_reasoning_parser.py`), so the
     handler only has to coerce to the SDK wire shape, apply the
-    ``THINKING_CONTENT`` -> ``PLAN`` rewrite, and drop citations with
+    `THINKING_CONTENT` -> `PLAN` rewrite, and drop citations with
     no attributable sources.
     """
 

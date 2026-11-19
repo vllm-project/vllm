@@ -89,7 +89,7 @@ def recursively_merge_kwargs(
     return merged
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
 
@@ -110,6 +110,9 @@ class ChatParams:
 
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
+
+    parallel_tool_calls: bool = True
+    """Request-level `parallel_tool_calls` for renderers that need API metadata."""
 
     response_format: Any | None = None
     """Request-level response format for renderers that need API metadata."""
@@ -143,6 +146,7 @@ class ChatParams:
                 self.mm_processor_kwargs,
             ),
             tool_choice=self.tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
             response_format=self.response_format,
         )
 
@@ -154,7 +158,7 @@ class ChatParams:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 
@@ -166,7 +170,7 @@ class TokenizeParams:
     """
 
     max_output_tokens: int | None = 0
-    """Maximum requested output tokens; ``None`` means no explicit limit.
+    """Maximum requested output tokens; `None` means no explicit limit.
 
     Zero indicates a request that does not need generated tokens, such as pooling.
     """
@@ -187,10 +191,10 @@ class TokenizeParams:
 
     truncation_side: Literal["left", "right"] | None = None
     """
-    Which side to truncate from when ``truncate_prompt_tokens`` is active:
-    - ``"right"`` keeps the first N tokens (truncate from the end).
-    - ``"left"``  keeps the last  N tokens (truncate from the start).
-    - ``None``    falls back to the tokenizer default.
+    Which side to truncate from when `truncate_prompt_tokens` is active:
+    - `"right"` keeps the first N tokens (truncate from the end).
+    - `"left"`  keeps the last  N tokens (truncate from the start).
+    - `None`    falls back to the tokenizer default.
     """
 
     do_lower_case: bool = False
@@ -225,10 +229,10 @@ class TokenizeParams:
     def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens.
 
-        ``max_output_tokens`` is *not* subtracted here: the value represents the
+        `max_output_tokens` is *not* subtracted here: the value represents the
         actual model context length, not a reservation of output space.
-        Downstream clamping of the sampling ``max_tokens`` is handled by
-        ``get_max_tokens()`` in the entrypoint layer.
+        Downstream clamping of the sampling `max_tokens` is handled by
+        `get_max_tokens()` in the entrypoint layer.
         """
         if self.max_total_tokens is None:
             return None
@@ -424,7 +428,7 @@ class TokenizeParams:
     ) -> int:
         """Return the number of source characters removed from the left.
 
-        ``_text_len_check`` pre-truncates long text before tokenization when
+        `_text_len_check` pre-truncates long text before tokenization when
         an explicit truncation side is requested. Fast-tokenizer offsets are
         then relative to that shortened string, so callers need this prefix
         length to map them back to the original prompt.

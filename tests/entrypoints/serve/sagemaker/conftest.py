@@ -10,7 +10,7 @@ from tests.utils import RemoteOpenAIServer
 
 # Model name constants used across tests
 MODEL_NAME_SMOLLM = "HuggingFaceTB/SmolLM2-135M-Instruct"
-LORA_ADAPTER_NAME_SMOLLM = "jekunz/smollm-135m-lora-fineweb-faroese"
+LORA_ADAPTER_NAME_SMOLLM = "vllm-project/smollm-135m-lora-fineweb-faroese"
 
 # SageMaker header constants
 HEADER_SAGEMAKER_CLOSED_SESSION_ID = "X-Amzn-SageMaker-Closed-Session-Id"
