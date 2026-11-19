@@ -97,6 +97,7 @@ TokenizerMode = Literal[
     "hf",
     "glm5_next",
     "alpamayo2_super",
+    "hy_v4",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -186,6 +187,7 @@ class ModelConfig:
     - "alpamayo2_super" uses the "hf" tokenizer with Alpamayo 2 Super's
       trajectory and special tokens added; selected automatically for
       `nvidia/Alpamayo2-Super`.
+    - "hy_v4" uses the HF tokenizer with HYV4 VL chat rendering.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -793,6 +795,8 @@ class ModelConfig:
                 "KimiK31ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "kimi_k3"
+            elif arch == "HYV4VLForConditionalGeneration":
+                self.tokenizer_mode = "hy_v4"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch in (

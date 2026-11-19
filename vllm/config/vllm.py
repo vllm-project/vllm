@@ -115,6 +115,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
+        "HYV4DFlyModel",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "Inkling2ForConditionalGeneration",
@@ -154,7 +155,14 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # kernel selection during graph capture.
         # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
         return (
-            frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
+            frozenset(
+                {
+                    "DeepseekV41ForCausalLM",
+                    "HYV4ForCausalLM",
+                    "HYV4VLForConditionalGeneration",
+                    "HYV4MTPModel",
+                }
+            )
             | _QWEN3_5_ARCHITECTURES
         )
     if current_platform.is_cuda():
@@ -1548,7 +1556,7 @@ class VllmConfig:
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
-        self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+        self.engram_config.resolve_dp_shared_memory(self.parallel_config, model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
