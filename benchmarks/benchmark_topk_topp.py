@@ -21,7 +21,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
 
@@ -104,6 +103,8 @@ def create_logits(
 
 def apply_top_k_top_p_flashinfer_mask(logits, k, p):
     """Keep top-k in logits; adapt probability-based top-p back to logits."""
+    import flashinfer.sampling as fi_sampling  # CUDA only: not at import for ROCm
+
     if k is not None:
         logits = fi_sampling.top_k_mask_logits(logits, k)
     if p is not None:
@@ -318,7 +319,10 @@ def bench_gpu_time(
 ) -> list[float]:
     """Milliseconds per call of func(fresh, k, p), with CUDA/HIP events around the
     call only. Before each call, untimed: restore the input from logits (func may
-    filter in place), then flush the caches, so the input is read from DRAM."""
+    filter in place), then flush the caches, so the input is read from DRAM.
+    Events, not FlashInfer's CUPTI timer: that one times everything its callable
+    launches, so the restore would be counted and would leave the input in L2. Events
+    also run on ROCm, and include the host time between the launches of a call."""
     fresh = torch.empty_like(logits)
     # 1 GiB: larger than the L2 of NVIDIA GPUs and the 256 MiB Infinity Cache of MI355X.
     flush = torch.empty(1 << 30, dtype=torch.int8, device=logits.device)
@@ -427,8 +431,8 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
-        help="Implementations to compare (PyTorch is an optional reference)",
+        default=["triton"],
+        help="Implementations to compare (flashinfer-mask needs FlashInfer, on CUDA)",
     )
 
     parser.add_argument(
