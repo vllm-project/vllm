@@ -386,6 +386,15 @@ def test_spawn_with_dynamic_backend_config():
             _remove_dynamic_member(enum_cls, member)
 
 
+def test_spawn_with_entrypoint_backend():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).parent / "standalone_tests" / "spawn_attention_backend.py"
+    subprocess.run([sys.executable, str(script)], check=True, timeout=90)
+
+
 def test_unpickle_with_conflicting_local_backend():
     import pickle
 

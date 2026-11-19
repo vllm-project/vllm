@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention backend registry."""
 
+import sys
 from collections.abc import Callable
 from enum import Enum, EnumMeta
 from typing import TYPE_CHECKING, cast
@@ -371,6 +372,20 @@ _BUILTIN_NAMES = {
 }
 
 
+def _same_backend_path(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    # spawn re-executes the entry script as __mp_main__ and aliases it to __main__.
+    left_module, _, left_name = left.partition(".")
+    right_module, _, right_name = right.partition(".")
+    return (
+        bool(left_name)
+        and left_name == right_name
+        and {left_module, right_module} == {"__main__", "__mp_main__"}
+        and sys.modules.get("__mp_main__") is sys.modules["__main__"]
+    )
+
+
 def _restore_backend(enum_cls, name: str, value: str, override: str | None):
     member = enum_cls.__members__.get(name)
     if member is None:
@@ -383,7 +398,9 @@ def _restore_backend(enum_cls, name: str, value: str, override: str | None):
         member._awaiting_plugin_registration = True
     else:
         path = member.get_path() if member.is_overridden() else member.value
-        if member.value != value or path != (override or value):
+        if not _same_backend_path(member.value, value) or not _same_backend_path(
+            path, override or value
+        ):
             raise ValueError(f"Conflicting registration for {enum_cls.__name__}.{name}")
     return member
 
@@ -446,7 +463,7 @@ def register_backend(
         if (
             member is not None
             and getattr(member, "_awaiting_plugin_registration", False)
-            and member.value == (class_path or "")
+            and _same_backend_path(member.value, class_path or "")
         ):
             restored = backend = member
         else:
@@ -457,7 +474,7 @@ def register_backend(
             if not getattr(restored, "_awaiting_plugin_registration", False) or (
                 not class_path
                 and restored.is_overridden()
-                and restored.get_path() != path
+                and not _same_backend_path(restored.get_path(), path)
             ):
                 raise ValueError(f"Conflicting registration for {restored}")
             delattr(restored, "_awaiting_plugin_registration")
