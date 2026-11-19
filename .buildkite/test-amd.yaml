@@ -243,7 +243,6 @@ steps:
   - tests/models/language/generation_ppl_test
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -1549,7 +1548,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTHONFAULTHANDLER=1
-  - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread
+  - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread -o faulthandler_timeout=600
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
@@ -1927,37 +1926,31 @@ steps:
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
-# Disabled until torchao transitive dependencies are locked.
-# - label: ":amd: (MI300) Quantization Shard %N"
-#   timeout_in_minutes: 115
-#   parallelism: 4
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_1
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
-#   - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
-#   - tests/quantization
-#   - tests/rocm/test_moe_weight_replay.py
-#   - tests/rocm/test_moe_padding.py
-#   optional: true
-#   commands:
-#   # temporary install here since we need nightly, will move to requirements/test.in
-#   # after torchao 0.12 release, and pin a working version of torchao nightly here
-#   # since torchao nightly is only compatible with torch nightly currently
-#   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
-#   # we can only upgrade after this is resolved
-#   # TODO(jerryzh168): resolve the above comment
-#   - uv pip install --system torchao==0.18.0
-#   - uv pip install --system conch-triton-kernels
-#   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-#   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
-#   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
+- label: ":amd: (MI300) Quantization Shard %N"
+  timeout_in_minutes: 115
+  parallelism: 4
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
+  - tests/quantization
+  - tests/rocm/test_moe_weight_replay.py
+  - tests/rocm/test_moe_padding.py
+  - requirements/test/quantization_deps_rocm.txt
+  optional: true
+  commands:
+  # torchao is installed off the default path (see docker/Dockerfile.rocm).
+  - export PYTHONPATH=/opt/quantization-deps$${PYTHONPATH:+:$$PYTHONPATH}
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
 
 - label: ":amd: (MI300) Quantized Fusions" # TBD
   timeout_in_minutes: 45
@@ -2219,6 +2212,8 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/models/deepseek_v32/amd/rocm.py
+  - vllm/models/deepseek_v4/amd/rocm.py
+  - vllm/models/deepseek_v41/amd/rocm.py
   commands:
   - >-
     pytest -v -s
@@ -3054,7 +3049,7 @@ steps:
   - export MODEL_NAMES='moonshotai/Kimi-Linear-48B-A3B-Instruct'
   - export PREFILL_BLOCK_SIZE='2048'
   - export DECODE_BLOCK_SIZE='2048'
-  - export VLLM_SERVE_EXTRA_ARGS='--trust-remote-code,--max-model-len 32768'
+  - export VLLM_SERVE_EXTRA_ARGS='--max-model-len 32768'
   - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
 
 - label: ":amd: (MI355) Distributed Features" # TBD
@@ -3203,7 +3198,7 @@ steps:
     DECODE_BLOCK_SIZE=256
     MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
     VLLM_ENGINE_READY_TIMEOUT_S=1800
-    VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+    VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype,fp8
     PREFILLER_KV_LAYOUT=
     DECODER_KV_LAYOUT=
     bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
@@ -3625,7 +3620,6 @@ steps:
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -4571,11 +4565,11 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - csrc/topk.cu
-  - csrc/persistent_topk.cuh
-  - csrc/sampled_topk.cuh
-  - csrc/topk_histogram_4096.cuh
-  - csrc/topk_histogram_4096_overflow.cuh
+  - csrc/attention/dsa/topk/topk.cu
+  - csrc/attention/dsa/topk/persistent_topk.cuh
+  - csrc/attention/dsa/topk/sampled_topk.cuh
+  - csrc/attention/dsa/topk/topk_histogram_4096.cuh
+  - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
   - vllm/model_executor/layers/indexer_topk.py
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/kernels/test_top_k_per_row.py
@@ -5155,7 +5149,6 @@ steps:
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
@@ -5314,29 +5307,29 @@ steps:
 
 #-------------------------------------------------------  mi355 · quantization  --------------------------------------------------------#
 
-# Disabled until torchao transitive dependencies are locked.
-# - label: ":amd: (MI355 DPX) Quantization Shard %N"
-#   timeout_in_minutes: 115
-#   parallelism: 4
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-#   dind: false
-#   agent_pool: mi355_dpx
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   - tests/quantization
-#   - vllm/_aiter_ops.py
-#   - vllm/platforms/rocm.py
-#   - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
-#   - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
-#   - tests/rocm/test_moe_weight_replay.py
-#   optional: true
-#   commands:
-#   - uv pip install --system torchao==0.18.0
-#   - uv pip install --system conch-triton-kernels
-#   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --ignore quantization/test_gfx950_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-#   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
+- label: ":amd: (MI355 DPX) Quantization Shard %N"
+  timeout_in_minutes: 115
+  parallelism: 4
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/quantization
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
+  - tests/rocm/test_moe_weight_replay.py
+  - requirements/test/quantization_deps_rocm.txt
+  optional: true
+  commands:
+  # torchao is installed off the default path (see docker/Dockerfile.rocm).
+  - export PYTHONPATH=/opt/quantization-deps$${PYTHONPATH:+:$$PYTHONPATH}
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --ignore quantization/test_gfx950_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
 
 #---------------------------------------------------------  mi355 · samplers  ----------------------------------------------------------#
 
@@ -5982,6 +5975,8 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/models/deepseek_v32/amd/rocm.py
+  - vllm/models/deepseek_v4/amd/rocm.py
+  - vllm/models/deepseek_v41/amd/rocm.py
   optional: true
   commands:
   - >-
@@ -6145,7 +6140,6 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/
-  - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/laguna.py
   - vllm/platforms/rocm.py
@@ -6169,7 +6163,6 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/
-  - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/gemma4.py

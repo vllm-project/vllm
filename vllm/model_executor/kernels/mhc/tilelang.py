@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -14,9 +13,7 @@ def _hc_prenorm_gemm_outputs(
     hc_mult: int,
     use_tilelang_fallback: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
-    )
+    from vllm.model_executor.kernels.mhc.warmup import compute_mhc_num_splits
     from vllm.utils.deep_gemm import (
         is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
@@ -24,9 +21,7 @@ def _hc_prenorm_gemm_outputs(
 
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
     num_tokens = x.shape[0]
-    n_splits = (
-        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64)) if use_deep_gemm else 1
-    )
+    n_splits = compute_mhc_num_splits(x.shape[1], num_tokens) if use_deep_gemm else 1
     out = torch.empty(
         n_splits,
         num_tokens,

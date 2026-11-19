@@ -123,7 +123,7 @@ def pack_dcp_topk_candidates_cutedsl(
 class PackDCPTopkCandidatesKernel(
     VllmTritonJitKernel["PackDCPTopkCandidatesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         dcp_rank: int
         dcp_world_size: int
@@ -308,7 +308,7 @@ class StableTopKFromGatheredCandidatesKernel(
     hist_chunks = (hist_bins + tb_size - 1) // tb_size
     warps_per_block = tb_size // cute.arch.WARP_SIZE
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         topk: int
         num_candidates: int

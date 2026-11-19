@@ -388,7 +388,7 @@ class _ReplaySSMMaterializeTables(NamedTuple):
     state_scale_slot_strides: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMModelContext:
     """Shared replay plans with independent physical slots for each cache group."""
 
