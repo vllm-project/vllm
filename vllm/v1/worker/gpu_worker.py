@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,12 @@ from vllm.distributed.parallel_state import (
     resume_device_comms,
     suspend_device_comms,
 )
+from vllm.distributed.pp_transport import (
+    PPTransport,
+    RowSpec,
+    check_intermediate_tensors,
+    row_specs,
+)
 from vllm.distributed.utils import all_reduce_int
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -104,7 +111,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -118,6 +125,12 @@ from vllm.v1.worker.extensible_kv_cache import (
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
     registers_kv_cache_memory,
+)
+from vllm.v1.worker.iteration_timing import (
+    finish_iteration_timing,
+    make_iteration_timer,
+    start_iteration_timing,
+    time_dummy_batch,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -177,7 +190,6 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
-    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -239,15 +251,12 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
         self._external_weight_charges = ExternalWeightCharges()
-        self.kv_cache_transient_bytes_before_tuning = 0
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
-        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
-
-        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+        self.elastic_ep_executor = self._make_elastic_ep_executor()
         self.worker_sentinel: WorkerSentinel | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
@@ -269,15 +278,29 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        validate_worker_profiler_config(self.profiler_config)
+        self._validate_profiler_config()
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
         # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
         self._pp_transport: PPTransport | None = None
+        # What a non-first PP rank receives into; checked on the NCCL path.
+        self._pp_recv_specs: dict[str, RowSpec] = {}
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+
+        # Set on the worker that times engine iterations.
+        self.iteration_timer = make_iteration_timer(vllm_config, rank)
+
+    def _validate_profiler_config(self) -> None:
+        validate_worker_profiler_config(self.profiler_config)
+
+    def _make_elastic_ep_executor(self):
+        """Construct elastic EP lazily so platform workers can opt out."""
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+        return ElasticEPScalingExecutor(self)
 
     @property
     def sleep_mode_backend(self) -> "SleepModeBackend":
@@ -544,8 +567,13 @@ class Worker(WorkerBase):
             torch.nn.functional.linear(x, x, x[0])
             del x
 
+            # Collect garbage, then freeze the startup heap so that later gc.collect()
+            # calls (weight loading, memory profiling, KV cache sizing) skip it. It is
+            # unfrozen by the first CUDA graph capture, or at the latest by
+            # compile_or_warm_up_model, which then refreezes the final heap.
+            freeze_gc_heap()
+
             # Now take memory snapshot after NCCL is initialized
-            gc.collect()
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
@@ -574,7 +602,10 @@ class Worker(WorkerBase):
     def _init_workspace_and_model_runner(self) -> None:
         """Set up the workspace manager, build the model runner, report usage."""
         # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        pc = self.vllm_config.parallel_config
+        # all-reduce-overlap runs both microbatches on one stream: one workspace set.
+        per_ubatch = pc.enable_dbo and pc.dbo_schedule != "all-reduce-overlap"
+        num_ubatches = 2 if per_ubatch else 1
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -620,13 +651,15 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
+        persistent = self.model_runner.intermediate_tensors
+        if persistent is not None:
+            self._pp_recv_specs = row_specs(persistent.tensors)
+
         if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
-            self._pp_transport = create_pp_transport(
-                self.vllm_config, self.model_runner.intermediate_tensors
-            )
+            self._pp_transport = create_pp_transport(self.vllm_config, persistent)
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -887,8 +920,8 @@ class Worker(WorkerBase):
             )
         return {(pp_rank, tp_rank): metadata}
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
+        return self.model_runner.get_kv_cache_layer_configs()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to GPU memory.
@@ -1097,22 +1130,21 @@ class Worker(WorkerBase):
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         if self.cache_config.enable_extensible_kv_cache:
+            kv_cache = self.model_runner.extensible_kv_cache
+            assert kv_cache is not None
+            # The blocks warmup_kernels committed hold garbage and can take
+            # nearly all the memory warmup may commit: release them, so the
+            # sizing steps run beside only the blocks they address.
+            kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
+            # Null stale ids past each row's last block, which the shrink unmapped:
+            # some kernels load whole KV tiles (e.g. AITER on gfx950, ROCm/aiter#8033).
+            self.model_runner.block_tables.clear_input_block_tables()
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
             # Measure before capture, whose persistent allocations would
             # hide part of the peak from a later peak - current.
-            kv_cache = self.model_runner.extensible_kv_cache
-            assert kv_cache is not None
-            stats = torch.accelerator.memory_stats(self.device)
-            kv_cache.reserved_headroom_bytes = max(
-                kv_cache.reserved_headroom_bytes,
-                # kernel_warmup keeps FlashInfer autotuning out of this
-                # peak window; include what the steps before it reached.
-                getattr(self, "kv_cache_transient_bytes_before_tuning", 0),
-                stats.get("allocated_bytes.all.peak", 0)
-                - stats.get("allocated_bytes.all.current", 0),
-            )
+            kv_cache.record_transient_peak()
             if not self.model_config.enforce_eager:
                 # Warmup's blocks hold garbage and capture addresses only the
                 # null block: release them so the graphs fit (encoder graphs
@@ -1240,8 +1272,10 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
+        # Unfreeze and run GC (also frees cyclic garbage objects since init_device),
+        # then refreeze so that GC won't scan static objects (model weights, KV caches,
+        # CUDA graphs) during inference.
+        gc.unfreeze()
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
@@ -1468,6 +1502,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @finish_iteration_timing
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1475,6 +1510,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     @with_gpu_sync_check
+    @start_iteration_timing
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
@@ -1496,6 +1532,10 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
+            # After the postprocessing that all-gathers and reshapes the tensors.
+            comm_postprocess.append(
+                partial(check_intermediate_tensors, tensor_dict, self._pp_recv_specs)
+            )
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
@@ -1608,6 +1648,7 @@ class Worker(WorkerBase):
             and self.parallel_config.data_parallel_size > 1
         )
 
+    @time_dummy_batch  # returns the iteration records that have completed
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(
             self.model_runner.decode_query_len,

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
@@ -24,19 +25,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    GroupOffloadConfig,
     OffloadingConnectorScheduler,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    KVCacheSpecKind,
-    MambaSpec,
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    GroupOffloadConfig,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpecKind,
+)
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -45,6 +48,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -105,35 +109,22 @@ def _group_config(
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
-    kv_spec: KVCacheSpec
     if mamba:
         # A recurrent group: one state per chunk, offloaded in align mode.
-        kv_spec = MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode="align",
-        )
+        manager_config = MambaManager.config(mamba_cache_mode="align")
         sliding_window_size_in_chunks = 1
         event_spec = _MAMBA_EVENT_SPEC
     else:
-        kv_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        )
+        manager_config = FullAttentionManager.config()
         event_spec = _FULL_ATTENTION_EVENT_SPEC
-    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
-    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=tokens_per_chunk,
         hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
-        kv_cache_spec=kv_spec,
-        manager_cls=manager_cls,
+        block_size=block_size,
+        manager_config=manager_config,
         kv_event_group_spec=event_spec,
         requires_cow_source=mamba,
     )
@@ -786,7 +777,8 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
 
     primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
     ctx = ReqContext(req_id="promotion")
-    primary.prepare_store([key], ctx)
+    primary.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -809,7 +801,7 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.token_ids == req.all_token_ids
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
-    primary.complete_store([key], ctx, success=success)
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
     raw_events = list(primary.take_events())
     if success:
         assert raw_events[0].removal_expected
@@ -837,13 +829,13 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
     ready_key, failed_key = [make_offload_key(_hash(i), 0) for i in (1, 2)]
     primary = CPUOffloadingManager(num_chunks=2, enable_events=True)
     ctx = ReqContext(req_id="shared-prefix")
-    primary.prepare_store([ready_key], ctx)
+    primary.prepare_store([ready_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     tracker.record_store(ready_req, group, 0, ready_key)
-    primary.complete_store([ready_key], ctx)
+    primary.complete_store([ready_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     [stored] = tracker.take_events(primary.take_events())
     assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
 
-    primary.prepare_store([failed_key], ctx)
+    primary.prepare_store([failed_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -851,7 +843,9 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
         )
         is None
     )
-    primary.complete_store([failed_key], ctx, success=False)
+    primary.complete_store(
+        [failed_key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
     assert list(tracker.take_events(primary.take_events())) == []
     assert primary.lookup(ready_key, ctx) is LookupResult.HIT
     assert ready_key in tracker._pending_event_metadata
@@ -868,7 +862,8 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     ctx = ReqContext(req_id="retry")
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     for attempt in range(2):
-        primary.prepare_store([key], ctx)
+        primary.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
         assert (
             OffloadingConnectorScheduler._maximal_prefix_lookup(
                 scheduler, [key], ctx, req, group, 0
@@ -876,7 +871,9 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
             is None
         )
         if attempt == 0:
-            primary.complete_store([key], ctx, success=False)
+            primary.complete_store(
+                [key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+            )
     # Drain the old failure only after the retry captured its metadata.
     old_cleanup = list(tracker.take_events(primary.take_events()))
     [inventory] = tracker.take_events(
@@ -886,7 +883,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     assert inventory.token_ids == req.all_token_ids
     assert old_cleanup == []
     assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
-    primary.complete_store([key], ctx, success=success)
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     assert len(events) == int(success)
     assert key in tracker._pending_event_metadata
@@ -1054,9 +1051,9 @@ def test_tiering_accepts_self_describing_kv_events():
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,
@@ -1096,9 +1093,9 @@ def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,
