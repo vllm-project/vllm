@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import mmap
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -148,9 +150,7 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
     ) == pytest.approx(64 / 24)
 
 
-@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
-def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
-    """Every page needs a host block, so one max_model_len request must fit."""
+def _hisparse_mla_layout_inputs(monkeypatch, kv_transfer_config=None):
     monkeypatch.setattr(
         current_platform,
         "get_hisparse_backend_cls",
@@ -180,12 +180,19 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
+        kv_transfer_config=kv_transfer_config,
     )
-    host_page = specs["model.layers.0.self_attn"].page_size_bytes
-    host_budget = (4 + extra_blocks) * host_page
     groups = get_hisparse_kv_cache_groups(
         config, {name: full_layer(spec) for name, spec in specs.items()}
     )
+    return config, groups, specs["model.layers.0.self_attn"].page_size_bytes
+
+
+@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
+def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
+    """Every page needs a host block, so one max_model_len request must fit."""
+    config, groups, host_page = _hisparse_mla_layout_inputs(monkeypatch)
+    host_budget = (4 + extra_blocks) * host_page
 
     if ok:
         layout = create_hisparse_layout(config, groups, host_budget=host_budget)
@@ -193,6 +200,46 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
             create_hisparse_layout(config, groups, host_budget=host_budget)
+
+
+@pytest.mark.parametrize("cpu_bytes_to_use", [None, 1 << 30])
+def test_hisparse_host_pool_shared_with_indexer_offload(monkeypatch, cpu_bytes_to_use):
+    """An indexer offload tier without its own budget takes its share of
+    host_pool_gib, sized to hold the same tokens as the host pool."""
+    offload_extra = {} if cpu_bytes_to_use is None else {"cpu_bytes_to_use": 1 << 30}
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "HiSparseConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {"host_pool_gib": 1},
+                },
+                {
+                    "kv_connector": "OffloadingConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": offload_extra,
+                },
+            ]
+        },
+    )
+    config, groups, _ = _hisparse_mla_layout_inputs(monkeypatch, kv_transfer_config)
+    (indexer,) = [g for g in groups if g.role is KVCacheGroupRole.HISPARSE_INDEXER]
+    host_budget = 1000 * 64 * 1024
+
+    layout = create_hisparse_layout(config, groups, host_budget=host_budget)
+
+    if cpu_bytes_to_use is not None:
+        assert layout.host_num_blocks == host_budget // layout.host_block_stride
+        return
+    indexer_bytes_per_block = cdiv(
+        round_up(indexer.page_size_bytes, mmap.PAGESIZE) * 64, indexer.block_size
+    )
+    assert layout.host_num_blocks == host_budget // (
+        layout.host_block_stride + indexer_bytes_per_block
+    )
 
 
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):

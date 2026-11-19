@@ -35,6 +35,15 @@ class HiSparseConfig:
     resident-only and evicted pages are copied to host at spill time. Prefill
     rows are always mirrored during the forward."""
 
+    offload_indexer: bool = True
+    """Add an `OffloadingConnector` for the indexer cache group when prefix
+    caching is enabled and no connector offloads it. Every HiSparse prefix hit
+    also needs the prefix's indexer KV, so without an offload tier prefixes are
+    lost once their indexer blocks are evicted from the GPU, however much host
+    pool remains. Unless the connector sets `cpu_bytes_to_use`, the HiSparse
+    `host_pool_gib` is split between the sparse-MLA host pool and the indexer
+    tier so that both hold the same number of tokens."""
+
 
 @config
 class AttentionConfig:

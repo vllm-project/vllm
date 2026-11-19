@@ -1292,6 +1292,35 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _configure_hisparse_indexer_offload(self) -> None:
+        kv_transfer_config = self.kv_transfer_config
+        hisparse_config = self.attention_config.hisparse_config
+        assert kv_transfer_config is not None and hisparse_config is not None
+        if (
+            not self.cache_config.enable_prefix_caching
+            or kv_transfer_config.has_connector("OffloadingConnector")
+            or kv_transfer_config.has_connector("MooncakeStoreConnector")
+        ):
+            return
+        if not hisparse_config.offload_indexer:
+            logger.warning(
+                "HiSparse is running with prefix caching but without indexer "
+                "offloading. A prefix hit needs both its host pages and its "
+                "indexer KV, and the indexer is kept only on GPU, so cached "
+                "prefixes are lost long before the host pool fills. Remove "
+                "offload_indexer=False or add an OffloadingConnector."
+            )
+            return
+        kv_transfer_config.add_connector(
+            {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
+        )
+        logger.info(
+            "HiSparse: added an OffloadingConnector for the indexer cache group "
+            "so prefix hits survive GPU eviction; host_pool_gib is split between "
+            "it and the sparse-MLA host pool. Set "
+            "hisparse_config.offload_indexer=False to disable."
+        )
+
     def _verify_aux_output_compatibility(self) -> None:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
@@ -2318,6 +2347,8 @@ class VllmConfig:
                 "and host_pool_gib; to combine it with another connector, nest "
                 "both in MultiConnector instead of using --kv-offloading-size."
             )
+        if self.attention_config.hisparse_config is not None:
+            self._configure_hisparse_indexer_offload()
         if (
             self.speculative_config is not None
             and self.speculative_config.prefill_context_kv_only

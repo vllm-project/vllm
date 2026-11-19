@@ -974,6 +974,50 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
         ),
     )
     assert isinstance(config.attention_config.hisparse_config, HiSparseConfig)
+    connectors = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+    assert [c["kv_connector"] for c in connectors].count("OffloadingConnector") == 1
+
+
+def _hisparse_vllm_config(monkeypatch, **kwargs) -> VllmConfig:
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    return VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 128},
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+        **kwargs,
+    )
+
+
+def test_hisparse_opt_out_of_indexer_offload_warns(monkeypatch, caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        config = _hisparse_vllm_config(
+            monkeypatch,
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(offload_indexer=False)
+            ),
+        )
+
+    assert config.kv_transfer_config.kv_connector == "HiSparseConnector"
+    assert "without indexer offloading" in caplog_vllm.text
+
+
+def test_hisparse_without_prefix_caching_skips_indexer_offload(monkeypatch):
+    config = _hisparse_vllm_config(
+        monkeypatch, cache_config=CacheConfig(enable_prefix_caching=False)
+    )
+
+    assert config.kv_transfer_config.kv_connector == "HiSparseConnector"
 
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):

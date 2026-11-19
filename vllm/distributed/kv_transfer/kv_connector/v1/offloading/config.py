@@ -5,6 +5,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import (
     is_mamba_group,
     resolve_dcp_kv_block_size,
@@ -172,10 +173,19 @@ def build_offloading_config(
             group.page_size_bytes for _, group in selected_groups
         )
 
+    kv_tp_replicas = kv_cache_config.kv_tp_replicas
+    if kv_cache_config.hisparse_host_num_blocks is not None:
+        # Only the indexer is offloaded; HiSparse's raw-page groups carry no TP
+        # replication metadata and would otherwise force one copy per rank.
+        kv_tp_replicas = kv_cache_groups_tp_replicas(
+            [group for _, group in selected_groups],
+            parallel_config.tensor_parallel_size,
+            parallel_config.decode_context_parallel_size,
+        )
     replicated_layout = (
         vllm_config.model_config.use_mla
         and parallel_config.tensor_parallel_size > 1
-        and kv_cache_config.kv_tp_replicas == parallel_config.tensor_parallel_size
+        and kv_tp_replicas == parallel_config.tensor_parallel_size
         and worker_kv_bytes_per_block > 0
         # Safe MVP boundary: TP-only, no other parallel axes.
         and parallel_config.pipeline_parallel_size == 1
@@ -258,6 +268,17 @@ def build_offloading_config(
         else vllm_config.cache_config.cache_dtype
     )
 
+    default_num_blocks = None
+    if kv_cache_config.hisparse_host_num_blocks is not None:
+        # Hold as many tokens as the HiSparse host pool, whose budget it shares.
+        (source_group,) = (
+            g for g in kv_cache_config.kv_cache_groups if g.host_resident
+        )
+        default_num_blocks = cdiv(
+            kv_cache_config.hisparse_host_num_blocks * source_group.block_size,
+            max(group_tokens_per_block),
+        )
+
     return OffloadingConfig(
         groups=groups,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -291,4 +312,5 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        default_num_blocks=default_num_blocks,
     )

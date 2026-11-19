@@ -184,9 +184,20 @@ its GPU cache group.
 ## Indexer KV offloading
 
 HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
-normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
-with HiSparse, it stores and restores that group through the generic KV
-offloading path; HiSparse continues to own only the main sparse-attention host tier.
+normal prefix-cacheable GPU cache group. `OffloadingConnector` stores and
+restores that group through the generic KV offloading path; HiSparse continues
+to own only the main sparse-attention host tier.
+
+Every prefix hit needs both its host pages and its indexer KV. Without an
+offload tier, a prefix is lost as soon as its indexer blocks are evicted from
+the GPU pool, long before the host pool fills. So when prefix caching is enabled
+and neither `OffloadingConnector` nor `MooncakeStoreConnector` is configured,
+vLLM adds an `OffloadingConnector`, wrapping the configured connector in
+`MultiConnector` if needed. Unless the `OffloadingConnector` sets
+`cpu_bytes_to_use`, `host_pool_gib` is split between the HiSparse host pool and
+the indexer tier so that both hold the same tokens. On a single node, MLA TP
+ranks share one copy of the indexer tier. Setting
+`hisparse_config.offload_indexer` to `false` disables this and logs a warning.
 
 The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks
