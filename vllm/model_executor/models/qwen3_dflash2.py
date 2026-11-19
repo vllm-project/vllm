@@ -568,7 +568,9 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.candidate_logits_processor.get_top_k_tokens(
-            self.lm_head, hidden_states, self.model.candidate_selector.top_k
+            self.lm_head,
+            self.cast_to_lm_head_dtype(hidden_states),
+            self.model.candidate_selector.top_k,
         )
 
 

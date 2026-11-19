@@ -26,7 +26,10 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
+    load_dflash_model,
+    with_draft_dtype,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -100,7 +103,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self._aux_staging = torch.zeros(
                 self._num_graph_context_tokens(self.max_num_reqs),
                 len(aux_layers) * vllm_config.model_config.get_hidden_size(),
-                dtype=self.dtype,
+                # Holds the target's hidden states, so it takes the target's
+                # dtype; combine_hidden_states casts them to the draft's.
+                dtype=vllm_config.model_config.dtype,
                 device=device,
             )
 
@@ -135,7 +140,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             config.attention_config,
             use_non_causal=self.requires_non_causal,
         )
-        return config
+        # Its KV cache is in the draft's dtype, as in load_dflash_model.
+        return with_draft_dtype(config, self.dtype)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         wants_full = (
