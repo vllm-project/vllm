@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end tests for the FlashInfer MoE-EP adapter on Hopper and Blackwell GPUs.
+"""End-to-end FlashInfer MoE-EP tests on Hopper, Blackwell and Rubin GPUs.
 
 Each test spawns one process per GPU, bootstraps vLLM's expert-parallel
 groups, builds a `FlashInferMoeEp` adapter from bf16 expert weights at the
@@ -997,7 +997,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
             else moe_ep.Sm107_Mxfp8_Mxfp4_Bf16_Cutedsl_MegaMoeConfig
         )
         assert isinstance(megakernel, expected_config)
-        assert megakernel.knobs is None
+        assert megakernel.knobs == ("cache" if weight_format == "nvfp4" else None)
         assert megakernel.apply_routing_weights_before_fc2 is (
             routing is RoutingMethodType.DeepseekV4
         )

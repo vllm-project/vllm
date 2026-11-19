@@ -786,3 +786,53 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
+
+
+@pytest.mark.parametrize(
+    ("block_size", "sliding_window", "step_tokens", "num_prompt_tokens"),
+    [
+        *((4, 10, 16, 40 + residue) for residue in range(4)),
+        # DSPark's drafter window (2,048 + 3 draft tokens) in 16K-token steps.
+        *((64, 2051, 16384, 100_096 + residue) for residue in (0, 1, 2, 63)),
+    ],
+)
+def test_eagle_swa_prefix_saved_by_chunked_prefill_serves_next_turn(
+    block_size, sliding_window, step_tokens, num_prompt_tokens
+):
+    """A target plus EAGLE sliding-window drafter (DSPark's layout) at
+    retention 0, saved step by step as a chunked prefill computes it, serves a
+    next turn that extends the prompt its whole prefix but EAGLE's dropped
+    block, at every prompt-end residue."""
+    groups = [
+        _group(["target"], _full(block_size)),
+        _group(["draft"], _swa(block_size, sliding_window), is_eagle_group=True),
+    ]
+    coord = _make_coord(
+        groups, hash_block_size=block_size, use_eagle=True, retention_interval=0
+    )
+    num_blocks = num_prompt_tokens // block_size
+    turn = [BlockHash(i.to_bytes(4, "big")) for i in range(num_blocks)]
+
+    # As the worker does, each step saves its new full blocks through store_mask.
+    stored: set[tuple[int, bytes]] = set()
+    saved_tokens = 0
+    for step_end in range(step_tokens, num_prompt_tokens + step_tokens, step_tokens):
+        token_len = min(step_end, num_prompt_tokens) // block_size * block_size
+        masks = coord.store_mask(
+            token_len, saved_tokens, num_prompt_tokens=num_prompt_tokens
+        )
+        first_block = saved_tokens // block_size
+        for group_id, mask in enumerate(masks):
+            for i, block in enumerate(range(first_block, token_len // block_size)):
+                if mask is None or mask[i]:
+                    stored.add((group_id, bytes(turn[block])))
+        saved_tokens = token_len
+
+    # The next turn diverges right after the prompt's last complete block.
+    next_turn = turn + [BlockHash((1 << 24 | i).to_bytes(4, "big")) for i in range(8)]
+    _, hit_length = coord.find_longest_cache_hit(
+        next_turn,
+        len(next_turn) * block_size,
+        ExternalCachedBlockPool(block_size, stored),
+    )
+    assert hit_length == (num_blocks - 1) * block_size

@@ -50,6 +50,11 @@ def use_workspace_lane(lane: int) -> Generator[None]:
         _workspace_lane.reset(token)
 
 
+def current_workspace_lane() -> int:
+    """Return the workspace lane selected for this execution context."""
+    return _workspace_lane.get()
+
+
 class WorkspaceManager:
     """Manager for workspace allocation.
 

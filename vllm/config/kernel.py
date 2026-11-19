@@ -133,6 +133,7 @@ MoEBackend = Literal[
     "deep_gemm_mega_moe",
     "cutlass",
     "flashinfer_trtllm",
+    "flashinfer_prims_ts",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_moe_ep_cutedsl",
@@ -345,6 +346,8 @@ class KernelConfig:
       NVFP4 or BF16 experts on SM100, or MXFP4 or 128x128 block-FP8 on SM90
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
+    - "flashinfer_prims_ts": Use FlashInfer's Prims-TS (CuTe DSL) expert
+      GEMMs with TRTLLM-GEN routing and finalize (NVFP4 only, SM100/103/107)
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP

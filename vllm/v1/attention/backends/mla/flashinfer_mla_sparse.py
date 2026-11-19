@@ -162,7 +162,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
                     "lacks (needs a build with flashinfer-ai/flashinfer#7410)"
                 )
 
-        # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
+        # The query is absorbed to kv_lora_rank before entering the SM10 kernel.
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = hf_text_config.qk_nope_head_dim
@@ -178,10 +178,10 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
                         f"qk_nope_head_dim={qk_nope_head_dim}, "
                         f"kv_lora_rank={kv_lora_rank}"
                     )
-            elif qk_nope_head_dim not in [128, 192]:
+            elif qk_nope_head_dim not in [64, 128, 192]:
                 return (
                     "FlashInfer MLA Sparse kernel requires qk_nope_head_dim "
-                    f"in [128, 192], but got {qk_nope_head_dim}"
+                    f"in [64, 128, 192], but got {qk_nope_head_dim}"
                 )
             # Check for index_topk which indicates sparse model
             if not hasattr(hf_text_config, "index_topk"):

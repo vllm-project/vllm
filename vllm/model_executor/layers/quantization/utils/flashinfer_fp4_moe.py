@@ -466,6 +466,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 ]:
     # Delayed import for circular dependency avoidance.
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
         NvFp4MoeBackend,
         is_global_sf_supported_for_nvfp4_backend,
     )
@@ -473,7 +474,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     assert backend in [
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        *TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_B12X,
     ]
@@ -486,7 +487,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         and backend
         in [
             NvFp4MoeBackend.FLASHINFER_CUTLASS,
-            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            *TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
             NvFp4MoeBackend.FLASHINFER_B12X,
         ]
     ):
@@ -506,7 +507,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+    if backend in TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS:
         w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
             w13,
             w13_scale,
@@ -526,6 +527,9 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         # intermediate is not 128-aligned at TP>1 (e.g. Gemma-4-26B-A4B at tp4) hit
         # `assert M % 128 == 0`. Padded rows are zero -> outputs unchanged.
         min_alignment = 64 if is_gated else 128
+        # Prims-TS needs intermediate_size % 128 == 0, gated or not.
+        if backend == NvFp4MoeBackend.FLASHINFER_PRIMS_TS:
+            min_alignment = 128
         w13, w13_scale, w2, w2_scale, padded_intermediate = (
             align_fp4_moe_weights_for_fi(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment

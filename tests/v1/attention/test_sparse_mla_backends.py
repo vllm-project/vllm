@@ -106,6 +106,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
@@ -758,7 +759,7 @@ def _quantize_dequantize_nvfp4_ds_mla(
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("block_size", SPARSE_BLOCK_SIZES)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
@@ -1187,6 +1188,27 @@ def test_sparse_backend_decode_correctness(
             metadata,
             out_buffer,
         )
+
+        # Below 32 heads the quantized-cache path concatenates the query straight
+        # into a head-padded buffer; padding per call must give the same output.
+        uses_padded_query = (
+            backend_cls == FlashMLASparseBackend
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+            and num_heads < 32
+            and qk_rope_head_dim > 0
+        )
+        assert (getattr(impl, "fp8_q_padded", None) is not None) == uses_padded_query
+        if uses_padded_query:
+            impl.fp8_q_padded = None
+            unpadded_output = mock_layer.forward_impl(
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                metadata,
+                torch.empty_like(out_buffer),
+            )
+            torch.testing.assert_close(backend_output, unpadded_output, rtol=0, atol=0)
 
     if block_stride_rows is not None and kv_cache_dtype == "auto":
         expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
@@ -6005,4 +6027,51 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
                 torch.tensor(expected[token].logprob),
                 rtol=0.01,
                 atol=0.01,
+            )
+
+
+@pytest.mark.parametrize("qk_nope_head_dim", [64, 128, 192, 96])
+def test_flashinfer_sparse_mla_absorbed_query_dimensions(qk_nope_head_dim):
+    """Select the unpadded eight-head backend, retaining unsupported-shape guards."""
+    from vllm.config import VllmConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major != 10:
+        pytest.skip("TRTLLM-GEN sparse MLA requires SM10")
+
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            index_topk=2048,
+        ),
+        get_num_attention_heads=lambda parallel_config: 8,
+    )
+    selector = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=64,
+        use_mla=True,
+        use_sparse=True,
+    )
+    with set_current_vllm_config(config):
+        if qk_nope_head_dim == 96:
+            with pytest.raises(ValueError, match="qk_nope_head_dim"):
+                current_platform.get_attn_backend_cls(
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE, selector, num_heads=8
+                )
+        else:
+            backend = current_platform.get_attn_backend_cls(
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE, selector, num_heads=8
+            )
+            assert backend.endswith(".FlashInferMLASparseTRTLLMBackend")
+            assert current_platform.get_attn_backend_cls(
+                None, selector, num_heads=8
+            ).endswith(
+                (".FlashInferMLASparseTRTLLMBackend", ".FlashAttnMLASparseFA4Backend")
             )
