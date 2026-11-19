@@ -15,7 +15,9 @@ instead of `multi_gpu_test` (which forks per test, and a forked child cannot
 use the parent's Ray connection).
 """
 
+import gc
 import os
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,6 +111,7 @@ class PPTransportWorker:
         import vllm.distributed.parallel_state as parallel_state
 
         in_the_same_node_as = parallel_state.in_the_same_node_as
+        transport = None
         if fabric:
             parallel_state.in_the_same_node_as = lambda *args, **kwargs: [
                 rank == 0 for rank in range(pp_size)
@@ -157,7 +160,189 @@ class PPTransportWorker:
             # receives it, so no stage may exit before the chain is done.
             torch.distributed.barrier(group=pp_group.cpu_group)
         finally:
+            if transport is not None:
+                transport.close()
+                if isinstance(transport, MoriIOTransport):
+                    released = weakref.ref(transport)
+                    del transport
+                    gc.collect()
+                    assert released() is None
             parallel_state.in_the_same_node_as = in_the_same_node_as
+            self._teardown()
+
+    def run_mori_one_rank_failing(
+        self,
+        pp_size: int,
+        port: int,
+        tp_size: int = 1,
+        phase: str = "connect",
+        transport_cls: type = MoriIOTransport,
+    ) -> None:
+        """A failed dependency, allocation, connection or GPU thread on one
+        TP chain must reject setup on all chains and release receive slots."""
+        if self.rank >= pp_size * tp_size:
+            return
+        import threading
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        import mori.io
+
+        pp_group = self._init(pp_size, port, tp_size)
+        try:
+            persistent = (
+                None
+                if pp_group.is_first_rank
+                else IntermediateTensors(
+                    {
+                        k: torch.empty(
+                            MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda"
+                        )
+                        for k in KEYS
+                    }
+                )
+            )
+            before = torch.accelerator.memory_allocated()
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, VLLM_PP_TRANSPORT="mori_io"))
+                fail_rank = tp_size if phase == "register" else 0
+                if self.rank == fail_rank:
+
+                    def fail(*args, **kwargs):
+                        raise RuntimeError(f"injected MoRI {phase} failure")
+
+                    if phase == "dependency":
+                        stack.enter_context(
+                            patch("vllm.utils.import_utils.has_mori", new=fail)
+                        )
+                    elif phase == "worker":
+                        set_device = torch.accelerator.set_device_index
+
+                        def fail_thread(device):
+                            if (
+                                threading.current_thread()
+                                is not threading.main_thread()
+                            ):
+                                fail()
+                            return set_device(device)
+
+                        stack.enter_context(
+                            patch.object(
+                                torch.accelerator, "set_device_index", fail_thread
+                            )
+                        )
+                    else:
+                        method = (
+                            "register_torch_tensor"
+                            if phase == "register"
+                            else "create_session"
+                        )
+                        stack.enter_context(
+                            patch.object(mori.io.IOEngine, method, new=fail)
+                        )
+                with pytest.raises(
+                    RuntimeError, match=f"injected MoRI {phase} failure"
+                ):
+                    create_pp_transport(_config(tp_size), persistent)
+            gc.collect()
+            torch.accelerator.synchronize()
+            assert torch.accelerator.memory_allocated() <= before
+        finally:
+            self._teardown()
+
+    def run_mori_row_limit(
+        self,
+        pp_size: int,
+        port: int,
+        tp_size: int = 1,
+        transport_cls: type = MoriIOTransport,
+    ) -> None:
+        """One oversized tensor must be rejected even when another smaller
+        tensor leaves enough space in the combined slot."""
+        if self.rank >= pp_size * tp_size:
+            return
+        pp_group = self._init(pp_size, port, tp_size)
+        transport = None
+        try:
+            persistent = (
+                None
+                if pp_group.is_first_rank
+                else {
+                    k: torch.empty(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
+                    for k in KEYS
+                }
+            )
+            transport = transport_cls(_config(tp_size), pp_group, persistent)
+            if pp_group.is_first_rank:
+                tensors = {
+                    "hidden_states": torch.empty(
+                        MAX_ROWS + 1, WIDTH, dtype=torch.bfloat16, device="cuda"
+                    ),
+                    "residual": torch.empty(
+                        1, WIDTH, dtype=torch.bfloat16, device="cuda"
+                    ),
+                }
+                with pytest.raises(RuntimeError, match="hidden_states.*at most"):
+                    transport.send(tensors, pp_group)
+            torch.distributed.barrier(group=pp_group.cpu_group)
+        finally:
+            if transport is not None:
+                transport.close()
+            self._teardown()
+
+    def run_mori_close_pending(
+        self,
+        pp_size: int,
+        port: int,
+        tp_size: int = 1,
+        transport_cls: type = MoriIOTransport,
+    ) -> None:
+        """A bounded close must retain a credit-blocked write's buffers; after
+        the consumer drains every step, retrying close releases them."""
+        if self.rank >= pp_size * tp_size:
+            return
+        pp_group = self._init(pp_size, port, tp_size)
+        transport = None
+        try:
+            persistent = (
+                None
+                if pp_group.is_first_rank
+                else {
+                    k: torch.empty(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
+                    for k in KEYS
+                }
+            )
+            transport = transport_cls(_config(tp_size), pp_group, persistent)
+            if pp_group.is_first_rank:
+                for step in range(4):
+                    h = torch.full(
+                        (_rows(step), WIDTH), step, dtype=torch.bfloat16, device="cuda"
+                    )
+                    transport.send({"hidden_states": h, "residual": -h}, pp_group)
+                torch.accelerator.synchronize()
+                allocated = torch.accelerator.memory_allocated()
+                with pytest.raises(RuntimeError, match="still using its buffers"):
+                    transport.close()
+                assert torch.accelerator.memory_allocated() == allocated
+                # The receiver has not read a slot yet, so the fourth write
+                # cannot finish before this explicit handoff.
+                pp_group.send_object("close kept the buffers", dst=1)
+                assert pp_group.recv_object(src=1) == "all four steps arrived"
+                transport.close()
+                assert torch.accelerator.memory_allocated() < allocated
+            else:
+                assert pp_group.recv_object(src=0) == "close kept the buffers"
+                for step in range(4):
+                    received = transport.recv(pp_group).tensors
+                    assert received["hidden_states"].shape == (_rows(step), WIDTH)
+                    assert (received["hidden_states"] == step).all(), step
+                    assert (received["residual"] == -step).all(), step
+                transport.close()
+                pp_group.send_object("all four steps arrived", dst=0)
+            transport.close()
+        finally:
+            if transport is not None:
+                transport.close()
             self._teardown()
 
     def run_one_rank_failing(
@@ -363,6 +548,28 @@ def test_mori_io_pp4():
 @_multi_gpu(num_gpus=4)
 def test_mori_io_tp2_pp2():
     _run_scenario("run_chain", 2, tp_size=2, transport_cls=MoriIOTransport)
+
+
+@_multi_gpu(num_gpus=4)
+@pytest.mark.parametrize("phase", ["dependency", "register", "connect", "worker"])
+def test_mori_io_setup_failure_reaches_other_tp_chains(phase):
+    _run_scenario(
+        "run_mori_one_rank_failing",
+        2,
+        tp_size=2,
+        phase=phase,
+        transport_cls=MoriIOTransport,
+    )
+
+
+@_multi_gpu(num_gpus=2)
+def test_mori_io_rejects_one_tensor_exceeding_its_row_capacity():
+    _run_scenario("run_mori_row_limit", 2, transport_cls=MoriIOTransport)
+
+
+@_multi_gpu(num_gpus=2)
+def test_mori_io_close_retains_pending_transfer_buffers():
+    _run_scenario("run_mori_close_pending", 2, transport_cls=MoriIOTransport)
 
 
 def test_mori_io_slot_holds_every_relayed_tensor():

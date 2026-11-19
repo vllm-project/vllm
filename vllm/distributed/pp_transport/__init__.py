@@ -58,6 +58,10 @@ class PPTransport(ABC):
     def recv(self, pp_group: "GroupCoordinator") -> "IntermediateTensors":
         """Receive this step's inputs from the previous stage."""
 
+    def close(self) -> None:
+        """Release transport resources after the last step has completed."""
+        return None
+
 
 def create_pp_transport(
     vllm_config: "VllmConfig", persistent: "IntermediateTensors | None"

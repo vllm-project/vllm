@@ -22,6 +22,8 @@ uses MoRI's XGMI backend, one that spans nodes its RDMA backend. Unlike
 engines.
 """
 
+import contextlib
+import importlib
 import json
 import math
 import queue
@@ -101,7 +103,10 @@ class _Worker:
     def __init__(self, name: str, device: int) -> None:
         self.jobs: queue.SimpleQueue = queue.SimpleQueue()
         self.device = device
-        threading.Thread(target=self._run, name=name, daemon=True).start()
+        self.ready: Future = Future()
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self.thread.start()
+        self.ready.result()
 
     def submit(self, fn: Callable[..., None], *args: Any) -> Future:
         future: Future = Future()
@@ -109,18 +114,40 @@ class _Worker:
         return future
 
     def _run(self) -> None:
-        torch.accelerator.set_device_index(self.device)
+        try:
+            torch.accelerator.set_device_index(self.device)
+        except BaseException as e:
+            self.ready.set_exception(e)
+            return
+        self.ready.set_result(None)
         while True:
-            future, fn, args = self.jobs.get()
+            job = self.jobs.get()
+            if job is None:
+                return
+            future, fn, args = job
             try:
                 future.set_result(fn(*args))
             except BaseException as e:
                 future.set_exception(e)
+            finally:
+                # A bound job otherwise keeps the transport and its GPU buffers
+                # alive while this thread waits for its next job.
+                del job, future, fn, args
+
+    def close(self) -> None:
+        self.jobs.put(None)
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError(
+                f"PP worker {self.thread.name} is still using its buffers"
+            )
 
 
 def _agree(pp_group: "GroupCoordinator", fn: Callable[[], Any]) -> list[Any]:
     """Run `fn` on every rank and gather the results; raise on every rank if it
     raised on any."""
+    from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
+
     out = error = None
     try:
         out = fn()
@@ -130,7 +157,15 @@ def _agree(pp_group: "GroupCoordinator", fn: Callable[[], Any]) -> list[Any]:
     torch.distributed.all_gather_object(
         gathered, (out, error), group=pp_group.cpu_group
     )
-    if errors := [e for _, e in gathered if e]:
+    errors = [e for _, e in gathered if e]
+    for group in (get_tp_group(), get_pcp_group()):
+        if group.world_size > 1:
+            group_errors: list[Any] = [None] * group.world_size
+            torch.distributed.all_gather_object(
+                group_errors, errors[0] if errors else None, group=group.cpu_group
+            )
+            errors = errors or [e for e in group_errors if e]
+    if errors:
         raise RuntimeError(f"MoRI-IO PP transport setup failed: {errors[0]}")
     return [o for o, _ in gathered]
 
@@ -144,19 +179,32 @@ class MoriIOTransport(PPTransport):
         pp_group: "GroupCoordinator",
         persistent: dict[str, torch.Tensor] | None,
     ) -> None:
-        """Collective over the PP group. Raises on every rank alike if some
+        """Collective over PP, TP and PCP. Raises on every rank alike if some
         rank cannot set up."""
-        check_available()
-        import zmq
-        from mori.io import (
-            BackendType,
-            EngineDesc,
-            IOEngine,
-            IOEngineConfig,
-            MemoryDesc,
-            RdmaBackendConfig,
-            XgmiBackendConfig,
-        )
+        self._workers: list[_Worker] = []
+        self._sockets: list[Any] = []
+        self._transfers: list[Any] = []
+        self._closed = False
+        try:
+            self._setup(pp_group, persistent)
+        except Exception:
+            self.close()
+            raise
+
+    def _setup(
+        self,
+        pp_group: "GroupCoordinator",
+        persistent: dict[str, torch.Tensor] | None,
+    ) -> None:
+        modules: dict[str, Any] = {}
+
+        def dependencies() -> None:
+            check_available()
+            modules["zmq"] = importlib.import_module("zmq")
+            modules["mori"] = importlib.import_module("mori.io")
+
+        _agree(pp_group, dependencies)
+        zmq, mori = modules["zmq"], modules["mori"]
 
         from vllm.distributed.parallel_state import in_the_same_node_as
         from vllm.utils.network_utils import (
@@ -170,23 +218,38 @@ class MoriIOTransport(PPTransport):
         first, last = pp_group.is_first_rank, pp_group.is_last_rank
         one_node = all(in_the_same_node_as(pp_group.cpu_group, source_rank=0))
         self.num_slots = NUM_SLOTS
-        device = torch.accelerator.current_device_index()
-        ctx = zmq.Context.instance()
-        ip = get_ip()
+        device: int
+        ctx: Any
+        ip: str
+
+        def environment() -> None:
+            nonlocal device, ctx, ip
+            device = torch.accelerator.current_device_index()
+            ctx = zmq.Context.instance()
+            ip = get_ip()
+
+        _agree(pp_group, environment)
+
+        def socket(path: str, kind: int, *, bind: bool) -> Any:
+            sock = make_zmq_socket(ctx, path, kind, bind=bind)
+            self._sockets.append(sock)
+            return sock
 
         def listen() -> tuple[Any, str]:
             path = make_zmq_path("tcp", ip, get_open_port())
-            return make_zmq_socket(ctx, path, zmq.PULL, bind=True), path
+            return socket(path, zmq.PULL, bind=True), path
 
         def register() -> dict[str, Any]:
             key = f"vllm-pp{rank}-{uuid.uuid4().hex[:8]}"
-            self.engine = IOEngine(key, IOEngineConfig(ip, get_open_port()))
+            self.engine = mori.IOEngine(key, mori.IOEngineConfig(ip, get_open_port()))
             if one_node:
-                self.engine.create_backend(BackendType.XGMI, XgmiBackendConfig())
+                self.engine.create_backend(
+                    mori.BackendType.XGMI, mori.XgmiBackendConfig()
+                )
             else:
                 # Completion is signaled over ZMQ.
-                config = RdmaBackendConfig(enable_notification=False)
-                self.engine.create_backend(BackendType.RDMA, config)
+                config = mori.RdmaBackendConfig(enable_notification=False)
+                self.engine.create_backend(mori.BackendType.RDMA, config)
             info: dict[str, Any] = {"engine": self.engine.get_engine_desc().pack()}
             if not first:
                 assert persistent is not None
@@ -204,6 +267,7 @@ class MoriIOTransport(PPTransport):
                 info["recv_md"] = recv_md.pack()
                 info["slot_bytes"] = self.recv_slot_bytes
                 info["specs"] = specs
+                info["row_limits"] = {k: t.shape[0] for k, t in persistent.items()}
             if not last:
                 self.ack_sock, info["ack"] = listen()
             return info
@@ -212,16 +276,15 @@ class MoriIOTransport(PPTransport):
 
         def connect() -> None:
             for peer in {rank - 1, rank + 1} & set(range(len(infos))):
-                desc = EngineDesc.unpack(infos[peer]["engine"])
+                desc = mori.EngineDesc.unpack(infos[peer]["engine"])
                 self.engine.register_remote_engine(desc)
             if not first:
-                self.ack_push = make_zmq_socket(
-                    ctx, infos[rank - 1]["ack"], zmq.PUSH, bind=False
-                )
+                self.ack_push = socket(infos[rank - 1]["ack"], zmq.PUSH, bind=False)
             if not last:
                 nxt = infos[rank + 1]
                 self.send_slot_bytes = nxt["slot_bytes"]
                 self.send_specs = nxt["specs"]
+                self.send_row_limits = nxt["row_limits"]
                 self.send_row_bytes = row_bytes(self.send_specs)
                 self.send_buf = torch.empty(
                     self.num_slots * self.send_slot_bytes,
@@ -229,22 +292,28 @@ class MoriIOTransport(PPTransport):
                     device=device,
                 )
                 send_md = self.engine.register_torch_tensor(self.send_buf)
-                remote_md = MemoryDesc.unpack(nxt["recv_md"])
+                remote_md = mori.MemoryDesc.unpack(nxt["recv_md"])
                 self.session = self.engine.create_session(send_md, remote_md)
                 if self.session is None:
                     raise RuntimeError(f"no MoRI-IO session to PP rank {rank + 1}")
-                self.meta_push = make_zmq_socket(ctx, nxt["meta"], zmq.PUSH, bind=False)
+                self.meta_push = socket(nxt["meta"], zmq.PUSH, bind=False)
 
         _agree(pp_group, connect)
 
         self.sent = self.received = 0
-        if not first:
-            self.acker = _Worker("mori-pp-ack", device)
-            self.acks: list[Future] = []
-        if not last:
-            self.sender = _Worker("mori-pp-send", device)
-            self.writes: list[Future | None] = [None] * self.num_slots
-            self.credits = self.num_slots
+
+        def start_workers() -> None:
+            if not first:
+                self.acker = _Worker("mori-pp-ack", device)
+                self._workers.append(self.acker)
+                self.acks: list[Future] = []
+            if not last:
+                self.sender = _Worker("mori-pp-send", device)
+                self._workers.append(self.sender)
+                self.writes: list[Future | None] = [None] * self.num_slots
+                self.credits = self.num_slots
+
+        _agree(pp_group, start_workers)
         # Every stage logs: slot sizes differ per boundary.
         logger.info_once(
             "MoRI-IO PP transport on PP rank %d: %s backend, %d slots, "
@@ -260,6 +329,12 @@ class MoriIOTransport(PPTransport):
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
         check_intermediate_tensors(tensors, self.send_specs)
         rows = {k: t.shape[0] for k, t in tensors.items()}
+        for key, n in rows.items():
+            if n > self.send_row_limits[key]:
+                raise RuntimeError(
+                    f"PP tensor {key} has {n} rows, but the next stage holds "
+                    f"at most {self.send_row_limits[key]}"
+                )
         offsets, size = pack_offsets(self.send_row_bytes, rows)
         if size > self.send_slot_bytes:
             raise RuntimeError(
@@ -295,11 +370,13 @@ class MoriIOTransport(PPTransport):
         if size:
             uid = self.session.allocate_transfer_uid()
             status = self.session.write(base, base, size, uid)
+            self._transfers.append(status)
             deadline = time.monotonic() + _TIMEOUT_S
             while not (status.Succeeded() or status.Failed()):
                 if time.monotonic() > deadline:
                     raise TimeoutError("MoRI-IO PP write did not complete")
                 time.sleep(0)
+            self._transfers.remove(status)
             if status.Failed():
                 raise RuntimeError(f"MoRI-IO PP write failed: {status.Message()}")
         self.meta_push.send(meta)
@@ -319,6 +396,9 @@ class MoriIOTransport(PPTransport):
         if seq != self.received:
             raise RuntimeError(f"Got PP step {seq}, expected {self.received}")
         self.received += 1
+        for key, n in rows.items():
+            if not 0 <= n <= self.persistent[key].shape[0]:
+                raise RuntimeError(f"PP tensor {key} has invalid row count {n}")
         offsets, _ = pack_offsets(self.recv_row_bytes, rows)
         base = slot * self.recv_slot_bytes
         out = {k: self.persistent[k][:n] for k, n in rows.items()}
@@ -337,3 +417,26 @@ class MoriIOTransport(PPTransport):
     def _ack(self, copied: torch.cuda.Event) -> None:
         copied.synchronize()
         self.ack_push.send(b"")
+
+    def close(self) -> None:
+        """Drain local jobs before releasing their registered GPU memory."""
+        if self._closed:
+            return
+        for worker in self._workers:
+            worker.close()
+        if any(not (s.Succeeded() or s.Failed()) for s in self._transfers):
+            raise RuntimeError("A MoRI-IO PP transfer is still using its buffers")
+        for sock in self._sockets:
+            with contextlib.suppress(Exception):
+                sock.close(linger=0)
+        self._sockets.clear()
+        # Destroy sessions/backends before the torch allocations they registered.
+        self.session = None
+        self.engine = None
+        self._transfers.clear()
+        self.send_buf = self.recv_buf = None
+        self.persistent = {}
+        self.writes = []
+        self.acks = []
+        self._workers.clear()
+        self._closed = True

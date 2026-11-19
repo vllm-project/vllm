@@ -1878,6 +1878,10 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         gc.unfreeze()
 
+        if pp_transport := getattr(self, "_pp_transport", None):
+            pp_transport.close()
+            self._pp_transport = None
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
