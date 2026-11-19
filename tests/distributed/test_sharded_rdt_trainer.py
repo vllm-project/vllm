@@ -65,8 +65,8 @@ def cpu_ipc(monkeypatch):
     def reduce(base):
         registry[base.untyped_storage().data_ptr()] = base
         ptr = base.untyped_storage().data_ptr()
-        # rebuild_cuda_tensor's arguments: [7:10] locate the allocation
-        return None, (ptr, 0, 0, 0, 0, 0, 0, ptr, base.nbytes, 0)
+        # rebuild_cuda_tensor's 15 arguments: [7:10] locate the allocation
+        return None, (ptr, *(0,) * 6, ptr, base.nbytes, 0, *(None,) * 4, True)
 
     monkeypatch.setattr(trainer_mod, "reduce_tensor", reduce)
     monkeypatch.setattr(trainer_mod, "rebuild_cuda_tensor", lambda *a: registry[a[0]])

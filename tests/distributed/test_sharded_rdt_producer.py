@@ -209,7 +209,7 @@ def test_cached_sources_follow_the_published_memory(server, monkeypatch, moved):
     for sync_idx in (0, 1):
         s.begin_sync([0], sync_idx)
         alloc = f"a{sync_idx}" if moved else "a"
-        export = (None,) * 6 + (0, alloc, 80, 0, False, sync_idx, 0, sync_idx)
+        export = (None,) * 6 + (0, alloc, 80, 0, False, sync_idx, 0, sync_idx, True)
         keep = () if moved else (1,)  # a moved allocation is a temporary
         s.publish_unit(0, ({1: export}, views, None, keep))
         base = bases[alloc]

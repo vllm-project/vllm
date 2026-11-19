@@ -434,6 +434,9 @@ class _RDTProducerServer:
             if cached is None:
                 args = list(reduce_args)
                 args[6] = self._device_index  # the exporter's device index
+                # packs wait on the unit's ready event; torch's export event would
+                # make freeing the import wait on a gather that may need rank 0
+                args[14] = False  # event_sync_required
                 cached = self._base_cache[reduce_args] = rebuild_cuda_tensor(*args)
             bases[sid] = cached
         rebuilt: dict[str, torch.Tensor] = {}
