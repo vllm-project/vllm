@@ -251,13 +251,22 @@ pub enum ContentPart {
     /// result (Anthropic's `tool_reference` block).
     #[serde(rename = "tool_reference")]
     ToolReference { name: String },
+    /// A vLLM extension carrying an image's embeddings or, in the only form
+    /// the Rust frontend supports, the model-specific metadata that sizes its
+    /// placeholder. The payload stays open here; `vllm-chat` decodes it.
+    #[serde(rename = "image_embeds")]
+    ImageEmbeds {
+        image_embeds: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 impl ContentPart {
     /// The media modality this part carries, if any.
     pub fn modality(&self) -> Option<MmModality> {
         match self {
-            Self::ImageUrl { .. } => Some(MmModality::Image),
+            Self::ImageUrl { .. } | Self::ImageEmbeds { .. } => Some(MmModality::Image),
             Self::VideoUrl { .. } => Some(MmModality::Video),
             Self::AudioUrl { .. } | Self::InputAudio { .. } => Some(MmModality::Audio),
             Self::Text { .. } | Self::Refusal { .. } | Self::ToolReference { .. } => None,

@@ -268,7 +268,7 @@ impl InklingChatRenderer {
             ChatContentPart::Text { text } => {
                 self.write_text_block(out, role_token_id, author_name, text)
             }
-            ChatContentPart::ImageUrl { .. } => {
+            ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
                 self.write_image_block(out, role_token_id, author_name)
             }
             ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {

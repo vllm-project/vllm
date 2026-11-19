@@ -311,7 +311,9 @@ impl ContentCapabilities {
             .iter()
             .filter_map(|part| match part {
                 ChatContentPart::Text { .. } | ChatContentPart::ToolReference { .. } => None,
-                ChatContentPart::ImageUrl { .. } => Some(self.typed_image),
+                ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
+                    Some(self.typed_image)
+                }
                 ChatContentPart::VideoUrl { .. } => Some(self.typed_video),
                 ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                     Some(self.typed_audio)

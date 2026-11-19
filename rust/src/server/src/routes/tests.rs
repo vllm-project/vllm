@@ -617,6 +617,7 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
                     ChatContentPart::Text { text }
                     | ChatContentPart::ToolReference { name: text } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::ImageEmbeds { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }
                     | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
@@ -645,16 +646,23 @@ fn qwen_multimodal_model_info_with_options(
         "vllm-server-qwen-config-{}.json",
         uuid::Uuid::new_v4()
     ));
+    let preprocessor_config_path = std::env::temp_dir().join(format!(
+        "vllm-server-qwen-preprocessor-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
     fs::write(
         &config_path,
         r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
     )
     .expect("write qwen test config");
+    fs::write(&preprocessor_config_path, r#"{"merge_size":2}"#)
+        .expect("write qwen test preprocessor config");
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
         "qwen2-vl-test".to_string(),
         Some("qwen2_vl".to_string()),
         vllm_chat::multimodal::MultimodalConfigFiles {
             config: Some(&config_path),
+            preprocessor_config: Some(&preprocessor_config_path),
             ..Default::default()
         },
         Arc::new(fake_chat_tokenizer()),
@@ -664,6 +672,7 @@ fn qwen_multimodal_model_info_with_options(
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(preprocessor_config_path);
     info
 }
 
@@ -5418,6 +5427,106 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     );
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
+
+/// The Python disaggregated encoder proxy sends a prefill or decode instance
+/// each image as metadata-only `image_embeds`, echoing the grid the encoder
+/// instance produced. The engine gets the prompt and features of the raw
+/// images, keeping only the CPU kwargs, and only if it consumes encoder
+/// outputs from an EC or KV transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_metadata_only_image_embeds_reach_engine_like_raw_images_without_encoder_inputs() {
+    let chat_request = |content: serde_json::Value| {
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": content}],
+        })
+    };
+    let backend = || {
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        ))
+    };
+
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel();
+    let (mut app, engine_task) =
+        test_app_with_backend_and_engine_request_check(backend(), move |request| {
+            let prompt = decode_prompt_token_ids(request).expect("prompt token ids");
+            raw_tx.send((prompt, request.mm_features.clone().expect("features"))).unwrap();
+        })
+        .await;
+    let (status, _) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        chat_request(json!([
+            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"},
+            {"type": "text", "text": "and "},
+            {"type": "image_url", "image_url": {"url": PNG_640X480_DATA_URI}, "uuid": "image-2"}
+        ])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    engine_task.finish().await;
+    let (raw_prompt, raw_features) = raw_rx.recv().unwrap();
+
+    // What the encoder instance reports per image: its grid as a flat list.
+    let grid = |index: usize| {
+        let Some(MmKwargValue::Tensor(tensor)) =
+            &raw_features[index].data.as_ref().unwrap()["image_grid_thw"].data
+        else {
+            panic!("image_grid_thw is a tensor");
+        };
+        let raw_view = tensor.data.as_raw_view().unwrap();
+        raw_view
+            .chunks_exact(8)
+            .map(|bytes| i64::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let metadata_content = json!([
+        {"type": "image_embeds", "image_embeds": {"image_grid_thw": grid(0)}, "uuid": "image-1"},
+        {"type": "text", "text": "and "},
+        {"type": "image_embeds", "image_embeds": {"image_grid_thw": grid(1)}, "uuid": "image-2"}
+    ]);
+    assert_ne!(grid(0), grid(1));
+
+    for allow_missing_mm_embeddings in [true, false] {
+        let mut ready = default_ready_response();
+        ready.allow_missing_mm_embeddings = allow_missing_mm_embeddings;
+        let expected_prompt = raw_prompt.clone();
+        let expected_features: Vec<_> =
+            raw_features.iter().map(|feature| feature.cpu_subset()).collect();
+        let backend = backend();
+        let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
+            ready,
+            |llm| ChatLlm::from_shared_backend(llm, backend),
+            move |request| {
+                assert_eq!(decode_prompt_token_ids(request), Some(expected_prompt));
+                assert_eq!(request.mm_features, Some(expected_features));
+            },
+        )
+        .await;
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            chat_request(metadata_content.clone()),
+        )
+        .await;
+        if allow_missing_mm_embeddings {
+            assert_eq!(status, StatusCode::OK, "{json}");
+            engine_task.finish().await;
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                json["error"]["message"],
+                "`image` features without encoder inputs require an engine that consumes \
+                 encoder outputs from an EC or KV transfer"
+            );
+            engine_task.abort_and_join().await;
+        }
+    }
+}
+
+const PNG_640X480_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==";
 
 const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
