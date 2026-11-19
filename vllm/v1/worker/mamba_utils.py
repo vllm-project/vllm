@@ -206,8 +206,11 @@ def _copy_mamba_state_block(
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
     TEMPORAL_TILES: tl.constexpr,
+    DST_IS_BLOCK_ID: tl.constexpr = False,
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
+
+    With `DST_IS_BLOCK_ID`, `dst_col` is a block id outside the block table.
 
     Shared copy body of `postprocess_mamba_fused_kernel` and
     `precopy_mamba_align_fused_kernel`:
@@ -244,7 +247,10 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
-    dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+    if DST_IS_BLOCK_ID:
+        dest_block_id = dst_col.to(tl.int64)
+    else:
+        dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
     dst_addr = state_base_addr + dest_block_id * state_block_stride
 
     is_conv_state = conv_width > 0
@@ -415,6 +421,15 @@ def postprocess_mamba_fused_kernel(
     # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
     # the existing 2D-grid contract.
     TEMPORAL_TILES: tl.constexpr = 1,
+    # Decode states at prefix-match boundaries: when MATCH_UNIT > 0, a step
+    # that crosses a MATCH_UNIT boundary off the block grid copies the state
+    # there into the request's hold `boundary // MATCH_UNIT % NUM_HOLDS` of
+    # this state's group (`hold_block_ids_ptr[req, group * NUM_HOLDS + slot]`,
+    # -1 for none).
+    hold_block_ids_ptr=None,
+    hold_block_ids_stride=0,
+    MATCH_UNIT: tl.constexpr = 0,
+    NUM_HOLDS: tl.constexpr = 1,
 ):
     """Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
@@ -461,6 +476,40 @@ def postprocess_mamba_fused_kernel(
         new_num_computed,
         block_size,
     )
+
+    if MATCH_UNIT > 0 and not needs_copy:
+        boundary = (new_num_computed // MATCH_UNIT) * MATCH_UNIT
+        if boundary >= num_tokens_running_state and boundary % block_size != 0:
+            group_idx = tl.load(state_group_indices_ptr + state_idx)
+            hold_block_id = tl.load(
+                hold_block_ids_ptr
+                + req_idx * hold_block_ids_stride
+                + group_idx * NUM_HOLDS
+                + (boundary // MATCH_UNIT) % NUM_HOLDS
+            )
+            if hold_block_id >= 0:
+                _copy_mamba_state_block(
+                    state_idx,
+                    req_idx,
+                    src_block_idx,
+                    hold_block_id,
+                    boundary - num_tokens_running_state,
+                    block_table_ptrs_ptr,
+                    block_table_stride_req,
+                    state_base_addrs_ptr,
+                    state_block_strides_ptr,
+                    state_elem_sizes_ptr,
+                    state_inner_sizes_ptr,
+                    state_conv_widths_ptr,
+                    state_group_indices_ptr,
+                    state_dim_row_count_ptr,
+                    state_dim_row_stride_ptr,
+                    tile_idx,
+                    COPY_BLOCK_SIZE,
+                    CONV_STATE_DIM_FIRST,
+                    TEMPORAL_TILES,
+                    True,
+                )
 
     if not needs_copy:
         return
@@ -1181,9 +1230,14 @@ class MambaSpecDecodeGPUContext:
         state_idx_gpu: torch.Tensor,
         new_num_computed_tokens_gpu: torch.Tensor,
         idx_mapping: torch.Tensor,
+        hold_block_ids_gpu: torch.Tensor | None = None,
+        match_unit: int = 0,
+        num_holds: int = 1,
     ) -> None:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
+        With `hold_block_ids_gpu`, also save the state at a crossed
+        `match_unit` boundary into the request's decode-state hold.
 
         `num_accepted_tokens_gpu` is updated in place while the kernel reads
         from a snapshot to avoid cross-program races when the accepted position
@@ -1228,4 +1282,10 @@ class MambaSpecDecodeGPUContext:
             PRECOMPUTED_NEW_COMPUTED=True,
             SKIP_TEMPORAL_STATE_COPY=self.replayssm is not None,
             TEMPORAL_TILES=_TEMPORAL_TILES,
+            hold_block_ids_ptr=hold_block_ids_gpu,
+            hold_block_ids_stride=(
+                0 if hold_block_ids_gpu is None else hold_block_ids_gpu.stride(0)
+            ),
+            MATCH_UNIT=0 if hold_block_ids_gpu is None else match_unit,
+            NUM_HOLDS=num_holds,
         )

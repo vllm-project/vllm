@@ -956,6 +956,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     state.max_num_reqs = cfg.max_num_reqs
     state.device = device
     state.vllm_config = MagicMock()
+    state.vllm_config.cache_config = state.cache_config
     state.vllm_config.compilation_config.static_forward_context = forward_context
 
     state.initialize_kv_cache(kv_cache_config, block_tables)
@@ -1097,6 +1098,9 @@ def _run_gpu_postprocess(
     num_computed_tokens: list[int],
     num_draft_tokens: dict[str, int],
     device: torch.device,
+    hold_block_ids: torch.Tensor | None = None,
+    match_unit: int = 0,
+    num_holds: int = 1,
 ) -> torch.Tensor:
     """Run the fused postprocess kernel and return normalized accepted counts."""
 
@@ -1133,6 +1137,10 @@ def _run_gpu_postprocess(
         CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
         SKIP_TEMPORAL_STATE_COPY=gpu_ctx.replayssm is not None,
         TEMPORAL_TILES=_TEMPORAL_TILES,
+        hold_block_ids_ptr=hold_block_ids,
+        hold_block_ids_stride=0 if hold_block_ids is None else hold_block_ids.stride(0),
+        MATCH_UNIT=match_unit,
+        NUM_HOLDS=num_holds,
     )
     torch.accelerator.synchronize()
     return accepted_gpu
@@ -2875,6 +2883,81 @@ class TestPostprocessMambaFusedKernel:
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
+
+    @pytest.mark.parametrize("bias", [0, 1, 2, 3])
+    @pytest.mark.parametrize(
+        "hold_ids, num_holds, boundary_offset, expected_hold",
+        [
+            pytest.param([30], 1, 8, 30, id="one_hold"),
+            # Boundary 24 -> 24 // 4 % 2 = 0; 28 -> 1.
+            pytest.param([30, 31], 2, 8, 30, id="two_holds_slot0"),
+            pytest.param([30, 31], 2, 12, 31, id="two_holds_slot1"),
+            # A block boundary is left to the block-aligned copy.
+            pytest.param([30], 1, 16, None, id="block_boundary"),
+            pytest.param([-1], 1, 8, None, id="no_hold"),
+        ],
+    )  # fmt: skip
+    def test_decode_match_state_copied_into_hold(
+        self,
+        device,
+        test_config,
+        bias,
+        hold_ids,
+        num_holds,
+        boundary_offset,
+        expected_hold,
+    ):
+        """A step that accepts tokens across a prefix-match boundary (unit 4)
+        copies the state there, `bias` tokens past the running column, into
+        the request's hold: temporal from column `src + bias`, conv shifted by
+        `bias`."""
+        cfg = test_config
+        torch.manual_seed(7100 + bias)
+        unit, src_col = 4, 1
+        # Steps start in block 1 (tokens 16..31); boundary = 16 + offset.
+        boundary = cfg.block_size + boundary_offset
+        running = boundary - bias
+        num_draft = 3
+        req_ids = ["req_0"]
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+        _, _, conv, temporal, _, fwd_gpu = _make_dual_layer_state(cfg, device)
+        conv_orig, temporal_orig = conv.clone(), temporal.clone()
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
+        block_table = torch.arange(8, dtype=torch.int32, device=device)[None]
+        holds = torch.tensor([hold_ids], dtype=torch.int32, device=device)
+
+        _run_gpu_postprocess(
+            gpu_ctx,
+            kv_cache_config=kv_cache_config,
+            forward_context=fwd_gpu,
+            copy_funcs=_COPY_FUNCS,
+            block_table=block_table,
+            req_ids=req_ids,
+            num_accepted_tokens=[bias + 1],
+            mamba_state_idx=[src_col],
+            num_scheduled_tokens={"req_0": num_draft + 1},
+            num_computed_tokens=[running - 1],
+            num_draft_tokens={"req_0": num_draft},
+            device=device,
+            hold_block_ids=holds,
+            match_unit=unit,
+            num_holds=num_holds,
+        )
+
+        expected_conv, expected_temporal = conv_orig.clone(), temporal_orig.clone()
+        if expected_hold is not None:
+            expected_conv[expected_hold, : cfg.conv_width - bias] = conv_orig[
+                src_col, bias:
+            ]
+            expected_temporal[expected_hold] = temporal_orig[src_col + bias]
+        if boundary_offset == 16:
+            # The block-aligned copy writes block 1 itself; check the hold only.
+            torch.testing.assert_close(conv[30], conv_orig[30], rtol=0, atol=0)
+            torch.testing.assert_close(temporal[30], temporal_orig[30], rtol=0, atol=0)
+            return
+        torch.testing.assert_close(conv, expected_conv, rtol=0, atol=0)
+        torch.testing.assert_close(temporal, expected_temporal, rtol=0, atol=0)
 
     @pytest.mark.parametrize(
         "same_physical_block", [True, False], ids=["same", "distinct"]

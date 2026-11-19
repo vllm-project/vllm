@@ -15,9 +15,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+import vllm.platforms
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -52,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
     KVCacheBlock,
+    decode_match_holds,
     get_block_hash,
     get_group_id,
     get_request_block_hasher,
@@ -62,6 +64,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     DFlashSlidingWindowManager,
     HiSparseHotManager,
     HiSparseResidentManager,
@@ -6821,3 +6824,278 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def _decode_match_manager(
+    num_holds: int = 1,
+    num_speculative_blocks: int = 0,
+    decode_match_holds: tuple[int, int] | None = None,
+    num_spec_tokens: int = 0,
+) -> KVCacheManager:
+    """Block 64, prefix-match unit 16."""
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    if num_speculative_blocks:
+        _replace_group(
+            kv_cache_config, 1, num_speculative_blocks=num_speculative_blocks
+        )
+    return make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+        decode_match_holds=decode_match_holds or (16, num_holds),
+        num_spec_tokens=num_spec_tokens,
+    )
+
+
+def _decode(
+    manager: KVCacheManager,
+    num_decoded: int,
+    num_spec_tokens: int = 0,
+    prompt_len: int = 40,
+) -> tuple[Request, list[dict[str, list[int]]]]:
+    """Prefill a `prompt_len` prompt, then decode `num_decoded` tokens one
+    scheduler step at a time; return the request and each step's new holds."""
+    req = make_request("0", list(range(prompt_len)), 16, sha256)
+    assert manager.allocate_slots(req, prompt_len) is not None
+    req.num_computed_tokens = prompt_len
+    holds = [manager.take_new_decode_holds()]
+    for token in range(1000, 1000 + num_decoded):
+        manager.new_step_starts()
+        req.append_output_token_ids(token)
+        assert (
+            manager.allocate_slots(req, 1, num_lookahead_tokens=num_spec_tokens)
+            is not None
+        )
+        holds.append(manager.take_new_decode_holds())
+        req.num_computed_tokens += 1
+    return req, holds
+
+
+def _resume_tokens(manager: KVCacheManager, req: Request) -> int:
+    follow_up = make_request("1", list(req.all_token_ids) + [7] * 20, 16, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(follow_up)
+    # Every group must key the boundary for the hybrid hit.
+    assert len({len(blocks) for blocks in computed_blocks.blocks}) == 1
+    return num_computed_tokens
+
+
+def _all_blocks_free(manager: KVCacheManager) -> bool:
+    return all(b.ref_cnt == 0 for b in manager.block_pool.blocks if not b.is_null)
+
+
+@pytest.mark.parametrize("num_holds", [1, 2])
+@pytest.mark.parametrize(
+    "prompt_len, num_decoded, expected",
+    [
+        pytest.param(40, 110, 144, id="past_boundary"),
+        pytest.param(40, 104, 144, id="ends_on_boundary"),
+        pytest.param(40, 90, 128, id="last_boundary_is_block_boundary"),
+        # The prompt ends on a boundary and decode crosses no other one.
+        pytest.param(48, 5, 48, id="prompt_end_boundary"),
+    ],
+)  # fmt: skip
+def test_decode_match_states_resume_at_last_prefix_match_boundary(
+    num_holds, prompt_len, num_decoded, expected
+):
+    """A follow-up turn resumes at the last prefix-match boundary before the
+    previous output end; a block boundary there stays with #67053's state."""
+    manager = _decode_match_manager(num_holds)
+    req, holds = _decode(manager, num_decoded, prompt_len=prompt_len)
+    # The holds are handed out once, with the step that ends prefill.
+    assert [h for h in holds if h] == [holds[0]]
+    assert len(holds[0]["0"]) == num_holds
+    manager.free(req)
+    assert _resume_tokens(manager, req) == expected
+    assert _all_blocks_free(manager)
+
+
+def test_decode_match_states_key_attention_at_mamba_block_boundary():
+    """With an attention block larger than the Mamba block, a decode boundary
+    on the Mamba block grid has a Mamba state but no attention key: the
+    attention group is keyed there too."""
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    _replace_group(kv_cache_config, 0, block_size=128)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+        decode_match_holds=(16, 1),
+    )
+    # 40 + 155 = 195 tokens: the last boundary, 192, is a Mamba block boundary
+    # inside the second attention block.
+    req, _ = _decode(manager, 155)
+    manager.free(req)
+    follow_up = make_request("1", list(req.all_token_ids) + [7] * 20, 16, sha256)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(follow_up)
+    assert num_computed_tokens == 192
+    assert _all_blocks_free(manager)
+
+
+def test_decode_match_states_off_keeps_block_boundary():
+    manager = _decode_match_manager(decode_match_holds=(0, 0))
+    req, holds = _decode(manager, 110)
+    assert not any(holds)
+    manager.free(req)
+    assert _resume_tokens(manager, req) == 128
+
+
+def test_decode_match_states_aborted_request_caches_hold():
+    """An abort (also how a stop string ends a request) still caches the
+    hold: its key covers exactly the tokens the engine computed."""
+    manager = _decode_match_manager()
+    req, _ = _decode(manager, 110)
+    req.status = RequestStatus.FINISHED_ABORTED
+    manager.free(req)
+    assert _resume_tokens(manager, req) == 144
+    assert _all_blocks_free(manager)
+
+
+@pytest.mark.parametrize(
+    "num_holds, num_decoded, expected",
+    [
+        # 150 tokens: no boundary in (150, 153], so the hold holds 144.
+        pytest.param(1, 110, 144, id="unambiguous"),
+        # 158 tokens: drafts accepted past a stop may have written 160 over 144.
+        pytest.param(1, 118, 128, id="one_hold_may_be_overwritten"),
+        # With two holds 160 goes to the other one.
+        pytest.param(2, 118, 144, id="two_holds"),
+    ],
+)  # fmt: skip
+def test_decode_match_states_spec_decode_unseen_writes(
+    num_holds, num_decoded, expected
+):
+    manager = _decode_match_manager(
+        num_holds, num_speculative_blocks=3, num_spec_tokens=3
+    )
+    req, _ = _decode(manager, num_decoded, num_spec_tokens=3)
+    manager.free(req)
+    assert _resume_tokens(manager, req) == expected
+    assert _all_blocks_free(manager)
+
+
+def test_decode_match_states_release_frees_holds_uncached():
+    """A streaming session's next chunk releases the holds without caching."""
+    manager = _decode_match_manager(num_holds=2)
+    req, holds = _decode(manager, 110)
+    hold_ids = set(holds[0]["0"])
+    released = manager.release_decode_holds(req)
+    assert {b.block_id for b in released} == hold_ids
+    pool = manager.block_pool
+    # The scheduler frees them once no in-flight step can write them.
+    pool.free_blocks(released)
+    assert all(pool.blocks[i].ref_cnt == 0 for i in hold_ids)
+    assert all(pool.blocks[i].block_hash is None for i in hold_ids)
+    manager.free(req)
+    assert _resume_tokens(manager, req) == 128
+
+
+def _decode_match_vllm_config(**overrides: object) -> SimpleNamespace:
+    cache_config = SimpleNamespace(
+        prefix_cache_decode_retention_interval=0,
+        prefix_match_unit=16,
+        enable_prefix_caching=True,
+        use_replayssm=False,
+        use_kda_recoverssm=False,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        use_replayssm_trackers=False,
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, decode_context_parallel_size=1
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        speculative_config=None,
+    )
+    for key, value in overrides.items():
+        target = cache_config if hasattr(cache_config, key) else vllm_config
+        setattr(target, key, value)
+    return vllm_config
+
+
+@pytest.fixture
+def cuda_platform(monkeypatch):
+    monkeypatch.setattr(
+        vllm.platforms,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True),
+        raising=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"prefix_cache_decode_retention_interval": None}, id="none"),
+        pytest.param({"prefix_match_unit": None}, id="unit_unset"),
+        pytest.param({"use_replayssm": True}, id="replayssm"),
+        # A step may cross two boundaries.
+        pytest.param(
+            {"speculative_config": SimpleNamespace(num_speculative_tokens=7)},
+            id="unit_within_two_steps",
+        ),
+        pytest.param(
+            {"kv_transfer_config": SimpleNamespace(
+                kv_connector="NixlConnector", kv_connector_module_path=None
+            )},
+            id="other_kv_connector",
+        ),
+        pytest.param(
+            {"parallel_config": SimpleNamespace(
+                pipeline_parallel_size=2, decode_context_parallel_size=1
+            )},
+            id="pp",
+        ),
+    ],
+)  # fmt: skip
+def test_decode_match_holds_off(cuda_platform, overrides):
+    vllm_config = _decode_match_vllm_config(**overrides)
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    assert decode_match_holds(vllm_config, kv_cache_config) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, (16, 1), id="sync"),
+        pytest.param({"scheduler_config": SimpleNamespace(async_scheduling=True)},
+                     (16, 2), id="async"),
+        pytest.param(
+            {"speculative_config": SimpleNamespace(num_speculative_tokens=3)},
+            (16, 2),
+            id="spec",
+        ),
+    ],
+)  # fmt: skip
+def test_decode_match_holds_on(cuda_platform, overrides, expected):
+    vllm_config = _decode_match_vllm_config(**overrides)
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    assert decode_match_holds(vllm_config, kv_cache_config) == expected
+
+
+def test_decode_match_holds_ignore_non_prefix_cacheable_groups(cuda_platform):
+    """A group outside prefix caching (e.g. an indexer tail ring) does not
+    turn decode states off."""
+    kv_cache_config = _make_hybrid_kv_cache_config(64, 200, ["full", "mamba"])
+    kv_cache_config.kv_cache_groups.append(
+        new_kv_cache_group(
+            ["tail"],
+            CircularBufferManager.layer_config(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=2, head_size=1, dtype=torch.float32
+                )
+            ),
+        )
+    )
+    vllm_config = _decode_match_vllm_config()
+    assert decode_match_holds(vllm_config, kv_cache_config) == (16, 1)
+
+
+def test_decode_retention_interval_rejects_periodic_values():
+    with pytest.raises(ValueError, match="periodic decode"):
+        CacheConfig(prefix_cache_decode_retention_interval=32)
+    assert CacheConfig(prefix_cache_decode_retention_interval=0)

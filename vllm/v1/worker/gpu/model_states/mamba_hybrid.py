@@ -21,10 +21,12 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadataBuilder,
     ShortConvAttentionMetadataBuilder,
 )
+from vllm.v1.core.kv_cache_utils import decode_match_holds
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -76,6 +78,18 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
 
 class MambaHybridModelState(DefaultModelState):
     """Model state for hybrid attention + Mamba / linear-attention models."""
+
+    # Decode states at prefix-match boundaries: hold blocks per request slot,
+    # `num_holds` per Mamba group in group order, -1 for none. Set in
+    # `initialize_kv_cache` from `decode_match_holds`, as the scheduler.
+    _decode_hold_ids: StagedWriteTensor | None = None
+    # Rows to upload at the next `apply_decode_hold_writes`, last write wins:
+    # one apply per step keeps the UVA staging buffers' depth contract, and
+    # one write per row avoids two writes to a row racing in one kernel.
+    _pending_decode_holds: dict[int, list[int]] | None = None
+    _decode_hold_ids_gpu: torch.Tensor | None = None
+    _decode_match_unit = 0
+    _num_decode_holds = 0
 
     def __init__(
         self,
@@ -131,6 +145,24 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
+        if self._pending_decode_holds is not None:
+            assert self._decode_hold_ids is not None
+            self._pending_decode_holds[req_index] = [
+                -1
+            ] * self._decode_hold_ids.gpu.shape[1]
+
+    def set_decode_hold_blocks(self, holds: dict[int, list[int]]) -> None:
+        assert self._pending_decode_holds is not None
+        self._pending_decode_holds.update(holds)
+
+    def apply_decode_hold_writes(self) -> None:
+        if not self._pending_decode_holds:
+            return
+        assert self._decode_hold_ids is not None
+        for req_index, block_ids in self._pending_decode_holds.items():
+            self._decode_hold_ids.stage_write(req_index, 0, block_ids)
+        self._pending_decode_holds.clear()
+        self._decode_hold_ids.apply_write()
 
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
@@ -161,6 +193,18 @@ class MambaHybridModelState(DefaultModelState):
             device=self.device,
         )
         mamba_group_ids = self._mamba_ctx.mamba_group_ids
+        unit, num_holds = decode_match_holds(self.vllm_config, kv_cache_config)
+        if self._align_mode and unit and self._decode_hold_ids_gpu is None:
+            self._decode_match_unit = unit
+            self._num_decode_holds = num_holds
+            self._decode_hold_ids = StagedWriteTensor(
+                (self.max_num_reqs, len(mamba_group_ids) * num_holds),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._decode_hold_ids.gpu.fill_(-1)
+            self._pending_decode_holds = {}
+            self._decode_hold_ids_gpu = self._decode_hold_ids.gpu
         # Under PP a step's postprocess runs after later steps re-gathered the
         # batch-ordered input tables, so state copies read the per-request-slot
         # tables. Aligned state indices are for the current batch only.
@@ -416,6 +460,9 @@ class MambaHybridModelState(DefaultModelState):
                 self._mamba_state_idx_gpu,
                 num_computed_tokens,
                 idx_mapping,
+                self._decode_hold_ids_gpu,
+                self._decode_match_unit,
+                self._num_decode_holds,
             )
 
         self._publish_replayssm_trackers(

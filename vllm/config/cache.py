@@ -290,6 +290,14 @@ class CacheConfig:
     retain periodic checkpoints at the specified interval, which must be a
     multiple of the scheduler block size. `None` retains checkpoints densely.
     Applies only to sliding-window and Mamba cache groups."""
+    prefix_cache_decode_retention_interval: int | None = Field(default=0, ge=0)
+    """Token interval between retained Mamba decode states. `0` keeps one
+    decode state per request, at the last `prefix_match_unit` boundary before
+    its output end, cached when the request is freed. With `prefix_match_unit`
+    unset this is the latest decode-crossed block boundary, as without the
+    option. Positive values (periodic decode states) are not supported yet.
+    `None` makes decode follow `prefix_cache_retention_interval`. Applies only
+    to Mamba "align" groups."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
@@ -438,6 +446,7 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
+            "prefix_cache_decode_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
@@ -474,6 +483,16 @@ class CacheConfig:
 
     _extensible_kv_cache_resolved: bool = field(default=False, init=False)
     """Set once `enable_extensible_kv_cache` has been settled for the model."""
+
+    @field_validator("prefix_cache_decode_retention_interval")
+    @classmethod
+    def _validate_decode_retention_interval(cls, value: int | None) -> int | None:
+        if value is not None and value > 0:
+            raise ValueError(
+                "prefix_cache_decode_retention_interval > 0 (periodic decode "
+                "states) is not supported yet; use 0 or None."
+            )
+        return value
 
     @field_validator("block_size", "enable_extensible_kv_cache", mode="wrap")
     @classmethod
