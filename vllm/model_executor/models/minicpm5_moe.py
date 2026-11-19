@@ -10,28 +10,48 @@ matching the team SGLang implementation.
 
 import copy
 from collections.abc import Iterable
+from itertools import islice
 
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2MixtureOfExperts,
-    DeepseekV2MLP,
-    DeepseekV2MoE,
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
 )
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
-from vllm.model_executor.models.utils import (
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.sequence import IntermediateTensors
+
+from .deepseek_v2 import DeepseekV2MLP, DeepseekV2MoE
+from .interfaces import (
+    EagleModelMixin,
+    LocalArgmaxMixin,
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -148,7 +168,99 @@ class MiniCPM5DecoderLayer(nn.Module):
         return self.mlp(hidden_states), residual
 
 
-class MiniCPM5Model(LlamaModel):
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
+)
+class MiniCPM5Model(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        self.quant_config = vllm_config.quant_config
+        self.vocab_size = config.vocab_size
+
+        pp_group = get_pp_group()
+        if (
+            pp_group.is_first_rank
+            or (config.tie_word_embeddings and pp_group.is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size, quant_config=self.quant_config
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: MiniCPM5DecoderLayer(vllm_config=vllm_config, prefix=prefix),
+            prefix=f"{prefix}.layers",
+        )
+        if pp_group.is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        pp_group = get_pp_group()
+        aux_hidden_states: list[torch.Tensor] = []
+        if pp_group.is_first_rank:
+            hidden_states = (
+                inputs_embeds
+                if inputs_embeds is not None
+                else self.embed_input_ids(input_ids)
+            )
+            residual = None
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+
+        if not pp_group.is_last_rank:
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked: list[tuple[str, str, str | int]] = [
             ("qkv_proj", "q_proj", "q"),
@@ -207,30 +319,113 @@ class MiniCPM5Model(LlamaModel):
         return loaded
 
 
-class MiniCPM5MoEForCausalLM(LlamaForCausalLM, DeepseekV2MixtureOfExperts):
+class MiniCPM5MoEForCausalLM(
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsQuant,
+    MixtureOfExperts,
+):
     # The custom loader maps expert projections separately from dense projections.
     hf_to_vllm_mapper = WeightsMapper()
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
 
-    def _init_model(self, vllm_config, prefix="", layer_type=None):
-        return MiniCPM5Model(
-            vllm_config=vllm_config, prefix=prefix, layer_type=MiniCPM5DecoderLayer
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        self.model = MiniCPM5Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix=""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.num_moe_layers = (
-            self.config.num_hidden_layers - self.config.first_k_dense_replace
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, scale=getattr(config, "logit_scale", 1.0)
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
         )
-        self.num_expert_groups = self.config.n_group
+
         self.moe_mlp_layers = [
             layer.mlp
             for layer in self.model.layers
             if isinstance(getattr(layer, "mlp", None), DeepseekV2MoE)
         ]
         self.moe_layers = [mlp.experts for mlp in self.moe_mlp_layers]
-        self.extract_moe_parameters(
-            self.moe_mlp_layers[-1] if self.moe_mlp_layers else None
-        )
+        if self.moe_mlp_layers:
+            example = self.moe_mlp_layers[-1]
+            self.num_moe_layers = (
+                config.num_hidden_layers - config.first_k_dense_replace
+            )
+            self.num_expert_groups = config.n_group
+            self.num_logical_experts = example.n_logical_experts
+            self.num_physical_experts = example.n_physical_experts
+            self.num_local_physical_experts = example.n_local_physical_experts
+            self.num_routed_experts = example.n_routed_experts
+            self.num_shared_experts = example.n_shared_experts
+            self.num_redundant_experts = example.n_redundant_experts
+        else:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        return AutoWeightsLoader(self).load_weights(weights)
+
+    def update_physical_experts_metadata(
+        self, num_physical_experts: int, num_local_physical_experts: int
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
 
     def get_expert_mapping(self):
         return fused_moe_make_expert_params_mapping(
