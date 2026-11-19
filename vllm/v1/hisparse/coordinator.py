@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -141,6 +141,7 @@ class HiSparseCoordinator:
                 manager.coordinator = self
                 manager.bind_host_pool(num_host_blocks)
         self.transition_watermark = 0
+        self.get_reserved_blocks: Callable[[], int] = lambda: 0
         if self.resident_managers:
             assert self.host_manager is not None
             assert self.host_group_id is not None
@@ -656,7 +657,13 @@ class HiSparseCoordinator:
         """
         assert self.host_manager is not None
         num_managers = len(self.resident_managers)
-        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
+        if not num_pages:
+            return []
+        # The load may finish several steps after admission. Only spend blocks
+        # left over after both the transition floor and current reservations.
+        spare = self.gpu_pool.get_num_free_blocks() - max(
+            self.transition_watermark, self.get_reserved_blocks()
+        )
         host_blocks = self.host_manager.req_to_blocks[request_id]
         num_pages = min(
             num_pages, len(host_blocks), self._num_resident_pages(request_id)

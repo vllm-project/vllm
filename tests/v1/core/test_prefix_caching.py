@@ -792,8 +792,13 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     assert not coordinator.has_pending_work()
 
 
-@pytest.mark.parametrize("has_room", [True, False])
-def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
+@pytest.mark.parametrize(
+    "above_watermark,unreserved,num_promoted",
+    [(4, 4, 4), (0, 4, 0), (4, 1, 1), (4, 0, 0)],
+)
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(
+    above_watermark, unreserved, num_promoted
+):
     """An import lands on host; spare GPU pages bring its whole prefix back."""
     manager = make_hisparse_kv_cache_manager(256, 16)
     num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
@@ -804,22 +809,26 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
     coordinator = get_hisparse_coordinator(manager)
     pool = coordinator.gpu_pool
-    if not has_room:
-        # Other requests hold everything above the transition watermark.
-        pool.get_new_blocks(
-            pool.get_num_free_blocks() - coordinator.transition_watermark
-        )
+    pool.get_new_blocks(
+        pool.get_num_free_blocks() - coordinator.transition_watermark - above_watermark
+    )
+    free = pool.get_num_free_blocks()
+    coordinator.get_reserved_blocks = lambda: free - unreserved
 
     coordinator.finish_host_import(request.request_id, failed=False)
     transfers = coordinator.build_offload_command().page_transfers
     assert all(transfer.restore for transfer in transfers)
-    promoted = range(4) if has_room else range(0)
+    promoted = range(num_promoted)
+    assert pool.get_num_free_blocks() == free - num_promoted
     assert [t.host_block_id for t in transfers] == [
         source[-1].block_id,
         *(source[page].block_id for page in promoted),
     ]
     row = _resident_block_ids(manager, request.request_id)
-    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [block_id != 0 for block_id in row] == [
+        *(page in promoted for page in range(4)),
+        True,
+    ]
     assert [t.resident_block_ids for t in transfers[1:]] == [
         (row[page],) for page in promoted
     ]
