@@ -235,6 +235,17 @@ class OffloadingConnectorScheduler:
         self._group_configs_by_id = {
             config.group_idx: config for config in self.config.kv_group_configs
         }
+        # Block IDs are pool-local. Track every group sharing a pool with an
+        # offloaded group so other-pool allocations cannot trigger its fences.
+        offload_pool_kinds = {
+            kv_cache_config.kv_cache_groups[group.group_idx].host_resident
+            for group in self.config.kv_group_configs
+        }
+        self._groups_sharing_offload_pool = frozenset(
+            group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.host_resident in offload_pool_kinds
+        )
         self.manager: OffloadingManager = spec.get_manager()
         # Under async_init the engine serves without offloading until every
         # worker has reported ready.
@@ -1093,6 +1104,8 @@ class OffloadingConnectorScheduler:
         # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         for group_idx, group_blocks in enumerate(blocks.blocks):
+            if group_idx not in self._groups_sharing_offload_pool:
+                continue
             num_prefix_blocks = self._num_prefix_blocks(
                 group_idx, num_locally_computed_tokens
             )
@@ -1266,6 +1279,8 @@ class OffloadingConnectorScheduler:
                             local_prefix_tokens, req_status.req.num_computed_tokens
                         )
                 for group_idx, group_blocks in enumerate(block_id_groups):
+                    if group_idx not in self._groups_sharing_offload_pool:
+                        continue
                     num_prefix_blocks = self._num_prefix_blocks(
                         group_idx, local_prefix_tokens
                     )

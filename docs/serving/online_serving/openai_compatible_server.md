@@ -176,6 +176,10 @@ The following extra parameters are supported:
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
+With the Python frontend's HF renderer, an assistant message with `content` set to
+`null`, `""`, or `[]` and a non-empty top-level `refusal` string renders like an
+explicit refusal content part. Non-empty `content` takes precedence.
+
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more information.

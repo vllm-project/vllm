@@ -252,11 +252,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
 
-    /// Arguments to be forwarded to the model's processor for multi-modal data,
-    /// e.g., image processor.
-    #[arg(long)]
-    pub mm_processor_kwargs: Option<Unsupported>,
-
     /// The size (in GiB) of the multi-modal processor cache.
     #[arg(long)]
     pub mm_processor_cache_gb: Option<Unsupported>,
