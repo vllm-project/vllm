@@ -237,7 +237,11 @@ _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 
 
-def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
+def _make_processor(
+    *, video_in_vision_config: bool = True, **kwargs
+) -> NanoNemotronVLProcessor:
+    # As in the Nemotron 3 Nano Omni checkpoints.
+    video = {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True}
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
@@ -248,15 +252,44 @@ def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
         dtype=torch.bfloat16,
         vision_config=SimpleNamespace(
             args={"min_num_patches": 4, "max_num_patches": 64},
-            # As in the Nemotron 3 Nano Omni checkpoints.
-            video_target_num_patches=16,
-            video_maintain_aspect_ratio=True,
+            **(video if video_in_vision_config else {}),
         ),
         sound_config=None,
     )
     return NanoNemotronVLProcessor(
         config=config, tokenizer=_CharTokenizer(), max_model_len=1024, **kwargs
     )
+
+
+def test_nemotron_processor_keeps_videos_of_different_sizes_apart():
+    videos = [
+        (np.zeros((2, h, w, 3), dtype=np.uint8), {"fps": 2.0, "frames_indices": [0, 1]})
+        for h, w in [(8, 32), (32, 8)]
+    ]
+    _, inputs = _make_processor()._preprocess_video(["<video><video>"], videos)
+
+    sizes = [tuple(frames.shape[-2:]) for frames in inputs["pixel_values_flat_video"]]
+    assert sizes == [(8, 32), (32, 8)]
+    assert inputs["video_frame_sizes"].tolist() == [list(size) for size in sizes]
+
+
+def test_nemotron_video_frame_size_falls_back_to_the_image_processor_config():
+    fallback = {"video_target_num_patches": 64, "video_maintain_aspect_ratio": False}
+
+    # The vision config's frame size wins.
+    processor = _make_processor(**fallback)
+    assert processor.video_target_num_patches == 16
+    assert processor.video_maintain_aspect_ratio is True
+
+    # A checkpoint in the native Transformers layout (Nemotron 3.5 Super VL)
+    # keeps it in the image processor config only.
+    processor = _make_processor(video_in_vision_config=False, **fallback)
+    assert processor.video_target_num_patches == 64
+    assert processor.video_maintain_aspect_ratio is False
+
+    # Neither sets one: frames are `force_image_size` squares.
+    processor = _make_processor(video_in_vision_config=False)
+    assert processor.video_target_num_patches is None
 
 
 @pytest.mark.parametrize(
@@ -332,7 +365,7 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
         sizes = raw_inputs["imgs_sizes"]
         assert raw_inputs == inputs
     else:
-        resized = [inputs["pixel_values_flat_video"]]
+        resized = inputs["pixel_values_flat_video"]
         raw = raw_inputs["pixel_values_raw_video"]
         sizes = raw_inputs["video_frame_sizes"].tolist()
         torch.testing.assert_close(
@@ -374,7 +407,7 @@ def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config
     shape, (text, inputs) = results[False]
     raw_shape, (raw_text, raw_inputs) = results[True]
     # Without device_resize, profiling frames are already at the target size.
-    assert tuple(inputs["pixel_values_flat_video"].shape[-2:]) == shape[1:3]
+    assert tuple(inputs["pixel_values_flat_video"][0].shape[-2:]) == shape[1:3]
     # With it, they are twice the target, so the profile run includes the
     # resize on the device; the prompt and token counts are unchanged.
     assert raw_text == text
@@ -519,7 +552,10 @@ def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
 
 
-def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
+@pytest.mark.parametrize(
+    "pixels_key", ["pixel_values_raw_video", "pixel_values_flat_video"]
+)
+def test_nemotron_embeds_videos_of_different_sizes_separately(pixels_key: str):
     # Videos that keep their aspect ratio can get different frame sizes, and
     # one encoder batch can hold several of them.
     model = _uninitialized_model()
@@ -536,7 +572,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
         torch.zeros(2, 6, 6, 3, dtype=torch.uint8),
     ]
     kwargs = dict(
-        pixel_values_raw_video=frames,
+        **{pixels_key: frames},
         video_frame_sizes=torch.tensor([[32, 64], [48, 48]]),
         video_num_patches=torch.tensor([2, 2]),
         frames_indices=torch.tensor([[0, 1], [0, 1]]),
@@ -544,7 +580,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
     )
     model.embed_multimodal(**kwargs)
     assert [k["video_frame_sizes"].tolist() for k in seen] == [[[32, 64]], [[48, 48]]]
-    assert all(k["pixel_values_raw_video"][0] is f for k, f in zip(seen, frames))
+    assert all(k[pixels_key][0] is f for k, f in zip(seen, frames))
     assert [k["video_num_patches"].tolist() for k in seen] == [[2], [2]]
 
     seen.clear()
