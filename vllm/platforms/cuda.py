@@ -855,7 +855,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
-    @with_nvml_context
     def get_process_memory_usage(cls, device_id: int = 0) -> int | None:
         """Device memory used by this process on the visible device
         `device_id` as reported by NVML.
@@ -870,11 +869,21 @@ class NvmlCudaPlatform(CudaPlatformBase):
         where this per-process path is exactly what still works.
         """
         try:
-            physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-            processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-        except (pynvml.NVMLError, IndexError, ValueError):
+            return cls._get_process_memory_usage(device_id)
+        except (
+            pynvml.NVMLError,
+            pynvml.NVMLLibraryMismatchError,
+            IndexError,
+            ValueError,
+        ):
             return None
+
+    @classmethod
+    @with_nvml_context
+    def _get_process_memory_usage(cls, device_id: int) -> int | None:
+        physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         pid = os.getpid()
         for proc in processes:
             if proc.pid == pid:
