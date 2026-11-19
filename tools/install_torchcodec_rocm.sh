@@ -70,7 +70,7 @@ fi
 
 # Install Python build dependencies
 echo "Installing Python build dependencies..."
-pip install pybind11 setuptools wheel "scikit-build-core>=0.10"
+pip install pybind11 setuptools wheel
 
 # Set pybind11 cmake path so CMake can find it
 export pybind11_DIR=$(python3 -c "import pybind11; print(pybind11.get_cmake_dir())")
@@ -92,6 +92,10 @@ cleanup() {
     rm -rf "$BUILD_DIR"
 }
 trap cleanup EXIT
+
+# torchcodec's build backend, kept out of the image (it pulls in pathspec)
+pip install --target "$BUILD_DIR/build-deps" "scikit-build-core>=0.10"
+export PYTHONPATH="$BUILD_DIR/build-deps${PYTHONPATH:+:$PYTHONPATH}"
 
 # Clone and build
 cd "$BUILD_DIR"
