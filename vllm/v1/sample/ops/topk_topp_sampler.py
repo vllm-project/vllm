@@ -14,11 +14,13 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
+    from vllm.v1.sample.ops import topk_topp_triton_gpu
     from vllm.v1.sample.ops.topk_topp_triton import (
+        _topk_topp,
+        _topp_split_mask,
+        _topp_split_stats,
+        _topp_split_step,
         apply_top_k_top_p_triton,
-        can_use_top_k_top_p_triton,
-        register_warmups,
-        reserve_workspace,
     )
 
 if TYPE_CHECKING:
@@ -29,8 +31,14 @@ logger = init_logger(__name__)
 
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON and not current_platform.is_cpu():
-        register_warmups()
+    if HAS_TRITON:
+        if not current_platform.is_cpu():
+            topk_topp_triton_gpu.register_warmups()
+        _topk_topp.register_warmup()
+        if current_platform.is_cuda_alike():
+            _topp_split_stats.register_warmup()
+            _topp_split_step.register_warmup()
+            _topp_split_mask.register_warmup()
 
 
 def reserve_top_k_top_p_workspace(
@@ -45,7 +53,7 @@ def reserve_top_k_top_p_workspace(
     scheduler = vllm_config.scheduler_config
     rows_per_req = 1 + spec.num_speculative_tokens
     rows = min(scheduler.max_num_batched_tokens, scheduler.max_num_seqs * rows_per_req)
-    reserve_workspace(device, rows, vocab_size)
+    topk_topp_triton_gpu.reserve_workspace(device, rows, vocab_size)
 
 
 def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | None:
@@ -218,7 +226,9 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON and can_use_top_k_top_p_triton(logits):
+    if HAS_TRITON:
+        if topk_topp_triton_gpu.can_use_top_k_top_p_triton(logits):
+            return topk_topp_triton_gpu.apply_top_k_top_p_triton(logits, k, p)
         return apply_top_k_top_p_triton(logits, k, p)
 
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (

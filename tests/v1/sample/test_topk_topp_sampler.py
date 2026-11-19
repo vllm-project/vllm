@@ -141,20 +141,7 @@ def test_flashinfer_sampler_fallback_when_flashinfer_disabled(monkeypatch):
 # =============================================================================
 
 
-def _triton_kernel_available() -> bool:
-    if not HAS_TRITON:
-        return False
-    from vllm.v1.sample.ops.topk_topp_triton import _supported_device
-
-    return _supported_device()
-
-
-TRITON_KERNEL_AVAILABLE = _triton_kernel_available()
-
-
-@pytest.mark.skipif(
-    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
-)
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -163,6 +150,13 @@ class TestTritonTopkTopp:
         """Set up test fixtures."""
         torch.set_default_device(DEVICE_TYPE)
         self.generator = Generator(device=DEVICE_TYPE).manual_seed(42)
+
+    def apply_top_k_top_p_triton(
+        self, logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    ) -> torch.Tensor:
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        return apply_top_k_top_p_triton(logits, k, p)
 
     def _compare_results(
         self,
@@ -176,8 +170,6 @@ class TestTritonTopkTopp:
         For top-p (with or without top-k), we allow small differences due to
         floating-point precision in probability sum calculations.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         # Clone logits for both implementations
         logits_pytorch = logits.clone()
         logits_triton = logits.clone().to(torch.float32)
@@ -188,7 +180,7 @@ class TestTritonTopkTopp:
         # Apply Triton kernel
         k_i32 = k.to(torch.int32) if k is not None else None
         p_f32 = p.to(torch.float32) if p is not None else None
-        result_triton = apply_top_k_top_p_triton(logits_triton, k_i32, p_f32)
+        result_triton = self.apply_top_k_top_p_triton(logits_triton, k_i32, p_f32)
 
         # Compare kept counts per row
         pytorch_kept = (result_pytorch != float("-inf")).sum(dim=-1)
@@ -292,12 +284,10 @@ class TestTritonTopkTopp:
 
     def test_both_disabled(self):
         """Test when both k and p are None (should be no-op)."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         logits = torch.randn(32, 1024, generator=self.generator, dtype=torch.float32)
         logits_clone = logits.clone()
 
-        result = apply_top_k_top_p_triton(logits_clone, k=None, p=None)
+        result = self.apply_top_k_top_p_triton(logits_clone, k=None, p=None)
 
         assert torch.equal(result, logits), "Should be no-op when both k and p are None"
 
@@ -362,8 +352,6 @@ class TestTritonTopkTopp:
         logits as row 0: an overflow there would read a different row and change
         the kept set.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         if not current_platform.is_cuda_alike():
             pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
         vocab_size = 131072
@@ -379,7 +367,7 @@ class TestTritonTopkTopp:
         )
         logits[batch_size - 1] = logits[0]
         k = torch.full((batch_size,), 5, dtype=torch.int32)
-        result = apply_top_k_top_p_triton(logits, k, None)
+        result = self.apply_top_k_top_p_triton(logits, k, None)
         torch.accelerator.synchronize()  # surface any async illegal memory access
         kept_first = (result[0] > float("-inf")).nonzero(as_tuple=True)[0]
         kept_last = (result[batch_size - 1] > float("-inf")).nonzero(as_tuple=True)[0]
@@ -395,8 +383,6 @@ class TestTritonTopkTopp:
     )
     def test_noncontiguous_logits_match_contiguous(self, mode: str):
         """Non-contiguous logits views should behave like contiguous inputs."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         device = torch.device(DEVICE_TYPE)
         batch_size, vocab_size, pad = 16, 4096, 8
         backing = torch.full(
@@ -429,8 +415,8 @@ class TestTritonTopkTopp:
         if mode in ("topp_only", "topk_and_topp"):
             p = torch.full((batch_size,), 0.95, device=device, dtype=torch.float32)
 
-        noncontig_out = apply_top_k_top_p_triton(logits, k, p)
-        contig_out = apply_top_k_top_p_triton(contig_logits, k, p)
+        noncontig_out = self.apply_top_k_top_p_triton(logits, k, p)
+        contig_out = self.apply_top_k_top_p_triton(contig_logits, k, p)
         pytorch_out = apply_top_k_top_p_pytorch(pytorch_logits, k, p)
 
         assert noncontig_out.data_ptr() == logits.data_ptr()
@@ -451,8 +437,6 @@ class TestTritonTopkTopp:
         can happen when structured-output grammar masks are applied before
         sampling.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
@@ -466,7 +450,7 @@ class TestTritonTopkTopp:
         k = torch.randint(
             1, 50, (batch_size,), generator=self.generator, dtype=torch.int32
         )
-        result = apply_top_k_top_p_triton(logits.clone(), k, None)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, None)
 
         assert not result.isnan().any(), "NaN found in top-k result with -inf logits"
         for i in range(batch_size):
@@ -480,8 +464,6 @@ class TestTritonTopkTopp:
     @pytest.mark.parametrize("inf_fraction", [0.5, 0.9, 0.99])
     def test_topp_with_neginf_logits(self, inf_fraction: float):
         """Top-p with many -inf logits."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
@@ -495,7 +477,7 @@ class TestTritonTopkTopp:
             torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9
             + 0.1
         )
-        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), None, p)
 
         assert not result.isnan().any(), "NaN found in top-p result with -inf logits"
         for i in range(batch_size):
@@ -507,8 +489,6 @@ class TestTritonTopkTopp:
     @pytest.mark.parametrize("inf_fraction", [0.5, 0.9, 0.99])
     def test_topk_topp_with_neginf_logits(self, inf_fraction: float):
         """Combined top-k + top-p with many -inf logits."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
@@ -525,7 +505,7 @@ class TestTritonTopkTopp:
             torch.rand(batch_size, generator=self.generator, dtype=torch.float32) * 0.9
             + 0.1
         )
-        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, p)
 
         assert not result.isnan().any(), (
             "NaN found in top-k+top-p result with -inf logits"
@@ -536,8 +516,6 @@ class TestTritonTopkTopp:
 
     def test_all_neginf_logits(self):
         """All logits are -inf (fully masked). Kernel should be a no-op."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 16, 128256
         logits = torch.full(
             (batch_size, vocab_size), float("-inf"), dtype=torch.float32
@@ -549,24 +527,22 @@ class TestTritonTopkTopp:
         p = torch.full((batch_size,), 0.9, dtype=torch.float32)
 
         # top-k only
-        result = apply_top_k_top_p_triton(logits.clone(), k, None)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, None)
         assert not result.isnan().any(), "NaN from all-inf top-k"
         assert (result == float("-inf")).all(), "Expected all -inf unchanged"
 
         # top-p only
-        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), None, p)
         assert not result.isnan().any(), "NaN from all-inf top-p"
         assert (result == float("-inf")).all(), "Expected all -inf unchanged"
 
         # top-k + top-p
-        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, p)
         assert not result.isnan().any(), "NaN from all-inf top-k+top-p"
         assert (result == float("-inf")).all(), "Expected all -inf unchanged"
 
     def test_few_valid_tokens_with_neginf(self):
         """Only a handful of tokens are finite per row (strict grammar)."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.full(
             (batch_size, vocab_size), float("-inf"), dtype=torch.float32
@@ -582,7 +558,7 @@ class TestTritonTopkTopp:
         p = torch.full((batch_size,), 0.9, dtype=torch.float32)
 
         # top-k only (k=50 but only 5 finite → keep all 5)
-        result = apply_top_k_top_p_triton(logits.clone(), k, None)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, None)
         assert not result.isnan().any()
         for i in range(batch_size):
             kept = (result[i] > float("-inf")).sum().item()
@@ -590,14 +566,14 @@ class TestTritonTopkTopp:
 
         # top-k with k < num_finite
         k_small = torch.full((batch_size,), 3, dtype=torch.int32)
-        result = apply_top_k_top_p_triton(logits.clone(), k_small, None)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k_small, None)
         assert not result.isnan().any()
         for i in range(batch_size):
             kept = (result[i] > float("-inf")).sum().item()
             assert kept <= 3, f"Row {i}: expected <=3 kept, got {kept}"
 
         # top-p only
-        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), None, p)
         assert not result.isnan().any()
         for i in range(batch_size):
             kept = (result[i] > float("-inf")).sum().item()
@@ -617,8 +593,6 @@ class TestTritonTopkTopp:
         causing the strict `>` keep_mask to exclude everything.
         Regression test for the `final_pivot >= max_logit` guard.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.full(
             (batch_size, vocab_size), float("-inf"), dtype=torch.float32
@@ -635,7 +609,7 @@ class TestTritonTopkTopp:
         if mode in ("topp_only", "topk_and_topp"):
             p = torch.full((batch_size,), 0.95, dtype=torch.float32)
 
-        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, p)
 
         assert not result.isnan().any(), "NaN in equal-logit result"
         for i in range(batch_size):
@@ -656,8 +630,6 @@ class TestTritonTopkTopp:
         Ensures the kernel handles near-degenerate probability
         distributions where the ternary search range collapses.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 128256
         logits = torch.full(
             (batch_size, vocab_size), float("-inf"), dtype=torch.float32
@@ -672,7 +644,7 @@ class TestTritonTopkTopp:
             )
 
         p = torch.full((batch_size,), 0.95, dtype=torch.float32)
-        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), None, p)
 
         assert not result.isnan().any(), "NaN in nearly-equal-logit result"
         for i in range(batch_size):
@@ -684,8 +656,6 @@ class TestTritonTopkTopp:
 
     def test_mixed_neginf_and_normal_rows(self):
         """Batch with a mix of normal rows and heavily-masked rows."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 32, 32000
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
@@ -703,7 +673,7 @@ class TestTritonTopkTopp:
             + 0.1
         )
 
-        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), k, p)
         assert not result.isnan().any(), "NaN in mixed normal/-inf batch"
         for i in range(batch_size):
             kept = (result[i] > float("-inf")).sum().item()
@@ -737,18 +707,48 @@ class TestTritonTopkTopp:
         self._compare_results(logits, k, p)
 
         # Top-p must actually trim the grammar rows beyond the (no-op) top-k.
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         kept_topk_only = (
-            apply_top_k_top_p_triton(logits.clone(), k, None)[:3] != float("-inf")
+            self.apply_top_k_top_p_triton(logits.clone(), k, None)[:3] != float("-inf")
         ).sum(-1)
         kept_topk_topp = (
-            apply_top_k_top_p_triton(logits.clone(), k, p)[:3] != float("-inf")
+            self.apply_top_k_top_p_triton(logits.clone(), k, p)[:3] != float("-inf")
         ).sum(-1)
         assert (kept_topk_topp < kept_topk_only).all(), (
             f"top-p did not trim grammar rows: {kept_topk_only.tolist()} -> "
             f"{kept_topk_topp.tolist()}"
         )
+
+    @pytest.mark.parametrize("batch_size", [8, 48])
+    def test_skip_split_without_topp_only_rows(
+        self, batch_size: int, monkeypatch: pytest.MonkeyPatch
+    ):
+        """has_topp_only_rows=False skips the split pipeline; the result must
+        not change when every top-p row also has a top-k, grammar rows
+        (k >= #finite logits) included."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        vocab_size = 32000
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        logits[1] = float("-inf")
+        idx = torch.randperm(vocab_size, generator=self.generator)[:30]
+        logits[1, idx] = torch.randn(30, generator=self.generator)
+        k = torch.randint(
+            50, 100, (batch_size,), generator=self.generator, dtype=torch.int32
+        )
+        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1
+        k[::4] = vocab_size
+        p[::4] = 1.0
+
+        expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
+        monkeypatch.setattr(
+            tt, "_apply_topp_split", lambda *args: pytest.fail("split launched")
+        )
+        actual = tt.apply_top_k_top_p_triton(
+            logits.clone(), k, p, has_topp_only_rows=False
+        )
+        assert torch.equal(actual, expected)
 
     def test_topp_tie_break_deterministic(self):
         """Boundary-duplicate trimming must be deterministic across calls.
@@ -757,8 +757,6 @@ class TestTritonTopkTopp:
         cross-program atomic order, so which copies of a tied boundary value
         survived could vary between identical calls.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size = 4, 128256
         # 1000 tied top tokens; the p=0.5 boundary lands inside the tie
         # group (each tied token has mass e/(1000e+1000) ~ 0.073%).
@@ -767,7 +765,9 @@ class TestTritonTopkTopp:
         logits[:, 1000:2000] = 0.0
         p = torch.full((batch_size,), 0.5, dtype=torch.float32)
 
-        results = [apply_top_k_top_p_triton(logits.clone(), None, p) for _ in range(5)]
+        results = [
+            self.apply_top_k_top_p_triton(logits.clone(), None, p) for _ in range(5)
+        ]
         for r in results[1:]:
             assert torch.equal(results[0], r), "non-deterministic tie break"
 
@@ -797,8 +797,6 @@ class TestTritonTopkTopp:
         space as log(pivot) + log(Z) + M, which fp32 rounds to M at that
         magnitude, so every token was masked and sampling produced token 0.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         vocab_size, forced_token = 131072, 13
         logits = torch.randn(
             batch_size, vocab_size, generator=self.generator, dtype=torch.float32
@@ -806,7 +804,7 @@ class TestTritonTopkTopp:
         logits[:, forced_token] = forced_logit
         p = torch.full((batch_size,), 0.95, dtype=torch.float32)
 
-        result = apply_top_k_top_p_triton(logits.clone(), None, p)
+        result = self.apply_top_k_top_p_triton(logits.clone(), None, p)
         assert (result[:, forced_token] == forced_logit).all()
         probs = result.softmax(dim=-1)
         assert not probs.isnan().any()
@@ -822,8 +820,6 @@ class TestTritonTopkTopp:
         boundary-value copies at every 8192-entry block, so each block of a
         slice could keep up to `numkeep` copies of its own.
         """
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch_size, vocab_size, num_ties = 64, 151936, 4096
         # 4096 tied tokens spread over many blocks, between 64 tokens above
         # and a low tail; the p=0.75 boundary lands mid-copy in the tie group.
@@ -833,7 +829,7 @@ class TestTritonTopkTopp:
         logits[:, -64:] = 4.0
         p = torch.full((batch_size,), 0.75, dtype=torch.float32)
 
-        kept = apply_top_k_top_p_triton(logits.clone(), None, p) != float("-inf")
+        kept = self.apply_top_k_top_p_triton(logits.clone(), None, p) != float("-inf")
         expected = apply_top_k_top_p_pytorch(logits.clone(), None, p) != float("-inf")
         num_kept, num_expected = kept.sum(dim=-1), expected.sum(dim=-1)
         assert torch.equal(num_kept, num_expected), (
@@ -846,18 +842,32 @@ class TestTritonTopkTopp:
         assert torch.equal(kept_ties, torch.arange(num_ties) < num_kept_ties)
 
 
-@pytest.mark.skipif(
-    not TRITON_KERNEL_AVAILABLE, reason="requires CUDA SM80+ or ROCm gfx942/gfx950"
-)
-class TestTritonTopkToppExact:
-    """Exact selection on every kernel path: the 32 to 256 logit tiers, the
-    histogram path with a shared gather or refinement (large k, huge nuclei,
-    ties at the cut), and the radix last resort (heavy ties)."""
+def _triton_gpu_kernel_available() -> bool:
+    if not HAS_TRITON:
+        return False
+    from vllm.v1.sample.ops.topk_topp_triton_gpu import _supported_device
 
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        torch.set_default_device(DEVICE_TYPE)
-        self.generator = Generator(device=DEVICE_TYPE).manual_seed(7)
+    return _supported_device()
+
+
+@pytest.mark.skipif(
+    not _triton_gpu_kernel_available(),
+    reason="requires CUDA SM80+ or ROCm gfx942/gfx950",
+)
+class TestTritonGpuTopkTopp(TestTritonTopkTopp):
+    """The fallback kernel's tests for the GPU kernel, and exact selection on each of
+    its paths: the 32 to 256 logit tiers, the histogram path with a shared gather or
+    refinement (large k, huge nuclei, ties at the cut), and the radix last resort
+    (heavy ties)."""
+
+    test_skip_split_without_topp_only_rows = None  # the fallback kernel's split
+
+    def apply_top_k_top_p_triton(
+        self, logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    ) -> torch.Tensor:
+        from vllm.v1.sample.ops.topk_topp_triton_gpu import apply_top_k_top_p_triton
+
+        return apply_top_k_top_p_triton(logits, k, p)
 
     @pytest.mark.parametrize(
         "kind,batch,vocab,k,p",
@@ -884,22 +894,16 @@ class TestTritonTopkToppExact:
         ],
     )
     def test_exact_selection(self, kind, batch, vocab, k, p):
-        from vllm.v1.sample.ops.topk_topp_triton import (
-            apply_top_k_top_p_triton,
-        )
-
         source = _make_logits(kind, batch, vocab, self.generator)
         k = _make_param(k, batch, vocab, self.generator, torch.int32)
         p = _make_param(p, batch, vocab, self.generator, torch.float32)
-        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        actual = self.apply_top_k_top_p_triton(source.clone(), k, p)
         _assert_exact_filter(source, actual, k, p)
 
     @pytest.mark.parametrize("max_k", [1, 4, 32, 64])
     @pytest.mark.parametrize("use_p", [True, False])
     def test_exact_hazards_at_the_cut(self, max_k, use_p):
         """Exact cut with ties, signed zeros, underflow, -inf or NaN at the cut."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         vocab = 151936
         source = torch.randn(12, vocab, generator=self.generator) * 4
         source = source.bfloat16().float()
@@ -924,7 +928,7 @@ class TestTritonTopkToppExact:
             [0.9, 1 - 1e-6, 1e-6, 0.95, 0.5, 1, 0.95, 0.95, 0.9, 0.9, 0.9, 1]
         )
         p = p if use_p else None
-        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        actual = self.apply_top_k_top_p_triton(source.clone(), k, p)
         # NaN is never kept, so the reference orders it as -inf.
         source, actual = (
             t.masked_fill(t.isnan(), float("-inf")) for t in (source, actual)
@@ -936,32 +940,26 @@ class TestTritonTopkToppExact:
         supergroup of 256), each with a runner-up in another group. The tier refines
         the crowded bin of maxima, so only its best 64 logits are complete, and it
         used to keep 56 runners-up in place of better maxima."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         vocab, n = 131072, 300
         source = torch.full((1, vocab), -10.0)
         maxima = torch.arange(n) * 256
         source[0, maxima] = 5.0 - 0.01 * torch.randperm(n) / n
         source[0, maxima + 16] = 5.0 - 0.03
         p = torch.tensor([0.2])
-        actual = apply_top_k_top_p_triton(source.clone(), None, p)
+        actual = self.apply_top_k_top_p_triton(source.clone(), None, p)
         _assert_exact_filter(source, actual, None, p)
 
     def test_cuda_graph_replay(self):
         """Device k/p are read at replay time, and the grid barrier resets."""
-        from vllm.v1.sample.ops.topk_topp_triton import (
-            apply_top_k_top_p_triton,
-        )
-
         batch, vocab = 4, 65536
         source = torch.randn(batch, vocab, generator=self.generator)
         k = torch.tensor([1, 20, 2000, vocab], dtype=torch.int32)
         p = torch.tensor([0.1, 0.5, 0.8, 1.0])
         logits = source.clone()
-        apply_top_k_top_p_triton(logits, k, p)
+        self.apply_top_k_top_p_triton(logits, k, p)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            apply_top_k_top_p_triton(logits, k, p)
+            self.apply_top_k_top_p_triton(logits, k, p)
         for _ in range(4):
             k.copy_(k.roll(1))
             p.copy_(p.roll(-1))
@@ -972,7 +970,7 @@ class TestTritonTopkToppExact:
     def test_warmup_covers_runtime_launch(self):
         """The startup warmup compiles the variant that every call launches, so
         no request pays a compile."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
+        import vllm.v1.sample.ops.topk_topp_triton_gpu as tt
 
         kernels = (tt._levels_kernel, tt._filter_kernel)
         for kernel in kernels:
@@ -991,7 +989,7 @@ class TestTritonTopkToppExact:
             logits = torch.randn(batch, vocab, generator=self.generator)
             k_rows = None if k is None else torch.full((batch,), k, dtype=torch.int64)
             p_rows = None if p is None else torch.full((batch,), p)
-            tt.apply_top_k_top_p_triton(logits, k_rows, p_rows)
+            self.apply_top_k_top_p_triton(logits, k_rows, p_rows)
         assert [_num_compiled(kernel) for kernel in kernels] == warmed
 
     def test_high_p_tail_is_refined_by_all_programs(self):
@@ -999,8 +997,6 @@ class TestTritonTopkToppExact:
         row max) is refined in further rounds by all programs. It used to fall back to
         one program's radix select per row, 50x to 100x slower than a nucleus inside
         the span (p = 0.999 on real rows took 7 ms to 39 ms)."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch = 64
         source = _make_logits("tail", batch, 131072, self.generator)
 
@@ -1012,7 +1008,7 @@ class TestTritonTopkToppExact:
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
-                apply_top_k_top_p_triton(logits, None, p_rows)
+                self.apply_top_k_top_p_triton(logits, None, p_rows)
                 end.record()
                 end.synchronize()
                 times.append(start.elapsed_time(end))
@@ -1022,16 +1018,14 @@ class TestTritonTopkToppExact:
 
     def test_empty_batch(self):
         """Steps with no rows to filter (e.g. no drafts to verify) return as is."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         logits = torch.empty(0, 32000)
         k = torch.empty(0, dtype=torch.int32)
-        assert apply_top_k_top_p_triton(logits, k, torch.empty(0)) is logits
+        assert self.apply_top_k_top_p_triton(logits, k, torch.empty(0)) is logits
 
     def test_reserved_workspace_covers_the_call(self):
         """Memory profiling reserves the workspace, so a call within the reserved
         rows allocates nothing after the KV cache is sized."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
+        import vllm.v1.sample.ops.topk_topp_triton_gpu as tt
 
         tt.reset_buffer_cache()
         batch, vocab = 40, 65536
@@ -1039,14 +1033,14 @@ class TestTritonTopkToppExact:
         k = torch.full((batch,), 20, dtype=torch.int32)
         tt.reserve_workspace(logits.device, batch, vocab)
         reserved = torch.accelerator.memory_allocated()
-        tt.apply_top_k_top_p_triton(logits, k, None)
+        self.apply_top_k_top_p_triton(logits, k, None)
         assert torch.accelerator.memory_allocated() == reserved
 
     def test_launch_cache_releases_inputs(self):
         """Launches are cached per shape, but not their logits, k and p: verification
         sees hundreds of row counts, and keeping each one's logits ran out of memory.
         Checked after the first call (cache miss) and after a repeated one (hit)."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
+        import vllm.v1.sample.ops.topk_topp_triton_gpu as tt
 
         tt.reset_buffer_cache()
         batch, vocab = 40, 65536
@@ -1055,7 +1049,7 @@ class TestTritonTopkToppExact:
         for _ in range(2):
             logits = torch.randn(batch, vocab, generator=self.generator)
             k = torch.full((batch,), 20, dtype=torch.int32)
-            tt.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
+            self.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
             del logits, k
             assert torch.accelerator.memory_allocated() == before
 
@@ -1063,34 +1057,45 @@ class TestTritonTopkToppExact:
         """Triton specializes pointers on 16-byte alignment, so logits 4 bytes off
         it must not reuse the cached launch of an aligned call of the same shape
         (it failed with `CUDA error: misaligned address`)."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
-
         batch, vocab = 8, 65536
         k = torch.full((batch,), 20, dtype=torch.int32)
         aligned = torch.randn(batch, vocab, generator=self.generator)
-        apply_top_k_top_p_triton(aligned, k, None)
+        self.apply_top_k_top_p_triton(aligned, k, None)
         flat = torch.randn(batch * vocab + 1, generator=self.generator)
         logits = flat[1:].view(batch, vocab)
         assert logits.data_ptr() % 16 != 0
         source = logits.clone()
-        apply_top_k_top_p_triton(logits, k, None)
+        self.apply_top_k_top_p_triton(logits, k, None)
         _assert_exact_filter(source, logits, k, None)
 
-    def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("max_vocab,kernel", [(1 << 20, "gpu"), (1000, "fallback")])
+    def test_sampler_dispatch(
+        self, max_vocab: int, kernel: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Logits that the GPU kernel cannot take (here: too large a vocab) go to the
+        previous Triton kernel."""
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
 
+        gpu = sampler_ops.topk_topp_triton_gpu
         calls = []
-        real = sampler_ops.apply_top_k_top_p_triton
 
-        def spy(logits, k, p):
-            calls.append(logits.shape)
-            return real(logits, k, p)
+        def spy(name: str, real):
+            def call(logits, k, p):
+                calls.append(name)
+                return real(logits, k, p)
 
-        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_triton", spy)
-        logits = torch.randn(8, 32000, generator=self.generator)
+            return call
+
+        gpu_spy = spy("gpu", gpu.apply_top_k_top_p_triton)
+        fallback_spy = spy("fallback", sampler_ops.apply_top_k_top_p_triton)
+        monkeypatch.setattr(gpu, "_MAX_VOCAB_SIZE", max_vocab)
+        monkeypatch.setattr(gpu, "apply_top_k_top_p_triton", gpu_spy)
+        monkeypatch.setattr(sampler_ops, "apply_top_k_top_p_triton", fallback_spy)
+        source = torch.randn(8, 32000, generator=self.generator)
         k = torch.full((8,), 50, dtype=torch.int32)
-        apply_top_k_top_p(logits, k, None)
-        assert calls == [logits.shape]
+        actual = apply_top_k_top_p(source.clone(), k, None)
+        assert calls == [kernel]
+        _assert_exact_filter(source, actual, k, None)
 
 
 def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Tensor:
