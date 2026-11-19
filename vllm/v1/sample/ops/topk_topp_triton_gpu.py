@@ -36,7 +36,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 BLOCK = 4096  # elements per streaming step, a multiple of 256
 MAX_SPLITS = 32
@@ -72,14 +72,11 @@ LEVELS_INTS = ["groups", "supergroups", "has_k", "has_p", "splits"]
 FILTER_INTS = LEVELS_INTS + ["rows", "fsplits"]
 
 
-def can_use_top_k_top_p_triton(logits: torch.Tensor) -> bool:
-    return (
-        logits.is_cuda
-        and logits.dtype == torch.float32
-        and logits.ndim == 2
-        and 1 < logits.shape[-1] < _MAX_VOCAB_SIZE  # Triton specializes a vocab of 1
-        and _supported_device()
-    )
+def is_supported(vocab_size: int) -> bool:
+    """Whether the kernel runs on this platform's GPUs for this vocab size. Triton
+    specializes a vocab of 1, which does not compile."""
+    vocab_ok = 1 < vocab_size < _MAX_VOCAB_SIZE
+    return HAS_TRITON and vocab_ok and _supported_device()
 
 
 def apply_top_k_top_p_triton(
@@ -99,6 +96,9 @@ def apply_top_k_top_p_triton(
         contiguous.
 
     """
+    assert logits.is_cuda
+    assert logits.dtype == torch.float32
+    assert logits.ndim == 2
     if (k is None and p is None) or logits.shape[0] == 0:
         return logits
     if logits.stride(1) != 1:
@@ -125,8 +125,7 @@ def apply_top_k_top_p_triton(
 def reserve_workspace(device: torch.device, rows: int, vocab: int) -> None:
     """Allocate the workspace for rows rows now, e.g. while memory profiling counts
     it, so that serving does not grow it."""
-    if vocab < _MAX_VOCAB_SIZE and _supported_device():
-        buffers(device, rows, vocab)
+    buffers(device, rows, vocab)
 
 
 def register_warmups() -> None:

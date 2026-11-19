@@ -41,14 +41,18 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_mask.register_warmup()
 
 
-def reserve_top_k_top_p_workspace(
+def maybe_reserve_topk_topp_workspace(
     vllm_config: "VllmConfig", device: torch.device, vocab_size: int
 ) -> None:
     """Spec-decode verification filters 1 + K rows per request, more than the dummy
     sampler run does, so allocate the Triton filter's workspace for them while
     memory profiling counts it."""
+    if not HAS_TRITON:
+        return
+    if not topk_topp_triton_gpu.is_supported(vocab_size):
+        return
     spec = vllm_config.speculative_config
-    if spec is None or not HAS_TRITON or current_platform.is_cpu():
+    if spec is None:
         return
     scheduler = vllm_config.scheduler_config
     rows_per_req = 1 + spec.num_speculative_tokens
@@ -227,7 +231,7 @@ def apply_top_k_top_p(
         return logits
 
     if HAS_TRITON:
-        if topk_topp_triton_gpu.can_use_top_k_top_p_triton(logits):
+        if topk_topp_triton_gpu.is_supported(logits.shape[-1]):
             return topk_topp_triton_gpu.apply_top_k_top_p_triton(logits, k, p)
         return apply_top_k_top_p_triton(logits, k, p)
 
