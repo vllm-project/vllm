@@ -1276,7 +1276,8 @@ def test_hisparse_host_exhaustion_defers_allocation(enable_caching):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_host_receive_completion_without_spill_metadata(failed):
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_host_receive_completion_without_spill_metadata(failed, cancelled):
     """Only successful external receives make host pages readable."""
     manager = make_hisparse_kv_cache_manager(32, 16)
     request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
@@ -1290,6 +1291,11 @@ def test_host_receive_completion_without_spill_metadata(failed):
     connector.connector_scheduler = scheduler
     composite = object.__new__(MultiConnector)
     composite._connectors = (connector,)
+    if cancelled:
+        request.status = RequestStatus.FINISHED_ABORTED
+        connector.request_finished_all_groups(
+            request, manager.get_block_ids(request.request_id)
+        )
     composite.update_connector_output(
         KVConnectorOutput(
             finished_recving={request.request_id},
@@ -1301,6 +1307,12 @@ def test_host_receive_completion_without_spill_metadata(failed):
         assert state is None
     else:
         assert state is not None and state.valid_pages == {0, 1}
+    command = get_hisparse_coordinator(manager).build_offload_command()
+    assert command is not None
+    assert bool(command.page_transfers) == (not failed and not cancelled)
+    if cancelled:
+        manager.free(request)
+        assert not get_hisparse_coordinator(manager).has_pending_work()
 
 
 def test_hisparse_recomputation_does_not_complete_failed_host_import():
