@@ -716,7 +716,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if (
                 self.is_draft_layer
                 and spec_config is not None
-                and spec_config.speculator_config.supports_prefill_context_kv_only
+                and spec_config.speculator_config.projects_context_kv
             ):
                 # The DFlash context-KV writer skips null block-table entries.
                 return DFlashSlidingWindowManager.layer_config(

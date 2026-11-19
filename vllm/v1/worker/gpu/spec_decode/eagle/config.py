@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.config import SpeculativeConfig
+from vllm.config import ModelConfig, SpeculativeConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
@@ -53,6 +53,10 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     @classmethod
     def apply_options(cls, spec: SpeculativeConfig) -> None:
         check_draft_lm_head_quantization(spec)
+
+    @classmethod
+    def supports_draft_eplb(cls, draft_model_config: ModelConfig) -> bool:
+        return draft_model_config.is_moe
 
     @property
     def num_lookahead_tokens(self) -> int:

@@ -3710,7 +3710,6 @@ def test_eager_store_matches_gpu_cacheable_prefix(
     vllm_config.model_config.max_model_len = 16384
     speculative_config = Mock(spec=SpeculativeConfig)
     speculative_config.num_speculative_tokens = 3
-    speculative_config.use_eagle.return_value = True
     speculative_config.use_eagle_block_drop.return_value = True
     speculative_config.use_multi_module_mtp.return_value = prefill_lookahead > 1
     attach_speculator_config(

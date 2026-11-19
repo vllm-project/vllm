@@ -1529,7 +1529,7 @@ class SpeculativeConfig:
         config_cls.apply_options(self)
 
         if self.prefill_context_kv_only:
-            if not config_cls.supports_prefill_context_kv_only:
+            if not config_cls.projects_context_kv:
                 raise ValueError(
                     "prefill_context_kv_only is not supported with speculative "
                     f"method {self.custom_method or self.method!r}."
@@ -1773,91 +1773,35 @@ class SpeculativeConfig:
                 )
             return
 
-        if requested_redundant_experts is not None:
-            if target_parallel_config is None or not target_parallel_config.enable_eplb:
-                raise ValueError(
-                    "eplb_config.draft_num_redundant_experts requires target "
-                    "EPLB to be "
-                    "enabled and speculative_config.draft_enable_eplb=true."
-                )
-            if not self.use_eagle():
-                raise ValueError(
-                    "eplb_config.draft_num_redundant_experts is only supported for MoE "
-                    "draft methods that use EPLB."
-                )
+        if requested_redundant_experts is not None and (
+            target_parallel_config is None or not target_parallel_config.enable_eplb
+        ):
+            raise ValueError(
+                "eplb_config.draft_num_redundant_experts requires target "
+                "EPLB to be "
+                "enabled and speculative_config.draft_enable_eplb=true."
+            )
 
-        if draft_model_config is None or target_parallel_config is None:
+        if (
+            draft_model_config is None
+            or target_parallel_config is None
+            or not target_parallel_config.enable_eplb
+        ):
             return
 
-        if self.method == "dspark":
-            if not target_parallel_config.enable_eplb:
-                return
-
-            from vllm.v1.worker.gpu.spec_decode.dspark.config import (
-                dspark_draft_supports_eplb,
-            )
-
-            supports_eplb = dspark_draft_supports_eplb(draft_model_config)
-            if requested_redundant_experts is not None and not supports_eplb:
+        config_cls = type(self.speculator_config)
+        if not config_cls.supports_draft_eplb(draft_model_config):
+            if requested_redundant_experts is not None:
                 raise ValueError(
-                    "eplb_config.draft_num_redundant_experts is only supported for "
-                    "DeepSeek V4 or V4.1 DSpark drafts that support EPLB. To "
-                    "disable draft EPLB, remove "
-                    "eplb_config.draft_num_redundant_experts "
-                    "and set speculative_config.draft_enable_eplb=false."
+                    "eplb_config.draft_num_redundant_experts requires a MoE draft "
+                    f"that supports EPLB, which the {self.method!r} draft "
+                    f"{draft_model_config.model!r} doesn't. To disable draft "
+                    "EPLB, remove eplb_config.draft_num_redundant_experts and "
+                    "set speculative_config.draft_enable_eplb=false."
                 )
-            if not supports_eplb:
-                return
-
-            if target_parallel_config.enable_elastic_ep:
-                raise ValueError(
-                    "EPLB for a DSpark draft is not supported with Elastic EP. "
-                    "Set speculative_config.draft_enable_eplb=false to disable "
-                    "draft EPLB."
-                )
-
-            assert self.draft_parallel_config is not None
-            if (
-                self.draft_parallel_config.tensor_parallel_size == 1
-                and target_parallel_config.prefill_context_parallel_size == 1
-                and target_parallel_config.data_parallel_size == 1
-            ):
-                remediation = (
-                    " If you want to disable draft EPLB, remove "
-                    "eplb_config.draft_num_redundant_experts and set "
-                    "speculative_config.draft_enable_eplb=false."
-                    if requested_redundant_experts is not None
-                    else " To disable draft EPLB, set "
-                    "speculative_config.draft_enable_eplb=false."
-                )
-                raise ValueError(
-                    "EPLB for a DSpark draft requires its tensor parallel size, "
-                    "prefill context parallel size, or data parallel size to "
-                    "be greater than 1."
-                    f"{remediation}"
-                )
-            draft_parallel_config = target_parallel_config
-            draft_num_experts = (
-                getattr(draft_model_config.hf_config, "dspark_n_routed_experts", 0)
-                or getattr(
-                    draft_model_config.hf_text_config,
-                    "dspark_n_routed_experts",
-                    0,
-                )
-                or None
-            )
-        else:
-            if not self.use_eagle() or not target_parallel_config.enable_eplb:
-                return
-            if not draft_model_config.is_moe:
-                if requested_redundant_experts is not None:
-                    raise ValueError(
-                        "eplb_config.draft_num_redundant_experts requires a MoE "
-                        "draft model."
-                    )
-                return
-            draft_parallel_config = target_parallel_config
-            draft_num_experts = None
+            return
+        draft_num_experts = config_cls.verify_draft_eplb(self)
+        draft_parallel_config = target_parallel_config
 
         ep_size = (
             draft_parallel_config.tensor_parallel_size
@@ -2118,12 +2062,6 @@ class SpeculativeConfig:
         than adding rows to the target batch.
         """
         return self.speculator_config.max_num_new_slots_for_drafting
-
-    def use_eagle(self) -> bool:
-        # NOTE: This method is usually a stand-in for "speculative decoding using
-        # target model hidden states"
-        # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token."""

@@ -2252,7 +2252,6 @@ def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = fake_speculative_config(
         method="dflash",
-        use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
         draft_model_config=SimpleNamespace(architectures=[]),
@@ -2366,7 +2365,6 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
         draft_model_config=SimpleNamespace(
             hf_config=SimpleNamespace(), architectures=[]
         ),
-        use_eagle=lambda: True,
         use_eagle_block_drop=lambda: method == "eagle",
         use_dspark=lambda: method == "dspark",
         use_multi_module_mtp=lambda: False,

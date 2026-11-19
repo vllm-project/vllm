@@ -106,7 +106,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.model_config.get_total_num_kv_heads.return_value = 8
     cfg.model_config.max_model_len = 4096
     cfg.scheduler_config.max_num_batched_tokens = 8192
-    # Without this, MagicMock's truthy use_eagle() triggers the coordinator's
+    # Without this, MagicMock's truthy use_eagle_block_drop() triggers the coordinator's
     # "use_eagle && nothing annotated → flag all groups" fallback.
     cfg.speculative_config = None
     cfg.num_hash_lookahead_tokens = 0

@@ -4924,7 +4924,7 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     )
     speculative_config.method = method
 
-    assert speculative_config.use_eagle()
+    assert speculative_config.uses_target_hidden_states
     assert speculative_config.use_eagle_block_drop() is (
         drops_block and not disable_eagle_block_drop
     )

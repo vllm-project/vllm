@@ -7832,7 +7832,6 @@ def _shared_kv_mtp_config():
     whose drafter layer merges into a target KV-cache group, so no group
     self-identifies as a drafter group (issue #52735)."""
     spec = MagicMock(name="shared_kv_mtp_spec")
-    spec.use_eagle.return_value = True
     spec.use_eagle_block_drop.return_value = True
     spec.disable_lookahead_block_hashes = False
     spec.use_multi_module_mtp.return_value = False
