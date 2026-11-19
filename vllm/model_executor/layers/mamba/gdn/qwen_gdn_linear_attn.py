@@ -36,6 +36,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
+    ReplaySSMRingPlanner,
+)
 from vllm.model_executor.layers.linear_attention.replayssm.state import (
     ReplaySSMLayerState,
 )
@@ -73,7 +76,6 @@ from vllm.model_executor.layers.mamba.ops.replayssm_config import GDN_MAX_BUFFER
 from vllm.model_executor.layers.mamba.ops.scatter_states import (
     scatter_states,
 )
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import ReplaySSMRingPlanner
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig

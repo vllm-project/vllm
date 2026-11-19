@@ -41,7 +41,7 @@ class MambaConfig:
     """Kernel backend for Mamba decode (SSU, and ReplaySSM's provider). A
     backend that can't run fails at startup. None selects automatically:
     Triton on GPUs and "cpu" on CPU, or FlashInfer where only it can run what
-    is asked; ReplaySSM uses Triton."""
+    is asked."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.

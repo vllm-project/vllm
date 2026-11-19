@@ -16,6 +16,9 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_base im
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
     FlashInferReplaySSMKernel,
 )
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton import (
+    TritonReplaySSMKernel,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
@@ -28,6 +31,17 @@ PREFILL_KWARGS = {
     "is_profile": True,
     "randomize_inputs": True,
 }
+
+
+def _replayssm_mixer(backend: MambaBackendEnum) -> MambaMixer2:
+    mixer = MambaMixer2.__new__(MambaMixer2)
+    torch.nn.Module.__init__(mixer)
+    mixer.ssu_kernel = (
+        FlashInferReplaySSMKernel
+        if backend == MambaBackendEnum.FLASHINFER
+        else TritonReplaySSMKernel
+    )
+    return mixer
 
 
 def _autotune_runner(
@@ -48,8 +62,9 @@ def _autotune_runner(
     return SimpleNamespace(
         extensible_kv_cache=extensible_kv_cache,
         vllm_config=SimpleNamespace(
-            use_flashinfer_replayssm=(
-                use_replayssm and backend == MambaBackendEnum.FLASHINFER
+            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
+            compilation_config=SimpleNamespace(
+                static_forward_context={"layers.0.mixer": _replayssm_mixer(backend)}
             ),
         ),
         uniform_decode_query_len=query_len,

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashinfer import (  # noqa: E501
+    FlashInferReplaySSMKernel,
     flashinfer_replayssm_autotune_supported,
 )
 from vllm.v1.worker.replayssm_utils import (
@@ -28,7 +29,11 @@ def _replayssm_autotune_kwargs(
     max_token_prefill_kwargs: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
     config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
+    layers = config.compilation_config.static_forward_context.values()
+    if not config.cache_config.use_replayssm or not any(
+        getattr(layer, "ssu_kernel", None) is FlashInferReplaySSMKernel
+        for layer in layers
+    ):
         return None
     if not flashinfer_replayssm_autotune_supported():
         logger.info_once(
@@ -100,7 +105,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_replayssm_trackers:
+    if not config.cache_config.use_replayssm:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,

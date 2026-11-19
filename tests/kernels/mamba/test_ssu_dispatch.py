@@ -42,7 +42,6 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.triton import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
-from vllm.model_executor.layers.mamba.ops import ssu_dispatch
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability, PlatformEnum
 from vllm.utils.torch_utils import set_random_seed
@@ -696,6 +695,14 @@ def test_replayssm_kernel_that_cannot_run_fails_at_selection(backend, cfg, reaso
         _select(cfg, backend)
 
 
+@needs_flashinfer
+def test_unset_backend_selects_flashinfer_replayssm_off_sm10x():
+    """As for plain SSU, unset picks FlashInfer when the Triton ReplaySSM
+    kernels can't run (stochastic rounding needs SM10x for Triton)."""
+    cfg = _cfg(*SM90, stochastic_rounding=True, **FP16, use_replayssm=True)
+    assert _select(cfg) is FlashInferReplaySSMKernel
+
+
 def test_triton_replayssm_standard_decode_keeps_pipeline_parallelism():
     cfg = _cfg(*SM100, pp_size=2, use_replayssm=True)
     assert _select(cfg, MambaBackendEnum.TRITON) is TritonReplaySSMKernel
@@ -921,7 +928,7 @@ def test_flashinfer_replayssm_selects_mtp_layout(
         replayssm_state_indices_d=torch.tensor([1, 2], dtype=torch.int32),
     )
     kernel = Mock()
-    monkeypatch.setattr(ssu_dispatch, "_checkpointing_ssu", lambda: kernel)
+    monkeypatch.setattr(FlashInferReplaySSMKernel, "_fn", staticmethod(lambda: kernel))
     x = torch.empty(num_decode_tokens, 2, 4)
     B = torch.empty(num_decode_tokens, 1, 8)
 

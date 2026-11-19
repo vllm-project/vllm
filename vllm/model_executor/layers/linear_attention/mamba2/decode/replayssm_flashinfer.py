@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
+from functools import cache
 from typing import TYPE_CHECKING, cast
 
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelectorConfig
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    selective_state_update_replayssm_flashinfer,
-)
 from vllm.platforms.interface import PlatformEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from .base import M, SSUBuffers, SSULayer
@@ -25,6 +24,18 @@ if TYPE_CHECKING:
 MAX_BUFFER_LEN = 16
 
 
+@cache
+def flashinfer_replayssm_autotune_supported() -> bool:
+    """Return True when FlashInfer exposes ReplaySSM autotuning."""
+    try:
+        from flashinfer.mamba.checkpointing_ssu import (  # noqa: F401
+            CheckpointingSSURunner,
+        )
+    except ImportError:
+        return False
+    return True
+
+
 @dataclass
 class FlashInferReplaySSMBuffers(TrackerBuffers):
     # checkpointing_ssu's two-kernel scratch, for up to max_num_seqs rows.
@@ -35,7 +46,7 @@ class FlashInferReplaySSMBuffers(TrackerBuffers):
 
 class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
     """FlashInfer's `checkpointing_ssu`, for standard and speculative decoding.
-    Selected only with `--mamba-backend flashinfer`."""
+    Selected automatically only when the Triton ReplaySSM kernels can't run."""
 
     backend = MambaBackendEnum.FLASHINFER
     name = "FlashInfer ReplaySSM"
@@ -138,6 +149,13 @@ class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
             ),
         )
 
+    @staticmethod
+    @cache
+    def _fn():
+        from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
+
+        return checkpointing_ssu
+
     @classmethod
     def forward(
         cls,
@@ -169,35 +187,48 @@ class FlashInferReplaySSMKernel(TrackerReplaySSMKernel):
                     t.view(batch, query_len, *t.shape[1:]) for t in (x, dt, B, C, out)
                 )
                 cu_seqlens = max_seqlen = None
+        if x.dim() == 3:
+            # One token per row, or packed rows when cu_seqlens is set.
+            dim = 0 if cu_seqlens is not None else 1
+            x, dt, B, C, out = (t.unsqueeze(dim) for t in (x, dt, B, C, out))
+
         mamba_config = layer.mamba_config
-        if layer.ssu_state.rand_seeds is not None:
-            # The first layer refreshes every layer's seed slot.
-            layer.ssu_state.rand_seeds.random_(0, 2**32)
+        rand_seed = None
+        if mamba_config.enable_stochastic_rounding:
+            if layer.ssu_state.rand_seeds is not None:
+                # The first layer refreshes every layer's seed slot.
+                layer.ssu_state.rand_seeds.random_(0, 2**32)
+            rand_seed = layer.ssu_state.rand_seed
+            if rand_seed is None:
+                rand_seed = torch.randint(
+                    0, 2**32, (1,), device=state.device, dtype=torch.int64
+                )
         x_cache, dt_cache, B_cache = layer.kv_cache[2:5]
-        selective_state_update_replayssm_flashinfer(
+        cb_scaled, cumAdt_vec, cb_old = metadata.replayssm_scratch
+        cls._fn()(
             state,
+            x_cache,
+            B_cache,
+            dt_cache,
+            layer.ssu_state.ring_start,
+            layer.ssu_state.prev_num_accepted,
             x,
             dt,
             A,
             B,
             C,
             out,
-            x_cache,
-            B_cache,
-            dt_cache,
-            layer.ssu_state.ring_start,
-            layer.ssu_state.prev_num_accepted,
             D=D,
             dt_bias=dt_bias,
             dt_softplus=True,
             state_batch_indices=indices,
-            scratch=metadata.replayssm_scratch,
-            enable_stochastic_rounding=mamba_config.enable_stochastic_rounding,
-            stochastic_rounding_philox_rounds=(
-                mamba_config.stochastic_rounding_philox_rounds
-            ),
-            rand_seed=layer.ssu_state.rand_seed,
+            pad_slot_id=NULL_BLOCK_ID,
+            rand_seed=rand_seed,
+            philox_rounds=mamba_config.stochastic_rounding_philox_rounds or 10,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             enable_pdl=False,
+            cb_scaled=cb_scaled,
+            cumAdt_vec=cumAdt_vec,
+            cb_old=cb_old,
         )

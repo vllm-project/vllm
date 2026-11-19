@@ -1,22 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The Triton ReplaySSM decode planner and the FlashInfer ReplaySSM entry,
-used by the ReplaySSM decode kernels in `linear_attention/mamba2/decode/`."""
+"""Triton ReplaySSM standard-decode planning, shared by the Mamba2 and Gated
+DeltaNet ReplaySSM decodes."""
 
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config.cache import CacheConfig
-from vllm.model_executor.layers.linear_attention.replayssm.state import (
-    ReplaySSMLayerState,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+from .state import ReplaySSMLayerState
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear_attention.lifecycle import GroupLayers
@@ -170,104 +168,3 @@ def get_replayssm_align_block_size(cache_config: CacheConfig, block_size: int) -
     if cache_config.prefix_match_unit is None:
         return block_size
     return math.gcd(block_size, cache_config.prefix_match_unit)
-
-
-@cache
-def flashinfer_replayssm_autotune_supported() -> bool:
-    """Return True when FlashInfer exposes ReplaySSM autotuning."""
-    try:
-        from flashinfer.mamba.checkpointing_ssu import (  # noqa: F401
-            CheckpointingSSURunner,
-        )
-    except ImportError:
-        return False
-    return True
-
-
-@cache
-def _checkpointing_ssu():
-    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
-
-    return checkpointing_ssu
-
-
-def selective_state_update_replayssm_flashinfer(
-    state: torch.Tensor,
-    x: torch.Tensor,
-    dt: torch.Tensor,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    out: torch.Tensor,
-    x_cache: torch.Tensor,
-    B_cache: torch.Tensor,
-    dt_cache: torch.Tensor,
-    ring_start: torch.Tensor,
-    prev_num_accepted_tokens: torch.Tensor,
-    D: torch.Tensor | None = None,
-    dt_bias: torch.Tensor | None = None,
-    dt_softplus: bool = False,
-    state_batch_indices: torch.Tensor | None = None,
-    null_block_id: int = NULL_BLOCK_ID,
-    scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    enable_stochastic_rounding: bool = False,
-    stochastic_rounding_philox_rounds: int = 0,
-    rand_seed: torch.Tensor | None = None,
-    cu_seqlens: torch.Tensor | None = None,
-    max_seqlen: int | None = None,
-    enable_pdl: bool = False,
-) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU with model-owned tracker metadata.
-
-    With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
-    refreshed by the caller each step; without one, a seed is drawn here.
-    """
-    if x.dim() == 3:
-        dim = 0 if cu_seqlens is not None else 1
-        x = x.unsqueeze(dim)
-        dt = dt.unsqueeze(dim)
-        B = B.unsqueeze(dim)
-        C = C.unsqueeze(dim)
-        out = out.unsqueeze(dim)
-
-    indices = state_batch_indices
-    if indices is not None and indices.dim() > 1:
-        indices = indices[:, 0]
-
-    cb_scaled = cumAdt_vec = cb_old = None
-    if scratch is not None:
-        cb_scaled, cumAdt_vec, cb_old = scratch
-
-    if not enable_stochastic_rounding:
-        rand_seed = None
-    elif rand_seed is None:
-        rand_seed = torch.randint(
-            0, 2**32, (1,), device=state.device, dtype=torch.int64
-        )
-    return _checkpointing_ssu()(
-        state,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted_tokens,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        out,
-        D=D,
-        dt_bias=dt_bias,
-        dt_softplus=dt_softplus,
-        state_batch_indices=indices,
-        pad_slot_id=null_block_id,
-        rand_seed=rand_seed,
-        philox_rounds=stochastic_rounding_philox_rounds or 10,
-        cu_seqlens=cu_seqlens,
-        max_seqlen=max_seqlen,
-        enable_pdl=enable_pdl,
-        cb_scaled=cb_scaled,
-        cumAdt_vec=cumAdt_vec,
-        cb_old=cb_old,
-    )

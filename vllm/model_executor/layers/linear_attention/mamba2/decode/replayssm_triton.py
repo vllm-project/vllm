@@ -9,7 +9,7 @@ import torch
 
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.linear_attention.kernel import LinearAttnSelectorConfig
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
     ReplaySSMRingPlanner,
     get_replayssm_align_block_size,
 )

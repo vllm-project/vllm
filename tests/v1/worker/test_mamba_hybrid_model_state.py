@@ -18,6 +18,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_vllm_config,
 )
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
@@ -279,8 +280,8 @@ def test_replayssm_uses_built_mamba_decode_split(
     state_config.speculative_config = config.speculative_config
     state_config.cache_config.use_replayssm = True
     state_config.cache_config.enable_prefix_caching = False
-    state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
+    model = torch.nn.Sequential(_TestReplaySSMMixer(MambaBackendEnum.FLASHINFER))
+    state = MambaHybridModelState(state_config, model, None, DEVICE)
     # The groups use these backend types without instantiating them.
     groups = [
         AttentionGroup(

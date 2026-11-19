@@ -38,11 +38,13 @@ from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_flashin
 from vllm.model_executor.layers.linear_attention.mamba2.decode.replayssm_triton import (
     TritonReplaySSMKernel,
 )
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
+    ReplaySSMRingPlanner,
+)
 from vllm.model_executor.layers.linear_attention.replayssm.state import (
     ReplaySSMLayerState,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import ReplaySSMRingPlanner
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot

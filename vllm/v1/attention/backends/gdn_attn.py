@@ -10,6 +10,9 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear_attention.replayssm.plan import (
+    get_replayssm_align_block_size,
+)
 from vllm.model_executor.layers.mamba.abstract import (
     get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
@@ -17,9 +20,6 @@ from vllm.model_executor.layers.mamba.abstract import (
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
-)
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    get_replayssm_align_block_size,
 )
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (

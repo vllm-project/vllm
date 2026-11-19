@@ -671,22 +671,6 @@ class VllmConfig:
         )
 
     @property
-    def use_flashinfer_replayssm(self) -> bool:
-        return (
-            self.cache_config.use_replayssm
-            and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
-
-    @property
-    def use_replayssm_trackers(self) -> bool:
-        """Mamba2 ReplaySSM whose rings follow the runner-committed trackers."""
-        return (
-            self.cache_config.use_replayssm
-            and not self.cache_config.use_kda_recoverssm
-            and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
-        )
-
-    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None

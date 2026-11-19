@@ -40,7 +40,10 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import (
+    initialize_replayssm_ring_trackers,
+    uses_ring_trackers,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -100,7 +103,9 @@ class MambaHybridModelState(DefaultModelState):
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self.prefix_caching = self.cache_config.enable_prefix_caching
-        self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
+        self._use_replayssm_trackers = any(
+            uses_ring_trackers(layer) for layer in model.modules()
+        )
         if self._use_replayssm_trackers:
             self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
