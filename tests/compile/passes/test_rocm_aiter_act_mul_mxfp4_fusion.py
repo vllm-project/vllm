@@ -3,13 +3,13 @@
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import torch
 
 from tests.compile.backend import TestBackend
-from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._aiter_ops import IS_AITER_FOUND, is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -279,6 +279,112 @@ def test_asm_mxfp4_gemm_on_a_plain_input_is_not_rewritten(
         activation = gemm_node.args[6] if len(gemm_node.args) > 6 else None
         assert activation is None and "activation" not in gemm_node.kwargs
         torch.testing.assert_close(out, ref)
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="gemm_with_dynamic_quant is registered only with AITER.",
+)
+@pytest.mark.parametrize("use_asm_gemm", [True, False])
+def test_gemm_refuses_an_activation_together_with_hadamard_rotate(use_asm_gemm: bool):
+    # Input: gemm_with_dynamic_quant called with an activation and hadamard_rotate=True,
+    # with and without the asm GEMM, on empty meta tensors.
+    # Expected: an AssertionError that names both arguments, raised before any tensor
+    # is read or any AITER kernel runs.
+    # Why: the fused act-mul quant does not rotate, so a call that kept both would drop
+    # the Hadamard rotation and return wrong output silently.
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import gemm_with_dynamic_quant
+
+    x = torch.empty(16, 2 * HIDDEN_SIZE, dtype=DTYPE, device="meta")
+    weight = torch.empty(
+        HIDDEN_SIZE, HIDDEN_SIZE // 2, dtype=torch.uint8, device="meta"
+    )
+    weight_scale = torch.empty(
+        HIDDEN_SIZE, HIDDEN_SIZE // 32, dtype=torch.uint8, device="meta"
+    )
+    with pytest.raises(AssertionError, match="activation and hadamard_rotate"):
+        gemm_with_dynamic_quant(
+            x,
+            weight,
+            weight_scale,
+            use_asm_gemm,
+            DTYPE,
+            activation="silu",
+            hadamard_rotate=True,
+        )
+
+
+class ActMulMxfp4HadamardModel(ActMulMxfp4Model):
+    """The same model, calling the GEMM op with a fused input Hadamard rotation."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.act(x)
+        return torch.ops.vllm.gemm_with_dynamic_quant(
+            y,
+            self.weight,
+            self.weight_scale,
+            self.use_asm_gemm,
+            self.dtype,
+            hadamard_rotate=True,
+        )
+
+
+def _gemm_args_by_name(node: torch.fx.Node) -> dict[str, Any]:
+    """The arguments of a gemm_with_dynamic_quant node, keyed by parameter name.
+
+    A traced op call leaves out the trailing arguments that equal their default, so a
+    name missing from the result has its default. Reading by name keeps a check
+    independent of how many parameters follow the one it looks at.
+    """
+    schema = torch.ops.vllm.gemm_with_dynamic_quant.default._schema
+    names = [argument.name for argument in schema.arguments]
+    return {**dict(zip(names, node.args)), **node.kwargs}
+
+
+@pytest.mark.parametrize("enable_act_custom_op", [True, False])
+def test_act_mul_pass_does_not_rewrite_a_hadamard_rotated_gemm(
+    enable_act_custom_op: bool, monkeypatch: pytest.MonkeyPatch
+):
+    # Input: a SiLU-and-mul feeding an asm MXFP4 GEMM called with hadamard_rotate=True,
+    # as a layer with a fused input Hadamard rotation calls it, 256 rows.
+    # Expected: the pass matches nothing, and the graph keeps its one GEMM node with
+    # hadamard_rotate=True and no activation.
+    # Why: the fused act-mul quant does not rotate, so rewriting this GEMM would drop
+    # the rotation and return wrong output silently.
+    _skip_unless_gfx950()
+    import aiter
+
+    real_quant = aiter.per_1x32_f4_quant_hip
+
+    def quant_without_rotation(
+        x: torch.Tensor, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Only the graph is under test, so the run must not depend on the installed
+        # AITER taking hadamard_rotate: drop it and quantize as usual.
+        kwargs.pop("hadamard_rotate", None)
+        return real_quant(x, **kwargs)
+
+    custom_ops = ["none"] + (["+silu_and_mul"] if enable_act_custom_op else [])
+    with _fusion_pass_under_test(custom_ops, monkeypatch) as (fusion_pass, backend):
+        model = ActMulMxfp4HadamardModel(
+            SiluAndMul(), HIDDEN_SIZE, DTYPE, use_asm_gemm=True
+        )
+        monkeypatch.setattr(aiter, "per_1x32_f4_quant_hip", quant_without_rotation)
+
+        x = torch.randn(256, 2 * HIDDEN_SIZE)
+        torch._dynamo.mark_dynamic(x, 0)
+        torch.compile(model, backend=backend)(x)
+
+        assert fusion_pass.matched_count == 0
+        gemm_nodes = [
+            n
+            for n in backend.graph_post_pass.nodes
+            if n.target == torch.ops.vllm.gemm_with_dynamic_quant.default
+        ]
+        assert len(gemm_nodes) == 1
+        gemm_args = _gemm_args_by_name(gemm_nodes[0])
+        assert gemm_args.get("hadamard_rotate") is True
+        assert gemm_args.get("activation") is None
 
 
 @contextmanager

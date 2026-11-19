@@ -953,8 +953,15 @@ class AiterActMulMxfp4GemmPattern(VllmPatternReplacement):
         def _replacement(
             x: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor
         ) -> torch.Tensor:
+            # By keyword: the parameters after out_dtype are shared with other
+            # features (hadamard_rotate), so their order must not matter here.
             return self.gemm_op(
-                x, weight, weight_scale, True, self.out_dtype, None, self.activation
+                x,
+                weight,
+                weight_scale,
+                True,
+                self.out_dtype,
+                activation=self.activation,
             )
 
         return _replacement

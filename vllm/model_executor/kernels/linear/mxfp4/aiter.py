@@ -85,10 +85,15 @@ if is_aiter_found_and_supported():
 
         With `hadamard_rotate`, the HIP quant of the ASM path rotates each
         32-element block of `x` by the orthonormal Sylvester Hadamard matrix
-        (`block_hadamard_rotate`); `weight` must be rotated the same way.
+        (`block_hadamard_rotate`); `weight` must be rotated the same way. It cannot
+        be combined with `activation`, whose fused quant does not rotate.
         """
         assert not (hadamard_rotate and x_scales is not None), (
             "hadamard_rotate needs an unquantized x"
+        )
+        assert not (hadamard_rotate and activation is not None), (
+            "activation and hadamard_rotate are exclusive: the fused act-mul quant "
+            "does not rotate the input"
         )
         # Only AITER releases with the fused rotation take the argument.
         quant_kwargs = {"hadamard_rotate": True} if hadamard_rotate else {}
