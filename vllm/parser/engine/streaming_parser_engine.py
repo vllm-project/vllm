@@ -312,6 +312,8 @@ class StreamingParserEngine:
         if self.state in (
             ParserState.TOOL_PREAMBLE,
             ParserState.TOOL_ARGS,
+            ParserState.TOOL_PARAM_NAME,
+            ParserState.TOOL_PARAM_VALUE,
             ParserState.TOOL_NAME,
             ParserState.TOOL_BETWEEN,
         ):
@@ -375,6 +377,8 @@ class StreamingParserEngine:
             ParserState.TOOL_PREAMBLE,
             ParserState.TOOL_NAME,
             ParserState.TOOL_ARGS,
+            ParserState.TOOL_PARAM_NAME,
+            ParserState.TOOL_PARAM_VALUE,
             ParserState.TOOL_BETWEEN,
         }
     )

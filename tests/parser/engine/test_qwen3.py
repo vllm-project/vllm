@@ -322,6 +322,72 @@ class TestNonStreaming:
             "content": "Document <tool_call> usage",
         }
 
+    def test_markup_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (in-value markup case)
+
+        Tool-call markup inside a genuine call's parameter value is value
+        text: the real call must not be cut short and no phantom call may
+        start. Reported with a write(path, content) call whose content
+        documents the format itself.
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write>\n"
+            "<parameter=path>\n"
+            "/tmp/t.xml\n"
+            "</parameter>\n"
+            "<parameter=content>\n"
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<root>\n"
+            "  <function=foo>\n"
+            "  <parameter=bar>baz</parameter>\n"
+            "</root>\n"
+            "\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "path": "/tmp/t.xml",
+            "content": (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<root>\n"
+                "  <function=foo>\n"
+                "  <parameter=bar>baz</parameter>\n"
+                "</root>\n"
+            ),
+        }
+
+    def test_unclosed_value_still_recovers_at_next_parameter(
+        self, parser, mock_request
+    ):
+        """A genuinely missing </parameter> keeps the current recovery: the
+        open value ends at the next top-level <parameter= opener and the
+        following parameters still parse."""
+        text = (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Dallas\n"
+            "<parameter=state>TX</parameter>\n"
+            "<parameter=unit>fahrenheit</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+        }
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser, mock_request):
@@ -726,6 +792,61 @@ class TestStreaming:
         assert last_call["name"] == "get_weather"
         assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
 
+    def test_streaming_markup_inside_parameter_value(self, parser, mock_request):
+        """Regression issue 58147 (in-value markup case), streaming path."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=write>\n",
+            "<parameter=path>\n",
+            "/tmp/t.xml\n",
+            "</parameter>\n",
+            "<parameter=content>\n",
+            '<?xml version="1.0" encoding="UTF-8"?>\n',
+            "<root>\n",
+            "  <function=foo>\n",
+            "  <parameter=bar>baz</parameter>\n",
+            "</root>\n",
+            "\n",
+            "</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "path": "/tmp/t.xml",
+            "content": (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<root>\n"
+                "  <function=foo>\n"
+                "  <parameter=bar>baz</parameter>\n"
+                "</root>\n"
+            ),
+        }
+
+    def test_streaming_unclosed_value_recovers_at_next_parameter(
+        self, parser, mock_request
+    ):
+        """Streaming keeps the missing-</parameter> recovery: the open value
+        ends at the next top-level opener and later parameters still stream."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Dallas\n",
+            "<parameter=state>TX</parameter>\n",
+            "<parameter=unit>fahrenheit</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+        }
+
     def test_streaming_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
         """Regression issue 58227
         Check that <tool_call> tag is ok inside parameter value
@@ -957,7 +1078,7 @@ class TestArgValueExtender:
         from vllm.parser import qwen3
 
         mock_request.tools = [write_tool]
-        param_re = qwen3._PARAM_RE
+        param_re = qwen3._PARAM_TAG_RE
         matches = 0
 
         class CountingPattern:
@@ -978,7 +1099,7 @@ class TestArgValueExtender:
 
                 return param_re.sub(count, *args)
 
-        monkeypatch.setattr(qwen3, "_PARAM_RE", CountingPattern())
+        monkeypatch.setattr(qwen3, "_PARAM_TAG_RE", CountingPattern())
         text = LOOP_HEAD + LOOP_PARAMS * 200 + LOOP_TAIL
         simulate_tool_streaming(
             qwen3.Qwen3Parser(
@@ -1011,12 +1132,15 @@ class TestArgValueExtender:
         expected = ["", 'a\\"', "\\nb", "", "\\n</param", None]
         assert [extend(d) for d in deltas] == expected
 
-    def test_extender_stops_at_split_next_parameter(self):
+    def test_extender_holds_at_split_next_parameter(self):
+        """An in-value opener may be value text (issue 58147), so the
+        extender holds from it until the value's own closer resolves it,
+        instead of ending the value at the opener."""
         from vllm.parser.qwen3 import _qwen3_arg_value_extender
 
         extend = _qwen3_arg_value_extender("<parameter=k>x")
         assert extend is not None
-        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", None]
+        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", ""]
 
     @pytest.mark.parametrize(
         "raw_args",
