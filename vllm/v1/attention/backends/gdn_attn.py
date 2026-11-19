@@ -606,6 +606,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
+            if checkpoint is not None and self.gdn_prefill_backend == "aiter_flydsl":
+                # FlyDSL cannot store checkpoints, so this step runs the
+                # Triton/FLA prefill, which needs FLA's chunk metadata.
+                chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                    prefill_query_start_loc,
+                    prefill_query_start_loc_cpu,
+                    query_start_loc.device,
+                )
 
         flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
