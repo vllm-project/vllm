@@ -1409,7 +1409,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
         # Videos of different sizes can't be stacked: bypass BatchFeature.
-        videos = {
+        video_pixels = {
             key: combined_inputs.pop(key)
             for key in ("pixel_values_raw_video", "pixel_values_flat_video")
             if key in combined_inputs
@@ -1424,7 +1424,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             batch = BatchFeature(combined_inputs, tensor_type=return_tensors)
             # Raw images for device resize can have different shapes.
             batch.update(image_inputs)
-        batch.update(videos)
+        batch.update(video_pixels)
         if ragged_frames_indices:
             assert isinstance(frames_indices, list)
             batch["frames_indices"] = [
