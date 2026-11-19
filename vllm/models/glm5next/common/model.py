@@ -85,10 +85,10 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    extract_layer_index,
     get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
+    load_layer_expert_weight,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -1134,17 +1134,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 )
                 continue
             if not self.use_mega_moe and "mlp.experts." in name:
-                # Each layer's experts load their own tensors, e.g. into the
-                # online quantization staging parameters of fused shared
-                # experts, which differ per layer under per-layer quantization.
+                # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue
-                layer_prefix, expert_name = name.split("mlp.experts.", 1)
-                experts = self.layers[extract_layer_index(layer_prefix)].mlp.experts
-                loaded_params.update(
-                    f"{layer_prefix}mlp.experts.{loaded}"
-                    for loaded in experts.load_weights([(expert_name, loaded_weight)])
-                )
+                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
                 continue
 
             name, loaded_weight = _mla_proj_checkpoint_tensor(

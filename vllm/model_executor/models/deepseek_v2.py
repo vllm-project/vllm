@@ -130,6 +130,7 @@ from .utils import (
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
+    load_layer_expert_weight,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -1586,17 +1587,10 @@ class DeepseekV2Model(nn.Module):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
             if "mlp.experts." in name:
-                # Each layer's experts load their own tensors, e.g. into the
-                # online quantization staging parameters of fused shared
-                # experts, which differ per layer under per-layer quantization.
+                # Per layer, not through a model-wide expert mapping.
                 if is_pp_missing_parameter(name, self):
                     continue
-                layer_prefix, expert_name = name.split("mlp.experts.", 1)
-                experts = self.layers[extract_layer_index(layer_prefix)].mlp.experts
-                loaded_params.update(
-                    f"{layer_prefix}mlp.experts.{loaded}"
-                    for loaded in experts.load_weights([(expert_name, loaded_weight)])
-                )
+                loaded_params |= load_layer_expert_weight(self, name, loaded_weight)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

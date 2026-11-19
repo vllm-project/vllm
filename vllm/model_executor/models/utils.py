@@ -569,6 +569,38 @@ def get_fused_shared_expert_layers(
     return frozenset(fused_layers)
 
 
+def load_layer_expert_weight(
+    model: nn.Module,
+    name: str,
+    loaded_weight: torch.Tensor,
+    experts_prefix: str = "mlp.experts",
+) -> set[str]:
+    """Load an expert tensor through the experts loader of its own layer.
+
+    For hand-written `load_weights` loops, which `AutoWeightsLoader` does not
+    descend into. The layer's `RoutedExperts.load_weights` resolves that layer's
+    parameters, e.g. the online quantization staging parameters of fused shared
+    experts, which differ per layer under per-layer quantization: a model-wide
+    expert mapping cannot.
+
+    Args:
+        model: Module `name` is relative to.
+        name: Expert tensor name, e.g. `layers.3.mlp.experts.0.gate_proj.weight`.
+        loaded_weight: The checkpoint tensor.
+        experts_prefix: Module name of the routed experts in a layer.
+
+    Returns:
+        The names of the loaded parameters, relative to `model`.
+
+    """
+    layer_prefix, expert_name = name.split(f"{experts_prefix}.", 1)
+    experts = model.get_submodule(f"{layer_prefix}{experts_prefix}")
+    return {
+        f"{layer_prefix}{experts_prefix}.{loaded}"
+        for loaded in experts.load_weights([(expert_name, loaded_weight)])
+    }
+
+
 def maybe_fuse_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
