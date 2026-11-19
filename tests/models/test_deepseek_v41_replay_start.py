@@ -26,14 +26,8 @@ WINDOW = 4
 # Group 0 is prefix-cacheable (compressed KV), group 1 is the replayed window.
 KV_CACHE_CONFIG = SimpleNamespace(
     kv_cache_groups=[
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(prefix_cacheable=True, prefix_replay_tokens=0)
-        ),
-        SimpleNamespace(
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=WINDOW
-            )
-        ),
+        SimpleNamespace(prefix_cacheable=True, prefix_replay_tokens=0),
+        SimpleNamespace(prefix_cacheable=False, prefix_replay_tokens=WINDOW),
     ]
 )
 

@@ -70,7 +70,12 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (
     AttnMetadataCudaGraphs,
 )
+from vllm.models.deepseek_v41.nvidia.specialized_decode.sampling.sharded_markov import (  # noqa: E501
+    RANK_DIM,
+    make_sharded_sampler,
+)
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 pytestmark = pytest.mark.skipif(
     not (
@@ -255,7 +260,8 @@ def _fma_finalize(rows: torch.Tensor, permuted: torch.Tensor, weights: torch.Ten
 def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     """Route + GEMM pair: the routed rows bitwise those of FlashInfer's
     TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp (plus FP32
-    summation-order error) of its finalized output."""
+    summation-order error) of its finalized output; the finalize kernel's (the
+    DSpark draft's in-layer finalize) bitwise the same FMA chain."""
     generator = torch.Generator().manual_seed(rows)
     gemm = _gemm(experts)
 
@@ -286,6 +292,8 @@ def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
+    # The finalize kernel computes the same FMA chain.
+    assert torch.equal(gemm.finalize(out).cpu(), ours)
     # FlashInfer may add the k products in another order (newer releases split
     # them into groups), so allow FP32's reordering error on top of the ulp.
     magnitude = (out.expert_weights.cpu().double()[..., None] * routed.cpu()).abs()
@@ -1327,6 +1335,126 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
         for k, want in expected.items():
             assert torch.equal(seen[k], want), (step, k)
             assert torch.equal(replayed[k], want), (step, k)
+
+
+# ------------------------------------------------- DSpark Markov sampling
+
+MARKOV_VOCAB = 129280  # DeepSeek-V4.1's vocabulary
+MARKOV_STEPS = 5
+MARKOV_QUERY = 6  # draft query rows per request; the anchor token is the first
+
+
+def _markov_case(dtype: torch.dtype) -> SimpleNamespace:
+    """Four request rows, the last a padding row (request-state index -1), at
+    temperatures 0, 1 and 0.6. The Markov weights are integer multiples of
+    1/16, so every bias element is an exact sum whatever the reduction order,
+    and cuBLAS and the sharded kernel round it to BF16 alike."""
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
+    rows, max_reqs = 4, 6
+
+    def ternary(*shape):
+        values = torch.randint(-1, 2, shape, generator=gen, device=DEVICE)
+        return values.to(torch.bfloat16)
+
+    states = torch.tensor([3, 0, 5, -1], device=DEVICE)
+    temperature = torch.zeros(max_reqs, dtype=torch.float32, device=DEVICE)
+    temperature[states[:3]] = torch.tensor([0.0, 1.0, 0.6], device=DEVICE)
+    base = torch.randn(rows, MARKOV_STEPS, MARKOV_VOCAB, generator=gen, device=DEVICE)
+    return SimpleNamespace(
+        rows=rows,
+        max_reqs=max_reqs,
+        embed=ternary(MARKOV_VOCAB, RANK_DIM),
+        head=ternary(MARKOV_VOCAB, RANK_DIM) / 16,
+        base=(base * 4).to(dtype),
+        input_ids=torch.randint(
+            0,
+            MARKOV_VOCAB,
+            (rows * MARKOV_QUERY,),
+            generator=gen,
+            device=DEVICE,
+            dtype=torch.int32,
+        ),
+        idx_mapping=states.repeat_interleave(MARKOV_STEPS),
+        sample_pos=torch.arange(rows * MARKOV_STEPS, device=DEVICE) + 100,
+        temperature=temperature,
+        seeds=torch.randint(0, 2**62, (max_reqs,), generator=gen, device=DEVICE),
+    )
+
+
+def _markov_outputs(case: SimpleNamespace) -> tuple[torch.Tensor, torch.Tensor]:
+    """A zeroed draft-logits cache (in the base logits' dtype, which the BF16
+    bias promotes to) and draft-token buffer."""
+    cache = torch.zeros(
+        case.max_reqs,
+        MARKOV_STEPS,
+        MARKOV_VOCAB,
+        dtype=case.base.dtype,
+        device=DEVICE,
+    )
+    tokens = torch.zeros(case.max_reqs, MARKOV_STEPS, dtype=torch.int64, device=DEVICE)
+    return cache, tokens
+
+
+def _markov_eager(case, cache, tokens):
+    """The speculator's eager loop: per position, the Markov bias of the
+    previous token, the logits add and `gumbel_sample`."""
+    prev = case.input_ids[::MARKOV_QUERY].long()
+    idx_mapping = case.idx_mapping.view(case.rows, MARKOV_STEPS)
+    sample_pos = case.sample_pos.view(case.rows, MARKOV_STEPS)
+    for i in range(MARKOV_STEPS):
+        logits = case.base[:, i] + case.embed[prev] @ case.head.t()
+        prev = gumbel_sample(
+            logits,
+            idx_mapping[:, i],
+            case.temperature,
+            case.seeds,
+            sample_pos[:, i] - 1,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=torch.tensor(i, dtype=torch.int32, device=DEVICE),
+        )
+        tokens[: case.rows, i] = prev
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_sharded_markov_chain_matches_eager(dtype):
+    """The vocabulary-sharded chain on one rank (the whole head) draws the
+    eager loop's tokens and caches its logits bitwise, eagerly and replayed
+    from a CUDA graph."""
+    case = _markov_case(dtype)
+    want_cache, want_tokens = _markov_outputs(case)
+    _markov_eager(case, want_cache, want_tokens)
+    sampler = make_sharded_sampler(
+        case.embed, case.head, MARKOV_VOCAB, MARKOV_STEPS, dtype, None, case.max_reqs
+    )
+    assert sampler is not None and sampler.supports(case.rows, case.base)
+    cache, tokens = _markov_outputs(case)
+
+    def run():
+        sampler.fork_noise(case.idx_mapping, case.sample_pos, case.seeds)
+        sampler.join_noise()
+        sampler.sample(
+            case.base,
+            case.input_ids,
+            MARKOV_QUERY,
+            case.idx_mapping,
+            case.temperature,
+            cache,
+            tokens,
+        )
+
+    graph, _ = _capture(run)
+    # Padding rows draw nothing that is read.
+    real = case.rows - 1
+    for replay in range(3):
+        if replay:
+            cache.zero_()
+            tokens.zero_()
+            graph.replay()
+            torch.accelerator.synchronize()
+        assert torch.equal(tokens[:real], want_tokens[:real]), replay
+        assert torch.equal(cache, want_cache), replay
 
 
 @pytest.mark.parametrize("rows", [1, 12, 48, 192])
