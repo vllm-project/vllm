@@ -8,6 +8,7 @@ from bisect import bisect_right
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -658,7 +659,8 @@ def measure_kv_cache_blocks(
         if isinstance(process_memory, int):
             process_memory_increase = process_memory - init_process_memory
     transient_peak = kv_cache.reserved_headroom_bytes
-    measured = dict(
+    measure = partial(
+        measure_kv_cache_bytes,
         init_free_memory=init_free_memory,
         free_memory=free_memory,
         committed_bytes=kv_cache.physical_bytes,
@@ -666,7 +668,7 @@ def measure_kv_cache_blocks(
         process_memory_increase=process_memory_increase,
         torch_reserve_growth_bytes=kv_cache.torch_reserve_growth_bytes,
     )
-    available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
+    available = measure(requested_memory=requested_memory)
     utilization = vllm_config.cache_config.gpu_memory_utilization
     # Explicit values just under 1.0 are mostly habits from estimate-based
     # sizing, which needed that headroom; this sizing measures it instead. Some
@@ -674,10 +676,7 @@ def measure_kv_cache_blocks(
     # lists so that those users can keep their setting.
     if utilization is not None and 0.7 < utilization < 1.0:
         # A budget of all memory free at startup is bound by the device alone.
-        withheld = (
-            measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
-            - available
-        )
+        withheld = measure(requested_memory=init_free_memory) - available
         if withheld >= 1 << 30:
             logger.warning_once(
                 "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "

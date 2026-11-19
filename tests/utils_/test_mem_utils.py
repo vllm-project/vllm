@@ -288,7 +288,7 @@ def _hold_device_memory(num_bytes: int, ready, release):
     import torch
 
     buf = torch.empty(num_bytes, dtype=torch.uint8, device="cuda")
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     ready.set()
     release.wait()
     del buf
@@ -301,7 +301,8 @@ def test_memory_profiling_ignores_other_process_allocations():
     _warmup = torch.zeros(1, device="cuda")
     del _warmup
     torch.accelerator.empty_cache()
-    if current_platform.get_process_memory_usage(torch.cuda.current_device()) is None:
+    device_id = torch.accelerator.current_device_index()
+    if current_platform.get_process_memory_usage(device_id) is None:
         pytest.skip("platform cannot report per-process device memory usage")
 
     baseline_snapshot = MemorySnapshot()
