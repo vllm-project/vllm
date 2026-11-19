@@ -128,7 +128,7 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 the same tests, and report a clear error when `flydsl` is not installed.
 
 Octave is enabled only on RDNA3 (including RDNA3.5) and CDNA3: gfx1100,
-gfx1151 and gfx942 (MI300), validated on gfx1100 and gfx942. The backend
+gfx1151 and gfx942 (MI300), validated on gfx1100, gfx1151 and gfx942. The backend
 rejects any other family at selection (`supports_compute_capability`, via
 `get_rdna_version()` and `get_cdna_version()`), and the kernel tests skip
 elsewhere. CMake builds the Octave sources and registers the ops only when the
