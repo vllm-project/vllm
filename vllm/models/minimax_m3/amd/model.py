@@ -58,7 +58,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     RoutedExperts,
     RoutedScaleMode,
-    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -2018,21 +2017,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
-        # expert, include the appended slot (id == num_local_experts).
-        # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
-        num_experts = self.config.num_local_experts
-        if self.fused_shared_expert_layers:
-            num_experts += 1
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=num_experts,
-        )
-
 
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -2124,9 +2108,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -2340,9 +2321,6 @@ class MiniMaxM3SparseForConditionalGeneration(
 
     def get_model_state_cls(self):
         return self.language_model.get_model_state_cls()
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.language_model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
