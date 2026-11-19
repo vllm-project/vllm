@@ -77,6 +77,83 @@ What request-wise gives up:
 5. The trainer keeps plans and reference counts.
 6. The engine removes objects it wrote but never delivered.
 
+## Fault tolerance
+
+This section applies to both designs. It covers what the engine, the store and the trainer do when a write, a read, the store or the job's coordinator fails. Each part says whether it is implemented or planned.
+
+### Publication and reads
+
+- The engine lists a key in the response when it starts writing the object, not when the write completes. The trainer may read as soon as the response arrives.
+- Mooncake publishes an object only when its put completes. A reader sees either no object or the whole object, never part of one.
+- Readers poll with a deadline. `read_aux_rows` retries a missing key until its timeout, which defaults to 600 s and should be no shorter than `object_put_stall_timeout_s`.
+- **Write barrier.** Take a request that has ended. Once every engine that served it has completed a pause that started afterwards (for example the pause before a weight update, or a sleep), every object the request wrote is in the store. This is the pause rule of the [protocol](protocol.md) for the session design, and E7 and F5 above for the request-wise design. A key still missing after the barrier is lost, not late.
+
+Status: implemented in both designs.
+
+### Failure of one request or one object
+
+Such a failure explicitly fails the samples that need the object. The rest of the batch trains as usual.
+
+- **Writes.** The engine retries a put the store refuses until `object_put_stall_timeout_s` (600 s by default). After that the engine stops with a write error, and its steps and pauses fail instead of hanging. Implemented.
+- **Outputs no one reads.** These are the objects of aborted requests, of final outputs the frontend dropped, and of `generate` calls that were cancelled. The request-wise design removes them in the engine (E7). The session design removes them with the session. Implemented.
+- **Reads.** The trainer masks a sample whose object is missing:
+  - at once, if the object's request has passed the write barrier;
+  - otherwise after waiting up to the read deadline, since the write may still land.
+
+  All ranks agree on the masked samples before the step. This is implemented in a trainer integration outside vLLM.
+
+Evidence comes from deleting objects on purpose before the trainer read them:
+
+- **Synchronous training, 3 steps.** 17 objects were deleted, and 17 samples were masked on every rank. The read on the critical path took 0.05 to 0.53 s per step. Before reads used the write barrier, it took 85 to 90 s per step, because three read layers each waited out a 30 s deadline.
+- **Fully asynchronous training, 8 steps.** 3 samples were masked, at a cost of at most 0.42 s per step.
+- **Not exercised.** A trajectory that finished after the last barrier and is read at once. A missing object there waits out the deadline.
+
+### Store failure
+
+- **A holder is lost.** The objects in its memory segment and on its SSD are lost, so many reads miss at once.
+- **The master is lost.** All metadata is lost, so no object can be found.
+
+Planned handling:
+
+- **Engine.** A write that cannot reach the store fails at the write deadline instead of hanging.
+- **Trainer.** Missing objects in bulk count as a store failure. Signs are the share of missing samples in a batch rising above a threshold, or store connection errors. The trainer then drops the batch and generates it again, instead of waiting out each read.
+- **Restart.** Start a new master and new holders on new directories, under a new key prefix, and let the engines and readers reconnect. Sessions in flight are abandoned.
+
+Status: planned. Tests that kill a holder and that kill the master are in progress.
+
+### Coordinator crash
+
+The coordinator (the driver, or a ledger actor) owns plans and references that the store does not hold. If it crashes, the job restarts.
+
+| Rule | Status |
+| --- | --- |
+| Each run writes under its own `object_key_prefix`. The store, its holders and their SSD directories belong to the job, and are deleted when it ends. | Implemented in the trainer integration (aux-fetch); no vLLM-side code needed |
+| On resume from a checkpoint, batches whose plans reference objects of the crashed run are not replayed. They are dropped and generated again. | Implemented in the trainer integration (aux-fetch); no vLLM-side code needed |
+| When the store outlives a run, the next run removes the previous run's prefix at startup, after the engines that wrote under it have stopped (`remove_by_regex(aux_prefix_pattern(prefix), True)`). | Planned |
+| A lease or TTL removes objects whose owner is gone. It is only a fallback, for stores shared across runs. | Planned |
+
+### Removed objects that reappear (Mooncake 0.3.14)
+
+- **Cause.** This is a bug in the Mooncake 0.3.14 master, and it needs offload to SSD (`offload_on_evict`).
+  - The trigger is a removal that lands after a holder has taken the object's offload task, but before the holder reports success.
+  - `Remove` does not check for an offload in progress: `CheckRemovable` ignores `offloading_task`. So the removal erases the key and drops the task.
+  - The holder still finishes writing the bucket and calls `NotifyOffloadSuccess`. That call finds the key gone and registers it again through `AddReplicaForRetainedClient`, with one `LOCAL_DISK` replica and no memory replica (`master_service.cpp`).
+- **Evidence from a validation run.** Per-key engine logs show the engine wrote one such key once, 46 s before the removal. The removal returned 0, and 0.12 s later the key existed again with one complete `LOCAL_DISK` replica. All 21 reappeared keys whose replicas were inspected had only that replica. A new put would have created a memory replica.
+- **Evidence from a minimal reproduction.** This ran without vLLM, on stock Mooncake 0.3.14. It overfills the memory segment, then removes every key while the holder writes a bucket. Each time, exactly one whole bucket came back within 0.5 s: 16 objects of 16 MB, or 4 objects of 64 MB.
+
+  | Objects | Segment | SSD | Removed | Reappeared |
+  | --- | --- | --- | --- | --- |
+  | 16 MB | 1 GB | local | 1,152 | 32 |
+  | 64 MB | 2 GB | local | 576 | 4 |
+  | 16 MB | 1 GB | network file system | 1,152 | 16 |
+
+- **Effect.**
+  - The key is readable again, and its disk space is held until the holder's directory is deleted.
+  - Readers are not affected, because no plan references a released key.
+  - Its contents may not match the original object, because the holder reads the object's memory after the removal may have freed it. This case was not tested.
+- **Handling.** After a removal, check the keys again and remove what reappeared.
+- **Fix.** `NotifyOffloadSuccess` should not register a key that no longer exists; the holder should mark the bucket entry dead instead. This is not implemented.
+
 ## Evidence
 
 Both branches were validated with a closed-loop simulator. A driver runs agentic sessions against one engine, updates the weights on a timer, reads every delivered object as a trainer would, and releases objects by the rules of each design. After every response it reads back the newly delivered rows and keeps a digest per position. Planted faults (dropped keys, double releases, removals of another session's objects, shifted rows) confirm that each class of failure is detected.
@@ -147,10 +224,7 @@ A run is accepted only if all of the following hold:
 
 **Known limits.**
 
-- **Objects that reappear after a release.** A few objects (6 to 9 per run, in some runs of either design) were present again after their owner removed them successfully.
-  - Per-key engine logs show that the engine wrote each of them once, minutes before the release, and never again.
-  - The suspected source is Mooncake 0.3.14 registering a removed key again when an offload to SSD it had already taken completes.
-  - The root cause is pending. Until then, check after a release and remove what reappeared.
+- **Objects that reappear after a release**: 6 to 9 keys per run, outside planted faults, in a few runs of either design. Mooncake 0.3.14 registers them again ([fault tolerance](#fault-tolerance)).
 - Mooncake 0.3.14 does not free SSD space when objects are removed (RFC kvcache-ai/Mooncake#3220).
 - A failed synchronous KV load remains a documented limit of both designs. The runs cover only the injected path.
 - The request-wise branch's `request_wise.md` lists that design's other limits: outputs lost after `generate` yielded them, and the versions of listed products, which are not returned.

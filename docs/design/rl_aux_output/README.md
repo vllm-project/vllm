@@ -68,6 +68,7 @@ Later:
 | [Scenarios](scenarios.md) | Sizing: bytes per position, KV tier capacity, object pool, object counts |
 | [Experiments](experiments.md) | Validation results, open items, and earlier measurements |
 | [Request-wise design](request_wise.md) | An alternative where objects belong to the request that wrote them: names without versions, the `held` rule, release by reference count, and a comparison with this design |
+| [Fault tolerance](request_wise.md#fault-tolerance) | For both designs: publication and the write barrier, failures of one object, of the store and of the coordinator, and removed objects that Mooncake registers again |
 
 ## Status
 
