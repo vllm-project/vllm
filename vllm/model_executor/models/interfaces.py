@@ -1835,8 +1835,12 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
         """Set which layers should output auxiliary hidden states for EAGLE-3.
 
         Args:
-            layers: Tuple of layer indices that should output auxiliary
-                hidden states.
+            layers: Aux layer ids. Id k captures the hidden state entering
+                layer k, i.e. the output of layer k-1; id 0 is the embedding
+                output. This matches capture sites that call
+                _maybe_add_hidden_state(..., idx + 1, ...) after each
+                decoder layer: ids (2, 14, 27) capture the outputs of layers
+                (1, 13, 26).
 
         """
         holder = get_eagle_decoder(self)
