@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Layout of the row each rank reports per step.
-ROW_SIZE = 14
+ROW_SIZE = 15
 (
     _DONE,  # a step with scheduled tokens finished since the previous sync
     _PERIOD,  # seconds since the previous sync
@@ -49,8 +49,9 @@ ROW_SIZE = 14
     _QUEUED,  # requests with prefill work, 0 if blocked
     _SLACK,  # min over them of (T - age - (k - 1) * e) / k
     _ARRIVED,  # requests that arrived since the previous sync
-    _ARRIVED_UNCACHED,  # their prompt tokens not in the prefix cache
-    _ARRIVED_CACHED,  # their prompt tokens in the prefix cache
+    _ADMITTED,  # requests scheduled for the first time since the previous sync
+    _ADMITTED_UNCACHED,  # their prompt tokens past the local and external hits
+    _ADMITTED_CACHED,  # their prompt tokens covered by those hits
 ) = range(ROW_SIZE)
 
 # Time constant of the arrival rate and request size estimates.
@@ -242,7 +243,7 @@ class PrefillHold:
         self._t_dec_at = 0.0
         self._clock = 0.0
         self._rate = 0.0
-        self._w_reqs = 0.0
+        self._w_admitted = 0.0
         self._w_uncached = 0.0
         self._w_cached = 0.0
         self._hold_start: float | None = None
@@ -252,7 +253,8 @@ class PrefillHold:
 
         # Local state.
         self._last_sync: float | None = None
-        self._arrived = [0, 0, 0]
+        self._arrived = 0
+        self._admitted = [0, 0, 0]
         self._cached_tokens: dict[str, int] = {}
         # (output, prefill tokens, attention work) of scheduled steps awaiting
         # their output, and those of the last finished step not yet reported.
@@ -271,21 +273,29 @@ class PrefillHold:
     def on_arrival(
         self, request: "Request", num_cached_tokens: Callable[["Request"], int]
     ) -> None:
-        cached_tokens = num_cached_tokens(request)
-        self._cached_tokens[request.request_id] = cached_tokens
-        self._arrived[0] += 1
-        self._arrived[1] += request.num_tokens - cached_tokens
-        self._arrived[2] += cached_tokens
+        """Counts an arrival toward the rate. Its size is taken when it is first
+        scheduled (`on_scheduled`): a KV connector's hit is unknown until the
+        scheduler looks the request up, so the local probe here only stands in
+        for the queue scan until then."""
+        self._cached_tokens[request.request_id] = num_cached_tokens(request)
+        self._arrived += 1
 
     def on_scheduled(
         self, output: "SchedulerOutput", requests: Mapping[str, "Request"]
     ) -> None:
         """Records a scheduled step's prefill tokens and attention work, the
         sum over prefill chunks of `n * (ctx + n / 2)` for `n` new tokens after
-        `ctx` computed ones. Must run before the scheduler advances
-        `num_computed_tokens`, so that `is_prefill_chunk` is pre-step."""
+        `ctx` computed ones, and the sizes of requests scheduled for the first
+        time. Must run before the scheduler advances `num_computed_tokens`, so
+        that `is_prefill_chunk` is pre-step."""
         if output.total_num_scheduled_tokens == 0:
             return
+        for new in output.scheduled_new_reqs:
+            request = requests[new.req_id]
+            if request.num_preemptions == 0:
+                self._admitted[0] += 1
+                self._admitted[1] += request.num_tokens - new.num_computed_tokens
+                self._admitted[2] += new.num_computed_tokens
         num_scheduled = output.num_scheduled_tokens
         tokens, attn = 0, 0.0
         # Every request admitted from the waiting queue starts a prefill.
@@ -338,8 +348,10 @@ class PrefillHold:
             self._done = None
             row[_DONE] = 1.0
             row[_DONE_TOKENS], row[_DONE_ATTN] = done
-        row[_ARRIVED], row[_ARRIVED_UNCACHED], row[_ARRIVED_CACHED] = self._arrived
-        self._arrived = [0, 0, 0]
+        row[_ARRIVED] = self._arrived
+        row[_ADMITTED], row[_ADMITTED_UNCACHED], row[_ADMITTED_CACHED] = self._admitted
+        self._arrived = 0
+        self._admitted = [0, 0, 0]
 
         chunks = state.prefill_chunks
         if len(self._cached_tokens) > 2 * state.num_waiting + 256:
@@ -435,11 +447,13 @@ class PrefillHold:
         decay = math.exp(-period / _RATE_TAU_S)
         arrived = sum(r[_ARRIVED] for r in rows)
         self._rate = self._rate * decay + arrived / _RATE_TAU_S
-        self._w_reqs = self._w_reqs * decay + arrived
+        # Sizes have their own count: a hold delays first scheduling, not
+        # arrivals, so dividing by arrivals would shrink them over every hold.
+        self._w_admitted = self._w_admitted * decay + sum(r[_ADMITTED] for r in rows)
         self._w_uncached = self._w_uncached * decay + sum(
-            r[_ARRIVED_UNCACHED] for r in rows
+            r[_ADMITTED_UNCACHED] for r in rows
         )
-        self._w_cached = self._w_cached * decay + sum(r[_ARRIVED_CACHED] for r in rows)
+        self._w_cached = self._w_cached * decay + sum(r[_ADMITTED_CACHED] for r in rows)
 
         reason = self._decide(rows)
         self.hold = reason in ("wait", "idle")
@@ -483,10 +497,10 @@ class PrefillHold:
         if not any(r[_WORK] for r in rows):
             # The next step may admit what arrives before it: hold if a typical
             # request alone on one rank would be held.
-            if self._w_reqs <= 0:
+            if self._w_admitted <= 0:
                 return "nothing"
-            size = min(self._w_uncached / self._w_reqs, self.budget)
-            ctx = self._w_cached / self._w_reqs
+            size = min(self._w_uncached / self._w_admitted, self.budget)
+            ctx = self._w_cached / self._w_admitted
             x = [size] + [0.0] * (len(rows) - 1)
             attn = [size * (ctx + size / 2)] + [0.0] * (len(rows) - 1)
             reason = self._judge(x, attn, blocked, decodes, 1, 0.0, self.ttft_target)
@@ -534,8 +548,8 @@ class PrefillHold:
         # evenly over the ranks.
         wait = min(t_dec, h)
         rate = self._rate / len(x)
-        size = self._w_uncached / self._w_reqs if self._w_reqs > 0 else 0.0
-        ctx = self._w_cached / self._w_reqs if self._w_reqs > 0 else 0.0
+        size = self._w_uncached / self._w_admitted if self._w_admitted > 0 else 0.0
+        ctx = self._w_cached / self._w_admitted if self._w_admitted > 0 else 0.0
         budget = self.budget
         p_new = 1.0 - math.exp(-rate * wait)
         add = [

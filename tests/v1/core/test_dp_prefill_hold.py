@@ -85,9 +85,8 @@ def _warm(
     _measure(hold, rng, 100, max_work, prompt_len)
     # 50 req/s of 4K (or `prompt_len`) uncached tokens each.
     uncached = prompt_len or 4000
-    hold.update(
-        [_row(arrived=1500 / RANKS, arrived_uncached=uncached * 1500 / RANKS)] * RANKS
-    )
+    n = 1500 / RANKS
+    hold.update([_row(arrived=n, admitted=n, admitted_uncached=uncached * n)] * RANKS)
 
 
 def _one_rank_queued(slack: float = T) -> list[list[float]]:
@@ -222,11 +221,33 @@ def test_local_row_offers_one_budget_and_scales_slack_by_releases_left():
     (req,) = create_requests(num_requests=1, num_tokens=1500)
     scheduler.add_request(req)
     row = hold.local_row()
-    assert row[dph._ARRIVED] == 1 and row[dph._ARRIVED_UNCACHED] == 1500
+    assert row[dph._ARRIVED] == 1
     assert row[dph._X] == 500
     assert row[dph._X_ATTN] == 500 * 250
     assert row[dph._QUEUED] == 1
     assert row[dph._SLACK] == pytest.approx(10.0 / 3, abs=0.1)
+
+
+def test_sizes_arrivals_past_external_hits():
+    """An arrival counts toward the rate at once, but its size is taken when it
+    is first scheduled: tokens a KV connector loads are no prefill, and the
+    scheduler learns of them only at its lookup."""
+    scheduler, hold = _hold_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=128, is_async=True)
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=200)
+    scheduler.add_request(req)
+    row = hold.local_row()
+    assert row[dph._ARRIVED] == 1 and row[dph._ADMITTED] == 0
+
+    output = scheduler.schedule()
+    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    _finish_step(scheduler, output, finished_recving={req.request_id})
+    scheduler.schedule()
+    row = hold.local_row()
+    assert row[dph._ARRIVED] == 0 and row[dph._ADMITTED] == 1
+    assert row[dph._ADMITTED_UNCACHED] == 200 - 128
+    assert row[dph._ADMITTED_CACHED] == 128
 
 
 class _Clock:
