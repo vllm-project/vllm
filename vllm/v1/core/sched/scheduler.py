@@ -765,14 +765,22 @@ class Scheduler(SchedulerInterface):
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
+        # Under pipeline parallelism a lone prefill is still chunked: its
+        # chunks then overlap across the stages instead of one chunk crossing
+        # every stage alone.
         num_running, num_waiting = self.get_request_counts()
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
+            if self.scheduler_config.enable_chunked_prefill
+            and (num_eligible_reqs > 1 or self.use_pp)
             else 0
         )
-        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+        if (
+            long_prefill_token_threshold > 0
+            and self.adaptive_long_prefill_threshold
+            and num_eligible_reqs > 1
+        ):
             # Floor the cap at a fair share of the input budget so it never
             # cuts a request below max_num_batched_tokens / num requests.
             long_prefill_token_threshold = max(

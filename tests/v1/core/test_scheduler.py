@@ -1899,6 +1899,26 @@ def test_long_prefill_threshold_ignored_when_alone():
     assert output.num_scheduled_tokens[request.request_id] == 1024
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_long_prefill_threshold_applies_to_lone_request_with_pp(adaptive: bool):
+    """With pipeline parallelism, a lone long prefill is still chunked so that
+    its chunks overlap across the pipeline stages. The adaptive fair-share
+    floor (the whole budget for one request) does not undo that."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        long_prefill_token_threshold_adaptive=adaptive,
+        async_scheduling=True,
+        pipeline_parallel_size=2,
+    )
+    request = create_requests(num_requests=1, num_tokens=1000)[0]
+    scheduler.add_request(request)
+
+    # Further chunks are schedulable before the earlier ones' outputs return.
+    chunks = [scheduler.schedule().total_num_scheduled_tokens for _ in range(3)]
+    assert chunks == [400, 400, 200]
+
+
 def test_long_prefill_threshold_applies_with_other_requests():
     """The threshold caps the prefill as soon as another request is queued."""
     scheduler = create_scheduler(

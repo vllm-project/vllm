@@ -107,7 +107,8 @@ class SchedulerConfig:
     Ignored when chunked prefill is disabled.
 
     The cap is not applied when the request is the only one in the batch,
-    since there is no other request for it to starve."""
+    since there is no other request for it to starve, except with pipeline
+    parallelism, where the chunks of a lone prompt overlap across stages."""
 
     long_prefill_token_threshold_adaptive: bool = Field(default=False)
     """Floor the effective long prefill token threshold at a fair share of
