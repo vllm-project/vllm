@@ -1076,6 +1076,7 @@ class ParallelEngramEmbedding(nn.Module):
             self.part_num_embeddings = min(
                 self.peer_rows, self.vocab_end_idx - row_start
             )
+        self._skip_layerwise_reload = self.cpu_offload and self.peer_rows == 0
         self._num_sms = torch.cuda.get_device_properties(
             torch.accelerator.current_device_index()
         ).multi_processor_count
