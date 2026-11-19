@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 
@@ -9,9 +11,11 @@ import pytest
 from vllm.config.cache import CacheConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import (
+    _config_hash_cache,
     get_attr_docs,
     get_compile_factors,
     hash_config,
+    hash_config_cached,
     hash_factors,
     normalize_value,
 )
@@ -43,6 +47,21 @@ class SimpleConfig:
 
 class DummyLogprobsMode(Enum):
     RAW_LOGITS = "raw_logits"
+
+
+def test_hash_config_cached_does_not_leave_stale_object_ids():
+    """Released configs must not leave hashes that a reused object ID can hit."""
+    config = CacheConfig()
+    key = id(config)
+    config_ref = weakref.ref(config)
+    assert hash_config_cached(config) == hash_config(config)
+    assert key in _config_hash_cache
+
+    del config
+    gc.collect()
+
+    assert config_ref() is None
+    assert key not in _config_hash_cache
 
 
 def test_hash_factors_deterministic():
