@@ -123,9 +123,6 @@ class EngramPool:
         fetch_mode: Where `EngramPrefetch` fetches: "sync" or "async".
         thp_dir: A tmpfs mounted `huge=always` for host shards, so they
             get transparent huge pages (RDMA host shards only).
-        rdma_owner_loopback: Keep each same-node pair's RDMA traffic on the
-            owner's NIC, for fabrics whose NICs of a node cannot reach each
-            other.
 
     """
 
@@ -140,7 +137,6 @@ class EngramPool:
         rdma_inflight: int = 8,
         fetch_mode: str = "sync",
         thp_dir: str | None = None,
-        rdma_owner_loopback: bool = False,
     ) -> None:
         self.group, self.fetch_mode = group, fetch_mode
         self._check_same(("pool", transport, host_shards))
@@ -162,7 +158,6 @@ class EngramPool:
                 max_tables,
                 rdma_inflight,
                 thp_dir,
-                rdma_owner_loopback,
             )
         self._where = "host memory" if host_shards else "HBM"
         self._buffer: torch.Tensor | None = None
@@ -279,7 +274,6 @@ def get_engram_pool(max_items: int, max_row_bytes: int, max_tables: int = 1):
         config.peer_group_rdma_inflight,
         config.peer_group_fetch,
         config.peer_group_thp_dir,
-        config.peer_group_rdma_owner_loopback,
     )
 
 

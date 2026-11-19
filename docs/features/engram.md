@@ -216,8 +216,8 @@ launch. `peer_group_transport` picks how rows move:
   with `cpu_offload` enabled, into RDMA WRITEs (RoCE v2 or InfiniBand, through
   libibverbs) that the fetching GPU builds and hands to the owner itself (it
   rings the NIC's doorbell); no SM moves rows. Each GPU uses the active mlx5
-  RDMA device closest to it on PCIe (`VLLM_ENGRAM_RDMA_DEVICES` limits the
-  candidates) and starts a proxy process that posts the WRs it is handed.
+  RDMA device closest to it (behind its PCIe switch, else on its NUMA node)
+  and starts a proxy process that posts the WRs it is handed.
   Peers exchange memory keys at startup, so the network must be trusted.
 
 `peer_group_fetch` picks where the fetch kernels run: `sync` (default) on the
@@ -235,14 +235,15 @@ another's decode fetches only slightly while prefill fetches keep their rate.
 The DP ranks of one engine step together, so it does not matter within one
 engine.
 
-On rail-optimized fabrics, where the NICs of one node cannot reach each
-other, set `peer_group_rdma_owner_loopback` so traffic between two GPUs of a
-node stays on one NIC. With `cpu_offload`, point `peer_group_thp_dir` at a
-tmpfs mounted with `huge=always` to put host shards on huge pages: NICs gather
-rows at random and miss their address-translation cache on nearly every 4 KB
-page. Mount it with
-`mount -t tmpfs -o huge=always,size=<size> none <dir>`, or inside
-`unshare -Urm` without root.
+With `cpu_offload`, each GPU's NIC reads the host shards of its own node
+itself, so the engines of a node must run as one user in one PID namespace
+(they open each other's shards through `/proc`), and no traffic goes from one
+NIC of a node to another. That is required on rail-optimized fabrics, whose
+NICs of one node cannot reach each other. Point `peer_group_thp_dir` at a tmpfs
+mounted with `huge=always` to put host shards on huge pages: NICs gather rows
+at random and miss their address-translation cache on nearly every 4 KB page.
+Mount it with `mount -t tmpfs -o huge=always,size=<size> none <dir>`, or
+inside `unshare -Urm` without root.
 
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.

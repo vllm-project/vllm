@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import mmap
 import os
+import re
 import uuid
 import weakref
 from types import SimpleNamespace
@@ -23,22 +24,83 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
-def _prefer_numa_node(address: int, num_bytes: int, node: int | None) -> None:
-    libnuma = get_libnuma()
-    if libnuma is None or node is None:
+MPOL_PREFERRED, MPOL_BIND = 1, 2
+# Room left on a NUMA node below which host memory is no longer bound to it:
+# a bound allocation that cannot be met invokes the OOM killer, and this
+# node's other GPUs allocate theirs at the same time.
+_BIND_HEADROOM = 4 << 30
+
+
+def _claimable_bytes(node: int) -> int:
+    """Free and clean page-cache bytes on NUMA node `node`."""
+    fields = {}
+    with open(f"/sys/devices/system/node/node{node}/meminfo") as f:
+        for line in f:  # "Node 0 MemFree:   123 kB"
+            key, value = line.split()[2:4]
+            fields[key.rstrip(":")] = int(value) << 10
+    cache = fields["Active(file)"] + fields["Inactive(file)"]
+    return fields["MemFree"] + cache - fields["Dirty"] - fields["Writeback"]
+
+
+def _fault_on_node(owner: np.ndarray, node: int | None) -> None:
+    """Fault in `owner`'s pages on NUMA node `node`, 1 GB at a time.
+    MPOL_PREFERRED takes another node's free memory before reclaiming page
+    cache on `node` (with the default zone_reclaim_mode=0), so each chunk is
+    bound to `node` while it clearly has room, and only preferred after."""
+    libnuma = None if node is None else get_libnuma()
+    if libnuma is None:
         logger.warning_once("Engram pool host shards may land off the GPU's NUMA node")
+        owner[:: mmap.PAGESIZE] = 0
         return
     mask = ctypes.c_ulong(1 << node)
-    # mbind(..., MPOL_PREFERRED = 1, nodemask, maxnode, flags)
-    if libnuma.mbind(
-        ctypes.c_void_p(address),
-        ctypes.c_ulong(num_bytes),
-        1,
-        ctypes.byref(mask),
-        ctypes.c_ulong(node + 2),
-        0,
-    ):
-        logger.warning_once("Engram pool mbind to NUMA node %d failed", node)
+    bind = True
+    for start in range(0, owner.size, 1 << 30):
+        chunk = owner[start : start + (1 << 30)]
+        with contextlib.suppress(OSError, KeyError, ValueError):
+            bind = bind and _claimable_bytes(node) > chunk.size + _BIND_HEADROOM
+        if libnuma.mbind(
+            ctypes.c_void_p(chunk.ctypes.data),
+            ctypes.c_ulong(chunk.size),
+            MPOL_BIND if bind else MPOL_PREFERRED,
+            ctypes.byref(mask),
+            ctypes.c_ulong(node + 2),
+            0,
+        ):
+            logger.warning_once("Engram pool mbind to NUMA node %d failed", node)
+        chunk[:: mmap.PAGESIZE] = 0
+
+
+def _check_pages(address: int, num_bytes: int, node: int | None, huge: bool) -> None:
+    """Warn if a mapping's pages are mostly off `node`, or (`huge`) mostly not
+    huge pages, as when memory was short or fragmented."""
+    start = f"{address:x}"
+    with open("/proc/self/numa_maps") as f:
+        line = next((x for x in f if x.startswith(start + " ")), "")
+    pages = {n: int(c) for n, c in re.findall(r" N(\d+)=(\d+)", line)}
+    on_node = pages.get(str(node), 0) / max(sum(pages.values()), 1)
+    huge_bytes = 0
+    with open("/proc/self/smaps") as f:
+        mine = False
+        for x in f:
+            if "-" in x.split()[0]:
+                mine = x.startswith(start + "-")
+            elif mine and x.startswith("ShmemPmdMapped:"):
+                huge_bytes = int(x.split()[1]) << 10
+    if node is not None and on_node < 0.9:
+        logger.warning(
+            "Engram pool: only %.0f%% of %.1f GiB of host memory is on the GPU's "
+            "NUMA node %d",
+            100 * on_node,
+            num_bytes / (1 << 30),
+            node,
+        )
+    if huge and huge_bytes < 0.9 * num_bytes:
+        logger.warning(
+            "Engram pool: only %.0f%% of %.1f GiB of host memory is on huge pages; "
+            "RDMA gathers from it run slower",
+            100 * huge_bytes / num_bytes,
+            num_bytes / (1 << 30),
+        )
 
 
 def _unregister(mapping: mmap.mmap, pointer: int) -> None:
@@ -89,11 +151,10 @@ class SharedHost:
         pointer = owner.ctypes.data
         device = torch.accelerator.current_device_index()
         node = current_platform.get_device_numa_node(device)
-        _prefer_numa_node(pointer, self.nbytes, node)
         if thp_dir:
             # Let the kernel compact memory to fault in huge pages...
             mapping.madvise(mmap.MADV_HUGEPAGE)
-        owner[:: mmap.PAGESIZE] = 0
+        _fault_on_node(owner, node)
         if thp_dir:
             # ...and collapse ranges that still fell back to base pages (e.g.
             # when memory was too fragmented), 1 GB at a time.
@@ -102,6 +163,7 @@ class SharedHost:
                     mapping.madvise(
                         MADV_COLLAPSE, start, min(1 << 30, self.nbytes - start)
                     )
+        _check_pages(pointer, self.nbytes, node, huge=thp_dir is not None)
         self.cpu = torch.from_numpy(owner)
         pin_tensor(self.cpu)
         finalizer = weakref.finalize(owner, _unregister, mapping, pointer)

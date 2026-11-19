@@ -91,13 +91,6 @@ class EngramConfig:
     it, so one engine's prefill delays another engine's decode by at most this
     backlog. The default (~2 MB) keeps prefill fetches at full rate."""
 
-    peer_group_rdma_owner_loopback: bool = False
-    """With `rdma`: keep the traffic between two GPUs of one node on the
-    owner's NIC (loopback) instead of sending it from one NIC to another.
-    Needed on rail-optimized fabrics, where the NICs of one node sit on
-    separate rails that cannot reach each other. Each NIC then also reads only
-    its own GPU's shard."""
-
     peer_group_thp_dir: str | None = None
     """With `rdma` and cpu_offload: a directory on a tmpfs mounted with
     `huge=always`, where host shards are placed on transparent huge pages.

@@ -18,6 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -33,7 +34,7 @@ from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
-from vllm.distributed.engram_pool import EngramPool, verbs
+from vllm.distributed.engram_pool import EngramPool, rdma, verbs
 from vllm.distributed.engram_pool.group import PeerGroup
 from vllm.distributed.parallel_state import (
     get_engram_dp_group,
@@ -307,9 +308,10 @@ def _check_pool_tables(store_dir: str):
         group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}{node}/store")
         # Engines batch differently (P/D): owners size each requester's mailbox.
         max_items = 9 * len(HEAD_SIZES) * (1 + group.rank_in_group % 2)
-        pool = EngramPool(group, transport, host, max_items, 72)
-        if node == 1:
-            pool.transport.node = str(group.rank_in_group)  # type: ignore[attr-defined]
+        # node == 1: each GPU as its own machine, so rows move over RDMA.
+        machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
+        with patch.object(rdma, "node_id", lambda machine=machine: machine):
+            pool = EngramPool(group, transport, host, max_items, 72)
         with torch.device("cuda"):
             table = PoolEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"

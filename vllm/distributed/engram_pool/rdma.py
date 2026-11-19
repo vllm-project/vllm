@@ -22,20 +22,9 @@ kernel, or `_place_kernel`) spins until the flag of every QP that gathered the
 table's rows says they have landed.
 
 Shards live in host memory, or in dmabuf-registered HBM.
-
-Same-node owner loopback (`owner_loopback`): on rail-optimized fabrics (one
-subnet per NIC) the NICs of one node cannot reach each other, so a requester
-and an owner on the same node must not talk NIC to NIC.
-Instead, everything between them goes through the owner's NIC over loopback:
-- the requester posts its requests on a QP it creates on the owner's NIC;
-- the owner's proxy registers the requester's landing buffer and flags on its
-  own NIC, so its gathers write rows straight into them (PCIe peer-to-peer);
-- the owner's NIC reads only its own GPU's shard, which also keeps its
-  address-translation working set small.
 """
 
 import ctypes
-import itertools
 import json
 import mmap
 import os
@@ -69,6 +58,7 @@ from vllm.distributed.engram_pool.rows import (
     wait_landed,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import current_stream
 
@@ -136,14 +126,16 @@ _WQE_SGES = _word(_RequestWQE, "sges", 4)
 _WRITE_IMM: tl.constexpr = tl.constexpr(verbs.MLX5_OPCODE_RDMA_WRITE_IMM)
 
 
+def node_id() -> str:
+    """This machine's identity: GPUs with the same one share host memory."""
+    with open("/proc/sys/kernel/random/boot_id") as f:
+        return f.read().strip()
+
+
 def pick_device() -> str:
-    """This GPU's RDMA device: the active one closest to it on PCIe, i.e. the
-    NIC behind the same PCIe switch. If several GPUs share the same closest
-    devices, they take them round-robin. `VLLM_ENGRAM_RDMA_DEVICES` (a
-    comma-separated list of device names) restricts the candidates."""
+    """This GPU's RDMA device: the active one closest to it (see `_nearest`).
+    GPUs with the same closest devices take them round-robin."""
     devices = verbs.active_devices()
-    if allowed := os.environ.get("VLLM_ENGRAM_RDMA_DEVICES"):
-        devices = [d for d in devices if d in allowed.split(",")]
     if not devices:
         raise RuntimeError("Engram pool RDMA transport found no active RDMA device")
     nearest = [
@@ -155,50 +147,24 @@ def pick_device() -> str:
 
 
 def _nearest(devices: list[str], gpu: int) -> list[str]:
-    """The `devices` whose sysfs PCIe path shares the longest prefix (the most
-    bridges and switches) with `gpu`'s."""
+    """The `devices` closest to `gpu`: those sharing the longest sysfs PCIe
+    path with it (the NIC behind its PCIe switch), then those on its NUMA node
+    (for GPUs not on the NICs' PCIe tree, as with C2C-attached GPUs)."""
     props = torch.cuda.get_device_properties(gpu)
     bdf = (
         f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
     )
     gpu_path = os.path.realpath(f"/sys/bus/pci/devices/{bdf}").split("/")
+    node = current_platform.get_device_numa_node(gpu)
 
-    def shared(device: str) -> int:
-        path = os.path.realpath(f"/sys/class/infiniband/{device}/device")
-        return len(os.path.commonprefix([gpu_path, path.split("/")]))
+    def closeness(device: str) -> tuple[int, bool]:
+        path = os.path.realpath(f"/sys/class/infiniband/{device}/device").split("/")
+        return len(os.path.commonprefix([gpu_path, path])), (
+            verbs.device_numa_node(device) == node
+        )
 
-    best = max(map(shared, devices))
-    return [d for d in devices if shared(d) == best]
-
-
-def _share_fd(fd: int) -> str:
-    """Serve `fd` (e.g. a dmabuf) to any process on this node that connects to
-    the returned abstract unix socket name. The fd stays open for the life of
-    this process."""
-    name = f"vllm-engram-{os.getpid()}-{next(_shared_fds)}"
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind("\0" + name)
-    server.listen(64)
-
-    def serve() -> None:
-        while True:
-            conn, _ = server.accept()
-            with conn:
-                socket.send_fds(conn, [b"x"], [fd])
-
-    threading.Thread(target=serve, daemon=True).start()
-    return name
-
-
-def _take_fd(name: str) -> int:
-    """Receive the fd another process on this node serves via `_share_fd`."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-        conn.connect("\0" + name)
-        _, fds, _, _ = socket.recv_fds(conn, 1, 1)
-    return fds[0]
-
-
-_shared_fds = itertools.count()
+    best = max(map(closeness, devices))
+    return [d for d in devices if closeness(d) == best]
 
 
 @triton.jit
@@ -295,6 +261,11 @@ def _plan_kernel(
     do_not_specialize=[
         "num_items",
         "rank",
+        "landing",
+        "landing_rkey",
+        "flags",
+        "flags_rkey",
+        "desc_lkey",
     ]
 )
 def _wr_kernel(
@@ -306,10 +277,10 @@ def _wr_kernel(
     box_keys,
     desc,
     seq_ptr,
-    landings,
-    landing_rkeys,
-    flag_bases,
-    flag_rkeys,
+    landing,
+    landing_rkey,
+    flags,
+    flags_rkey,
     num_items,
     world,
     rank,
@@ -319,7 +290,7 @@ def _wr_kernel(
     wr_counts,
     used,
     box_rkeys,
-    desc_lkeys,
+    desc_lkey,
     queues,
     slots,
     BOX_BYTES: tl.constexpr,
@@ -365,11 +336,6 @@ def _wr_kernel(
     wr_at = box + index * WR_BYTES
     sges = box + (num_wrs + 2 * num_qps) * WR_BYTES
     wr_id = rank.to(tl.int64)
-    # Our landing buffer's address and rkey as registered on this row's
-    # gatherer's NIC (ours, or a same-node owner's under owner loopback).
-    gatherer = owner % world
-    landing_at = tl.load(landings + gatherer, mask=remote, other=0)
-    landing_rkey_at = tl.load(landing_rkeys + gatherer, mask=remote, other=0)
     word = tl.arange(0, WR_WORDS)[None, :]
     wr = _rdma_wr(
         word,
@@ -379,8 +345,8 @@ def _wr_kernel(
         tl.minimum(size - position, ROWS_PER_WR)[:, None],
         _WRITE,
         tl.where(last, _SIGNALED, 0).to(tl.int64)[:, None],
-        (landing_at + slot * (WORDS * 8))[:, None],
-        landing_rkey_at[:, None],
+        (landing + slot * (WORDS * 8))[:, None],
+        landing_rkey.to(tl.int64),
     )
     record = desc + (wr_start + index)[:, None] * WR_WORDS + word
     tl.store(record, wr, mask=first[:, None])
@@ -390,9 +356,8 @@ def _wr_kernel(
     read = (box + (num_wrs + 2 * position) * WR_BYTES)[:, None]
     write = read + WR_BYTES
     lkey = tl.load(box_keys + owner % world, mask=remote, other=0).to(tl.int64)
-    flags_at = tl.load(flag_bases + gatherer, mask=remote, other=0)
-    flag = (flags_at + (owner * QPS + position) * 8)[:, None]
-    rkey = tl.load(flag_rkeys + gatherer, mask=remote, other=0)[:, None]
+    flag = (flags + (owner * QPS + position) * 8)[:, None]
+    rkey = flags_rkey.to(tl.int64)
     wr = _rdma_wr(word, wr_id, write, read + _WR_SGE * 8, 1, _READ, 0, flag, rkey)
     wr = _with_sge(wr, word, _WR_SGE, read + _WR_DATA * 8, 8, lkey[:, None])
     record = desc + (wr_start + num_wrs + 2 * position)[:, None] * WR_WORDS + word
@@ -427,7 +392,7 @@ def _wr_kernel(
                 boxes,
                 box_rkeys,
                 desc.to(tl.int64),
-                desc_lkeys,
+                desc_lkey,
                 queues,
                 BOX_BYTES,
                 MAX_WRS,
@@ -486,7 +451,7 @@ def _post_requests(
     boxes,
     box_rkeys,
     desc_at,
-    desc_lkeys,
+    desc_lkey,
     queues,
     BOX_BYTES: tl.constexpr,
     MAX_WRS: tl.constexpr,
@@ -518,7 +483,7 @@ def _post_requests(
     value = tl.where(word == _WQE_IMM, imm, value)
     value = _with_be64(value, word, _WQE_RADDR, box)
     value = tl.where(word == _WQE_RKEY, _be32(rkey)[:, None], value)
-    lkey = _be32(tl.load(desc_lkeys + gatherer, mask=active, other=0))[:, None]
+    lkey = _be32(desc_lkey)
     value = _with_data_seg(value, word, _WQE_WRS, group_wrs * WR_BYTES, lkey, wrs_at)
     value = _with_data_seg(value, word, _WQE_SGES, sizes * SGE_BYTES, lkey, sges_at)
     at = wqe.to(tl.pointer_type(tl.uint32))[:, None] + word
@@ -591,7 +556,6 @@ class RdmaTransport:
         max_tables: int,
         rdma_inflight: int,
         thp_dir: str | None = None,
-        owner_loopback: bool = False,
     ) -> None:
         self.group, self.host_shards = group, host_shards
         self.thp_dir = thp_dir
@@ -599,8 +563,7 @@ class RdmaTransport:
         # Rows per table in a fetch, and in all.
         self.max_items, self.max_tables = max_items, max_tables
         total = max_items * max_tables
-        with open("/proc/sys/kernel/random/boot_id") as f:
-            self.node = f.read().strip()
+        self.node = node_id()
         # Bound the WRITEs in flight per NIC: many QPs for few peers, few for many.
         self.qps_per_peer = min(16, max(2, 128 // max(self.world - 1, 1)))
         self._compiled: dict[tuple, Any] = {}
@@ -634,27 +597,11 @@ class RdmaTransport:
             SQ_DEPTH,
             rdma_inflight,
         )
-        # With owner loopback, each same-node peer is reached through that
-        # peer's NIC; every other peer through this GPU's NIC.
-        where = self._all_gather([device, self.node])
-        self.same_node = [
-            peer
-            for peer, (_, node) in enumerate(where)
-            if owner_loopback and node == self.node and peer != self.rank
-        ]
-        names = [
-            where[p][0] if p in self.same_node else device for p in range(self.world)
-        ]
-        nics = {name: verbs.Device(name) for name in set(names)}
-        # This GPU posts its requests itself: one QP per gatherer, created on
-        # the NIC that reaches that gatherer.
-        cqs = {
-            name: nic.create_cq(self.world * REQUEST_DEPTH, wakeable=True)
-            for name, nic in nics.items()
-        }
+        # This GPU posts its requests itself, on one QP per gatherer.
+        self.verbs = verbs.Device(device)
+        cq, channel = self.verbs.create_cq(self.world * REQUEST_DEPTH, wakeable=True)
         made = [
-            nics[name].create_qp(cqs[name][0], cqs[name][0], REQUEST_DEPTH, 2)
-            for name in names
+            self.verbs.create_qp(cq, cq, REQUEST_DEPTH, 2) for _ in range(self.world)
         ]
         logger.info(
             "Engram pool RDMA proxy (pid %d) on %s, %d QPs per peer",
@@ -664,13 +611,19 @@ class RdmaTransport:
         )
         requests = [qpn for _, qpn in made]
         everyone = self._all_gather(
-            {
-                **info,
-                "requests": requests,
-                "max_items": max_items,
-                "same_node": self.same_node,
-            }
+            {**info, "requests": requests, "max_items": max_items, "node": self.node}
         )
+        # Each GPU's NIC gathers its node's host shards itself (`shard`), so
+        # no QPs connect GPUs of one node: their NICs may not reach each other,
+        # as on rail-optimized fabrics.
+        self.local_peers = {
+            peer
+            for peer, e in enumerate(everyone)
+            if host_shards and e["node"] == self.node and peer != self.rank
+        }
+        remote = [
+            (peer, e) for peer, e in enumerate(everyone) if peer not in self.local_peers
+        ]
         # Every owner posts our WRs, so they fit every NIC and path.
         self.max_sge = min(e["max_sge"] for e in everyone)
         self.mtu = min(e["mtu"] for e in everyone)
@@ -689,35 +642,37 @@ class RdmaTransport:
         self.max_wrs = triton.cdiv(total, rows_per_wr) + groups * (
             1 + 2 * self.qps_per_peer
         )
-        mailboxes = self._call(
-            "connect",
-            [
-                [peer, e["address"], e["qpns"][self.rank]]
-                for peer, e in enumerate(everyone)
-                if peer != self.rank and peer not in self.same_node
-            ],
-            [
-                # A same-node requester created its QP to us on our NIC, so it
-                # has our NIC's address.
+        try:
+            mailboxes = self._call(
+                "connect",
                 [
-                    peer,
-                    info["address"] if self.rank in e["same_node"] else e["address"],
-                    e["requests"][self.rank],
-                ]
-                for peer, e in enumerate(everyone)
-            ],
-            box_sizes,
-            max_tables,
-            self.same_node,
-        )
-        for (qp, _), name, e in zip(made, names, everyone):
-            gid, lid = e["address"]
-            nics[name].connect(qp, e["notices"][self.rank], (bytes.fromhex(gid), lid))
+                    [peer, e["address"], e["qpns"][self.rank]]
+                    for peer, e in remote
+                    if peer != self.rank
+                ],
+                [[peer, e["address"], e["requests"][self.rank]] for peer, e in remote],
+                box_sizes,
+                max_tables,
+            )
+            for peer, e in remote:
+                gid, lid = e["address"]
+                qp = made[peer][0]
+                address = (bytes.fromhex(gid), lid)
+                self.verbs.connect(qp, e["notices"][self.rank], address)
+        except RuntimeError as err:
+            near = [p for p, e in remote if e["node"] == self.node and p != self.rank]
+            if not near:
+                raise
+            raise RuntimeError(
+                f"Engram pool RDMA could not connect GPU {self.rank}'s NIC to its "
+                f"node's GPUs {near}. If the NICs of a node cannot reach each "
+                "other (as on rail-optimized fabrics), use host shards "
+                "(cpu_offload): they need no connections within a node."
+            ) from err
         peers = {qpn: peer for peer, (_, qpn) in enumerate(made)}
-        for name, (cq, channel) in cqs.items():
-            threading.Thread(
-                target=self._watch, args=(nics[name], cq, channel, peers), daemon=True
-            ).start()
+        threading.Thread(
+            target=self._watch, args=(cq, channel, peers), daemon=True
+        ).start()
         from cuda.bindings import driver as cu
 
         _, ordering = cu.cuDeviceGetAttribute(
@@ -744,9 +699,6 @@ class RdmaTransport:
             landing, verbs.PEER_WRITE
         )
         self.flags_at, _, self.flags_rkey = self._register(flags, verbs.PEER_ORDERED)
-        # Per gatherer: our landing buffer and flags, registered on the NIC
-        # that gatherer writes them with.
-        targets = self._register_at_same_node_owners(landing, flags)
         self.host_landing = isinstance(landing, SharedHost)
         self._keep = [landing, flags]
         boxes, rkeys, lkeys = zip(*self._all_gather(mailboxes))
@@ -763,22 +715,11 @@ class RdmaTransport:
         memory = CuMem(desc_bytes, rdma=True)
         memory.map()
         self.desc = device_view(memory.address, desc_bytes, memory).view(torch.int64)
-        desc_lkeys = {}
-        for name, nic in nics.items():
-            fd = memory.dmabuf_fd()
-            desc_lkeys[name], _ = nic.reg_dmabuf(
-                fd, memory.address, desc_bytes, verbs.NIC_READ
-            )
-            os.close(fd)
-        # Per gatherer: the lkey of our WR descriptors on the NIC we post that
-        # gatherer's requests on.
-        self.desc_lkeys = torch.tensor(
-            [desc_lkeys[name] for name in names], dtype=torch.int64, device=gpu
+        fd = memory.dmabuf_fd()
+        self.desc_lkey, _ = self.verbs.reg_dmabuf(
+            fd, memory.address, desc_bytes, verbs.NIC_READ
         )
-        self.landing_ats, self.landing_rkeys, self.flags_ats, self.flags_rkeys = (
-            torch.tensor(column, dtype=torch.int64, device=gpu)
-            for column in zip(*targets)
-        )
+        os.close(fd)
         self.queues = torch.tensor(
             self._map_queues(made), dtype=torch.int64, device=gpu
         )
@@ -813,44 +754,14 @@ class RdmaTransport:
         # Each row's slot in the landing buffer, -1 if dead.
         self.slots = torch.empty(total, dtype=torch.int32, device=gpu)
 
-    def _register_at_same_node_owners(self, landing, flags) -> list[list[int]]:
-        """Exchange landing buffers and flags with same-node peers: each GPU's
-        proxy registers its same-node peers' buffers on its own NIC (owner
-        loopback). Collective. Returns, per gatherer, `[landing address,
-        landing rkey, flags address, flags rkey]` as that gatherer's NIC sees
-        our buffers."""
-        if isinstance(landing, SharedHost):
-            kind, fds = "host", (os.dup(landing.fd), os.dup(flags.fd))
-            spans = [[landing.nbytes, 0], [flags.nbytes, 0]]
-        else:
-            kind, fds = "dmabuf", (landing.dmabuf_fd(), flags.dmabuf_fd())
-            spans = [[landing.size, landing.address], [flags.size, flags.address]]
-        shared = self._all_gather([kind, [_share_fd(fd) for fd in fds], spans])
-        theirs = {}
-        for peer in self.same_node:
-            kind, names, spans = shared[peer]
-            (at, _, rkey), (flags_at, _, flags_rkey) = (
-                self._call("register", kind, *span, access, fds=[_take_fd(name)])
-                for name, span, access in zip(
-                    names, spans, (verbs.PEER_WRITE, verbs.PEER_ORDERED)
-                )
-            )
-            theirs[peer] = [at, rkey, flags_at, flags_rkey]
-        everyone = self._all_gather({str(p): v for p, v in theirs.items()})
-        own = [self.landing_at, self.landing_rkey, self.flags_at, self.flags_rkey]
-        return [
-            everyone[p][str(self.rank)] if p in self.same_node else own
-            for p in range(self.world)
-        ]
-
-    def _watch(self, nic, cq: int, channel: int, peers: dict[int, int]) -> None:
+    def _watch(self, cq: int, channel: int, peers: dict[int, int]) -> None:
         """Flag the first failed request. Requests are unsignaled: only failed
         ones complete, as when a peer's engine is gone."""
         wc = (verbs.ibv_wc * 16)()
         while True:
-            nic.notify_cq(cq)
-            if not (count := nic.poll_cq(cq, wc, 16)):
-                nic.cq_event(channel)
+            self.verbs.notify_cq(cq)
+            if not (count := self.verbs.poll_cq(cq, wc, 16)):
+                self.verbs.cq_event(channel)
                 continue
             for c in wc[:count]:
                 if c.status:
@@ -938,21 +849,22 @@ class RdmaTransport:
         # host shards (over loopback); owners gather everything else.
         address, lkey, _ = self._register(registered, verbs.NIC_READ)
         fd = registered.fd if isinstance(registered, SharedHost) else -1
-        peers = self._all_gather([address, lkey, self.node, os.getpid(), fd])
+        peers = self._all_gather([address, lkey, os.getpid(), fd])
         bases, keys, gatherers = [], [], []
-        for rank, (address, lkey, node, pid, fd) in enumerate(peers):
+        for rank, (address, lkey, pid, fd) in enumerate(peers):
             gatherer = rank
-            if self.host_shards and node == self.node and rank != self.rank:
+            if rank in self.local_peers:
+                # No QP connects GPUs of one node: open the owner's memfd
+                # through /proc and gather it with this GPU's NIC.
                 try:
-                    # Peers on this node open the memfd through /proc.
                     address, lkey = self._call("map_peer", pid, fd, num_bytes)
-                    gatherer = self.rank
-                except RuntimeError as e:
-                    logger.warning_once(
-                        "Engram pool GPUs fetch their node's host shards from "
-                        "their owners: %s",
-                        e,
-                    )
+                except RuntimeError as err:
+                    raise RuntimeError(
+                        f"Engram pool GPU {self.rank} cannot open GPU {rank}'s host "
+                        "shard through /proc: the engines of a node must run as one "
+                        "user in one PID namespace, with ptrace_scope allowing it"
+                    ) from err
+                gatherer = self.rank
             bases.append(address)
             keys.append(lkey)
             gatherers.append(gatherer)
@@ -1000,10 +912,10 @@ class RdmaTransport:
             _wr_kernel,
             (triton.cdiv(n, 128),),
             (self.owner_pos, self.counts, self.remote_addr, self.keys, self.boxes)
-            + (self.box_keys, self.desc, self.seq, self.landing_ats, self.landing_rkeys)
-            + (self.flags_ats, self.flags_rkeys, n, self.world, self.rank)
+            + (self.box_keys, self.desc, self.seq, self.landing_at, self.landing_rkey)
+            + (self.flags_at, self.flags_rkey, n, self.world, self.rank)
             + (self.ticket, self.starts, self.wr_starts, self.wr_counts, self.used)
-            + (self.box_rkeys, self.desc_lkeys, self.queues, slots),
+            + (self.box_rkeys, self.desc_lkey, self.queues, slots),
             dict(
                 BOX_BYTES=self.box_bytes,
                 MAX_WRS=self.max_wrs,
