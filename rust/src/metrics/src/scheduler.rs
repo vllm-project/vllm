@@ -286,6 +286,7 @@ pub struct SchedulerMetrics {
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
+    pub prefix_cache_sparse_retention_misses: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_cached_by_source: Family<CacheHitSourceLabels, U64Counter>,
@@ -433,6 +434,13 @@ impl SchedulerMetrics {
             "vllm:prefix_cache_hits",
             "Prefix cache hits, in terms of number of cached tokens.",
             prefix_cache_hits.clone(),
+        );
+
+        let prefix_cache_sparse_retention_misses = Family::default();
+        registry.register(
+            "vllm:prefix_cache_sparse_retention_misses",
+            "Shared-prefix tokens another KV cache group matched but that were not reused because a Mamba / sliding-window group held no state there (sparse retention or eviction). Whole blocks of the local lookup, new requests only.",
+            prefix_cache_sparse_retention_misses.clone(),
         );
 
         let external_prefix_cache_queries = Family::default();
@@ -792,6 +800,7 @@ impl SchedulerMetrics {
             cache_config_info,
             prefix_cache_queries,
             prefix_cache_hits,
+            prefix_cache_sparse_retention_misses,
             external_prefix_cache_queries,
             external_prefix_cache_hits,
             prompt_tokens_cached_by_source,

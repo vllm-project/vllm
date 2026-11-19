@@ -107,6 +107,9 @@ pub struct PrefixCacheStats {
     /// `hits` split by the cache tier that supplied them (connector stats only).
     #[serde(default)]
     pub hits_by_source: CachedTokensBySource,
+    /// Shared-prefix tokens a Mamba / sliding-window group held no state for.
+    #[serde(default)]
+    pub sparse_retention_misses: u64,
 }
 
 /// Single KV cache block eviction sample.
@@ -530,15 +533,18 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.base.hits, 4);
         assert_eq!(stats.hits_by_source, CachedTokensBySource::default());
+        assert_eq!(stats.sparse_retention_misses, 0);
 
         let payload = serde_json::json!({
             "reset": false, "requests": 1, "queries": 16, "hits": 12,
             "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0,
-            "hits_by_source": {"host": 8, "p2p": 4}
+            "hits_by_source": {"host": 8, "p2p": 4},
+            "sparse_retention_misses": 6
         });
         let wire = rmp_serde::to_vec_named(&payload).unwrap();
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
+        assert_eq!(stats.sparse_retention_misses, 6);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
 
         // Serialized as sparsely as Python sends it.
