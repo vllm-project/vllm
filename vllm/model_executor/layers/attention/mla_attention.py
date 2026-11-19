@@ -1412,7 +1412,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         # The metadata builder's condition (_init_dcp_shardq).
         layout = ContextLayout.from_layer(
-            self.get_kv_cache_spec(vllm_config), self.indexer
+            self.get_kv_cache_config(vllm_config).spec, self.indexer
         )
         if layout is None:
             return
