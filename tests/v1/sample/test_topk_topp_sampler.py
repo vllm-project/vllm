@@ -1059,6 +1059,23 @@ class TestTritonTopkToppExact:
             del logits, k
             assert torch.accelerator.memory_allocated() == before
 
+    def test_misaligned_logits_after_an_aligned_call(self):
+        """Triton specializes pointers on 16-byte alignment, so logits 4 bytes off
+        it must not reuse the cached launch of an aligned call of the same shape
+        (it failed with `CUDA error: misaligned address`)."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch, vocab = 8, 65536
+        k = torch.full((batch,), 20, dtype=torch.int32)
+        aligned = torch.randn(batch, vocab, generator=self.generator)
+        apply_top_k_top_p_triton(aligned, k, None)
+        flat = torch.randn(batch * vocab + 1, generator=self.generator)
+        logits = flat[1:].view(batch, vocab)
+        assert logits.data_ptr() % 16 != 0
+        source = logits.clone()
+        apply_top_k_top_p_triton(logits, k, None)
+        _assert_exact_filter(source, logits, k, None)
+
     def test_sampler_dispatches_to_triton_kernel(self, monkeypatch: pytest.MonkeyPatch):
         import vllm.v1.sample.ops.topk_topp_sampler as sampler_ops
 

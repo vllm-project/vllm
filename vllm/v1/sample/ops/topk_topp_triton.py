@@ -104,14 +104,15 @@ def apply_top_k_top_p_triton(
     if logits.stride(1) != 1:
         logits = logits.contiguous()
     rows, vocab = logits.shape
-    key = Key(
-        logits.device, rows, vocab, logits.stride(0), k is not None, p is not None
-    )
+    has_k, has_p = k is not None, p is not None
     # An absent k or p: an empty tensor (a null pointer the kernels never read), so the
     # pointer dtypes, and thus the compiled variant, do not change.
     empty = functools.partial(torch.empty, 0, device=logits.device)
     k = empty(dtype=torch.int32) if k is None else k.to(torch.int32)
     p = empty(dtype=torch.float32) if p is None else p.to(torch.float32)
+    # Triton specializes pointers on 16-byte alignment, which cached launches skip.
+    aligned = all(t.data_ptr() % 16 == 0 for t in (logits, k, p))
+    key = Key(logits.device, rows, vocab, logits.stride(0), has_k, has_p, aligned)
     plan = _PLANS.get(key)
     if plan is None:
         return launch_jit(logits, k, p, key)
@@ -154,8 +155,8 @@ def _supported_device() -> bool:
 
 
 class Key(NamedTuple):
-    """The shape of a call: the logits' device, shape and row stride, and whether k and
-    p are given."""
+    """The shape of a call: the logits' device, shape and row stride, whether k and p
+    are given, and whether all three pointers (logits, k, p) are 16-byte aligned."""
 
     device: torch.device
     logits_shape0: int
@@ -163,6 +164,7 @@ class Key(NamedTuple):
     logits_stride0: int
     has_k: bool
     has_p: bool
+    aligned: bool
 
 
 class Launch(NamedTuple):
