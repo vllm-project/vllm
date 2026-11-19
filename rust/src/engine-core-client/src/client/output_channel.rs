@@ -5,8 +5,8 @@
 //! [`EngineCoreOutputStream`](crate::EngineCoreOutputStream).
 //!
 //! With a stream interval above one, the sender holds back the outputs after
-//! the first one until they carry at least that many new tokens, then delivers
-//! them in one channel message, which the stream yields as one
+//! the first one until they reach the token interval or fill half the unread
+//! output budget, then delivers them in one channel message as one
 //! [`EngineCoreStreamDelivery`](crate::EngineCoreStreamDelivery). The request
 //! task is then woken once per delivery instead of once per engine step.
 //!
@@ -33,6 +33,8 @@ use crate::error::{Error, Result};
 type QueuedOutput = Box<Result<Delivery>>;
 
 pub(crate) const MAX_QUEUED_OUTPUTS_PER_REQUEST: usize = 256;
+// Leave room for the next batch while the consumer drains the first.
+const MAX_BUFFERED_OUTPUTS_PER_DELIVERY: usize = MAX_QUEUED_OUTPUTS_PER_REQUEST / 2;
 
 /// Create the output channel for one request.
 pub(crate) fn output_channel(stream_interval: NonZeroU32) -> (OutputSender, OutputReceiver) {
@@ -81,7 +83,7 @@ impl OutputReceiver {
 pub(crate) struct OutputSender {
     tx: mpsc::UnboundedSender<QueuedOutput>,
     queued_outputs: Arc<AtomicUsize>,
-    /// Minimum number of new tokens per delivery after the first one.
+    /// Target number of new tokens per delivery after the first one.
     stream_interval: usize,
     /// Whether the first output has been delivered.
     delivered_first: bool,
@@ -92,8 +94,8 @@ pub(crate) struct OutputSender {
 }
 
 impl OutputSender {
-    /// Send one output, or hold it back until the held-back outputs reach the
-    /// stream interval. Within the unread output limit, the first and terminal
+    /// Send one output, or buffer it until the token interval or batch limit.
+    /// Within the unread output limit, the first and terminal
     /// outputs are delivered immediately, the latter with any held-back outputs.
     /// Returns false when the receiver is gone or its unread output limit is reached.
     pub fn send(&mut self, output: EngineCoreStreamOutput) -> bool {
@@ -118,7 +120,10 @@ impl OutputSender {
 
         self.buffered_tokens += output.new_token_ids.len();
         self.buffered.push(output);
-        if finished || self.buffered_tokens >= self.stream_interval {
+        if finished
+            || self.buffered_tokens >= self.stream_interval
+            || self.buffered.len() >= MAX_BUFFERED_OUTPUTS_PER_DELIVERY
+        {
             self.flush();
         }
         true
@@ -371,6 +376,21 @@ mod tests {
     }
 
     #[test]
+    fn long_stream_interval_delivers_in_order_to_a_periodic_reader() {
+        let (mut sender, mut receiver) = channel(512);
+        let mut received = Vec::new();
+        for token in 1u32..=513 {
+            assert!(sender.send(output(&[token])));
+            if (token - 1).is_multiple_of(MAX_BUFFERED_OUTPUTS_PER_DELIVERY as u32) {
+                received.extend(deliveries(&mut receiver).into_iter().flatten().flatten());
+            }
+        }
+        assert!(sender.send(finished(&[514])));
+        received.extend(deliveries(&mut receiver).into_iter().flatten().flatten());
+        assert_eq!(received, (1..=514).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn unread_outputs_are_bounded_across_deliveries_and_batching() {
         let (mut sender, mut receiver) = channel(512);
         for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
@@ -384,6 +404,7 @@ mod tests {
         assert!(!sender.send(output(&[1])));
 
         sender.flush();
-        assert_eq!(receiver.try_recv().unwrap().unwrap().iter().count(), 256);
+        let remaining: usize = deliveries(&mut receiver).iter().map(Vec::len).sum();
+        assert_eq!(remaining, MAX_QUEUED_OUTPUTS_PER_REQUEST);
     }
 }

@@ -289,10 +289,11 @@ pub struct ChatCompletionRequest {
     /// when `mm_payload` is set.
     pub return_mm_kwargs: Option<bool>,
 
-    /// Number of tokens to batch into each streamed chunk. Raises the server's
+    /// Target token count for each streamed chunk. Raises the server's
     /// `--stream-interval` for this request. Values below the server setting
     /// are clamped up to it. The first and last chunks are always sent
-    /// immediately. Ignored for non-streaming requests.
+    /// immediately. Batches also flush at 128 engine outputs. Ignored for
+    /// non-streaming requests.
     pub stream_interval: Option<NonZeroU32>,
 }
 

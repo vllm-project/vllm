@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn registry_tracks_lora_phases_from_engine_events() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry
+        let _lora = registry
             .register(
                 "req-lora".to_string(),
                 Some("adapter-a".to_string()),
@@ -709,7 +709,8 @@ mod tests {
                 NonZeroU32::MIN,
             )
             .unwrap();
-        registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let _plain =
+            registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         // Registered but not yet scheduled: counted as waiting. The non-LoRA
         // request never shows up.
@@ -755,7 +756,7 @@ mod tests {
     #[test]
     fn registry_unions_lora_adapters_across_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry
+        let _a1 = registry
             .register(
                 "req-a1".to_string(),
                 Some("adapter-a".to_string()),
@@ -763,7 +764,7 @@ mod tests {
                 NonZeroU32::MIN,
             )
             .unwrap();
-        registry
+        let _a2 = registry
             .register(
                 "req-a2".to_string(),
                 Some("adapter-a".to_string()),
@@ -771,7 +772,7 @@ mod tests {
                 NonZeroU32::MIN,
             )
             .unwrap();
-        registry
+        let _b = registry
             .register(
                 "req-b".to_string(),
                 Some("adapter-b".to_string()),

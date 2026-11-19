@@ -195,9 +195,9 @@ impl EngineCoreLlm {
         self
     }
 
-    /// Set the frontend-level stream interval: the minimum number of newly
-    /// generated tokens batched into each streamed output after the first one.
-    /// A request's own `stream_interval` can only raise it.
+    /// Set the frontend-level token target for streamed chunks after the
+    /// first one. A request's own `stream_interval` can only raise it.
+    /// The engine client can flush earlier to bound the unread output queue.
     pub fn with_stream_interval(mut self, stream_interval: NonZeroU32) -> Self {
         self.stream_interval = stream_interval;
         self
