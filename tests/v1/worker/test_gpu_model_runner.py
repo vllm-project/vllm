@@ -373,17 +373,19 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("backends", "num_spec_tokens", "block_size", "mamba_page_size_padded"),
+    ("backends", "num_spec_tokens", "num_mla", "block_size", "mamba_page_size_padded"),
     [
         # Without draft tokens the 528-byte row keeps the padded 656-byte estimate.
-        ([_mock_backend([64])], 0, 3328, 3328 * 656),
-        ([_mock_backend([64]), KpoolTailBackend], 0, 3328, 3328 * 656),
+        ([_mock_backend([64])], 0, 1, 3328, 3328 * 656),
+        ([_mock_backend([64]), KpoolTailBackend], 0, 1, 3328, 3328 * 656),
         # KPOOL_TAIL supports only BLHNC, which packs Mamba states unpadded.
-        ([_mock_backend([64]), KpoolTailBackend], 1, 4224, None),
+        ([_mock_backend([64]), KpoolTailBackend], 1, 1, 4224, None),
+        # 13 rows of 4096 tokens hold 12 of the 34 states, a group of three.
+        ([_mock_backend([64]), KpoolTailBackend], 1, 13, 4096, None),
     ],
 )
 def test_hybrid_mla_block_alignment(
-    monkeypatch, backends, num_spec_tokens, block_size, mamba_page_size_padded
+    monkeypatch, backends, num_spec_tokens, num_mla, block_size, mamba_page_size_padded
 ):
     monkeypatch.setattr(
         Platform, "_find_non_ssm_backends", classmethod(lambda cls, c: backends)
@@ -411,7 +413,9 @@ def test_hybrid_mla_block_alignment(
         dtype=torch.uint8,
         state_content_bytes=528,
     )
-    vllm_config.compilation_config.static_forward_context["mla"] = mla_layer
+    layers = vllm_config.compilation_config.static_forward_context
+    layers.update({f"mla.{i}": mla_layer for i in range(num_mla)})
+    layers.update({f"kda.{i}": Mock(spec=MambaBase) for i in range(34)})
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=num_spec_tokens
     )

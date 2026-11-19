@@ -985,6 +985,7 @@ class Platform:
             AttentionLayerBase,
         )
         from vllm.model_executor.layers.mamba.abstract import (
+            MambaBase,
             get_mamba_num_speculative_blocks,
             get_mamba_prefill_checkpoint_alignment,
         )
@@ -994,6 +995,7 @@ class Platform:
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+        from vllm.v1.core.kv_cache_planning import packed_mamba_group_size
         from vllm.v1.kv_cache_interface import (
             AttentionSpec,
             MambaSpec,
@@ -1011,7 +1013,7 @@ class Platform:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
-        pad_mamba = False
+        pad_mamba = narrow_row = False
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
@@ -1053,9 +1055,8 @@ class Platform:
             if mla_config is not None and isinstance(mla_config.spec, AttentionSpec):
                 mla_spec = mla_config.spec
                 row = mla_spec.real_page_size_bytes // mla_spec.block_size
-                if row < attn_page_size_1_token and not (
-                    get_mamba_num_speculative_blocks(vllm_config)
-                ):
+                narrow_row = row < attn_page_size_1_token
+                if narrow_row and not get_mamba_num_speculative_blocks(vllm_config):
                     pad_mamba = True
                 else:
                     attn_page_size_1_token = row
@@ -1219,10 +1220,34 @@ class Platform:
         else:
             # Use minimum block size that satisfies both backend alignment and
             # mamba page size compatibility
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
+            steps = cdiv(
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
+            if (
+                narrow_row
+                and not pad_mamba
+                and all(layout.is_block_outermost for layout in layouts)
+            ):
+                # Round down instead if the MLA pages one step lower still hold the
+                # packed planner's Mamba group.
+                layers = get_layers_from_vllm_config(
+                    vllm_config,
+                    AttentionLayerBase,  # type: ignore[type-abstract]
+                ).values()
+                specs = [
+                    config.spec
+                    for layer in layers
+                    if not isinstance(layer, MambaBase)
+                    and (config := layer.get_kv_cache_config(vllm_config)) is not None
+                    and isinstance(config.spec, MLAAttentionSpec)
+                ]
+                down = kernel_block_alignment_size * (steps - 1)
+                pages = sum(s.page_size_bytes * down // s.block_size for s in specs)
+                num_mamba = sum(isinstance(layer, MambaBase) for layer in layers)
+                group = packed_mamba_group_size(num_mamba, pages // mamba_page_size)
+                if group * mamba_page_size <= pages:
+                    steps -= 1
+            attn_block_size = kernel_block_alignment_size * steps
             attn_block_size = backend_block_alignment * cdiv(
                 attn_block_size, backend_block_alignment
             )
@@ -1244,12 +1269,11 @@ class Platform:
         # Pad mamba page size to exactly match attention page size
         # unless block-outermost layouts pack the Mamba states at their own size.
         attn_page_size = cache_config.block_size * attn_page_size_1_token
-        assert attn_page_size >= mamba_page_size
-
         if attn_page_size == mamba_page_size or (
             not pad_mamba and all(layout.is_block_outermost for layout in layouts)
         ):
             return
+        assert attn_page_size >= mamba_page_size
 
         if (
             cache_config.mamba_page_size_padded is None

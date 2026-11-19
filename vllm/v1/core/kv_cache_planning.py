@@ -858,6 +858,12 @@ def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -
     return best_d
 
 
+def packed_mamba_group_size(num_states: int, states_per_block: int) -> int:
+    """Largest Mamba group `_get_packed_kv_cache_groups` forms when a block fits
+    `states_per_block` states: one more, spread evenly over the groups."""
+    return cdiv(num_states, cdiv(num_states, states_per_block + 1))
+
+
 def _get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: dict[str, KVCacheLayerConfig],
@@ -962,7 +968,9 @@ def _get_packed_kv_cache_groups(
             state_page = next(iter(spec.kv_cache_specs.values())).page_size_bytes
             states_per_block = max(anchor_bytes // state_page, 1)
             if issubclass(spec.manager_cls, MambaManager):
-                states_per_block += 1
+                states_per_block = packed_mamba_group_size(
+                    len(spec.kv_cache_specs), states_per_block
+                )
             num_groups = max(
                 num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
             )
