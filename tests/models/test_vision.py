@@ -505,11 +505,8 @@ def test_pos_emb_keeps_dtype_for_video_chunks(t: int):
     assert pos_emb.weight.dtype == torch.bfloat16
     assert pos_emb.time_weight.dtype == torch.float32
 
-    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
-    out = pos_emb(x, [[t, height, width]])
+    cast_pos_emb = copy.deepcopy(pos_emb).to(torch.bfloat16)
 
-    assert out.dtype == torch.bfloat16
-    expected = pos_emb.weight.flatten(end_dim=1).unsqueeze(0).repeat(t, 1, 1)
-    if t > 1:
-        expected = expected + pos_emb.time_weight[0:t].to(torch.bfloat16)
-    torch.testing.assert_close(out, expected.reshape(-1, dim), rtol=0, atol=0)
+    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
+    grid = [[t, height, width]]
+    torch.testing.assert_close(pos_emb(x, grid), cast_pos_emb(x, grid), rtol=0, atol=0)
