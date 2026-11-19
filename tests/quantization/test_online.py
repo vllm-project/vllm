@@ -14,12 +14,14 @@ import pytest
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.model_executor.layers.quantization.online.nvfp4 as online_nvfp4
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
     load_model_without_vllm_runner,
     quant_config_args,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
@@ -63,6 +65,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
@@ -119,7 +122,9 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4WeightOnlyOnlineLinearMethod,
     _quantize_moe_weight_to_nvfp4,
+    _quantize_nvfp4,
 )
 from vllm.model_executor.layers.quantization.online.requantization import (
     is_requantization_source,
@@ -133,12 +138,19 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkNvfp4MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    is_fp4_marlin_supported,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
     ref_nvfp4_quant,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
@@ -229,6 +241,7 @@ class _TestRoutedExperts(RoutedExperts):
         (Fp8PtpcOnlineLinearMethod, kFp8StaticChannelSym, kFp8DynamicTokenSym),
         (Mxfp8OnlineLinearMethod, kMxfp8Static, None),
         (Mxfp4OnlineLinearMethod, kMxfp4Static, kMxfp4Dynamic),
+        (Nvfp4WeightOnlyOnlineLinearMethod, kNvfp4Static, None),
     ],
 )
 def test_online_linear_methods_resolve_activation_quant_key(
@@ -258,6 +271,7 @@ def test_online_linear_methods_resolve_activation_quant_key(
         ("linear", _TestLinear, kFp8Static128BlockSym, True),
         ("linear", _TestLinear, kMxfp8Static, True),
         ("linear", _TestLinear, kMxfp4Static, False),
+        ("linear", _TestLinear, kNvfp4Static, True),
         ("moe", _TestRoutedExperts, kFp8StaticTensorSym, True),
         ("moe", _TestRoutedExperts, kFp8Static128BlockSym, True),
         ("moe", _TestRoutedExperts, kFp8StaticChannelSym, True),
@@ -331,6 +345,54 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
         assert computed_key == activation_quant_key
 
 
+def test_online_nvfp4_weight_only_shorthand_is_linear_only() -> None:
+    """`nvfp4_weight_only` quantizes linear layers and leaves MoE unquantized."""
+    args = resolve_quantization_config("nvfp4_weight_only", None)
+    assert args is not None
+    config = OnlineQuantizationConfig(args)
+
+    resolved = config.resolve_quant_method_cls(_TestLinear, "linear")
+    assert resolved is not None
+    assert resolved[4] is Nvfp4WeightOnlyOnlineLinearMethod
+    assert config.resolve_quant_method_cls(_TestRoutedExperts, "moe") is None
+
+
+@pytest.mark.skipif(
+    not is_fp4_marlin_supported(), reason="No NVFP4 W4A16 kernel on this platform."
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_online_nvfp4_weight_only_linear_matches_dequantized_weight(
+    default_vllm_config,
+) -> None:
+    """The W4A16 GEMM computes `x @ dequant(W).T` with the online NVFP4 weight."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None, dtype=torch.bfloat16
+    )
+    config = OnlineQuantizationConfig(quant_config_args(linear="nvfp4_weight_only"))
+    torch.manual_seed(0)
+    weight = torch.randn(256, 512, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 512, device="cuda", dtype=torch.bfloat16)
+    with torch.device("cuda"):
+        layer = ReplicatedLinear(
+            512,
+            256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=config,
+            prefix="linear",
+        )
+    layer.weight.weight_loader(layer.weight, weight)
+
+    packed, scales, global_scale = _quantize_nvfp4(weight, weight_amax(weight))
+    dequantized = dequantize_to_dtype(
+        packed, scales, global_scale, torch.bfloat16, swizzle=False
+    )
+    ref = x.float() @ dequantized.float().T
+    out = layer(x)[0].float()
+    assert ((out - ref).norm() / ref.norm()).item() < 1e-2
+
+
 @pytest.mark.skipif(
     current_platform.is_xpu(),
     reason="MXFP4 linear kernels on XPU only support dynamic activation.",
@@ -364,8 +426,10 @@ def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> No
     "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
 )
 @pytest.mark.parametrize("requantize", [False, True])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_moe_stages_quantized_weights_for_humming(
-    scheme, requantize, tmp_path, dist_init, workspace_init
+    scheme, requantize, tmp_path, workspace_init
 ) -> None:
     """Real online conversion and reload must match a fresh Humming layer."""
     from vllm.config import set_current_vllm_config
@@ -718,11 +782,12 @@ def _write_minimal_llama_config(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="MXFP8 requantization requires CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_prequantized_compatibility(
     checkpoint_config_factory,
     raises_requantization_error: bool,
     default_vllm_config,
-    dist_init,
 ) -> None:
     """Online weights replace only layers left unquantized by a checkpoint."""
     default_vllm_config.model_config = ModelConfig()
@@ -779,8 +844,10 @@ def test_online_prequantized_compatibility(
     or not is_quant_method_supported("fp8"),
     reason="Requires FP8 support on CUDA or ROCm.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_block_fp8_requantization_removes_source_scales(
-    default_vllm_config, dist_init, workspace_init
+    default_vllm_config, workspace_init
 ) -> None:
     """Blockwise FP8 replaces MXFP8 scales with its own scale parameter."""
     default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
@@ -808,8 +875,10 @@ def test_online_block_fp8_requantization_removes_source_scales(
         assert layer.weight_scale_inv.numel() > 0
 
 
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_ignore_keeps_checkpoint_quantization_linear(
-    default_vllm_config, dist_init, monkeypatch
+    default_vllm_config, monkeypatch
 ):
     """Ignoring online quantization does not replace a checkpoint method (linear)."""
     default_vllm_config.model_config = ModelConfig()
@@ -837,8 +906,10 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_configures_prequantized_moe(
-    default_vllm_config, dist_init
+    default_vllm_config,
 ) -> None:
     """Configure the checkpoint method as the online MoE's weight source."""
     default_vllm_config.model_config = ModelConfig()
@@ -1092,19 +1163,13 @@ def test_weight_loading_requantization(
         pytest.param("quark", id="quark_nvfp4"),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_weight_loading_requantization_moe(
     source_format: str, default_vllm_config, monkeypatch
 ) -> None:
     """Online re-quantization uses the original quant method for loading."""
     from tests.kernels.moe.utils import make_dummy_moe_config
 
-    # Loading local experts needs parameter TP metadata, not a process group.
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.fp8.select_fp8_moe_backend",
@@ -1288,6 +1353,7 @@ def test_online_requantized_moe_padding(
         "int8",
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_online_requantized_moe_reload(
     source_format: str,
     online_target: str,
@@ -1308,14 +1374,6 @@ def test_online_requantized_moe_reload(
     )
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
-
-    # This is faster than `dist_init` arg.
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
 
     moe = SimpleNamespace(
         w13_num_shards=2,
@@ -2108,6 +2166,8 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization(
     model_name: str,
     quant_scheme: str | None,
@@ -2117,7 +2177,6 @@ def test_online_quantization(
     extra_runner_kwargs: dict,
     use_rocm_aiter: bool,
     monkeypatch,
-    dist_init,
     workspace_init,
 ) -> None:
     """Tests that online quantization frontend configuration works -
@@ -2488,9 +2547,10 @@ def test_online_quantization_loads_real_weights(
     ],
     ids=["linear_regex", "direct_fused_regex", "legacy_fused_regex"],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_targets(
     default_vllm_config,
-    dist_init,
     targets: dict[str, str],
     prefix: str,
     expected_method_cls,
@@ -2522,8 +2582,10 @@ def test_online_quantization_targets(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization_records_global_config(
-    default_vllm_config, dist_init
+    default_vllm_config,
 ) -> None:
     default_vllm_config.model_config = ModelConfig()
     config = OnlineQuantizationConfig(quant_config_args(linear="fp8_per_block"))
@@ -2884,6 +2946,65 @@ def test_online_linear_tp_weight_quant_matches_unsharded(
         assert torch.equal(tp_scale, full_scale)
 
 
+@pytest.mark.parametrize("shard_dim", [0, 1])
+def test_online_nvfp4_weight_only_tp_quant_matches_unsharded(
+    monkeypatch, shard_dim: int
+) -> None:
+    """A TP shard without the max packs like the same slice of the full weight."""
+    torch.manual_seed(0)
+    weight = torch.randn(32, 64, device=DEVICE, dtype=torch.bfloat16)
+    weight[-1, -1] = 64.0
+    full_amax = weight_amax(weight).reshape(1)
+    full_weight, full_scales, full_global = _quantize_nvfp4(weight, full_amax)
+
+    _patch_max_reduce(monkeypatch, full_amax)
+    shard_size = weight.shape[shard_dim] // 2
+    shard = weight.narrow(shard_dim, 0, shard_size).contiguous()
+    amax = amax_for_tp_weight_quant(weight_amax(shard).reshape(1), True)
+    tp_weight, tp_scales, tp_global = _quantize_nvfp4(shard, amax)
+
+    # Along the input dim, a byte packs 2 values and a scale covers 16.
+    packed_size, scale_size = (
+        (shard_size, shard_size)
+        if shard_dim == 0
+        else (shard_size // 2, shard_size // 16)
+    )
+    assert torch.equal(tp_global, full_global)
+    assert torch.equal(tp_weight, full_weight.narrow(shard_dim, 0, packed_size))
+    assert torch.equal(
+        tp_scales.view(torch.uint8),
+        full_scales.view(torch.uint8).narrow(shard_dim, 0, scale_size),
+    )
+
+
+@pytest.mark.skipif(not cutlass_fp4_supported(), reason="No native NVFP4 quant kernel.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_online_nvfp4_native_quant_matches_reference(monkeypatch, dtype) -> None:
+    """The native packer and the PyTorch fallback dequantize to equally close
+    values: they may only differ on ties between two E2M1 values."""
+    torch.manual_seed(0)
+    weight = torch.randn(256, 512, device=DEVICE, dtype=dtype) * 0.02
+    weight[::7] = 0
+    weight.view(256, 32, 16)[:, ::5] = 0
+    amax = weight_amax(weight)
+    native = _quantize_nvfp4(weight, amax)
+    monkeypatch.setattr(online_nvfp4, "cutlass_fp4_supported", lambda: False)
+    reference = _quantize_nvfp4(weight, amax)
+
+    assert torch.equal(native[2], reference[2])
+    assert torch.equal(native[1].view(torch.uint8), reference[1].view(torch.uint8))
+    dequant_native, dequant_ref = (
+        dequantize_to_dtype(q, s, g, torch.float32, swizzle=False)
+        for q, s, g in (native, reference)
+    )
+    differ = dequant_native != dequant_ref
+    w = weight.float()
+    torch.testing.assert_close(
+        (dequant_native - w).abs()[differ], (dequant_ref - w).abs()[differ]
+    )
+    assert torch.all(dequant_native[weight == 0] == 0)
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
@@ -3111,11 +3232,16 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize("staging_device", ["cuda", "cpu"])
+def test_online_nvfp4_quantizes_original_expert_weights(staging_device: str) -> None:
+    """CPU-staged experts (CPU weight offloading) quantize on the GPU."""
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
 
-    quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
+    quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(
+        weight.to(staging_device)
+    )
+    assert quantized.is_cuda and block_scale.is_cuda and global_decode_scale.is_cuda
     global_encode_scale = 1.0 / global_decode_scale
     expected = [
         scaled_fp4_quant(
