@@ -77,7 +77,7 @@ def can_use_top_k_top_p_triton(logits: torch.Tensor) -> bool:
         logits.is_cuda
         and logits.dtype == torch.float32
         and logits.ndim == 2
-        and logits.shape[-1] < _MAX_VOCAB_SIZE
+        and 1 < logits.shape[-1] < _MAX_VOCAB_SIZE  # Triton specializes a vocab of 1
         and _supported_device()
     )
 

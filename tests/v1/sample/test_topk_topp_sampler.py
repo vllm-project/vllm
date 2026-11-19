@@ -1071,6 +1071,13 @@ class TestTritonGpuTopkTopp(TestTritonTopkTopp):
         self.apply_top_k_top_p_triton(logits, k, None)
         _assert_exact_filter(source, logits, k, None)
 
+    def test_single_token_vocab(self):
+        """The GPU kernel does not compile for a vocab of 1: the fallback takes it."""
+        source = torch.randn(4, 1, generator=self.generator)
+        k = torch.ones(4, dtype=torch.int32)
+        actual = apply_top_k_top_p(source.clone(), k, torch.full((4,), 0.9))
+        assert torch.equal(actual, source)
+
     @pytest.mark.parametrize("max_vocab,kernel", [(1 << 20, "gpu"), (1000, "fallback")])
     def test_sampler_dispatch(
         self, max_vocab: int, kernel: str, monkeypatch: pytest.MonkeyPatch
