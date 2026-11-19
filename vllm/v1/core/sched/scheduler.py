@@ -1914,6 +1914,11 @@ class Scheduler(SchedulerInterface):
         """Reserve GPU memory for the request's prompt embeds."""
         if request.prompt_embeds is None:
             return
+        if request.request_id in self.prompt_embeds_rows:
+            raise RuntimeError(
+                f"prompt_embeds rows of request {request.request_id} are already "
+                "reserved; reserving again would leak them."
+            )
         num_rows = request.prompt_embeds.shape[0]
         self.prompt_embeds_rows[request.request_id] = num_rows
         self.num_prompt_embeds_rows += num_rows
