@@ -79,7 +79,7 @@ def _supports_combination(capability, head_size, kv_cache_dtype, block_size=64):
     )
 
 
-def _impl(head_size, kv_cache_dtype):
+def _impl(head_size, kv_cache_dtype, **kwargs):
     return FlashAttentionImpl(
         num_heads=8,
         head_size=head_size,
@@ -88,6 +88,7 @@ def _impl(head_size, kv_cache_dtype):
         alibi_slopes=None,
         sliding_window=None,
         kv_cache_dtype=kv_cache_dtype,
+        **kwargs,
     )
 
 
@@ -147,6 +148,47 @@ def test_sm90_fp8_mma_rejects_dcp(head_size, kv_cache_dtype, rejected):
                 _impl(head_size, kv_cache_dtype)
         else:
             assert _impl(head_size, kv_cache_dtype).dcp_world_size == 2
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype,prefix_lm_ranges,refused",
+    [
+        ("fp8", True, True),
+        ("fp8_e4m3", True, True),
+        ("fp8", False, False),
+        ("auto", True, False),
+    ],
+)
+def test_sm90_fp8_mma_refuses_prefix_lm_ranges(
+    kv_cache_dtype, prefix_lm_ranges, refused
+):
+    """A layer that applies PrefixLM ranges refuses an FP8 KV cache on SM90.
+
+    Its PrefixLM steps run non-causal attention: as varlen rows, one FA4 call
+    with `causal=True` and per-row causal flags, which the wrapper's guard
+    against non-causal FP8 attention does not read, or with the mask_mod.
+    """
+    with _device(SM90, head_size=512, kv_cache_dtype=kv_cache_dtype):
+        if refused:
+            with pytest.raises(NotImplementedError, match="PrefixLM"):
+                _impl(512, kv_cache_dtype, prefix_lm_ranges=prefix_lm_ranges)
+        else:
+            impl = _impl(512, kv_cache_dtype, prefix_lm_ranges=prefix_lm_ranges)
+            assert impl.runs_prefix_lm_rows is prefix_lm_ranges
+
+
+def test_composites_do_not_declare_prefix_lm_rows():
+    """FlashAttention declares `supports_prefix_lm_rows`, so `Attention` passes
+    its impl `prefix_lm_ranges`. The composite does not: it passes its
+    arguments to both children, and its causal FlashAttention child, which
+    serves Gemma 4's full-attention layers also with an FP8 KV cache on SM90,
+    runs no PrefixLM steps."""
+    from vllm.v1.attention.backends.triton_flash_attn import (
+        TritonFlashAttentionBackend,
+    )
+
+    assert FlashAttentionBackend.supports_prefix_lm_rows()
+    assert not TritonFlashAttentionBackend.supports_prefix_lm_rows()
 
 
 @pytest.mark.parametrize(

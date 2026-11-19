@@ -70,6 +70,7 @@ from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 from .interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
+    SupportsBidirectionalSpans,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -575,6 +576,13 @@ class Gemma4Attention(nn.Module):
             # window; the runner keeps the full range and the kernel bounds it
             # per-query here.
             mm_prefix_clamp_sliding_window=self.is_sliding,
+            # With use_bidirectional_attention="vision", images attend
+            # bidirectionally on the sliding layers only, as in HF.
+            mm_prefix_ranges=self.is_sliding
+            or getattr(config, "use_bidirectional_attention", None) != "vision",
+            # The layer types the checkpoint trained with bidirectional spans.
+            bidirectional_spans=layer_type
+            in (getattr(config, "bidirectional_span_layer_types", None) or ()),
             prefix=f"{prefix}.attn",
         )
 
@@ -1463,7 +1471,12 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class Gemma4ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsBidirectionalSpans,
 ):
     is_3d_moe_weight: ClassVar[bool] = True
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import bisect
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
@@ -87,6 +88,31 @@ def replay_boundaries(
     resend = (num_prompt_tokens - 1) // block * block
     extension = num_prompt_tokens // block * block
     return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
+
+
+def bidirectional_span_boundaries(
+    span_ends: Sequence[int],
+    lo: int,
+    hi: int,
+    scheduler_block_size: int,
+    use_eagle: bool,
+    num_hash_lookahead_tokens: int,
+) -> list[int]:
+    """Positions a prompt that extends this one past a bidirectional span can
+    resume at, for the span ends in `(lo, hi]`.
+
+    The blocks up to a span's end are keyed on the span and reused by such a
+    prompt, so the end is a reuse point, lowered as `replay_boundaries` lowers
+    a resend: a lookahead hash of the block that ends there covers the next
+    span, and EAGLE groups drop back one block.
+    """
+    ends = span_ends[
+        bisect.bisect_right(span_ends, lo) : bisect.bisect_right(span_ends, hi)
+    ]
+    if not use_eagle:
+        return [end - num_hash_lookahead_tokens for end in ends]
+    block = scheduler_block_size
+    return [max(end // block * block - block, 0) for end in ends]
 
 
 class KVCacheCoordinator(ABC):
@@ -378,12 +404,54 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
 
         """
+        use_eagle = bool(self.drop_eagle_group_ids)
+        num_lookahead = self.block_pool.num_hash_lookahead_tokens
         boundaries = replay_boundaries(
             request.num_prompt_tokens,
             self.scheduler_block_size,
-            use_eagle=bool(self.drop_eagle_group_ids),
-            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+            use_eagle=use_eagle,
+            num_hash_lookahead_tokens=num_lookahead,
         )
+        if request.bidirectional_spans and self.retention_interval is not None:
+            # Dense retention keeps every tail anyway. Ends at or below what
+            # every group has cached were passed when their blocks were cached.
+            # An end can mark a tail up to a window (plus block and alignment
+            # rounding) below it, so later ends are passed once the chunk is
+            # within that reach.
+            caching = [
+                manager
+                for manager in self.single_type_managers
+                if manager.enable_caching
+                and manager.prefix_cacheable(manager.manager_config)
+            ]
+            num_cached = min(
+                (
+                    manager.num_cached_block.get(request.request_id, 0)
+                    * manager.block_size
+                    for manager in caching
+                ),
+                default=0,
+            )
+            reach = max(
+                (
+                    manager.sliding_window_reach(manager.manager_config)
+                    for manager in caching
+                ),
+                default=0,
+            )
+            boundaries += tuple(
+                bidirectional_span_boundaries(
+                    request._bidirectional_span_ends,
+                    lo=num_cached,
+                    hi=num_computed_tokens
+                    + num_lookahead
+                    + reach
+                    + 3 * self.scheduler_block_size,
+                    scheduler_block_size=self.scheduler_block_size,
+                    use_eagle=use_eagle,
+                    num_hash_lookahead_tokens=num_lookahead,
+                )
+            )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue

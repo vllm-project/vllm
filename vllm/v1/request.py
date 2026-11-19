@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import enum
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -84,6 +85,7 @@ class Request:
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
         block_hashes: list["BlockHash"] | None = None,
+        bidirectional_spans: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -199,6 +201,17 @@ class Request:
         # Multi-modal related
         self.mm_features = mm_features or []
 
+        # Sorted, disjoint [start, end) prompt ranges whose tokens attend to
+        # each other on the layers that apply spans. Set before the block
+        # hashes, which key every block a span overlaps on it.
+        self.bidirectional_spans: tuple[tuple[int, int], ...] = tuple(
+            (int(start), int(end)) for start, end in bidirectional_spans or ()
+        )
+        self._bidirectional_span_ends = gc_untrack(
+            [end for _, end in self.bidirectional_spans]
+        )
+        self._bidirectional_span_digests: dict[tuple[int, int], bytes] = {}
+
         # Read-only views
         # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
@@ -287,6 +300,7 @@ class Request:
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
             block_hashes=block_hashes,
+            bidirectional_spans=request.bidirectional_spans,
         )
 
     def append_output_token_ids(
@@ -316,6 +330,8 @@ class Request:
         )
         del self.block_hashes[num_valid_hashes:]
         self._prompt_embeds_per_block_hashes.clear()
+        # The span digests cover prompt tokens only, which this never drops:
+        # streaming input, which extends prompts, is refused with spans.
 
     @property
     def use_structured_output(self) -> bool:
@@ -353,6 +369,26 @@ class Request:
     @property
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
+
+    def align_prefill_to_bidirectional_spans(
+        self, num_computed_tokens: int, num_new_tokens: int
+    ) -> int:
+        """Shorten a prefill chunk so that it does not end inside a span.
+
+        A token of a span attends to the whole span, so the uncomputed rest of
+        a span runs in one step. A chunk that would end inside a span ends at
+        its start. A chunk that starts inside one, after a prefix-cache hit or
+        a KV load that ends there, either finishes it or gets 0 tokens.
+        """
+        spans = self.bidirectional_spans
+        if not spans or num_new_tokens <= 0:
+            return num_new_tokens
+        chunk_end = num_computed_tokens + num_new_tokens
+        # Only the first span that ends after the chunk can contain its end.
+        idx = bisect.bisect_right(self._bidirectional_span_ends, chunk_end)
+        if idx == len(spans) or spans[idx][0] >= chunk_end:
+            return num_new_tokens
+        return max(spans[idx][0] - num_computed_tokens, 0)
 
     def get_max_cache_hit_length(self, bound: int | None = None) -> int:
         """Longest prefix cache hit allowed, optionally tightened by bound."""

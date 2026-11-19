@@ -49,6 +49,7 @@ def prompt_embeds_processor():
         is_diffusion=False,
         return_sampling_mask=False,
         supports_multimodal_inputs=False,
+        declares_bidirectional_spans=False,
     )
     model_config.get_vocab_size.return_value = 32
     model_config.try_get_generation_config.return_value = {}

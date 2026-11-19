@@ -87,6 +87,7 @@ def _get_backend_priorities(
     use_non_causal: bool = False,
     head_size: int | None = None,
     use_mm_prefix: bool = False,
+    use_bidirectional_spans: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.v1.kv_cache_interface import is_quantized_kv_cache
@@ -165,18 +166,23 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TURBOQUANT,
             ]
         else:
-            return [
-                *(
-                    [AttentionBackendEnum.TRITON_FLASH_ATTN]
-                    if device_capability.major == 9 and use_mm_prefix
-                    else []
-                ),
+            backends = [
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
             ]
+            if device_capability.major == 9 and use_mm_prefix:
+                # PrefixLM layers on Hopper prefer the Triton/FlashAttention
+                # composite. Layers that apply bidirectional spans prefer
+                # FlashAttention, which runs their steps as varlen rows
+                # (backends/prefix_lm_rows.py), and fall back to the composite.
+                backends.insert(
+                    1 if use_bidirectional_spans else 0,
+                    AttentionBackendEnum.TRITON_FLASH_ATTN,
+                )
+            return backends
 
 
 def _backend_cls_path(backend_cls: type[AttentionBackend]) -> str:
@@ -436,6 +442,7 @@ class CudaPlatformBase(Platform):
             use_non_causal=attn_selector_config.use_non_causal,
             head_size=attn_selector_config.head_size,
             use_mm_prefix=attn_selector_config.use_mm_prefix,
+            use_bidirectional_spans=attn_selector_config.use_bidirectional_spans,
         )
         for priority, backend in enumerate(backend_priorities):
             try:

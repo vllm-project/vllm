@@ -4,7 +4,7 @@
 
 import copy
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -29,6 +29,10 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
+)
+from vllm.v1.attention.backends.prefix_lm_rows import (
+    PrefixLMRows,
+    PrefixLMRowsBuilder,
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
@@ -91,7 +95,8 @@ FA4_DENSE_MAX_SEQLEN_K = 8192
 
 
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
-    """Warm paged, causal FA4 on Blackwell and Hopper."""
+    """Warm paged, causal FA4 on Blackwell and Hopper, and on Hopper its
+    per-row causal variant, which runs PrefixLM steps as varlen rows."""
 
     @dataclass(frozen=True, slots=True)
     class CompileKey:
@@ -107,6 +112,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float
         is_single_batch: bool
         num_splits: int
+        dynamic_causal: bool = False
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -126,6 +132,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         softcap: float,
         is_single_batch: bool = True,
         num_splits: int = 1,
+        dynamic_causal: bool = False,
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
@@ -139,6 +146,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             softcap=softcap,
             is_single_batch=is_single_batch,
             num_splits=num_splits,
+            dynamic_causal=dynamic_causal,
         )
 
     def get_warmup_keys(
@@ -148,11 +156,14 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         kv_cache_spec: AttentionSpec,
         num_qo_heads: int,
         window_size: tuple[int, int],
+        dynamic_causal: bool = False,
     ) -> list[CompileKey]:
         capability = current_platform.get_device_capability()
         major = capability.major if capability is not None else None
         if (
             vllm_config.parallel_config.decode_context_parallel_size != 1
+            # FA4 takes per-row causal flags on SM90 only.
+            or (dynamic_causal and major != 9)
             or vllm_config.model_config.rswa_window is not None
             or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
             or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
@@ -192,6 +203,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             page_size=page_size,
             window_size=WarmupChoices(window_size),
             softcap=softcap,
+            dynamic_causal=dynamic_causal,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -238,6 +250,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             num_splits=2 if compile_key.num_splits > 1 else 1,
             fa_version=4,
             return_softmax_lse=False,
+            dynamic_causal_shape=(batch_size,) if compile_key.dynamic_causal else None,
         )
         if compile_key.head_dim == 512 and compile_key.num_splits > 1:
             from torch._subclasses.fake_tensor import FakeTensorMode
@@ -427,6 +440,10 @@ class FlashAttentionBackend(AttentionBackend):
         return is_fa_version_supported(4)
 
     @classmethod
+    def supports_prefix_lm_rows(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         if not is_flash_attn_varlen_func_available():
             return False
@@ -534,6 +551,12 @@ class FlashAttentionMetadata:
     # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
     # (-1, -1) for query tokens outside every multimodal range.
     mm_prefix_query_range_tensor: torch.Tensor | None = None
+
+    # The same PrefixLM ranges as causal and bidirectional varlen rows, which
+    # layers without a sliding window use instead of the mask_mod (see
+    # prefix_lm_rows.py). None unless a query of the step sees a later key of
+    # its range and every such range is scheduled to its end.
+    prefix_lm_rows: PrefixLMRows | None = None
 
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
@@ -785,7 +808,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
         self.mm_prefix_query_ranges_np: np.ndarray | None = None
         self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
-        if self.model_config.is_mm_prefix_lm:
+        if self.model_config.uses_prefix_lm_ranges:
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self.mm_prefix_query_ranges_cpu = torch.empty(
                 (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
@@ -794,6 +817,41 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.mm_prefix_query_ranges_gpu = torch.empty(
                 (max_num_tokens, 2), dtype=torch.int32, device=self.device
             )
+        # PrefixLM steps as varlen rows (FlashAttentionImpl.
+        # _forward_prefix_lm_rows) need FA4's per-row causal flags, which it
+        # accepts on SM90 only. Like the mask_mod's query ranges, the rows are
+        # built per step, and only for steps in which a query sees a later key
+        # of its range, so a request schedules at least two prompt tokens and
+        # the step does not replay a full CUDA graph under FULL_AND_PIECEWISE
+        # or FULL_DECODE_ONLY. The rows take their query offsets from the host,
+        # which adaptive verification can contradict on device.
+        speculative_config = vllm_config.speculative_config
+        self.prefix_lm_rows_builder: PrefixLMRowsBuilder | None = None
+        if (
+            self.model_config.uses_prefix_lm_ranges
+            and fa_version == 4
+            and current_platform.is_device_capability_family(90)
+            and self.dcp_world_size == 1
+            and self.rswa_window is None
+            and not (
+                speculative_config is not None
+                and speculative_config.enable_adaptive_verification
+            )
+        ):
+            self.prefix_lm_rows_builder = PrefixLMRowsBuilder(self.device)
+            # Compile the rows' kernel at startup for the layers that run them.
+            layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+            if vllm_config.kernel_config.enable_jit_warmup and any(
+                getattr(layer.impl, "runs_prefix_lm_rows", False)
+                for layer in layers.values()
+            ):
+                _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
+                    vllm_config=vllm_config,
+                    kv_cache_spec=kv_cache_spec,
+                    num_qo_heads=self.num_heads_q,
+                    window_size=(-1, -1),
+                    dynamic_causal=True,
+                )
 
     def build(
         self,
@@ -963,8 +1021,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         # Compute mm_prefix range tensor if the batch contains
-        # multimodal tokens with bidirectional ranges.  Built for every FA
-        # group; Gemma4 nulls the field for its non-sliding layers.
+        # multimodal tokens with bidirectional ranges.  Groups whose layers
+        # opt out of the ranges get metadata without them.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
             # The upper bound is exact for prefill rows, which is where
@@ -988,6 +1046,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     non_blocking=True,
                 )
                 attn_metadata.mm_prefix_query_range_tensor = mm_query_ranges
+                if self.prefix_lm_rows_builder is not None and causal is True:
+                    attn_metadata.prefix_lm_rows = self.prefix_lm_rows_builder.build(
+                        mm_ranges,
+                        common_attn_metadata.query_start_loc_cpu,
+                        common_attn_metadata.seq_lens_cpu_upper_bound,
+                        seq_lens,
+                        block_table_tensor,
+                        max_seq_len,
+                    )
 
         # R-SWA: copy prefix lengths into persistent buffers (outside the
         # compiled region) so forward() never allocates during CUDA graph
@@ -1016,6 +1083,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
+        rows = metadata.prefix_lm_rows
+        if rows is not None:
+            new_metadata.prefix_lm_rows = replace(
+                rows, block_table=blk_table.index_select(0, rows.row_req)
+            )
         return new_metadata
 
     def update_draft_decode_metadata(self, metadata: FlashAttentionMetadata) -> None:
@@ -1057,6 +1129,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
+        prefix_lm_ranges: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1135,6 +1208,23 @@ class FlashAttentionImpl(AttentionImpl):
                 "FA4 SM90 FP8 KV cache does not support decode context "
                 "parallelism; use an unquantized KV cache."
             )
+        if uses_sm90_fa4_fp8_kv_dequant and prefix_lm_ranges:
+            # PrefixLM steps run non-causal attention, as varlen rows or with
+            # the mask_mod. The rows pass causal=True with per-row flags, which
+            # the FP8 guard in flash_attn_varlen_func does not read.
+            raise NotImplementedError(
+                "FA4 SM90 FP8 KV cache does not support PrefixLM ranges "
+                "(multimodal or bidirectional spans); use an unquantized KV "
+                "cache."
+            )
+        # A layer that applies PrefixLM ranges and has no sliding window or
+        # sinks runs a step that prefills whole ranges as varlen rows.
+        self.runs_prefix_lm_rows = (
+            prefix_lm_ranges
+            and self.vllm_flash_attn_version == 4
+            and self.sliding_window == (-1, -1)
+            and sinks is None
+        )
 
         dcp_a2a = (
             vllm_config is not None
@@ -1299,6 +1389,16 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
             )
             return output
+        elif attn_metadata.prefix_lm_rows is not None and self.runs_prefix_lm_rows:
+            self._forward_prefix_lm_rows(
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                output[:num_actual_tokens],
+                attn_metadata,
+                attn_metadata.prefix_lm_rows,
+            )
+            return output
         else:
             causal = attn_metadata.causal
             is_dynamic_causal = isinstance(causal, torch.Tensor)
@@ -1409,6 +1509,42 @@ class FlashAttentionImpl(AttentionImpl):
                 aux_tensors=rswa_aux or mm_aux,
             )
             return output
+
+    def _forward_prefix_lm_rows(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        rows: PrefixLMRows,
+    ) -> None:
+        """Attention for a step that prefills whole PrefixLM ranges, as varlen
+        rows (prefix_lm_rows.py) over the same packed queries and output, in one
+        FA4 call with a causal flag per row (`dynamic_causal`).
+
+        The rows run over an unquantized KV cache only: `__init__` refuses an
+        FP8 KV cache for layers that apply PrefixLM ranges.
+        """
+        assert self.vllm_flash_attn_version is not None
+        flash_attn_varlen_func(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=rows.cu_seqlens_q,
+            max_seqlen_q=rows.max_seqlen_q,
+            seqused_k=rows.seqused_k,
+            max_seqlen_k=rows.max_seqlen_k,
+            block_table=rows.block_table,
+            softmax_scale=self.scale,
+            causal=True,
+            dynamic_causal=rows.row_causal,
+            alibi_slopes=self.alibi_slopes,
+            softcap=self.logits_soft_cap,
+            fa_version=self.vllm_flash_attn_version,
+            num_splits=attn_metadata.max_num_splits,
+        )
 
     def do_kv_cache_update(
         self,

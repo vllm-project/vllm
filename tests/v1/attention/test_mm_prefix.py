@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """mm_prefix query-range metadata and the FA4 mask_mod that consumes it.
 
-The metadata tests run anywhere. The FA4 tests need SM100 and run the real
-kernel against a dense float32 reference, which is the only way to check what
+The metadata tests run anywhere. The FA4 tests need a GPU that runs FA4 (the
+varlen-row tests SM90) and run the real kernel against a dense float32
+reference, which is the only way to check what
 cannot be reasoned about from the Python side:
 
 * `q_ranges[token_idx, 0]` indexing an aux tensor with a runtime `Int32`.
@@ -14,6 +15,10 @@ callers must pass `causal=False` and no FA-layer window. FA #155 stopped
 auto-clearing those when `mask_mod` is set; leaving `causal=True` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
+
+import contextlib
+import dataclasses
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -633,6 +638,439 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2), (
         "test batch does not actually exercise the mm_prefix branch"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Layers without a sliding window: whole ranges as varlen rows (SM90)
+# --------------------------------------------------------------------------- #
+
+# Largest difference allowed between the rows and the mask_mod path, which
+# compute the same attention with the same tiles.
+ROWS_VS_MASK_ATOL = 0.0
+
+# Request 0 prefills three ranges and a causal tail; request 2's cache hit ends
+# inside its second range (752), so that range is partly cached; request 4 is a
+# plain prefill in the same step; 1 and 3 are decodes. Inclusive (start, end).
+ROWS_SEQ_LENS = [600, 513, 1200, 97, 340]
+ROWS_QUERY_LENS = [600, 1, 448, 1, 340]
+ROWS_MM_RANGES = {
+    0: [(0, 255), (256, 511), (512, 549)],
+    1: [(4, 259)],
+    2: [(0, 511), (512, 1023), (1024, 1100)],
+    3: [(1, 64)],
+}
+
+
+def _rows_case(head_size, seq_lens, query_lens, mm_ranges, block_size=BLOCK_SIZE):
+    """Config, metadata, builder, paged KV and dense K/V for one step."""
+    vllm_config = _enable_mm_prefix(
+        create_vllm_config(
+            model_name=MODEL,
+            max_model_len=max(seq_lens),
+            block_size=block_size,
+            num_gpu_blocks=2048,
+        )
+    )
+    mc = vllm_config.model_config
+    mc.get_head_size = MethodType(lambda self: head_size, mc)
+    with set_current_vllm_config(vllm_config):
+        fa_version = get_flash_attn_version(head_size=head_size)
+    if current_platform.is_device_capability_family(90) and head_size == 512:
+        assert fa_version == 4, "the rows need FA4 at head size 512 on SM90"
+    elif fa_version != 4:
+        pytest.skip(f"FA4 does not support head_size={head_size} on this device")
+    torch.manual_seed(0)
+    num_heads = mc.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens, name="rows")
+    common = create_common_attn_metadata(batch, block_size, DEVICE)
+    common.mm_req_doc_ranges = mm_ranges
+    qs, new_ks, new_vs, k_fulls, v_fulls, k_ctxs, v_ctxs = [], [], [], [], [], [], []
+    for q_len, s_len in zip(query_lens, seq_lens):
+        ctx = s_len - q_len
+        shape = (num_kv_heads, head_size)
+        qs.append(torch.randn(q_len, num_heads, head_size, dtype=DTYPE, device=DEVICE))
+        k_full = torch.randn(s_len, *shape, dtype=DTYPE, device=DEVICE)
+        v_full = torch.randn(s_len, *shape, dtype=DTYPE, device=DEVICE)
+        k_fulls.append(k_full)
+        v_fulls.append(v_full)
+        k_ctxs.append(k_full[:ctx])
+        v_ctxs.append(v_full[:ctx])
+        new_ks.append(k_full[ctx:])
+        new_vs.append(v_full[ctx:])
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_ctxs,
+        v_contexts=v_ctxs,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=DTYPE,
+        device=DEVICE,
+        num_blocks=2048,
+        common_attn_metadata=common,
+        layout=KVCacheLayout.LBNHC,
+        randomize_blocks=True,
+    )
+    kv_cache_spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=mc.dtype,
+        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
+    )
+    with set_current_vllm_config(vllm_config):
+        builder = FlashAttentionMetadataBuilder(
+            kv_cache_spec, ["model.layers.0.self_attn.attn"], vllm_config, DEVICE
+        )
+    qkv = (torch.cat(qs), torch.cat(new_ks), torch.cat(new_vs), kv_cache)
+    return vllm_config, common, builder, qkv, (k_fulls, v_fulls)
+
+
+def _rows_impl(vllm_config, head_size, **kwargs):
+    mc = vllm_config.model_config
+    with set_current_vllm_config(vllm_config):
+        return FlashAttentionImpl(
+            num_heads=mc.get_num_attention_heads(vllm_config.parallel_config),
+            head_size=head_size,
+            scale=head_size**-0.5,
+            num_kv_heads=mc.get_num_kv_heads(vllm_config.parallel_config),
+            alibi_slopes=None,
+            kv_cache_dtype="auto",
+            **kwargs,
+        )
+
+
+@contextlib.contextmanager
+def _count_combines():
+    """Count the calls to FA4's SplitKV combine, which runs only when a call
+    splits its keys."""
+    from vllm.vllm_flash_attn.cute import interface
+
+    combine = interface._flash_attn_fwd_combine
+    calls: list[int] = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return combine(*args, **kwargs)
+
+    # The combine reads its compile cache through the module's name for it.
+    counted.compile_cache = combine.compile_cache  # type: ignore[attr-defined]
+    with patch.object(interface, "_flash_attn_fwd_combine", counted):
+        yield calls
+
+
+def _forward(vllm_config, impl, metadata, qkv):
+    query, key, value, kv_cache = qkv
+    layer = MockAttentionLayer(DEVICE)
+    with (
+        set_current_vllm_config(vllm_config),
+        patch.object(
+            impl, "_forward_prefix_lm_rows", wraps=impl._forward_prefix_lm_rows
+        ) as rows,
+    ):
+        impl.do_kv_cache_update(layer, key, value, kv_cache, metadata.slot_mapping)
+        out = impl.forward(
+            layer, query, key, value, kv_cache, metadata, torch.empty_like(query)
+        )
+    return out, rows.call_count
+
+
+@requires_fa4
+@pytest.mark.parametrize("head_size", [128, 512])
+def test_ranges_run_as_varlen_rows_on_layers_without_window(head_size):
+    """On SM90, a layer without a sliding window that applies PrefixLM ranges
+    runs a step that prefills whole ranges as varlen rows, not the mask_mod,
+    and matches the dense reference for a step that mixes range prefills (one
+    partly cached), a plain prefill and decodes.
+
+    A plain step runs first on the same impl and shape, so the row kernel is
+    compiled after the stock causal kernel, as in a server.
+    """
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    vllm_config, common, builder, qkv, (k_fulls, v_fulls) = _rows_case(
+        head_size, ROWS_SEQ_LENS, ROWS_QUERY_LENS, ROWS_MM_RANGES
+    )
+    impl = _rows_impl(
+        vllm_config, head_size, sliding_window=None, prefix_lm_ranges=True
+    )
+    plain = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=dataclasses.replace(common, mm_req_doc_ranges=None),
+    )
+    assert plain.prefix_lm_rows is None
+    _, calls = _forward(vllm_config, impl, plain, qkv)
+    assert calls == 0
+
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    # Request 0: three ranges and a causal tail; 1 and 3: decodes, one row
+    # each; 2: the uncached part of a range, a range and a tail; 4: plain.
+    assert md.prefix_lm_rows is not None
+    assert md.prefix_lm_rows.num_rows == 4 + 1 + 3 + 1 + 1
+    actual, calls = _forward(vllm_config, impl, md, qkv)
+    assert calls == 1
+
+    scale = head_size**-0.5
+    ref_args = (qkv[0], k_fulls, v_fulls, ROWS_QUERY_LENS, ROWS_SEQ_LENS)
+    expected = _dense_reference(*ref_args, ROWS_MM_RANGES, None, scale)
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+    causal_only = _dense_reference(*ref_args, {}, None, scale)
+    assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2)
+
+    # Metadata reused for another KV cache group gathers that group's blocks.
+    other = md.block_table.flip(0).contiguous()
+    moved = builder.update_block_table(md, other, md.slot_mapping)
+    row_req = md.prefix_lm_rows.row_req.long()
+    assert torch.equal(moved.prefix_lm_rows.block_table, other[row_req])
+
+    # The mask_mod path on the same metadata computes the same attention.
+    mask_impl = _rows_impl(vllm_config, head_size, sliding_window=None)
+    mask_out, calls = _forward(vllm_config, mask_impl, md, qkv)
+    assert calls == 0
+    torch.testing.assert_close(actual, mask_out, atol=ROWS_VS_MASK_ATOL, rtol=0)
+
+
+@requires_fa4
+@pytest.mark.parametrize(
+    "seq_lens,query_lens,mm_ranges,num_rows,num_splits,block_size",
+    [
+        # Two ranges and a causal tail next to a decode, with the keys split
+        # four ways, at the 64-token block size of FA4's paged TMA loads.
+        pytest.param(
+            [2048, 900],
+            [600, 1],
+            {0: [(1448, 1747), (1748, 2027)]},
+            4,
+            4,
+            64,
+            id="split_rows",
+        ),
+        # A range and a long causal row after it, in a call split five ways.
+        pytest.param(
+            [2048],
+            [700],
+            {0: [(1348, 1775)]},
+            2,
+            5,
+            BLOCK_SIZE,
+            id="split_causal_row",
+        ),
+        # More rows than FA4's varlen scheduler walks without a lookup table,
+        # at the kernel's own split count.
+        pytest.param(
+            [800],
+            [800],
+            {0: [(s, s + 1) for s in range(0, 600, 2)]},
+            301,
+            0,
+            BLOCK_SIZE,
+            id="many_rows",
+        ),
+    ],
+)
+def test_rows_on_split_and_many_row_steps(
+    seq_lens, query_lens, mm_ranges, num_rows, num_splits, block_size
+):
+    """The rows match the dense reference and the mask_mod path where FA4
+    changes kernel variant: split keys and more than 256 rows."""
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    head_size = 512
+    vllm_config, common, builder, qkv, (k_fulls, v_fulls) = _rows_case(
+        head_size, seq_lens, query_lens, mm_ranges, block_size=block_size
+    )
+    impl = _rows_impl(
+        vllm_config, head_size, sliding_window=None, prefix_lm_ranges=True
+    )
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert md.prefix_lm_rows is not None
+    assert md.prefix_lm_rows.num_rows == num_rows
+    # Both paths take the metadata's split count, as the backend's FA4 calls do.
+    md = dataclasses.replace(md, max_num_splits=num_splits)
+    with _count_combines() as combines:
+        actual, calls = _forward(vllm_config, impl, md, qkv)
+    assert calls == 1
+    if num_splits > 1:
+        # The forced count reached the kernel, which split the keys.
+        assert len(combines) == 1
+    ref_args = (qkv[0], k_fulls, v_fulls, query_lens, seq_lens)
+    expected = _dense_reference(*ref_args, mm_ranges, None, head_size**-0.5)
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+    causal_only = _dense_reference(*ref_args, {}, None, head_size**-0.5)
+    assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2)
+    # Split keys change only the order of the softmax reduction.
+    mask_impl = _rows_impl(vllm_config, head_size, sliding_window=None)
+    mask_out, _ = _forward(vllm_config, mask_impl, md, qkv)
+    torch.testing.assert_close(actual, mask_out, atol=5e-3, rtol=1e-2)
+
+
+# Next questions about a cached state: the uncached tail of the state's last
+# range, the question as a range and a causal tail; a question after a range
+# (its tail and a causal run); a question that is one row over many keys, whose
+# keys the kernel splits.
+NEXT_QUESTION_CASES = [
+    pytest.param([2048], [320], {0: [(1536, 1747), (1748, 2027)]}, id="next_question"),
+    pytest.param([2048], [384], {0: [(1024, 1679)]}, id="question_after_a_range"),
+    pytest.param([2048], [64], {0: [(1984, 2047)]}, id="one_row_question"),
+]
+
+
+@requires_fa4
+@pytest.mark.parametrize("seq_lens,query_lens,mm_ranges", NEXT_QUESTION_CASES)
+def test_next_questions_run_as_rows(seq_lens, query_lens, mm_ranges):
+    """A next question about a cached state runs as rows at the kernel's own
+    split count and matches the dense reference and, up to the order of the
+    softmax reduction, the mask_mod path."""
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    head_size = 512
+    vllm_config, common, builder, qkv, (k_fulls, v_fulls) = _rows_case(
+        head_size, seq_lens, query_lens, mm_ranges, block_size=64
+    )
+    impl = _rows_impl(
+        vllm_config, head_size, sliding_window=None, prefix_lm_ranges=True
+    )
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert md.prefix_lm_rows is not None
+    actual, calls = _forward(vllm_config, impl, md, qkv)
+    assert calls == 1
+    ref_args = (qkv[0], k_fulls, v_fulls, query_lens, seq_lens)
+    expected = _dense_reference(*ref_args, mm_ranges, None, head_size**-0.5)
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+    mask_impl = _rows_impl(vllm_config, head_size, sliding_window=None)
+    mask_out, calls = _forward(vllm_config, mask_impl, md, qkv)
+    assert calls == 0
+    torch.testing.assert_close(actual, mask_out, atol=5e-3, rtol=1e-2)
+
+
+@requires_fa4
+def test_warmup_keys_include_the_rows_kernel():
+    """The JIT warmup's keys for the rows' per-row causal kernel mirror the
+    causal kernel's, with and without split keys."""
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    from vllm.v1.attention.backends.flash_attn import _FA4_DENSE_ATTENTION_KERNEL
+
+    vllm_config, *_ = _rows_case(512, [64], [64], {})
+    spec = AttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
+    )
+    variants: tuple[dict[str, bool], ...] = ({}, {"dynamic_causal": True})
+    with set_current_vllm_config(vllm_config):
+        keys = [
+            _FA4_DENSE_ATTENTION_KERNEL.get_warmup_keys(
+                vllm_config=vllm_config,
+                kv_cache_spec=spec,
+                num_qo_heads=8,
+                window_size=(-1, -1),
+                **variant,
+            )
+            for variant in variants
+        ]
+    causal, rows = keys
+    assert rows and all(key.dynamic_causal for key in rows)
+    assert {key.num_splits > 1 for key in rows} == {False, True}
+    assert [dataclasses.replace(key, dynamic_causal=False) for key in rows] == causal
+
+
+@requires_fa4
+@pytest.mark.parametrize("seq_lens,query_lens,mm_ranges", NEXT_QUESTION_CASES)
+def test_warmup_compiles_the_kernels_of_prefix_lm_steps(
+    seq_lens, query_lens, mm_ranges
+):
+    """From empty FA4 compile caches, the warmup's compiles cover the rows of a
+    next question and of a whole prompt: they compile no further FA4 kernel,
+    and match the dense reference."""
+    from vllm.v1.attention.backends.flash_attn import _FA4_DENSE_ATTENTION_KERNEL
+
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    from vllm.vllm_flash_attn.cute.interface import (
+        _flash_attn_fwd,
+        _flash_attn_fwd_combine,
+    )
+
+    head_size = 512
+    vllm_config, common, builder, qkv, (k_fulls, v_fulls) = _rows_case(
+        head_size, seq_lens, query_lens, mm_ranges, block_size=64
+    )
+    whole_ranges = {0: [(0, 255), (256, 511)]}
+    _, whole, whole_builder, whole_qkv, (whole_k, whole_v) = _rows_case(
+        head_size, [600], [600], whole_ranges, block_size=64
+    )
+    impl = _rows_impl(
+        vllm_config, head_size, sliding_window=None, prefix_lm_ranges=True
+    )
+    spec = AttentionSpec(
+        block_size=64, num_kv_heads=impl.num_kv_heads, head_size=512, dtype=DTYPE
+    )
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert md.prefix_lm_rows is not None
+    whole_md = whole_builder.build(common_prefix_len=0, common_attn_metadata=whole)
+    assert whole_md.prefix_lm_rows is not None
+
+    caches = (
+        _flash_attn_fwd.compile_cache,  # type: ignore[attr-defined]
+        _flash_attn_fwd_combine.compile_cache,  # type: ignore[attr-defined]
+    )
+    saved = [dict(cache.cache) for cache in caches]
+    try:
+        for cache in caches:
+            cache.cache.clear()
+        with set_current_vllm_config(vllm_config):
+            _FA4_DENSE_ATTENTION_KERNEL.warmup(
+                vllm_config=vllm_config,
+                kv_cache_spec=spec,
+                num_qo_heads=impl.num_heads,
+                window_size=(-1, -1),
+                dynamic_causal=True,
+            )
+        compiled = [set(cache.cache) for cache in caches]
+        assert compiled[0]
+        actual, calls = _forward(vllm_config, impl, md, qkv)
+        assert calls == 1
+        whole_out, calls = _forward(vllm_config, impl, whole_md, whole_qkv)
+        assert calls == 1
+        new = [set(cache.cache) - before for cache, before in zip(caches, compiled)]
+    finally:
+        for cache, entries in zip(caches, saved):
+            cache.cache.update(entries)
+    assert new == [set(), set()]
+    scale = head_size**-0.5
+    expected = _dense_reference(
+        qkv[0], k_fulls, v_fulls, query_lens, seq_lens, mm_ranges, None, scale
+    )
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+    expected = _dense_reference(
+        whole_qkv[0], whole_k, whole_v, [600], [600], whole_ranges, None, scale
+    )
+    torch.testing.assert_close(whole_out.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_fa4
+def test_steps_rows_cannot_serve_keep_the_mask_path():
+    """A range that runs past the scheduled tokens (a chunked multimodal item)
+    cannot be a row, even after a whole range; a step with a per-request causal
+    tensor keeps its own path. Both keep the mask_mod metadata and build no
+    rows."""
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("FA4 takes per-row causal flags on SM90 only")
+    _, common, builder, *_ = _rows_case(128, [300], [300], {0: [(10, 60), (100, 399)]})
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert md.mm_prefix_query_range_tensor is not None
+    assert md.prefix_lm_rows is None
+
+    _, common, builder, *_ = _rows_case(128, [300], [300], {0: [(10, 60)]})
+    assert (
+        builder.build(common_prefix_len=0, common_attn_metadata=common).prefix_lm_rows
+        is not None
+    )
+    causal = torch.ones(1, dtype=torch.int32, device=DEVICE)
+    md = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=dataclasses.replace(common, causal=causal),
+    )
+    assert md.prefix_lm_rows is None
 
 
 @pytest.mark.parametrize(
