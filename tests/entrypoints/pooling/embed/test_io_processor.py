@@ -19,7 +19,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingCompletionRequest,
     EmbeddingRequest,
 )
-from vllm.entrypoints.pooling.typing import (
+from vllm.entrypoints.pooling.types import (
     PoolingEngineInput,
     PoolingServeContext,
 )

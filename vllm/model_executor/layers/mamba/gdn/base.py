@@ -48,8 +48,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.use_replayssm = vllm_config.is_gdn_replayssm_enabled()
-        # GDN ReplaySSM always runs on FlashInfer; MambaBase consumers read this.
+        # GDN ReplaySSM always runs on FlashInfer with runner-committed trackers.
         self.use_flashinfer_replayssm = self.use_replayssm
+        self.use_replayssm_trackers = self.use_replayssm
         self.state_alignment = mamba_state_alignment(vllm_config)
         self.replayssm_buffer_len = (
             self.cache_config.replayssm_buffer_len if self.use_replayssm else None

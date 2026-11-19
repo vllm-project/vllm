@@ -15,6 +15,9 @@ from vllm.model_executor.layers.mamba.gdn.replayssm import (
     load_gdn_replayssm_materializer,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import GDN_REPLAYSSM_RING_SLOTS
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
+    replayssm_materialize,
+)
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -37,7 +40,9 @@ def initialize_replayssm_ring_trackers(
     kv_cache_config: KVCacheConfig,
     forward_context: Mapping[str, Any],
 ) -> None:
-    """Allocate and bind one tracker pair per ReplaySSM cache group."""
+    """Allocate and bind one tracker pair per ReplaySSM cache group, and the
+    stochastic-rounding seed slots of the FlashInfer ReplaySSM layers."""
+    seeded: list[str] = []
     for group in kv_cache_config.kv_cache_groups:
         names = [
             name
@@ -73,6 +78,36 @@ def initialize_replayssm_ring_trackers(
         # Triton plans each decode step in the group's first executed layer.
         planner = min(names, key=extract_layer_index)
         forward_context[planner]._plans_replayssm_decode = True
+        seeded.extend(
+            name
+            for name, layer in zip(names, layers)
+            if layer.use_flashinfer_replayssm
+            and layer.mamba_type == MambaAttentionBackendEnum.MAMBA2
+            and layer.mamba_config.enable_stochastic_rounding
+        )
+    _bind_replayssm_rand_seeds(forward_context, seeded)
+
+
+def _bind_replayssm_rand_seeds(
+    forward_context: Mapping[str, Any], names: list[str]
+) -> None:
+    """Give each layer one slot of a shared Philox seed buffer.
+
+    The first executed layer refreshes the whole buffer with one launch per
+    step instead of every layer drawing its own seed.
+    """
+    if not names:
+        return
+    layers = [forward_context[name] for name in sorted(names, key=extract_layer_index)]
+    device = layers[0].kv_cache[1].device
+    seeds = layers[0]._replayssm_rand_seeds
+    # Extensible caches rebind after capture. Keep the captured address.
+    if seeds is None or seeds.numel() != len(layers) or seeds.device != device:
+        seeds = torch.zeros(len(layers), dtype=torch.int64, device=device)
+    for slot, layer in enumerate(layers):
+        layer._replayssm_rand_seed = seeds[slot : slot + 1]
+        layer._replayssm_rand_seeds = None
+    layers[0]._replayssm_rand_seeds = seeds
 
 
 def get_replayssm_block_copy_tensors(
@@ -81,7 +116,7 @@ def get_replayssm_block_copy_tensors(
     """Include shared trackers in scheduler block copies alongside packed pages."""
     tensors: list[torch.Tensor] = []
     for layer in forward_context.values():
-        if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
+        if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
             tensors.extend(
                 (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
             )
@@ -380,7 +415,7 @@ class _ReplaySSMMaterializeTables(NamedTuple):
     state_scale_slot_strides: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class ReplaySSMModelContext:
     """Shared replay plans with independent physical slots for each cache group."""
 
@@ -413,6 +448,7 @@ class ReplaySSMModelContext:
         cls,
         grouped: Sequence[tuple[list[Any], MambaSpec, torch.Tensor]],
         max_num_reqs: int,
+        materialize_prefixes: bool,
     ) -> "ReplaySSMModelContext":
         mixers = [mixer for group, _, _ in grouped for mixer in group]
         first = mixers[0]
@@ -421,7 +457,7 @@ class ReplaySSMModelContext:
         # Homogeneous groups share cache-hit lookup, logical columns, and replay
         # transitions. The scheduler still assigns each group its own slots.
         assert all(spec == first_spec for _, spec, _ in grouped), (
-            "FlashInfer ReplaySSM requires equal Mamba cache specs"
+            "ReplaySSM trackers require equal Mamba cache specs"
         )
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
@@ -432,7 +468,7 @@ class ReplaySSMModelContext:
             )
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
-        ), "FlashInfer ReplaySSM requires equal materialization geometry"
+        ), "ReplaySSM trackers require equal materialization geometry"
 
         device = first.kv_cache[1].device
         executed_query_width = 0
@@ -520,13 +556,13 @@ class ReplaySSMModelContext:
             mamba_block_size=first_spec.block_size,
             logical_window=int(first.replayssm_buffer_len),
             ring_buffer_len=first.kv_cache[2].size(2),
-            materialize_prefixes=first_spec.mamba_cache_mode == "align",
+            materialize_prefixes=materialize_prefixes,
         )
 
-    def _materialize(self) -> None:
+    def _materialize(self, num_reqs: int) -> None:
         """Publish canonical prefix snapshots.
 
-        Mamba2 publishes every layer in one FlashInfer call. FlashInfer's GDN
+        Mamba2 publishes every layer in one kernel launch. FlashInfer's GDN
         materializer takes one layer per call.
         """
         if self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
@@ -535,6 +571,27 @@ class ReplaySSMModelContext:
         assert self.materialize_tables is not None
         first = self.mixers[0]
         mamba_config = first.mamba_config
+        if not first.use_flashinfer_replayssm:
+            replayssm_materialize(
+                *self.materialize_tables[:9],
+                self.src_slots,
+                self.dst_slots,
+                self.plan_ring_start,
+                self.plan_flush_count,
+                self.active_request_indices,
+                num_reqs=num_reqs,
+                state_dtype=first.kv_cache[1].dtype,
+                input_dtype=first.kv_cache[2].dtype,
+                matrixA_dtype=first.A.dtype,
+                num_heads=first.kv_cache[1].size(1),
+                dim=first.kv_cache[1].size(2),
+                dstate=first.kv_cache[1].size(3),
+                heads_per_group=(
+                    first.kv_cache[1].size(1) // first.kv_cache[4].size(1)
+                ),
+                ring_buffer_len=self.ring_buffer_len,
+            )
+            return
         rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
@@ -658,7 +715,7 @@ class ReplaySSMModelContext:
             MAX_NUM_REQS=self.max_num_reqs,
             BLOCK_SIZE=triton.next_power_of_2(self.max_num_reqs),
         )
-        self._materialize()
+        self._materialize(num_reqs)
 
 
 def _cuda_i64_ptrs(tensors: list[torch.Tensor]) -> torch.Tensor:

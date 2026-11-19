@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -64,14 +64,14 @@ def _temporary_replayssm_autotune_state(
     max_num_reqs: int,
     *,
     prepare_dummy_block_tables: bool = True,
-) -> Iterator[None]:
-    """Run FlashInfer ReplaySSM dummy steps, then restore the touched state."""
+) -> Generator[None]:
+    """Run ReplaySSM dummy steps, then restore the touched state."""
     from vllm.model_executor.layers.mamba.abstract import MambaBase
 
     reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
-        if not isinstance(module, MambaBase) or not module.use_flashinfer_replayssm:
+        if not isinstance(module, MambaBase) or not module.use_replayssm_trackers:
             continue
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
@@ -98,7 +98,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
+    if not config.use_replayssm_trackers:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,
@@ -110,11 +110,14 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         return
 
     from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
     from vllm.v1.worker.mamba_utils import _get_mamba_spec_for_layer
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
+        if not is_mamba_group(group):
+            continue
         names = [
             name
             for name in group.layer_names
@@ -122,11 +125,12 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 layer := config.compilation_config.static_forward_context[name],
                 MambaBase,
             )
-            and layer.use_flashinfer_replayssm
+            and layer.use_replayssm_trackers
         ]
         if not names:
             continue
         spec = _get_mamba_spec_for_layer(group, names[0])
+        align = is_mamba_align_group(group)
         mixers = [
             config.compilation_config.static_forward_context[name] for name in names
         ]
@@ -155,9 +159,10 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 mixer._replayssm_ring_start.zero_()
                 mixer._replayssm_prev_num_accepted.zero_()
 
-        context = ReplaySSMModelContext.create(grouped, runner.max_num_reqs)
+        context = ReplaySSMModelContext.create(
+            grouped, runner.max_num_reqs, materialize_prefixes=align
+        )
         device = grouped[0][2].device
-        align = grouped[0][1].mamba_cache_mode == "align"
         block_size = grouped[0][1].block_size
         query_len = runner.decode_query_len
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=device)

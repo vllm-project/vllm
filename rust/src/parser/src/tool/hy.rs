@@ -15,7 +15,7 @@ use winnow::token::{literal, rest, take_until};
 use self::structural_tag::HyStructuralTagBuilder;
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
+use super::{JsonStyle, Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 /// Wire-level HY tool-call dialect.
@@ -162,7 +162,9 @@ impl HyToolParser {
             }
             HyEvent::ToolCall { name, raw_params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
-                let arguments = serde_json::to_string(&arguments)
+                // The template renders JSON values with Python separators.
+                let arguments = JsonStyle::Spaced
+                    .to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
                 output.push_call(ToolCallDelta {
@@ -526,7 +528,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Beijing\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Beijing\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                     ToolCall(
@@ -535,7 +537,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Hangzhou\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Hangzhou\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                 ],
@@ -744,7 +746,7 @@ mod tests {
                             name: Some(
                                 "get_weather",
                             ),
-                            arguments: "{\"city\":\"Beijing\",\"date\":\"2026-03-30\"}",
+                            arguments: "{\"city\": \"Beijing\", \"date\": \"2026-03-30\"}",
                         },
                     ),
                     ToolCall(

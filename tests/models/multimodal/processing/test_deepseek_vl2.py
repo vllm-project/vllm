@@ -67,4 +67,4 @@ def test_image_embedding_cache_identity_ignores_image_count(processor, use_uuid:
 
     assert hashes[0] == hashes[1]
     if use_uuid:
-        assert hashes[0] == "embedding-0"
+        assert hashes[0] == "uuid:embedding-0"

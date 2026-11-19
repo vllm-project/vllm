@@ -18,7 +18,7 @@ def _max_with_nan(a, b):
     return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
 
 
-@triton.jit(do_not_specialize=["width", "nblocks"])
+@triton.jit(do_not_specialize=["stride_scores", "width", "nblocks"])
 def _block_scores_kernel(
     logits,
     starts,
