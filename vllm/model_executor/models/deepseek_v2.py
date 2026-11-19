@@ -26,6 +26,7 @@
 
 import typing
 from collections.abc import Iterable
+from functools import partial
 from itertools import islice
 
 import torch
@@ -94,6 +95,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
@@ -1563,13 +1565,6 @@ class DeepseekV2Model(nn.Module):
         else:
             stacked_params_mapping.extend(mla_params_mapping)
 
-        # Fused shared experts load as the routed experts' extra slots.
-        weights = maybe_fuse_shared_experts(
-            weights,
-            n_routed_experts=self.config.n_routed_experts,
-            n_shared_experts=self.config.n_shared_experts or 1,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
-        )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # With index_topk_freq>1 only some layers build an indexer, yet the
@@ -1705,6 +1700,7 @@ class DeepseekV2ForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
     model_cls = DeepseekV2Model
+    hf_to_vllm_mapper = WeightsMapper()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1738,6 +1734,21 @@ class DeepseekV2ForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # Eagle draft models have their own inner model and loader.
+        fused_layers = getattr(self.model, "fused_shared_expert_layers", None)
+        if fused_layers:
+            # Fused shared experts load as the routed experts' extra slots.
+            # Subclasses whose `hf_to_vllm_mapper` renames the shared experts
+            # (e.g. Mistral Large 3) must fuse after renaming instead: the
+            # mapper runs its transforms before its renames.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=config.n_routed_experts,
+                n_shared_experts=config.n_shared_experts or 1,
+                fused_shared_expert_layers=fused_layers,
+            )
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -1819,7 +1830,7 @@ class DeepseekV2ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):

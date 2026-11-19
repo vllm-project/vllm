@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import regex as re
@@ -9,7 +10,6 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
@@ -90,6 +90,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
     sequence_parallel_chunk,
 )
@@ -1132,14 +1133,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     mlp.experts.load_shared_expert_weight(name, loaded_weight)
                 )
                 continue
-            # Only parse the layer index when FSE is enabled.
-            if (
-                "mlp.shared_experts." in name
-                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-                and extract_layer_index(name) in self.fused_shared_expert_layers
-            ):
-                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
-
             if not self.use_mega_moe and "mlp.experts." in name:
                 # Each layer's experts load their own tensors, e.g. into the
                 # online quantization staging parameters of fused shared
@@ -1251,6 +1244,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
+    hf_to_vllm_mapper = WeightsMapper()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -1261,6 +1256,19 @@ class Glm5NextForCausalLM(
         self.model = Glm5NextModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # MegaMoE loads its fused shared experts itself (`load_shared_expert_weight`).
+        if self.model.fused_shared_expert_layers and not self.model.use_mega_moe:
+            # Fused shared experts load as the routed experts' extra slots.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=self.config.n_routed_experts,
+                n_shared_experts=_num_fused_shared_experts(
+                    self.config.n_shared_experts, True
+                ),
+                fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+            )
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.config.vocab_size,
@@ -1367,7 +1375,7 @@ class Glm5NextForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         for module in self.modules():

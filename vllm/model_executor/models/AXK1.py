@@ -24,6 +24,7 @@
 """Inference-only A.X K1 model."""
 
 from collections.abc import Iterable
+from functools import partial
 from itertools import islice
 
 import torch
@@ -83,6 +84,7 @@ from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
@@ -840,14 +842,6 @@ class AXK1Model(nn.Module):
         else:
             stacked_params_mapping.extend(mla_params_mapping)
 
-        assert self.config.n_routed_experts is not None
-        # Fused shared experts load as the routed experts' extra slots.
-        weights = maybe_fuse_shared_experts(
-            weights,
-            n_routed_experts=self.config.n_routed_experts,
-            n_shared_experts=self.config.n_shared_experts or 1,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
-        )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -968,6 +962,7 @@ class AXK1ForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
     model_cls = AXK1Model
+    hf_to_vllm_mapper = WeightsMapper()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -997,6 +992,16 @@ class AXK1ForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if self.model.fused_shared_expert_layers:
+            # Fused shared experts load as the routed experts' extra slots.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=config.n_routed_experts,
+                n_shared_experts=config.n_shared_experts or 1,
+                fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+            )
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -1070,4 +1075,4 @@ class AXK1ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

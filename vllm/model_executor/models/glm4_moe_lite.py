@@ -25,6 +25,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
+from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -73,6 +74,7 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     get_fused_shared_expert_layers,
     get_spec_layer_idx_from_weight_name,
@@ -357,13 +359,6 @@ class Glm4MoeLiteModel(nn.Module):
 
         stacked_params_mapping.extend(mla_params_mapping)
 
-        # Fused shared experts load as the routed experts' extra slots.
-        weights = maybe_fuse_shared_experts(
-            weights,
-            n_routed_experts=self.config.n_routed_experts,
-            n_shared_experts=self.config.n_shared_experts or 1,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
-        )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -442,6 +437,7 @@ class Glm4MoeLiteForCausalLM(
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+    hf_to_vllm_mapper = WeightsMapper()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -475,6 +471,16 @@ class Glm4MoeLiteForCausalLM(
         self.model = Glm4MoeLiteModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if self.model.fused_shared_expert_layers:
+            # Fused shared experts load as the routed experts' extra slots.
+            redirect = partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=config.n_routed_experts,
+                n_shared_experts=config.n_shared_experts or 1,
+                fused_shared_expert_layers=self.model.fused_shared_expert_layers,
+            )
+            transforms = WeightsMapper(weights_transforms=[redirect])
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | transforms
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -549,4 +555,4 @@ class Glm4MoeLiteForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -1687,6 +1687,22 @@ def test_models_fse_init(
             with set_current_vllm_config(vllm_config):
                 if model_type == "minimax_m3":
                     loaded = _load_minimax_m3_weights(model, checkpoint)
+                elif model_type in (
+                    "deepseek_v2",
+                    "AXK1",
+                    "glm4_moe_lite",
+                    "deepseek_v32",
+                    "glm5_next",
+                ):
+                    # As the transform of their `ForCausalLM`'s weights mapper.
+                    loaded = model.load_weights(
+                        maybe_fuse_shared_experts(
+                            checkpoint,
+                            n_routed_experts=config.n_routed_experts,
+                            n_shared_experts=config.n_shared_experts or 1,
+                            fused_shared_expert_layers=model.fused_shared_expert_layers,
+                        )
+                    )
                 else:
                     loaded = model.load_weights(checkpoint)
                 base = config.num_hidden_layers

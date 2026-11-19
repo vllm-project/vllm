@@ -633,8 +633,8 @@ def maybe_fuse_shared_experts(
         chunk = total // n_shared_experts
         suffix = name.split(prefix, 1)[1]
         if ckpt_proj_names:
-            projection, dot, rest = suffix.partition(".")
-            suffix = ckpt_proj_names.get(projection, projection) + dot + rest
+            projection, dot, tail = suffix.partition(".")
+            suffix = ckpt_proj_names.get(projection, projection) + dot + tail
         for j in range(n_shared_experts):
             sl = slice(j * chunk, (j + 1) * chunk)
             if loaded_weight.ndim == 1:

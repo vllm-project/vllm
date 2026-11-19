@@ -34,7 +34,6 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
-    maybe_fuse_shared_experts,
     pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
@@ -250,13 +249,6 @@ class DeepseekV32Model(torch.nn.Module):
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
-        # Fused shared experts load as the routed experts' extra slots.
-        weights = maybe_fuse_shared_experts(
-            weights,
-            n_routed_experts=self.config.n_routed_experts,
-            n_shared_experts=self.config.n_shared_experts or 1,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
-        )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
