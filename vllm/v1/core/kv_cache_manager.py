@@ -607,14 +607,16 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        attach_computed = (
-            new_computed_block_list is not self.empty_kv_cache_blocks.blocks
-            or num_external_computed_tokens > 0
-        )
         preallocated = None
         if required_blocks > available_blocks:
-            # Prefix hits must be touched before allocating any groups.
-            if attach_computed or self.try_preallocate is None:
+            # Real hits must be attached first. A resumed request may explicitly
+            # supply empty groups, even after retained-hit slicing.
+            if (
+                self.try_preallocate is None
+                or num_new_computed_tokens
+                or num_external_computed_tokens
+                or any(new_computed_block_list)
+            ):
                 return None
             preallocated = self.try_preallocate(
                 request.request_id,
@@ -626,7 +628,10 @@ class KVCacheManager:
             if preallocated is None:
                 return None
 
-        if attach_computed:
+        if (
+            new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+            or num_external_computed_tokens > 0
+        ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(

@@ -109,7 +109,6 @@ class HiSparseCoordinator:
         # Spec decode step tokens an import needs beyond its sequence.
         self.import_step_tokens = import_step_tokens
         self.num_reprefillable_tokens = num_reprefillable_tokens
-        self.managers = managers
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -470,17 +469,8 @@ class HiSparseCoordinator:
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
-    def get_num_reclaimable_blocks(self, request_id: str, available: int) -> int:
+    def get_num_reclaimable_blocks(self, request_id: str) -> int:
         """Clean resident blocks a hot-first allocation can release immediately."""
-        if not self.hot_managers or not all(
-            request_id in manager.hot_required for manager in self.hot_managers
-        ):
-            return 0
-        hot_blocks = sum(
-            manager.get_num_required_blocks(request_id) for manager in self.hot_managers
-        )
-        if not hot_blocks or hot_blocks > available:
-            return 0
         state = self.request_states.get(request_id)
         if state is None:
             return 0
@@ -501,19 +491,26 @@ class HiSparseCoordinator:
         available: int,
     ) -> dict[int, list[KVCacheBlock]] | None:
         """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
-        if self.gpu_pool is None or required > self.gpu_pool.num_gpu_blocks:
+        if not self.resident_managers or required > self.gpu_pool.num_gpu_blocks:
             return None
-        if (
-            self.get_num_reclaimable_blocks(request_id, available)
-            < required - available
-        ):
+        upfront = 0
+        for manager in self.hot_managers:
+            missing = manager.get_num_required_blocks(request_id)
+            upfront += missing
+            # A running request's ordinary estimate counts Hot only after it
+            # has been requested. Charge any additional Hot groups here.
+            if request_id not in manager.hot_required:
+                required += missing
+        if not upfront or upfront > available:
             return None
-        hot_blocks = {
-            manager.kv_cache_group_id: manager.allocate_new_blocks(
+        if self.get_num_reclaimable_blocks(request_id) < required - available:
+            return None
+        hot_blocks = {}
+        for manager in self.hot_managers:
+            manager.require_hot(request_id)
+            hot_blocks[manager.kv_cache_group_id] = manager.allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
-            for manager in self.hot_managers
-        }
         self.update_residency(request_id)
         return hot_blocks
 

@@ -16,7 +16,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -76,7 +76,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import mamba_layer, new_kv_cache_group, sliding_window_layer
@@ -944,8 +944,8 @@ def test_hisparse_hot_transition_reclaims_pages_before_next_prefill_chunk(
     get_reclaimable = coordinator.get_num_reclaimable_blocks
     update_residency = coordinator.update_residency
 
-    def record_reclaim(request_id: str, available: int) -> int:
-        count = get_reclaimable(request_id, available)
+    def record_reclaim(request_id: str) -> int:
+        count = get_reclaimable(request_id)
         predicted_releases.append(count)
         return count
 
@@ -1235,6 +1235,105 @@ def test_hisparse_async_import_preserves_hot_transition_reservation(tmp_path):
     assert manager.allocate_slots(first, 2 * block, reserved_blocks=8) is None
     assert manager.block_pool.get_num_free_blocks() == 13
     assert manager.allocate_slots(first, 2 * block) is not None
+
+
+def _hot_transition_scheduler(tmp_path, max_num_batched_tokens):
+    from .utils import create_scheduler
+
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    template = create_scheduler(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        max_model_len=256,
+        max_num_batched_tokens=max_num_batched_tokens,
+        long_prefill_token_threshold=96,
+        max_num_seqs=2,
+        num_blocks=38,
+    )
+    config = template.vllm_config
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="HiSparseConnector", kv_role="kv_both"
+    )
+    return Scheduler(
+        vllm_config=config,
+        kv_cache_config=make_hisparse_kv_cache_config(38, 64, num_resident_groups=3),
+        block_size=HISPARSE_BLOCK_SIZE,
+        log_stats=True,
+        structured_output_manager=template.structured_output_manager,
+    )
+
+
+def _finish_hisparse_step(scheduler, output, sampled_tokens):
+    command = output.kv_connector_metadata.command
+    completed = {t.transfer_id: 1 for t in command.page_transfers}
+    ids = list(output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=ids,
+            sampled_token_ids=[sampled_tokens.get(req_id, []) for req_id in ids],
+            kv_connector_output=KVConnectorOutput(
+                kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
+                    completed, completed
+                )
+            ),
+        ),
+    )
+
+
+def test_hisparse_streaming_resume_under_pressure(tmp_path):
+    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=96)
+
+    def chunk(tokens):
+        request = make_request(
+            "A",
+            tokens,
+            HISPARSE_BLOCK_SIZE,
+            sha256,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        request.resumable = True
+        return request
+
+    first = chunk(list(range(96)))
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"A": 96}
+    _finish_hisparse_step(scheduler, output, {"A": [7]})
+    assert first.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 13
+
+    scheduler.add_request(chunk(list(range(1000, 1032))))
+    assert scheduler.schedule().num_scheduled_tokens == {"A": 32}
+
+
+@pytest.mark.parametrize("prompt_length", [144, 160])
+def test_hisparse_prefill_shortfall_without_hot_request(tmp_path, prompt_length):
+    scheduler = _hot_transition_scheduler(tmp_path, max_num_batched_tokens=128)
+    first = make_request("A", list(range(prompt_length)), HISPARSE_BLOCK_SIZE, sha256)
+    second = make_request("B", [996], HISPARSE_BLOCK_SIZE, sha256)
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"A": 96, "B": 1}
+    _finish_hisparse_step(scheduler, output, {"B": [7]})
+    manager = scheduler.kv_cache_manager
+    assert manager.block_pool.get_num_free_blocks() == 9
+    hot = get_hisparse_coordinator(manager).hot_managers
+    assert all("A" not in group.hot_required for group in hot)
+
+    if prompt_length == 160:
+        # 16 new blocks plus 6 Hot exceed the 9 free plus 12 reclaimable.
+        assert manager.allocate_slots(first, 64) is None
+        assert manager.block_pool.get_num_free_blocks() == 9
+        assert all("A" not in group.hot_required for group in hot)
+        return
+
+    # Six Hot blocks up front unlock twelve clean blocks for A's next chunk.
+    assert scheduler.schedule().num_scheduled_tokens == {"A": 48, "B": 1}
+    assert second.num_preemptions == 0
 
 
 def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):
