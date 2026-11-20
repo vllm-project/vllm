@@ -15,6 +15,7 @@ import torch
 
 import vllm.envs as envs
 from tests.quantization.utils import load_model_without_vllm_runner
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import (
@@ -149,37 +150,10 @@ class _StubAttention(torch.nn.Module):
         self.o_proj = SimpleNamespace(reduce_results=True)
 
 
-class _SingleRankGroup:
-    """Minimal stand-in for a size-1 `GroupCoordinator`."""
-
-    world_size = 1
-    rank_in_group = 0
-    rank = 0
-    local_rank = 0
-    ranks = [0]
-    is_first_rank = True
-    is_last_rank = True
-    # Read at model construction, never used for communication here.
-    device_group = SimpleNamespace(size=lambda: 1, rank=lambda: 0)
-    cpu_group = None
-
-
 @pytest.fixture
-def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
-    """Single rank parallel groups without initializing a process group.
-
-    This is faster than the `dist_init` fixture.
-    """
-    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
-        monkeypatch.setattr(
-            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
-        )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
+@override_parallel_groups(SingleRankGroup())
+def single_rank_parallel_state():
+    yield
 
 
 @pytest.fixture(autouse=True)

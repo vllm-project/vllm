@@ -622,7 +622,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache. If several skipped items miss the cache, the error names all of them by modality and index.
 
 ??? code
 
@@ -1322,6 +1322,8 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
