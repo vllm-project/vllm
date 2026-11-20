@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoEFactory,
+    determine_expert_counts,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -67,6 +68,7 @@ def get_config() -> dict[str, Any] | None:
 __all__ = [
     "ApplyMoEActivationConfig",
     "FusedMoEFactory",
+    "determine_expert_counts",
     "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEQuantConfig",
