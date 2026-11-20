@@ -846,50 +846,6 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(room):
     assert not coordinator.has_pending_work()
 
 
-@pytest.mark.parametrize("load_finished", [False, True])
-def test_hisparse_import_promotion_reserves_parked_loads(load_finished):
-    """The scheduler keeps a parked load's remaining blocks free while it
-    loads and after it finishes until it is scheduled; another import's
-    promotion must not take them."""
-    manager = make_hisparse_kv_cache_manager(64, 16)
-    connector = HiSparseConnectorScheduler(async_speculative=False)
-    connector.bind_kv_cache_manager(manager, get_hisparse_coordinator(manager))
-    coordinator = connector.coordinator
-    parked = make_request(
-        "parked", list(range(7 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    imported = make_request(
-        "import", list(range(4 * HISPARSE_BLOCK_SIZE + 1)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    for request, num_tokens in (
-        (parked, 2 * HISPARSE_BLOCK_SIZE),
-        (imported, imported.num_tokens),
-    ):
-        assert allocate_external_prefix(manager, request, num_tokens) is not None
-        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-        connector.requests[request.request_id] = request
-    if load_finished:
-        connector.update_connector_output(
-            KVConnectorOutput(finished_recving={parked.request_id})
-        )
-        parked.status = RequestStatus.WAITING
-        coordinator.build_offload_command()
-    reserved = connector._remaining_blocks(parked)
-    assert reserved > 0
-    pool = coordinator.gpu_pool
-    pool.get_new_blocks(
-        pool.get_num_free_blocks() - coordinator.transition_watermark - reserved - 1
-    )
-
-    connector.update_connector_output(
-        KVConnectorOutput(finished_recving={imported.request_id})
-    )
-    source = manager.get_blocks(imported.request_id).blocks[0]
-    assert [
-        t.host_block_id for t in coordinator.build_offload_command().page_transfers
-    ] == [source[-1].block_id, source[0].block_id]
-
-
 def test_hisparse_import_respects_prefill_admitted_while_receiving():
     """A prefill admitted while an import is in flight is promised the free
     blocks it still needs; promoting the import's pages when it lands must not

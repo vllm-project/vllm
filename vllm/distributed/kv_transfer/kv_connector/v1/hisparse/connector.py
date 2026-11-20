@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,6 @@ from vllm.v1.hisparse.types import (
     SparseKVRowMirror,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -100,57 +100,17 @@ class HiSparseConnectorScheduler:
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
         import_step_tokens: int = 0,
-        spec_step_tokens: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
-        self.kv_cache_manager: KVCacheManager | None = None
+        self.reserved_blocks: Callable[[], int] = lambda: 0
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.import_step_tokens = import_step_tokens
-        self.spec_step_tokens = spec_step_tokens
         self.requests: dict[str, Request] = {}
-        self.loaded_unscheduled: set[str] = set()
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
-
-    def bind_kv_cache_manager(
-        self, kv_cache_manager: KVCacheManager, coordinator: HiSparseCoordinator
-    ) -> None:
-        self.bind_coordinator(coordinator)
-        self.kv_cache_manager = kv_cache_manager
-
-    def _inflight_prefill_reserved_blocks(self) -> int:
-        """Blocks admitted prefills and parked loads still need to finish.
-
-        Mirrors the scheduler's `_inflight_prefill_reserved_blocks`, which
-        admission keeps free for them: a parked load stays reserved after its
-        load finishes until it is scheduled, then while it is prefilling.
-        """
-        return sum(
-            self._remaining_blocks(request)
-            for request in self.requests.values()
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-            or request.request_id in self.loaded_unscheduled
-            or (request.status == RequestStatus.RUNNING and request.is_prefill_chunk)
-        )
-
-    def _remaining_blocks(self, request: Request) -> int:
-        assert self.kv_cache_manager is not None
-        max_model_len = self.kv_cache_manager.max_model_len
-        full_num_tokens = min(request.num_tokens, max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=full_num_tokens + self.spec_step_tokens,
-            new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
-            num_encoder_tokens=0,
-            total_computed_tokens=request.num_computed_tokens,
-            num_local_computed_tokens=request.num_computed_tokens,
-            num_tokens_main_model=full_num_tokens,
-            apply_admission_cap=True,
-            prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
-        )
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
         if self.coordinator is None:
@@ -169,7 +129,6 @@ class HiSparseConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
         assert self.coordinator is not None
-        self.loaded_unscheduled.difference_update(scheduler_output.num_scheduled_tokens)
         # HiSparse rebinds worker state every step, so the load must start
         # before the forward rather than being deferred to post-forward.
         scheduler_output.has_sync_kv_loads = True
@@ -247,20 +206,12 @@ class HiSparseConnectorScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
         finished_recving = connector_output.finished_recving or ()
-        reserved_blocks = (
-            self._inflight_prefill_reserved_blocks() if finished_recving else 0
-        )
+        reserved_blocks = self.reserved_blocks() if finished_recving else 0
         for request_id in finished_recving:
-            request = self.requests.get(request_id)
-            if (
-                request is not None
-                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-            ):
-                self.loaded_unscheduled.add(request_id)
             self.coordinator.finish_host_import(
                 request_id,
                 failed=request_id in connector_output.failed_recving,
-                restore=request is not None,
+                restore=request_id in self.requests,
                 reserved_blocks=reserved_blocks,
             )
         metadata = connector_output.kv_connector_worker_meta
@@ -309,13 +260,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     if vllm_config.num_speculative_tokens
                     else 0
                 ),
-                spec_step_tokens=(
-                    1
-                    + vllm_config.num_scheduled_spec_tokens
-                    + vllm_config.num_lookahead_tokens
-                    if vllm_config.num_scheduled_spec_tokens
-                    else 0
-                ),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(
@@ -336,14 +280,17 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.bind_kv_cache_manager(
-            kv_cache_manager,
+        self.connector_scheduler.bind_coordinator(
             get_hisparse_coordinator(
                 kv_cache_manager,
                 import_step_tokens=self.connector_scheduler.import_step_tokens,
                 num_reprefillable_tokens=self._vllm_config.num_reprefillable_tokens,
-            ),
+            )
         )
+
+    def bind_reserved_blocks(self, reserved_blocks: Callable[[], int]) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.reserved_blocks = reserved_blocks
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -482,5 +429,4 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         self.connector_scheduler.requests.pop(request.request_id, None)
-        self.connector_scheduler.loaded_unscheduled.discard(request.request_id)
         return False, None
