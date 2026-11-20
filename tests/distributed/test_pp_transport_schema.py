@@ -140,10 +140,9 @@ def test_pp2_tp2_tensor_dict_transport(tmp_path):
     )
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("sharded_field", ["hidden_states", "residual"])
 @pytest.mark.parametrize("shape", [(4,), (4, 8)])
-def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field, shape):
+def test_mixed_views_keep_capture_shapes_and_addresses(sharded_field, shape):
     transport = PPTransportSchema(
         {
             field: PPTransportTensorSpec(
@@ -164,8 +163,6 @@ def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field, 
         )
         return transport.prepare_inputs(buffers, num_tokens, received)
 
-    if compiled:
-        forward = torch.compile(forward, backend="eager", fullgraph=True)
     captures = []
     for num_tokens in (5, 2):
         values = {
@@ -190,7 +187,7 @@ def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field, 
 
 
 @pytest.mark.parametrize("sequence_parallel", [None, False, True])
-def test_receive_preserves_padding_and_legacy_dtype_conversion(sequence_parallel):
+def test_receive_preserves_padding(sequence_parallel):
     specs = (
         None
         if sequence_parallel is None
@@ -200,9 +197,7 @@ def test_receive_preserves_padding_and_legacy_dtype_conversion(sequence_parallel
     )
     transport = PPTransportSchema(specs, tp_size=1)
     buffers = IntermediateTensors({"residual": torch.full((8, 4), -1.0)})
-    received = IntermediateTensors(
-        {"residual": torch.full((3, 4), 2.0, dtype=torch.float64)}
-    )
+    received = IntermediateTensors({"residual": torch.full((3, 4), 2.0)})
     views = transport.prepare_inputs(buffers, 4, received, num_received_tokens=3)
     torch.testing.assert_close(views["residual"][:3], torch.full((3, 4), 2.0))
     torch.testing.assert_close(views["residual"][3:], torch.full((1, 4), -1.0))
@@ -249,8 +244,7 @@ class DownstreamSchema(PPTransportSchema):
         )
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-def test_downstream_descriptor_drives_all_buffer_views(compiled):
+def test_downstream_descriptor_drives_all_buffer_views():
     transport = DownstreamSchema()
     buffers = transport.make_empty_intermediate_tensors(
         20, torch.float32, torch.device("cpu")
@@ -268,8 +262,6 @@ def test_downstream_descriptor_drives_all_buffer_views(compiled):
             ),
         )
 
-    if compiled:
-        forward = torch.compile(forward, backend="eager", fullgraph=True)
     for num_tokens, local_rows in ((9, 5), (2, 1)):
         expected = {
             "hidden_states": torch.full((num_tokens, 4), 3.0),

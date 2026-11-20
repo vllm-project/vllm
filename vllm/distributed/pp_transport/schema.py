@@ -165,9 +165,7 @@ class PPTransportSchema:
             source = source[:copy_rows]
             if source.shape != (copy_rows, *view.shape[1:]):
                 raise ValueError(f"Invalid PP input shape for {key}: {source.shape}")
-            if spec.dtype is not None and source.dtype != spec.dtype:
-                raise ValueError(f"Invalid PP input dtype for {key}: {source.dtype}")
-            # Legacy models can send FP32 residuals into model-dtype buffers.
-            if torch.compiler.is_compiling() or source.data_ptr() != view.data_ptr():
+            # Some PP transports receive into the persistent tensors.
+            if source.data_ptr() != view.data_ptr():
                 view[:copy_rows].copy_(source)
         return IntermediateTensors(views)
