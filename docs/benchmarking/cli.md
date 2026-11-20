@@ -1681,6 +1681,8 @@ tokens). Energy per token is `null` when no output tokens are returned.
 All selected GPUs must support NVML cumulative energy counters. If a counter
 is unavailable or resets during the run, the benchmark warns and omits energy
 metrics rather than returning a partial total. Short runs are sensitive to
-hardware counter resolution. Without this flag, NVML is not initialized and
+hardware counter resolution: in one multi-GPU validation the counters updated
+roughly every 100 ms, although this cadence varies by GPU and driver.
+Without this flag, NVML is not initialized and
 the result schema is unchanged. Async, HF, and MII backends are not supported
 by this option.

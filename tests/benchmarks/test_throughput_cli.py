@@ -532,6 +532,17 @@ def test_throughput_energy_excludes_loading_and_warmup(
         assert not any("energy" in key for key in results)
 
 
+def test_throughput_energy_rejects_invisible_ordinal_before_model_load(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        ["--energy-gpu-ids", "1", "--input-len", "4", "--output-len", "2"]
+    )
+    with pytest.raises(ValueError, match="out of range for CUDA_VISIBLE_DEVICES"):
+        validate_args(args)
+
+
 @pytest.mark.parametrize("extra_args", [["--async-engine"], ["--backend", "hf"]])
 def test_throughput_energy_rejects_unsupported_backends(extra_args):
     from vllm.benchmarks.throughput import validate_args

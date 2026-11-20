@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,15 +13,36 @@ logger = init_logger(__name__)
 
 
 def _resolve_physical_device_id(device_id: str) -> int:
-    from vllm.platforms.cuda import NvmlCudaPlatform
+    """Map a CUDA-visible ordinal or device UUID to its physical NVML index.
+
+    Avoid importing the CUDA platform (and its compiled extension): energy
+    counter tests must also run against a CPU-only vLLM installation.
+    NVML is initialized by the caller when UUID resolution is needed.
+    """
+    try:
+        visible_ordinal = int(device_id)
+    except ValueError:
+        control_id = device_id
+    else:
+        if visible_ordinal < 0:
+            raise ValueError("Energy GPU ordinals must be non-negative")
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if not visible:
+            return visible_ordinal
+        entries = visible.split(",")
+        if visible_ordinal >= len(entries):
+            raise ValueError(
+                f"Energy GPU ordinal {visible_ordinal} is out of range for "
+                f"CUDA_VISIBLE_DEVICES={visible}"
+            )
+        control_id = entries[visible_ordinal]
 
     try:
-        visible_device_id = int(device_id)
+        return int(control_id)
     except ValueError:
-        return NvmlCudaPlatform.device_control_id_to_physical_device_id(device_id)
-    if visible_device_id < 0:
-        raise ValueError("Energy GPU ordinals must be non-negative")
-    return NvmlCudaPlatform.visible_device_id_to_physical_device_id(visible_device_id)
+        nvml = import_pynvml()
+        handle = nvml.nvmlDeviceGetHandleByUUID(control_id)
+        return int(nvml.nvmlDeviceGetIndex(handle))
 
 
 class GpuEnergyMeter:
@@ -31,6 +53,8 @@ class GpuEnergyMeter:
             raise ValueError("Energy GPU IDs must be non-empty")
         if len(set(device_ids)) != len(device_ids):
             raise ValueError("Energy GPU IDs must be distinct")
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        visible_count = len(visible.split(",")) if visible else None
         for device_id in device_ids:
             try:
                 visible_device_id = int(device_id)
@@ -38,6 +62,11 @@ class GpuEnergyMeter:
                 continue
             if visible_device_id < 0:
                 raise ValueError("Energy GPU ordinals must be non-negative")
+            if visible_count is not None and visible_device_id >= visible_count:
+                raise ValueError(
+                    f"Energy GPU ordinal {visible_device_id} is out of range for "
+                    f"CUDA_VISIBLE_DEVICES={visible}"
+                )
         self.device_ids = list(device_ids)
         self.physical_device_ids: list[int] | None = None
         self.energy_j: float | None = None

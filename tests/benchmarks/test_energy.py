@@ -20,6 +20,7 @@ def nvml(monkeypatch):
     nvml.nvmlDeviceGetHandleByIndex.side_effect = lambda i: i
     nvml.nvmlDeviceGetTotalEnergyConsumption.side_effect = [1000, 3000, 2000, 6000]
     monkeypatch.setattr(energy, "import_pynvml", lambda: nvml)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(
         energy, "time", SimpleNamespace(perf_counter=iter([10.0, 12.0]).__next__)
     )
@@ -30,11 +31,7 @@ def nvml(monkeypatch):
 def test_energy_aggregates_devices_and_normalizes_units(
     monkeypatch, nvml, output_tokens
 ):
-    monkeypatch.setattr(
-        energy,
-        "_resolve_physical_device_id",
-        lambda device_id: {"0": 2, "1": 3}[device_id],
-    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
     meter = energy.GpuEnergyMeter(["0", "1"])
     with meter.measure():
         pass
@@ -60,22 +57,32 @@ def test_energy_rejects_invalid_device_selection(device_ids):
 
 
 def test_energy_resolves_visible_ordinals_and_device_control_ids(monkeypatch):
-    from vllm.platforms.cuda import NvmlCudaPlatform
-
-    monkeypatch.setattr(
-        NvmlCudaPlatform,
-        "visible_device_id_to_physical_device_id",
-        classmethod(lambda cls, device_id: device_id + 4),
-    )
-    monkeypatch.setattr(
-        NvmlCudaPlatform,
-        "device_control_id_to_physical_device_id",
-        classmethod(lambda cls, device_id: 7 if device_id == "GPU-example" else 8),
-    )
+    # Exercise the real resolver, mocking only the external NVML calls.
+    nvml = Mock()
+    nvml.nvmlDeviceGetHandleByUUID.side_effect = lambda uuid: f"handle:{uuid}"
+    nvml.nvmlDeviceGetIndex.side_effect = {
+        "handle:GPU-example": 7,
+        "handle:MIG-example": 8,
+    }.__getitem__
+    monkeypatch.setattr(energy, "import_pynvml", lambda: nvml)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,GPU-example")
 
     assert energy._resolve_physical_device_id("0") == 4
+    assert energy._resolve_physical_device_id("1") == 7
     assert energy._resolve_physical_device_id("GPU-example") == 7
     assert energy._resolve_physical_device_id("MIG-example") == 8
+    assert [call.args[0] for call in nvml.nvmlDeviceGetHandleByUUID.call_args_list] == [
+        "GPU-example",
+        "GPU-example",
+        "MIG-example",
+    ]
+
+
+def test_energy_rejects_invalid_visible_ordinal_before_loading(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    with pytest.raises(ValueError, match="out of range for CUDA_VISIBLE_DEVICES"):
+        energy.GpuEnergyMeter(["1"])
+    assert energy.GpuEnergyMeter(["0"]).device_ids == ["0"]
 
 
 @pytest.mark.parametrize("failure", ["init", "initial_read", "final_read", "reset"])
