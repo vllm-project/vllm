@@ -44,7 +44,8 @@ DFly currently rejects LoRA, microbatching, disaggregated prefill/decode,
 heterogeneous vocabularies, adaptive verification, and a separate draft
 attention backend.
 
-On ROCm, DFly is validated with HY4 Flash FP8 on eight MI355X GPUs:
+On ROCm, DFly is validated with HY4 Flash BF16 (`tencent/Hy4-flash`) and FP8
+on eight MI355X GPUs:
 
 ```bash
 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
