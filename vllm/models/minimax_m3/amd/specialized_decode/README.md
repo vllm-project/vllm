@@ -6,6 +6,9 @@ layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
 post-attention norm, the FP32 router and top-4, the shared and routed experts,
 and the MoE TP all-reduce.
 
+`--monokernel` uses this path when the deployment doesn't fit the whole-layer
+mono decode in `../mono`, which needs MXFP8 attention projections.
+
 Milestone one is deliberately narrow:
 
 - TP4 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU);
