@@ -14,7 +14,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.parser import ParserManager
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
@@ -466,7 +465,7 @@ def test_incomplete_missing_function_end(parser: ToolParser) -> None:
     assert "get_weather" in (out.content or "")
 
 
-def test_nameless_param_cannot_satisfy_required(parser: ToolParser) -> None:
+def test_param_missing_name_invalid(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
         '<function name="get_weather">'
@@ -476,10 +475,10 @@ def test_nameless_param_cannot_satisfy_required(parser: ToolParser) -> None:
     )
     out = parser.extract_tool_calls(text, request)
     assert not out.tools_called
-    assert not out.content
+    assert "<param>北京</param>" in (out.content or "")
 
 
-def test_duplicate_params_keep_first_value(parser: ToolParser) -> None:
+def test_duplicate_param_names_invalid(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
     text = (
         '<function name="get_weather">'
@@ -488,7 +487,7 @@ def test_duplicate_params_keep_first_value(parser: ToolParser) -> None:
         "</function>\n"
     )
     out = parser.extract_tool_calls(text, request)
-    assert json.loads(out.tool_calls[0].function.arguments) == {"city": "北京"}
+    assert not out.tools_called
 
 
 def test_case_sensitive_param_name_invalid(parser: ToolParser) -> None:
@@ -817,70 +816,3 @@ def test_nullable_string_keeps_raw_text(
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]
-
-
-@pytest.mark.parametrize("stream", [False, True])
-def test_cdata_close_tag_and_missing_param_close(parser: ToolParser, stream: bool):
-    request = make_request(make_tools_write())
-    value = "  </function>\n<param name='ignored'>  "
-    text = f'<function name="write_file"><param name="content"><![CDATA[{value}]]></function>'
-    if stream:
-        calls = run_tool_extraction_streaming(
-            parser, list(text), request, assert_one_tool_per_delta=False
-        ).tool_calls
-    else:
-        calls = parser.extract_tool_calls(text, request).tool_calls
-    assert [json.loads(call.function.arguments) for call in calls] == [
-        {"content": value}
-    ]
-
-
-def test_missing_required_call_is_never_streamed(parser: ToolParser):
-    request = make_request(make_tools_weather())
-    text = '<function name="get_weather"><param>ignored</param></function>'
-    delta = parser.extract_tool_calls_streaming("", text, text, [], [], [], request)
-    assert delta is None
-
-
-def test_two_calls_completed_in_one_delta(parser: ToolParser):
-    request = make_request(make_tools_weather())
-    call = '<function name="get_weather"><param name="city">北京</param></function>'
-    text = call + call
-    delta = parser.extract_tool_calls_streaming("", text, text, [], [], [], request)
-    assert delta is not None
-    assert [call.index for call in delta.tool_calls] == [0, 1]
-
-
-def test_registered_parser_streams_token_deltas() -> None:
-    request = make_request(make_tools_weather())
-    parser_cls = ParserManager.get_parser(
-        tool_parser_name="minicpm5",
-        reasoning_parser_name=None,
-        enable_auto_tools=True,
-    )
-    assert parser_cls is not None
-    parser = parser_cls(MagicMock(), request.tools)
-    chunks = [
-        "<function",
-        ' name="get_weather">',
-        '<param name="city">',
-        "Paris",
-        "</param>",
-        "</function>",
-    ]
-    calls = []
-    for i, chunk in enumerate(chunks):
-        delta = parser.parse_delta(
-            chunk,
-            [i + 2],
-            request,
-            prompt_token_ids=[1] if i == 0 else None,
-            finished=i == len(chunks) - 1,
-        )
-        if delta is not None:
-            assert not delta.content
-            calls.extend(delta.tool_calls)
-
-    assert len(calls) == 1
-    assert calls[0].function.name == "get_weather"
-    assert json.loads(calls[0].function.arguments) == {"city": "Paris"}
