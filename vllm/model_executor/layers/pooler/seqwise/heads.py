@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -18,7 +20,11 @@ from .methods import SequencePoolingMethodOutput
 def _apply_rowwise_if_batch_invariant(
     fn: ProjectorFn | ClassifierFn, x: torch.Tensor
 ) -> torch.Tensor:
-    if not envs.VLLM_BATCH_INVARIANT or x.shape[0] <= 1:
+    if (
+        not envs.VLLM_BATCH_INVARIANT
+        or x.shape[0] <= 1
+        or isinstance(fn, (LinearBase, BaseLayerWithLoRA))
+    ):
         return fn(x)
     return torch.cat([fn(row) for row in x.split(1)])
 
