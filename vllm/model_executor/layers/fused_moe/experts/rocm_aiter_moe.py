@@ -231,6 +231,7 @@ def aiter_moe_pads(
     use_mxfp4_w4a4: bool,
     use_mxfp4_w4a16: bool,
     tp_size: int,
+    skip_bf16_tail: bool = False,
 ) -> tuple[int, int]:
     """Round the padding deltas to what AITER's MoE dispatch expects.
 
@@ -251,6 +252,10 @@ def aiter_moe_pads(
       (`pad_ku_skip_s2 = min(k_unroll, inter_dim_pad // K_per_ku_s2)`).
     So both stage 1 kernels expect the undoubled pad. Recheck these lines on an
     AITER bump.
+
+    skip_bf16_tail (unquantized weights on CDNA3): an undoubled intermediate
+    pad keeps 32-column granularity, which AITER's CDNA3 BF16 FlyDSL decode
+    kernels skip; CK still rounds it down to 64 itself.
     """
     if activation == MoEActivation.SITU:
         return hidden_pad, intermediate_pad
@@ -259,9 +264,10 @@ def aiter_moe_pads(
         and not use_mxfp4_w4a16
         and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
     )
+    granularity = 32 if skip_bf16_tail and not double else 64
     return (
         hidden_pad // 128 * 128,
-        intermediate_pad // 64 * 64 * (2 if double else 1),
+        intermediate_pad // granularity * granularity * (2 if double else 1),
     )
 
 
@@ -412,6 +418,8 @@ def rocm_aiter_fused_experts(
         else moe_config.intermediate_pad
     )
 
+    from vllm.platforms.rocm import get_cdna_version
+
     hidden_pad, intermediate_pad = aiter_moe_pads(
         hidden_pad,
         intermediate_pad,
@@ -419,6 +427,11 @@ def rocm_aiter_fused_experts(
         quant_config.use_mxfp4_w4a4,
         quant_config.use_mxfp4_w4a16,
         moe_config.tp_size,
+        skip_bf16_tail=(
+            quant_config.quant_dtype is None
+            and quant_config.weight_quant_dtype is None
+            and get_cdna_version() == 3
+        ),
     )
 
     # AITER's bias-less W4A16 FlyDSL stage 1 leaves the padded intermediate
