@@ -91,7 +91,7 @@ steps:
     BASELINE_FILE: "/tmp/mooncake-ec-e2e/baseline.json"
   commands:
     # Mooncake comes from the CI image (requirements/test/kv_connectors_cuda.txt).
-    - uv venv --system-site-packages --python 3.12 .venv
+    - uv venv --system-site-packages --python python3 .venv
     - bash .buildkite/scripts/check-kv-connectors.sh
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:

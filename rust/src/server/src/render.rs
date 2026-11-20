@@ -75,6 +75,8 @@ pub struct RenderConfig {
     pub dtype: Option<ModelDtype>,
     /// Maximum multimodal items per prompt for each modality.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     pub tls: Option<TlsConfig>,
 }
 
@@ -118,7 +120,7 @@ impl RenderState {
     /// Served model names followed by LoRA adapter names.
     pub(crate) fn model_names(&self) -> ServedModelNames {
         (self.served_model_names.clone())
-            .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
+            .with_adapter_names(self.lora_modules.iter().map(|module| module.name.clone()))
     }
 }
 
@@ -175,7 +177,7 @@ fn validate_lora_modules(
     let mut seen = HashSet::new();
     for module in lora_modules {
         let name = &module.name;
-        check_lora_module(served_model_names.names(), module)
+        check_lora_module(served_model_names.base_names(), module)
             .with_context(|| format!("invalid --lora-modules entry `{name}`"))?;
         if !seen.insert(name) {
             bail!("LoRA adapter `{name}` is given more than once");
@@ -203,6 +205,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
@@ -433,6 +436,7 @@ mod tests {
                 language_model_only: false,
                 dtype: None,
                 limit_mm_per_prompt: Default::default(),
+                mm_processor_kwargs: Default::default(),
                 tls: None,
             },
             shutdown,
