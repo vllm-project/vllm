@@ -63,7 +63,7 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 indicatif = "0.18.4"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "3359c44226f3b7e8952cb58241d71b614d66a816", default-features = false }
+llm-multimodal = { git = "https://github.com/smg-project/smg", rev = "592048ce792d1de5344f4e540a4b2dfc30b7b09a", default-features = false }
 memmap2 = "0.9"
 mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
