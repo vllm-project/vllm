@@ -7,9 +7,11 @@ assert on the config `load_eagle_model` hands to `get_model`.
 """
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, LoadConfig, SpeculativeConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -53,6 +55,9 @@ class _VllmConfig:
     cache_config: _CacheConfig
     speculative_config: _SpeculativeConfig
     load_config: LoadConfig = field(default_factory=LoadConfig)
+    model_config: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(dtype=torch.bfloat16)
+    )
 
 
 def _config(target_backend: str, draft_backend: str | None) -> _VllmConfig:
@@ -118,6 +123,7 @@ def test_draft_attn_builders_get_overrides_and_keep_resolved_cache_state():
     speculator.vllm_config = cfg
     speculator.speculative_config = cfg.speculative_config
     speculator.requires_non_causal = True
+    speculator.dtype = torch.bfloat16
 
     used = speculator.attn_vllm_config
 
