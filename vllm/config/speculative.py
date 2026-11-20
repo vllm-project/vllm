@@ -68,7 +68,6 @@ _NESTED_HF_CONFIG_KEYS = frozenset(
         "text_config",
         "language_config",
         "llm_config",
-        "thinker_config",
     }
 )
 
@@ -192,11 +191,6 @@ def _get_minimax_m3_dspark_draft(
     return draft
 
 
-def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
-    model_type = getattr(model_config.hf_config, "model_type", None)
-    return model_type == "qwen3_omni_moe_thinker"
-
-
 def _get_attention_head_dim(config: Any) -> int | None:
     head_dim = getattr(config, "head_dim", None)
     if head_dim is not None:
@@ -237,7 +231,8 @@ def _validate_qwen3_omni_dspark(
     num_speculative_tokens: int,
 ) -> None:
     """Validate the standalone Qwen3-Omni DSpark checkpoint contract."""
-    if not _is_qwen3_omni_target(target_model_config):
+    model_type = getattr(target_model_config.hf_config, "model_type", None)
+    if model_type != "qwen3_omni_moe_thinker":
         return
 
     draft_hf_config = draft_model_config.hf_config
