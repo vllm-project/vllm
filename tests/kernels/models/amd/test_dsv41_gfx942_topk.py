@@ -11,6 +11,7 @@ as the AgentX server's max_model_len (1M).
 """
 
 import math
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -329,6 +330,15 @@ def test_select_candidates_matches_vllm(
             assert all((a != a and b != b) or a == b for a, b in zip(vw, vg)), (
                 f"row {r}: different chosen block scores"
             )
+
+
+def test_build_writes_nothing_beside_the_installed_source():
+    """The build writes nothing next to the installed topk512_gfx942.cu, which
+    a non-root server cannot write to."""
+    from vllm.models.deepseek_v41.amd.ops import topk
+
+    assert topk.build()
+    assert not os.path.exists(os.path.splitext(topk._SOURCE)[0] + ".hip")
 
 
 def test_failed_build_leaves_the_top_k_to_vllm(monkeypatch):

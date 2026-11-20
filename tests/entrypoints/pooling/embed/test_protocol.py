@@ -15,6 +15,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingCompletionRequest,
     build_typed_embeddings,
 )
+from vllm.renderers import TokenizeParams
 
 
 @pytest.fixture
@@ -192,9 +193,10 @@ class TestMaxEmbedLenCapsInput:
 
     def test_non_chunked_max_embed_len_caps_input(self):
         cfg = _embedding_model_config(max_model_len=128, max_embed_len=64)
+        default_tok_params = TokenizeParams(max_total_tokens=cfg.max_model_len)
 
         tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
-            cfg
+            cfg, default_tok_params
         )
 
         assert tok_params.max_input_tokens == 64
@@ -204,9 +206,10 @@ class TestMaxEmbedLenCapsInput:
         cfg = _embedding_model_config(
             max_model_len=128, max_embed_len=64, enable_chunked_processing=True
         )
+        default_tok_params = TokenizeParams(max_total_tokens=cfg.max_model_len)
 
         tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
-            cfg
+            cfg, default_tok_params
         )
 
         assert tok_params.max_input_tokens == 64
@@ -214,9 +217,10 @@ class TestMaxEmbedLenCapsInput:
 
     def test_no_max_embed_len_falls_back_to_model_len(self):
         cfg = _embedding_model_config(max_model_len=128)
+        default_tok_params = TokenizeParams(max_total_tokens=cfg.max_model_len)
 
         tok_params = EmbeddingCompletionRequest(model="m", input="hi").build_tok_params(
-            cfg
+            cfg, default_tok_params
         )
 
         assert tok_params.max_input_tokens == 128
