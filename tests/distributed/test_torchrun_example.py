@@ -41,7 +41,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="facebook/opt-125m",
     tensor_parallel_size=2,
-    pipeline_parallel_size=int(os.getenv("PP_SIZE", 1)),
+    # Pipeline parallelism with external_launcher is no longer supported with MRV2.
     distributed_executor_backend="external_launcher",
     gpu_memory_utilization=random.uniform(0.8, 0.92),
     seed=0,

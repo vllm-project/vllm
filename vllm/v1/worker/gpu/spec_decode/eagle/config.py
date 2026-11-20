@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.config import SpeculativeConfig
+from vllm.config import ModelConfig, SpeculativeConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
@@ -18,12 +18,28 @@ def wrap_eagle_hf_config(spec: SpeculativeConfig, method: str) -> None:
     spec.update_arch_()
 
 
+def check_draft_lm_head_quantization(spec: SpeculativeConfig) -> None:
+    draft = spec.draft_model_config
+    if (
+        spec.draft_lm_head_quantization is not None
+        and draft is not None
+        and draft.head_dtype != draft.dtype
+    ):
+        raise ValueError(
+            "draft_lm_head_quantization needs the lm_head to run in the "
+            f"model dtype, got head_dtype={draft.head_dtype}."
+        )
+
+
 class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
     supported_options = frozenset({"draft_lm_head_quantization"})
     uses_target_hidden_states = True
+    one_token_draft_decodes = True
     supports_watermarking = True
+    # Draft KV depends on the tokens the drafter reads ahead.
+    draft_kv_depends_on_lookahead = True
 
     @classmethod
     def matches(cls, spec: SpeculativeConfig) -> bool:
@@ -37,28 +53,15 @@ class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
 
     @classmethod
     def apply_options(cls, spec: SpeculativeConfig) -> None:
-        draft = spec.draft_model_config
-        if (
-            spec.draft_lm_head_quantization is not None
-            and draft is not None
-            and draft.head_dtype != draft.dtype
-        ):
-            raise ValueError(
-                "draft_lm_head_quantization needs the lm_head to run in the "
-                f"model dtype, got head_dtype={draft.head_dtype}."
-            )
+        check_draft_lm_head_quantization(spec)
+
+    @classmethod
+    def supports_draft_eplb(cls, draft_model_config: ModelConfig) -> bool:
+        return draft_model_config.is_moe
 
     @property
     def num_lookahead_tokens(self) -> int:
         return self.num_speculative_tokens
-
-    @property
-    def max_num_new_slots_for_drafting(self) -> int:
-        if self.spec_config.parallel_drafting:
-            # P-EAGLE (V1 model runner only): the existing query is reused; only
-            # masked queries need new slots.
-            return self.num_speculative_tokens - 1
-        return 0
 
 
 class Eagle3SpeculatorConfig(EagleSpeculatorConfig):
