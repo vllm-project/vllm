@@ -327,8 +327,8 @@ def _fwd_grouped_kernel_stage1(
     IS_MLA: tl.constexpr = False,
     SLIDING_WINDOW: tl.constexpr = 0,
 ):
-    cur_batch = tl.program_id(0)
-    cur_head_id = tl.program_id(1)
+    cur_head_id = tl.program_id(0)
+    cur_batch = tl.program_id(1)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
     split_kv_id = tl.program_id(2)
 
@@ -378,10 +378,10 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[None, :]
         base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
         if BLOCK_DPE > 0:
-            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
+            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[None, :]
 
         ks = tl.load(k_scale)
         vs = tl.load(v_scale)
@@ -400,28 +400,28 @@ def _fwd_grouped_kernel_stage1(
             )
 
             # explicitly facilitate overlapping load/compute
-            offs_buf_k = kv_off_k[None, :] + base_offs_k
+            offs_buf_k = kv_off_k[:, None] + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
-                mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
+                mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
                 cache_modifier=".cg",
             )
 
             if k.dtype.is_fp8():
                 k = (k.to(tl.float32) * ks).to(q.dtype)
-            qk = tl.dot(q, k.to(q.dtype))
+            qk = tl.dot(q, tl.trans(k.to(q.dtype)))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = kv_off_k[None, :] + base_offs_kpe
+                offs_buf_kpe = kv_off_k[:, None] + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dpe[None, :]),
                     other=0.0,
                     cache_modifier=".cg",
                 )
                 if kpe.dtype.is_fp8():
                     kpe = (kpe.to(tl.float32) * ks).to(qpe.dtype)
-                qk += tl.dot(qpe, kpe.to(qpe.dtype))
+                qk += tl.dot(qpe, tl.trans(kpe.to(qpe.dtype)))
             qk *= sm_scale
 
             if logit_cap > 0:
@@ -445,10 +445,7 @@ def _fwd_grouped_kernel_stage1(
                 if v.dtype.is_fp8():
                     v = (v.to(tl.float32) * vs).to(q.dtype)
             else:
-                # MLA uses a single c_kv.
-                # loading the same c_kv to interpret it as v is not necessary.
-                # transpose the existing c_kv (aka k) for the dot product.
-                v = tl.trans(k)
+                v = k
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -582,8 +579,8 @@ def _decode_grouped_att_m_fwd(
     BLOCK_H = 16
     NUM_KV_SPLITS = num_kv_splits
     grid = (
-        batch,
         triton.cdiv(head_num, min(BLOCK_H, kv_group_num)),
+        batch,
         NUM_KV_SPLITS,
     )
 
