@@ -84,6 +84,10 @@ def _run_engine_core_handshake(
         engine_core_module, "maybe_attach_gc_debug_callback", lambda: None
     )
     monkeypatch.setattr(engine_core_module, "enable_envs_cache", lambda: None)
+    monkeypatch.setattr(
+        engine_core_module.kv_cache_utils, "NONE_HASH", None, raising=False
+    )
+    monkeypatch.setattr(engine_core_module.kv_cache_utils, "_NONE_HASH_SEED", None)
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_rank_local=0),
