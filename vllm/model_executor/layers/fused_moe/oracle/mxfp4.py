@@ -1309,6 +1309,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        activation = getattr(layer, "activation", None)
+        if activation == MoEActivation.RELU2_NO_MUL:
+            raise ValueError(
+                "AITER_MXFP4_MXFP4 (W4A4) does not support relu2 "
+                "(MoEActivation.RELU2_NO_MUL): no fp4-activation relu2 "
+                "kernel exists in AITER, and this branch's plain W4A4 "
+                "weight shuffle is incompatible with the BF16-only relu2 "
+                "kernel's expected gate/up-interleaved a16w4 shuffle. Use "
+                "AITER_MXFP4_BF16 instead."
+            )
+
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
