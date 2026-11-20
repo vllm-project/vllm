@@ -670,11 +670,12 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     HY4 Flash supports NVIDIA CUDA and AMD ROCm; LoRA and pipeline parallelism
     are not supported. On ROCm, it has been validated on MI355X (gfx950) with
     TP8 and supports only BF16 KV storage (`--kv-cache-dtype auto` or
-    `bfloat16`). Set `VLLM_ROCM_USE_AITER=1` and
+    `bfloat16`). Set `VLLM_ROCM_USE_AITER=1` and, until vLLM's AITER includes
+    [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277),
     `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
     decode kernel reads the wrong KV rows once a layer's KV cache exceeds
     4 GiB, which HY4 Flash's cache layout reaches after a few hundred thousand
-    tokens ([ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277)).
+    tokens.
     Published checkpoints use
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
