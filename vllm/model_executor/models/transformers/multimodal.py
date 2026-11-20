@@ -967,46 +967,47 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
 
-        load_audio_from_video = self.info._fuses_audio_into_video
+        fuses_audio_into_video = self.info._fuses_audio_into_video
         override = _get_load_audio_from_video(hf_kwargs)
-        if override is not None and bool(override) != load_audio_from_video:
+        if override is not None and bool(override) != fuses_audio_into_video:
             raise ValueError(
                 "load_audio_from_video is a server-level setting and cannot be "
                 "overridden per request; pass it in --mm-processor-kwargs instead."
             )
-        if load_audio_from_video:
-            hf_kwargs = {
-                **hf_kwargs,
-                "load_audio_from_video": False,
-                "use_audio_in_video": False,
-            }
         item_counts = mm_items.get_all_counts()
         num_audios = item_counts.get("audio", 0)
         num_videos = item_counts.get("video", 0)
-        load_audio_from_video = load_audio_from_video and num_videos > 0
+        load_audio_from_video = fuses_audio_into_video and num_videos > 0
         if load_audio_from_video and num_audios != num_videos:
             raise ValueError(
                 f"load_audio_from_video requires equal number of audio and video "
                 f"items, got {num_audios=}, {num_videos=}"
             )
 
+        # Only the main call may fuse, not those processing each audio alone
+        unfused_kwargs = hf_kwargs
+        if fuses_audio_into_video:
+            unfused_kwargs = {
+                **hf_kwargs,
+                "load_audio_from_video": False,
+                "use_audio_in_video": False,
+            }
+        call_kwargs = unfused_kwargs
+        if load_audio_from_video:
+            call_kwargs = {
+                **unfused_kwargs,
+                "load_audio_from_video": True,
+                "audio_from_video_indices": list(range(num_videos)),
+            }
+
         # Ask for the replacement each placeholder expands to, and record it as
         # per-item fields: its token ids, and the tokens or patches behind them
         if has_mm_data := any(hf_data.values()):
             hf_data = {**hf_data, "return_text_replacement_offsets": True}
 
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
-        call_kwargs = hf_kwargs
-        if load_audio_from_video:
-            call_kwargs = {
-                **hf_kwargs,
-                "load_audio_from_video": True,
-                "audio_from_video_indices": list(range(num_videos)),
-            }
-
         try:
             hf_inputs = self.info.ctx.call_hf_processor(
-                hf_processor,
+                self.info.get_hf_processor(**unfused_kwargs),
                 dict(text=prompt_text, **hf_data),
                 call_kwargs,
             )
@@ -1025,7 +1026,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             hf_inputs["audio_feature_lengths"] = feature_attention_mask.sum(-1)
 
         self._unpad_images(hf_inputs)
-        self._unpad_audios(hf_inputs, hf_data, hf_kwargs)
+        self._unpad_audios(hf_inputs, hf_data, unfused_kwargs)
 
         if "video_second_per_grid" in hf_inputs:
             hf_inputs["second_per_grid_ts"] = hf_inputs.pop("video_second_per_grid")
