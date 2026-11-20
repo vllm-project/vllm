@@ -28,11 +28,8 @@ from vllm.distributed.aux_output_connector.connector import (
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-<<<<<<< HEAD
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
-=======
 from vllm.distributed.ec_transfer.ec_events import AllECCleared
->>>>>>> fa0829e287 ([Bugfix][EC]Fix EC event endpoint collision and idle cache-clear publishing)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -7573,6 +7570,7 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     scheduler.ec_connector.take_unavailable_requests.return_value = {request.request_id}
     # `request_finished` reports (delay_free, params) for the request teardown.
     scheduler.ec_connector.request_finished.return_value = (False, None)
+    scheduler.ec_connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
     outputs = scheduler.update_from_output(

@@ -2755,11 +2755,8 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
-<<<<<<< HEAD
-<<<<<<< HEAD
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
-=======
         # collect encoder cache events from cache manager and connector
         ec_events = self.encoder_cache_manager.take_events()
         if self.ec_connector is not None:
@@ -2769,10 +2766,8 @@ class Scheduler(SchedulerInterface):
         if ec_events:
             batch = ECEventBatch(ts=time.time(), events=ec_events)
             self.ec_event_publisher.publish(batch)
->>>>>>> 1e4b18b772 ([Feature] Add encoder cache events)
-=======
+
         self._publish_ec_events()
->>>>>>> fa0829e287 ([Bugfix][EC]Fix EC event endpoint collision and idle cache-clear publishing)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
