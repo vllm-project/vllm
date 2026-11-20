@@ -23,7 +23,7 @@ MODEL = "baidu/ERNIE-4.5-21B-A3B-Thinking"
 
 @pytest.fixture(scope="module")
 def ernie45_tokenizer():
-    return get_tokenizer(tokenizer_name=MODEL, trust_remote_code=True)
+    return get_tokenizer(tokenizer_name=MODEL)
 
 
 @pytest.fixture

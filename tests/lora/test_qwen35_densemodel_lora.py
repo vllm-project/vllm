@@ -37,7 +37,7 @@ VL_EXPECTED_LORA_OUTPUT = [
     "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",  # noqa: E501
 ]
 
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH)
 
 
 def _assert_exact_outputs(
@@ -328,7 +328,6 @@ def test_qwen35_text_lora(
         max_num_seqs=4,
         max_lora_rank=8,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_tower_connector_lora=True,
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
@@ -354,7 +353,6 @@ def test_qwen35_text_lora_tp4(
         max_num_seqs=4,
         enforce_eager=True,
         tensor_parallel_size=4,
-        trust_remote_code=True,
         enable_tower_connector_lora=True,
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
