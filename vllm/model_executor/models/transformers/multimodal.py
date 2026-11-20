@@ -1022,12 +1022,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         feature_attention_mask = hf_inputs.get("feature_attention_mask")
+        # Qwen-Omni's `get_rope_index` takes these lengths as `audio_seqlens`
         if feature_attention_mask is not None:
             hf_inputs["audio_feature_lengths"] = feature_attention_mask.sum(-1)
 
         self._unpad_images(hf_inputs)
         self._unpad_audios(hf_inputs, hf_data, unfused_kwargs)
 
+        # Qwen-Omni's alias for Qwen2.5-VL's `second_per_grid_ts`
         if "video_second_per_grid" in hf_inputs:
             hf_inputs["second_per_grid_ts"] = hf_inputs.pop("video_second_per_grid")
 
