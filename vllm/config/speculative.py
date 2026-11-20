@@ -1240,7 +1240,7 @@ class SpeculativeConfig:
                 }
             )
 
-        if hf_config.model_type == "inkling2":
+        if hf_config.model_type in ("inkling2", "inkling2_loop"):
             from vllm.models.inkling2.configs import Inkling2DSparkConfig
 
             hf_config = Inkling2DSparkConfig.from_target(hf_config)

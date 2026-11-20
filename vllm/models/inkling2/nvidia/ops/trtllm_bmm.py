@@ -128,15 +128,22 @@ def expert_plan(
         # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
         return ExpertPlan(tile, max_ctas, (0, 0))
     names = configs(nvfp4, tile)
+    keys = _KERNELS[(nvfp4, tile)]
     kernels = []
-    for key, (n, k) in zip(_KERNELS[(nvfp4, tile)], shapes):
-        ((index, layout),) = (v for name, v in names.items() if key in name)
-        assert layout == (3 if tile >= 128 else 1)  # R128c4 / R8c4 activations
-        size = _module()[0].bmm_workspace_size(
-            nvfp4, tile, index, n, k, num_experts, max_ctas
-        )
-        assert size == 0, size
-        kernels.append(index)
+    for projection, (n, k) in enumerate(shapes):
+        # The projection's kernel, else the other's (an unrolled K loop, say,
+        # needs K to be a multiple of its double K tile).
+        for key in (keys[projection], keys[1 - projection]):
+            ((index, layout),) = (v for name, v in names.items() if key in name)
+            assert layout == (3 if tile >= 128 else 1)  # R128c4 / R8c4 activations
+            size = _module()[0].bmm_workspace_size(
+                nvfp4, tile, index, n, k, num_experts, max_ctas
+            )
+            if size == 0:
+                kernels.append(index)
+                break
+        else:
+            raise AssertionError(f"no Inkling2 expert GEMM for {(n, k)}, tile {tile}")
     return ExpertPlan(tile, max_ctas, (kernels[0], kernels[1]))
 
 

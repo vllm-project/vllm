@@ -192,12 +192,17 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/inkling/
+  - vllm/models/inkling2/
   - vllm/cute_utils/
   - cmake/external_projects/tml_fa4.cmake
   - tests/models/inkling/
+  - tests/models/inkling2/
   commands:
     # FA4 kernel tests require SM100; the suite skips them elsewhere.
-    - pytest -v -s models/inkling
+    - >-
+      pytest -v -s
+      models/inkling
+      models/inkling2
   mirror:
     amd:
       automatic_shard: true
@@ -217,6 +222,27 @@ steps:
       commands:
       - pytest -v -s models/inkling/rocm
       - pytest -v -s models/inkling/test_mm_towers.py models/inkling/test_moe_weight_layout.py models/inkling/test_qkvr_prep.py
+
+- label: ":nvidia: (DGX Spark) Inkling 2 SM12"
+  key: inkling2-sm12-tests
+  automatic_shard: true
+  timeout_in_minutes: 20
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/models/inkling2/
+  - vllm/utils/humming.py
+  - tests/models/inkling2/
+  commands:
+    - >-
+      pytest -v -s
+      models/inkling2/test_core_ops.py
+      models/inkling2/test_moe.py
+      models/inkling2/test_model.py
+      -k 'humming or sm12x or loop_norm or conv_mix'
 
 # Disabled until the gguf installation is locked.
 # - label: ":nvidia: (B200) Flint"

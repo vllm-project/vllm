@@ -11,14 +11,17 @@ import math
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from . import use_sm100_kernels
 from .block_scales import _scale_offsets
 
 FP32_MAX = tl.constexpr(3.4028234663852886e38)
-# Hopper has no e2m1 conversions: round in software, identically.
-_HW_E2M1 = tl.constexpr(use_sm100_kernels())
+# Both Blackwell families have native e2m1 conversions; Hopper uses software.
+_HW_E2M1 = tl.constexpr(
+    use_sm100_kernels() or current_platform.is_device_capability_family(120)
+)
 
 
 @triton.jit

@@ -200,14 +200,22 @@ def can_initialize(
         ):
             pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
-    if model_arch in ("Inkling2ForConditionalGeneration", "Inkling2DSparkModel"):
+    if model_arch in (
+        "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
+        "Inkling2DSparkModel",
+    ):
         from vllm.platforms import current_platform
 
         if not (
             current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
+            and (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
         ):
-            pytest.skip("Inkling2 requires Blackwell (SM10x)")
+            pytest.skip("Inkling2 requires Hopper or Blackwell")
 
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform

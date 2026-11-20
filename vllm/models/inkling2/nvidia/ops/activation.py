@@ -231,9 +231,9 @@ def swiglu_quantize(
     max_rows = routed.numel()
     num_warps, maxnreg = (4, None) if max_rows <= 16384 else (2, 72)
     if not nvfp4 and max_rows <= 512:
-        # Few rows: a program per 256 columns.
-        assert n % 256 == 0
-        head, tail, num_warps = 256, 0, 2
+        # Few rows: a program per 256 (or 128) columns.
+        head, tail, num_warps = 256 if n % 256 == 0 else 128, 0, 2
+        assert n % head == 0
     else:
         # Whole rows, as a power-of-two head and tail.
         head = 1 << (n.bit_length() - 1)

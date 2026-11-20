@@ -1126,7 +1126,7 @@ def _combine(
 ) -> None:
     hidden = down.shape[1]
     tokens = src2dst.numel() // topk
-    block = 512
+    block = 512 if hidden % 512 == 0 else 256
     assert hidden % block == 0
     _combine_kernel[(tokens, hidden // block)](
         down,

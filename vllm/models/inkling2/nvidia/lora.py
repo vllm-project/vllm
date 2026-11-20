@@ -160,9 +160,13 @@ class Inkling2MoEWithLoRA(BaseLayerWithLoRA):
         self.punica_wrapper = punica_wrapper
 
     def forward(
-        self, x: torch.Tensor, reduce: bool = True, push: SeqParallel | None = None
+        self,
+        x: torch.Tensor,
+        reduce: bool = True,
+        push: SeqParallel | None = None,
+        pass_idx: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
-        return self.base_layer(x, reduce, push, lora=self)
+        return self.base_layer(x, reduce, push, lora=self, pass_idx=pass_idx)
 
     def add_w13(
         self,
