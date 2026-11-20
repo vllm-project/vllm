@@ -8,6 +8,7 @@
 from collections.abc import Sequence
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -31,14 +32,14 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
-    is_mamba_align_group,
     is_mamba_group,
+    is_mamba_prefix_caching_group,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_mamba_prefill_checkpoint_position,
+    get_reusable_prefix_length,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
@@ -59,10 +60,10 @@ def _partial_tail_non_mamba_puts(
     - Mamba groups: the state at `boundary`, handed off by the core as a
       boundary put of its own, so Mamba groups are not listed here.
     - Other groups: the KV from the last LCM-aligned normal save up to
-      `boundary` plus the group's EAGLE proof margin (`proof_end`). Each
-      block is keyed by the hash at its end, clipped to `proof_end`.
+      `boundary`. Each block is keyed by the hash at its end, clipped
+      to the checkpoint boundary.
 
-    Groups whose proof is not computed yet are omitted. For example, with LCM
+    Groups whose KV is not computed yet are omitted. For example, with LCM
     16, blocks of 4 tokens, and a checkpoint at 44, the full-attention blocks
     are 8-10, keyed at 36, 40 and 44.
 
@@ -85,39 +86,32 @@ def _partial_tail_non_mamba_puts(
     prompt_tokens = req_meta.num_prompt_tokens
     completed = req_meta.completed_token_len
     assert prompt_tokens is not None and completed is not None
+    if req_meta.max_offload_tokens is not None:
+        completed = min(completed, req_meta.max_offload_tokens)
     hash_block_size = coord.hash_block_size
-    # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
-    # groups carry the eagle flag.
-    boundary = get_mamba_prefill_checkpoint_position(
+    boundary = get_reusable_prefix_length(
         prompt_tokens,
-        hash_block_size,
-        coord.use_eagle,
-        coord.num_hash_lookahead_tokens,
+        num_hash_lookahead_tokens=coord.num_hash_lookahead_tokens,
+        alignment_tokens=hash_block_size,
     )
-    # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
-    # attention KV, EAGLE proof included, ends on an attention block end no later
-    # than this checkpoint's proof, so the normal and prompt-tail saves store it.
     if not req_meta.publish_partial_tail and boundary not in mamba_tails:
         return []
     num_hashes = len(req_meta.block_hashes)
-    if boundary == 0 or boundary // hash_block_size > num_hashes:
+    if not 0 < boundary <= completed or boundary // hash_block_size > num_hashes:
         return []
     start = boundary // coord.lcm_block_size * coord.lcm_block_size
     puts: list[BoundaryPut] = []
     for group_id, block_size in enumerate(block_sizes):
         if group_id in coord.mamba_group_ids:
             continue
-        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
-        if proof_end > completed or proof_end // hash_block_size > num_hashes:
-            continue
         group_blocks = req_meta.block_ids[group_id]
-        for block_idx in range(start // block_size, cdiv(proof_end, block_size)):
+        for block_idx in range(start // block_size, cdiv(boundary, block_size)):
             if block_idx >= len(group_blocks):
                 break
             block_id = group_blocks[block_idx]
             if block_id == NULL_BLOCK_ID:
                 continue
-            num_tokens = min((block_idx + 1) * block_size, proof_end)
+            num_tokens = min((block_idx + 1) * block_size, boundary)
             puts.append(BoundaryPut(group_id, block_id, num_tokens))
     return puts
 
@@ -180,8 +174,8 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(map(is_mamba_align_group, mamba_groups.values())), (
-                "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert all(map(is_mamba_prefix_caching_group, mamba_groups.values())), (
+                "MooncakeStoreScheduler requires prefix caching for Mamba layers"
             )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
@@ -375,6 +369,9 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                max_offload_tokens=get_max_offload_tokens(
+                    request_real.kv_transfer_params
+                ),
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -553,6 +550,13 @@ class MooncakeStoreScheduler:
                 continue
             if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+            if (
+                req_meta.max_offload_tokens is not None
+                and not req_meta.token_len_chunk
+                and not req_meta.boundary_puts
+            ):
+                req_meta.can_save = False
+                continue
             if self.enable_kv_events and coord.num_hash_lookahead_tokens:
                 request, _ = self._unfinished_requests[req_meta.req_id]
                 req_meta.num_hash_lookahead_tokens = coord.num_hash_lookahead_tokens
@@ -648,6 +652,11 @@ class MooncakeStoreScheduler:
         boundary_tokens = next(iter(boundaries))
         if boundary_tokens > tracker.prefill_end_tokens:
             return False
+        if (
+            tracker.max_offload_tokens is not None
+            and boundary_tokens > tracker.max_offload_tokens
+        ):
+            return False
 
         mamba_puts: list[BoundaryPut] = []
         for group_id, block_id, boundary in partial_tail_offloads:
@@ -669,6 +678,7 @@ class MooncakeStoreScheduler:
             prefill_end_tokens=tracker.prefill_end_tokens,
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
+            max_offload_tokens=tracker.max_offload_tokens,
         )
         coord = self._store_coord
         assert coord is not None
@@ -724,6 +734,11 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[BoundaryPut] = []
             for group_id, block_id, boundary_tokens in entries:
+                if (
+                    tracker.max_offload_tokens is not None
+                    and boundary_tokens > tracker.max_offload_tokens
+                ):
+                    continue
                 is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
                 if is_decode_boundary and not self.save_decode_cache:
                     continue
@@ -752,6 +767,7 @@ class MooncakeStoreScheduler:
                     prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_puts=accepted,
                     completed_token_len=tracker.token_len,
+                    max_offload_tokens=tracker.max_offload_tokens,
                 )
             )
 
