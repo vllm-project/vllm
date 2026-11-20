@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -13,7 +14,7 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 @pytest.fixture(scope="module")
 def default_server_args():
-    return [
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--max-model-len",
         "2048",
@@ -22,6 +23,10 @@ def default_server_args():
         "--enforce-eager",
         "--enable-per-request-metrics",
     ]
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        # The reuse tests exercise the explicit aggregated-server opt-in.
+        args.append("--enable-prompt-token-ids")
+    return args
 
 
 @pytest.fixture(scope="module")

@@ -340,6 +340,16 @@ pub struct ServerUnsupportedArgs {
     )]
     pub trust_request_mm_kwargs: Option<Unsupported>,
 
+    /// Reuse caller-supplied prompt token ids without a KV transfer connector.
+    /// The Python frontend owns this opt-in; the Rust frontend does not implement it.
+    #[arg(
+        long,
+        visible_alias = "no-enable-prompt-token-ids",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_prompt_token_ids: Option<Unsupported>,
+
     /// The role name to return if `request.add_generation_prompt=true`.
     #[arg(long)]
     pub response_role: Option<Unsupported>,

@@ -110,8 +110,30 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
+_OFFLOAD_ONLY_CONNECTORS = frozenset(
+    {"OffloadingConnector", "LMCacheMPConnector", "SimpleCPUOffloadConnector"}
+)
+
+
+def _has_prompt_token_id_reuse_connector(renderer: BaseRenderer) -> bool:
+    config = renderer.config.kv_transfer_config
+    if config is None or config.kv_connector is None:
+        return False
+    if config.kv_connector == "MultiConnector":
+        return any(
+            (name := child.get("kv_connector")) is not None
+            and name not in _OFFLOAD_ONLY_CONNECTORS
+            for child in config.kv_connector_extra_config.get("connectors", [])
+        )
+    return config.kv_connector not in _OFFLOAD_ONLY_CONNECTORS
+
+
 def _reused_prompt_token_ids(
-    request: Any, renderer: BaseRenderer, messages: list[Any] | None = None
+    request: Any,
+    renderer: BaseRenderer,
+    messages: list[Any] | None = None,
+    *,
+    enable_prompt_token_ids: bool = False,
 ) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
@@ -120,15 +142,19 @@ def _reused_prompt_token_ids(
     the key keeps the id list out of the engine's sampling metadata.
 
     Returns None when token ids alone are not enough. For example, the
-    user may want the rendered prompt back, or may have sent media for
-    the model to see. In those cases, conversation is re-rendered instead.
-    Otherwise raises VLLMValidationError if the ids are malformed or out of
-    vocabulary.
+    user may want the rendered prompt back, may have sent media for the
+    model to see, or may have no KV transfer connector without explicitly
+    enabling direct token-id reuse. In those cases, messages are rendered
+    instead. Otherwise raises VLLMValidationError if the ids are malformed
+    or out of vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
     ids = kv.pop("prompt_token_ids", None)
+    # Forwarded features only have meaning together with the ids. Consume both
+    # so a request never retains half of the pre-rendered payload.
+    kv.pop("prompt_features", None)
     if ids is None:
         return None
     if getattr(request, "echo", False):
@@ -147,6 +173,22 @@ def _reused_prompt_token_ids(
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "messages have non-text content and are rendered instead."
+        )
+        return None
+    # Without a connector, accepting forwarded ids would skip chat templating,
+    # truncate_prompt_tokens, and tokenization on any client-supplied text.
+    # Render messages by default so aggregated routers keep working; an explicit
+    # server opt-in preserves direct reuse for trusted pre-rendered requests.
+    if (
+        not _has_prompt_token_id_reuse_connector(renderer)
+        and not enable_prompt_token_ids
+    ):
+        logger.warning_once(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "the server has no KV transfer connector configured for prompt id "
+            "reuse and --enable-prompt-token-ids is not set, so messages are rendered "
+            "instead. Set --enable-prompt-token-ids to keep reusing ids "
+            "forwarded by a trusted caller."
         )
         return None
     # bool is an int subclass, hence the exact type check.
@@ -176,6 +218,7 @@ class OnlineRenderer:
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         trust_request_mm_kwargs: bool = False,
+        enable_prompt_token_ids: bool = False,
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
@@ -212,6 +255,7 @@ class OnlineRenderer:
         self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
+        self.enable_prompt_token_ids = enable_prompt_token_ids
 
         self.log_error_stack = log_error_stack
         self.supports_browsing = False
@@ -569,7 +613,11 @@ class OnlineRenderer:
         tok_params: TokenizeParams | None = None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        reuse_ids = _reused_prompt_token_ids(request, self.renderer)
+        reuse_ids = _reused_prompt_token_ids(
+            request,
+            self.renderer,
+            enable_prompt_token_ids=self.enable_prompt_token_ids,
+        )
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
@@ -847,7 +895,12 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
+        reuse_ids = _reused_prompt_token_ids(
+            request,
+            renderer,
+            messages,
+            enable_prompt_token_ids=self.enable_prompt_token_ids,
+        )
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
