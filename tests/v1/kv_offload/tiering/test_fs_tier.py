@@ -10,6 +10,7 @@ data integrity throughout the process.
 import errno
 import mmap
 import os
+import signal
 import threading
 import time
 from unittest.mock import MagicMock
@@ -77,6 +78,7 @@ def _make_offloading_spec(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
@@ -285,6 +287,8 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
+    # The bytes were written before the rename lost, so they count.
+    assert results[0].transfer_bytes == tier._block_size
     assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
     with open(dest, "rb") as f:
         assert f.read() == published
@@ -460,11 +464,53 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
+    assert load_results[0].transfer_bytes == len(keys) * tier._block_size
 
     for i, cid in enumerate(load_chunk_ids):
         assert torch.allclose(tensor[cid], expected[i]), (
             f"Chunk {cid} data mismatch after store+load"
         )
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_reports_only_newly_written_blocks(fs_tier, monkeypatch, use_c_ext):
+    """transfer_bytes counts the blocks a job wrote, not those already on disk."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier
+    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    published = tier.file_mapper.get_file_name(key(2))
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 2 * tier._block_size
+    with open(published, "rb") as f:
+        published_bytes = f.read()
+
+    # Change block 2's source so a rewrite would show on disk.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == tier._block_size
+    with open(published, "rb") as f:
+        assert f.read() == published_bytes
+    assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+
+    # Re-storing a published prefix writes nothing.
+    tier.submit_store(make_job(3, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 0
+    assert tier._job_block_counts == {}
 
 
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
@@ -502,6 +548,45 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
             assert torch.allclose(tensor[bid], expected[i])
     finally:
         tier.shutdown()
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
+    """A store that runs out of space partway through a block raises an error
+    that says it was a short write and may mean a full filesystem, instead of
+    EIO, which reads as a device error.
+
+    A soft RLIMIT_FSIZE below the block size makes write(2) return a short
+    count, as a nearly full filesystem does. The hard limit is left alone, so
+    the soft limit can be restored afterwards.
+    """
+    resource = pytest.importorskip("resource")
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    block = 192 * 1024
+    dest = tmp_path / "block.bin"
+    buf = memoryview(bytearray(block))
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, hard))
+    try:
+        with pytest.raises(OSError) as exc_info:
+            io_mod.batch_store_block([str(dest)], buf, [0], block, use_o_direct=False)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+    assert exc_info.value.errno is None
+    assert str(exc_info.value) == (
+        f"Encountered short-write error when writing {dest}. This could be a "
+        "hardware error or the filesystem may be full (ENOSPC)"
+    )
+    # Neither the block nor its temp file is left behind.
+    assert os.listdir(tmp_path) == []
 
 
 def test_wait_idle_blocks_until_tasks_complete():

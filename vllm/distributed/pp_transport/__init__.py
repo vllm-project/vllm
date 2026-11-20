@@ -60,8 +60,8 @@ def create_pp_transport(
     vllm_config: "VllmConfig", persistent: "IntermediateTensors | None"
 ) -> PPTransport | None:
     """Collective over the PP group. Returns None (send over NCCL) without PP,
-    or under "auto" when copy engines are not usable on some rank; every rank
-    makes the same choice.
+    under "auto" on ROCm, or under "auto" when copy engines are not usable on
+    some rank; every rank makes the same choice.
 
     Args:
         vllm_config: The engine config.
@@ -80,6 +80,14 @@ def create_pp_transport(
         CopyEngineTransport,
         CopyEngineUnavailable,
     )
+    from vllm.platforms import current_platform
+
+    if mode == "auto" and current_platform.is_rocm():
+        logger.info_once(
+            "PP transport: NCCL (SDMA copy engines on ROCm are opt-in: "
+            "VLLM_PP_TRANSPORT=copy_engine)"
+        )
+        return None
 
     try:
         transport = CopyEngineTransport(
