@@ -7,6 +7,7 @@ import pytest
 import transformers
 from packaging.version import Version
 from transformers import (
+    AutoProcessor,
     Gemma3nForConditionalGeneration,
     Gemma4ForConditionalGeneration,
     Qwen2_5OmniThinkerForConditionalGeneration,
@@ -32,25 +33,12 @@ VIDEO_ASSET = VideoAsset("baby_reading", num_frames=4)
 
 OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
     "Qwen/Qwen2.5-Omni-3B": {
-        "prompt": (
-            "<|im_start|>user\n"
-            "<|audio_bos|><|AUDIO|><|audio_eos|>"
-            "<|vision_bos|><|IMAGE|><|vision_eos|>"
-            "<|vision_bos|><|VIDEO|><|vision_eos|>"
-            "Describe what you see and hear.<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        ),
         "auto_cls": Qwen2_5OmniThinkerForConditionalGeneration,
         "vllm_runner_kwargs": {
             "gpu_memory_utilization": 0.85,
         },
     },
     "google/gemma-3n-E2B-it": {
-        "prompt": (
-            "<bos><start_of_turn>user\n"
-            "<audio_soft_token><image_soft_token>"
-            "Describe what you see and hear.<end_of_turn>\n<start_of_turn>model\n"
-        ),
         "auto_cls": Gemma3nForConditionalGeneration,
         "modalities": ("audio", "image"),
         "patch_hf_runner": model_utils.gemma3n_patch_hf_runner,
@@ -59,11 +47,6 @@ OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
         },
     },
     "google/gemma-4-E2B-it": {
-        "prompt": (
-            "<bos><|turn>user\n"
-            "<|audio|><|image|><|video|>Describe what you see and hear.<turn|>\n"
-            "<|turn>model\n<|channel>thought\n<channel|>"
-        ),
         "auto_cls": Gemma4ForConditionalGeneration,
         "vllm_runner_kwargs": {
             "gpu_memory_utilization": 0.85,
@@ -101,6 +84,13 @@ def test_transformers_omni_generation(
         "videos": [(VIDEO_ASSET.np_ndarrays, VIDEO_ASSET.metadata)],
     }
     mm_data = {f"{m}s": assets[f"{m}s"] for m in modalities}
+    content: list[dict[str, str]] = [{"type": modality} for modality in modalities]
+    content.append({"type": "text", "text": "Describe what you see and hear."})
+    prompt = AutoProcessor.from_pretrained(model_id).apply_chat_template(
+        [{"role": "user", "content": content}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
     with vllm_runner(
         model_id,
@@ -112,7 +102,7 @@ def test_transformers_omni_generation(
         **settings.get("vllm_runner_kwargs", {}),
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
-            [settings["prompt"]],
+            [prompt],
             128,
             num_logprobs=10,
             **mm_data,
@@ -128,7 +118,7 @@ def test_transformers_omni_generation(
         if (patch := settings.get("patch_hf_runner")) is not None:
             hf_model = patch(hf_model)
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            [settings["prompt"]],
+            [prompt],
             128,
             num_logprobs=10,
             **mm_data,

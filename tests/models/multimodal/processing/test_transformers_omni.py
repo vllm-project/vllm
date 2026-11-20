@@ -19,41 +19,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 OMNI_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
-    "Qwen/Qwen2.5-Omni-3B": {
-        "prompt": (
-            "<|im_start|>user\n"
-            "<|audio_bos|><|AUDIO|><|audio_eos|>"
-            "<|vision_bos|><|IMAGE|><|vision_eos|>"
-            "<|vision_bos|><|VIDEO|><|vision_eos|>"
-            "Describe what you see and hear.<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        ),
-    },
-    "google/gemma-3n-E2B-it": {
-        "prompt": (
-            "<bos><start_of_turn>user\n"
-            "<audio_soft_token><image_soft_token>"
-            "Describe what you see and hear.<end_of_turn>\n<start_of_turn>model\n"
-        ),
-        "modalities": ("audio", "image"),
-    },
-    "google/gemma-4-E2B-it": {
-        "prompt": (
-            "<bos><|turn>user\n"
-            "<|audio|><|image|><|video|>Describe what you see and hear.<turn|>\n"
-            "<|turn>model\n<|channel>thought\n<channel|>"
-        ),
-    },
-    "Qwen/Qwen3-Omni-30B-A3B-Instruct": {
-        "prompt": (
-            "<|im_start|>user\n"
-            "<|audio_start|><|audio_pad|><|audio_end|>"
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-            "Describe what you see and hear.<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        ),
-    },
+    "Qwen/Qwen2.5-Omni-3B": {},
+    "google/gemma-3n-E2B-it": {"modalities": ("audio", "image")},
+    "google/gemma-4-E2B-it": {},
+    "Qwen/Qwen3-Omni-30B-A3B-Instruct": {},
 }
 
 SAMPLING_RATE = 16000
@@ -104,15 +73,13 @@ def _hf_mm_kwargs(mm_data):
 
 
 def _prompt(hf_processor, *modalities):
-    text = ""
-    for modality in modalities:
-        if modality == "audio":
-            bos, token, eos = "audio_bos_token", "audio_token", "audio_eos_token"
-        else:
-            bos, eos = "vision_bos_token", "vision_eos_token"
-            token = "image_token" if modality == "image" else "video_token"
-        text += "".join(getattr(hf_processor, name) for name in (bos, token, eos))
-    return text + " Describe this."
+    content: list[dict[str, str]] = [{"type": modality} for modality in modalities]
+    content.append({"type": "text", "text": "Describe what you see and hear."})
+    return hf_processor.apply_chat_template(
+        [{"role": "user", "content": content}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -142,7 +109,7 @@ def test_omni_multimodal_processor(model_id):
     assert isinstance(info, MultiModalProcessingInfo)
     hf_processor = info.get_hf_processor()
     mm_data = _mm_data(model_id)
-    prompt = OMNI_MODEL_SETTINGS[model_id]["prompt"]
+    prompt = _prompt(hf_processor, *_modalities(model_id))
 
     result = mm_processor(
         prompt=prompt,
@@ -168,7 +135,7 @@ def test_omni_fields_stay_on_their_own_modality():
     mm_data = {"audio": [_audio()], "image": [_image()], "video": [_video()]}
 
     result = mm_processor(
-        prompt=OMNI_MODEL_SETTINGS[model_id]["prompt"],
+        prompt=_prompt(mm_processor.info.get_hf_processor(), *mm_data),
         mm_items=mm_processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
     )
@@ -257,7 +224,7 @@ def test_repeated_omni_request_hits_the_processor_cache(model_id):
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     cache = MultiModalProcessorOnlyCache(model_config)
     mm_data = _mm_data(model_id)
-    prompt = OMNI_MODEL_SETTINGS[model_id]["prompt"]
+    prompt = _prompt(mm_processor.info.get_hf_processor(), *mm_data)
 
     def process():
         return mm_processor(
