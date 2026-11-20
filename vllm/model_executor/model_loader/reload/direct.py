@@ -81,8 +81,7 @@ def direct_reload_refusal(config: VllmConfig) -> str | None:
         return "weight offloading"
     model_config = config.model_config
     if model_config is not None and model_config.quantization == "torchao":
-        # its load_weights runs a layerwise reload, and its post-load
-        # processing replaces the weight parameter
+        # post-load processing swaps the weight for a tensor subclass parameter
         return "torchao quantization"
     spec = config.speculative_config
     if spec is not None and spec.draft_lm_head_quantization is not None:
