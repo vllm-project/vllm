@@ -2076,6 +2076,18 @@ class SpeculativeConfig:
                 "entropy is computed but never used to defer rejections."
             )
 
+        if (
+            self.rejection_sample_method in ("synthetic", "fly")
+            and self.target_model_config is not None
+            and self.target_model_config.masked_token_ids
+        ):
+            # Only the target logits are masked, and these methods can accept
+            # draft tokens regardless of them.
+            raise ValueError(
+                "masked_token_ids is not supported with "
+                f"rejection_sample_method={self.rejection_sample_method!r}."
+            )
+
         self.verify_equal_vocab_size_if_draft_model()
         return self
 

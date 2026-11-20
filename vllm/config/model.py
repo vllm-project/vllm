@@ -387,8 +387,9 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     masked_token_ids: list[int] | None = None
-    """Token ids whose logits are set to -inf, so they are never sampled, e.g.
-    the lm_head rows past the tokenizer or placeholder tokens."""
+    """Token ids that are never sampled (their logits are set to -inf before
+    sampling), e.g. the lm_head rows past the tokenizer or placeholder tokens.
+    Prompt logprobs are unaffected."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
@@ -973,6 +974,7 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_masked_token_ids()
 
     def _supports_multimodal_inputs(self) -> bool:
         """Checks if the model supports multimodal inputs.
@@ -1599,6 +1601,16 @@ class ModelConfig:
                     "set `--allow-deprecated-quantization`.",
                     self.quantization,
                 )
+
+    def _verify_masked_token_ids(self) -> None:
+        if not self.masked_token_ids:
+            return
+        vocab_size = self.get_vocab_size()
+        invalid = [i for i in self.masked_token_ids if not 0 <= i < vocab_size]
+        if invalid:
+            raise ValueError(
+                f"masked_token_ids must be in [0, {vocab_size}), got {invalid}."
+            )
 
     def _verify_cuda_graph(self) -> None:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
