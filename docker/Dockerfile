@@ -23,7 +23,7 @@
 # =============================================================================
 
 ARG CUDA_VERSION=13.2.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
@@ -230,6 +230,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         # Cython 3.3 rejects tilelang's hardcoded Py_LIMITED_API=3.8.
         printf 'cython<3.3\n' > /tmp/build-constraints.txt \
         && export UV_BUILD_CONSTRAINT=/tmp/build-constraints.txt; \
+        # PyNvVideoCodec's cp314 aarch64 wheels are manylinux_2_34 only, and
+        # it has no sdist. The build does not need it; the wheel still
+        # requires it (the build stage re-copies cuda.txt), and the Ubuntu
+        # runtime image installs it.
+        sed -i '/^PyNvVideoCodec==/d' requirements/cuda.txt; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
@@ -771,7 +776,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
 
-# Python version string for paths (e.g., "312" for 3.12)
+# Python version string for paths (e.g., "314" for 3.14)
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 

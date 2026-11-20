@@ -380,7 +380,13 @@ def resolve_fp8_moe_weight_block_shape(
     """Return the TP-adapted block shape and refine factor:
     refine if kernels allow, else pad to the TP shard."""
     refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
-    if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
+    # A requantization source never runs FP8 kernels: a pinned backend, which may
+    # not even be an FP8 one (the target's), must not choose its layout.
+    if (
+        is_checkpoint_fp8_serialized
+        and config.moe_backend != "auto"
+        and Fp8MoEKernelOracle.maybe_skip_for_requantization_source() is None
+    ):
         kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
         refined_key = (
             None
@@ -523,7 +529,7 @@ def select_fp8_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
+            logger.debug_once(oracle.make_log_backend(backend, AVAILABLE_BACKENDS))
             return backend, kernel_cls
 
     # TODO(rob): per discussion with TPU team, we need a way to register

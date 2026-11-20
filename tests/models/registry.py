@@ -341,6 +341,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct"),
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview"),
+    "HYV4FlashForCausalLM": _HfExamplesInfo("tencent/Hy4-flash"),
     # Internal checkpoint, not publicly available yet.
     "HYV4ForCausalLM": _HfExamplesInfo("tencent/Hy4-preview"),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
@@ -751,6 +752,11 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "vllm-project/sentiment-polish-gpt2-small"
     ),
+    "GteForSequenceClassification": _HfExamplesInfo(
+        "alibaba-nlp-community/gte-multilingual-reranker-base",
+        min_transformers_version="5.18",
+        hf_overrides={"architectures": ["GteForSequenceClassification"]},
+    ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
         trust_remote_code=True,
@@ -769,6 +775,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
+    "ShieldGemma2ForImageClassification": _HfExamplesInfo("google/shieldgemma-2-4b-it"),
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),
 }
 
@@ -962,6 +969,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
+    ),
+    "HYV4FlashVLForConditionalGeneration": _HfExamplesInfo(
+        "tencent/Hy4-flash",
+        max_model_len=4096,
+    ),
+    "HYV4VLForConditionalGeneration": _HfExamplesInfo(
+        "tencent/Hy4",
+        max_model_len=4096,
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1784,6 +1799,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "HYV4MTPModel": _HfExamplesInfo(
         "tencent/Hy4-preview",
         speculative_model="tencent/Hy4-preview",
+    ),
+    "HYV4DFlyModel": _HfExamplesInfo(
+        "tencent/Hy4-flash",
+        speculative_model="tencent/Hy4-flash",
+        speculative_method="dfly",
+        max_model_len=4096,
     ),
     "InklingMTPModel": _HfExamplesInfo(
         "thinkingmachines/Inkling-NVFP4",

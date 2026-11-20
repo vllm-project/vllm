@@ -21,6 +21,32 @@ namespace {
 
 using bf16 = __nv_bfloat16;
 
+// SM100's packed FP32 instructions where they exist; the same RN results.
+__device__ __forceinline__ float2 mul2(float2 const a, float2 const b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  return __fmul2_rn(a, b);
+#else
+  return make_float2(__fmul_rn(a.x, b.x), __fmul_rn(a.y, b.y));
+#endif
+}
+
+__device__ __forceinline__ float2 fma2(float2 const a, float2 const b,
+                                       float2 const c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  return __ffma2_rn(a, b, c);
+#else
+  return make_float2(__fmaf_rn(a.x, b.x, c.x), __fmaf_rn(a.y, b.y, c.y));
+#endif
+}
+
+__device__ __forceinline__ float2 add2(float2 const a, float2 const b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  return __fadd2_rn(a, b);
+#else
+  return make_float2(__fadd_rn(a.x, b.x), __fadd_rn(a.y, b.y));
+#endif
+}
+
 constexpr int kVec = 8;
 constexpr int kPairs = kVec / 2;
 constexpr int kTaps = 4;
@@ -218,6 +244,11 @@ __device__ __forceinline__ void unpack(uint4 raw, float2 (&v)[kPairs]) {
 
 // a * b + c of the bf16 pairs a and b (fp32 products, unrounded).
 __device__ __forceinline__ float2 fmaBf16(uint32_t a, uint32_t b, float2 c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 1000
+  // bf16 products are exact in fp32: the same result as SM100's mixed FMA.
+  float2 const x = unpack(a), y = unpack(b);
+  return make_float2(__fmaf_rn(x.x, y.x, c.x), __fmaf_rn(x.y, y.y, c.y));
+#else
   float2 d;
   asm("{\n"
       ".reg .b16 al, ah, bl, bh;\n"
@@ -229,6 +260,7 @@ __device__ __forceinline__ float2 fmaBf16(uint32_t a, uint32_t b, float2 c) {
       : "=f"(d.x), "=f"(d.y)
       : "r"(a), "r"(b), "f"(c.x), "f"(c.y));
   return d;
+#endif
 }
 
 __device__ __forceinline__ uint4 pack(float2 const (&v)[kPairs]) {
@@ -518,7 +550,7 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
       unpack(__ldcg(reinterpret_cast<uint4 const*>(src + r * p.xSourceStride)),
              x);
 #pragma unroll
-      for (int i = 0; i < kPairs; ++i) acc[i] = __fadd2_rn(acc[i], x[i]);
+      for (int i = 0; i < kPairs; ++i) acc[i] = add2(acc[i], x[i]);
     }
     return pack(acc);
   };
@@ -626,7 +658,7 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
       float2 const scale = make_float2(p.convScale, p.convScale);
 #pragma unroll
       for (int i = 0; i < kPairs; ++i)
-        y[v][i] = __fmul2_rn(__fadd2_rn(y[v][i], cur[i]), scale);
+        y[v][i] = mul2(add2(y[v][i], cur[i]), scale);
       roundBf16(y[v]);
       if (p.resAddend != nullptr) {
         float2 add[kPairs];
@@ -635,10 +667,10 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
           float2 res[kPairs];
           unpack(row[resRow * kRowVecs + v * kThreads], res);
 #pragma unroll
-          for (int i = 0; i < kPairs; ++i) add[i] = __fadd2_rn(res[i], add[i]);
+          for (int i = 0; i < kPairs; ++i) add[i] = add2(res[i], add[i]);
         }
 #pragma unroll
-        for (int i = 0; i < kPairs; ++i) y[v][i] = __fadd2_rn(add[i], y[v][i]);
+        for (int i = 0; i < kPairs; ++i) y[v][i] = add2(add[i], y[v][i]);
         roundBf16(y[v]);
       }
       *reinterpret_cast<uint4*>(p.convOut + int64_t(t) * p.dim + cols[v]) =
@@ -647,7 +679,7 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
         float2 last[kPairs];
         unpack(row[lastRow * kRowVecs + v * kThreads], last);
 #pragma unroll
-        for (int i = 0; i < kPairs; ++i) y[v][i] = __fadd2_rn(last[i], y[v][i]);
+        for (int i = 0; i < kPairs; ++i) y[v][i] = add2(last[i], y[v][i]);
       }
     }
     // Per source, the sum of squares and the Q query dots.
@@ -661,10 +693,10 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
         source(n, v, s);
 #pragma unroll
         for (int i = 0; i < kPairs; ++i) {
-          acc[0] = __ffma2_rn(s[i], s[i], acc[0]);
+          acc[0] = fma2(s[i], s[i], acc[0]);
 #pragma unroll
           for (int q = 0; q < Q; ++q)
-            acc[1 + q] = __ffma2_rn(query[q][v][i], s[i], acc[1 + q]);
+            acc[1 + q] = fma2(query[q][v][i], s[i], acc[1 + q]);
         }
       }
 #pragma unroll
@@ -684,7 +716,7 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
       unpack(normRows[q * kRowVecs + v * kThreads + threadIdx.x], w);
 #pragma unroll
       for (int i = 0; i < kPairs; ++i)
-        w[i] = __fmul2_rn(__fmul2_rn(mix[v][i], make_float2(rstd, rstd)), w[i]);
+        w[i] = mul2(mul2(mix[v][i], make_float2(rstd, rstd)), w[i]);
       int64_t const offset =
           (int64_t(q) * p.outTokens + tokenBase + t) * p.dim + cols[v];
       uint4 const packed = pack(w);
@@ -743,7 +775,7 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
           source(n, v, s);
 #pragma unroll
           for (int i = 0; i < kPairs; ++i)
-            mix[v][i] = __ffma2_rn(make_float2(w, w), s[i], mix[v][i]);
+            mix[v][i] = fma2(make_float2(w, w), s[i], mix[v][i]);
         }
       }
       float2 sq = make_float2(0.f, 0.f);
@@ -751,8 +783,8 @@ __global__ void __launch_bounds__(Config<Q>::kThreads + 32, 1)
       for (int v = 0; v < kVecs; ++v)
 #pragma unroll
         for (int i = 0; i < kPairs; ++i) {
-          mix[v][i] = __fmul2_rn(mix[v][i], make_float2(invTotal, invTotal));
-          sq = __ffma2_rn(mix[v][i], mix[v][i], sq);
+          mix[v][i] = mul2(mix[v][i], make_float2(invTotal, invTotal));
+          sq = fma2(mix[v][i], mix[v][i], sq);
         }
       sumSq[0] = __fadd_rn(sq.x, sq.y);
       sumSq[1] = 0.f;

@@ -106,6 +106,21 @@ def test_vocab_size_is_respected(tokenizer, backend: str, vocab_size_delta: int)
     assert not bitmask[0, invalid >> 5].item() & (1 << (invalid & 31))
 
 
+def test_allocate_token_bitmask_does_not_pin(monkeypatch):
+    """EngineCore may be unable to create the CUDA context that pinning needs."""
+    full = torch.full
+
+    def full_pinning_fails(*args, pin_memory=False, **kwargs):
+        if pin_memory:
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        return full(*args, **kwargs)
+
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", True)
+    monkeypatch.setattr(torch, "full", full_pinning_fails)
+    bitmask = allocate_token_bitmask(num_rows=1, vocab_size=32)
+    assert not bitmask.is_pinned()
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_accept_tokens_rejection_is_atomic(tokenizer, backend: str):
     structured_output_backend = BACKEND_CLASSES[backend](
