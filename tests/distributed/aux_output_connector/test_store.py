@@ -3200,13 +3200,13 @@ def test_session_object_writer_drain_keeps_the_writes_behind_a_put_that_returned
 
     client, writer = _timed_writer(put, 1.0, 4)
     rows = np.zeros((1, 1), dtype=np.uint8)
+    monkeypatch.setattr(
+        session_objects_module, "time", SimpleNamespace(monotonic=monotonic)
+    )
     try:
         writer.add_tail("job/s/tail/0", rows, {})
         assert entered.wait(10)
         writer.add_tail("job/s/tail/1", rows, {})
-        monkeypatch.setattr(
-            session_objects_module, "time", SimpleNamespace(monotonic=monotonic)
-        )
         draining = threading.Thread(target=writer.drain, name="drain", daemon=True)
         draining.start()
         draining.join(10)
