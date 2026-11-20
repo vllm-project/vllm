@@ -138,6 +138,8 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
     supports_aux_hidden_states_over_pp = True
+    _tower_model_names: tuple[str, ...] = ()
+    """Read by `recursive_replace`, so text-only models need this empty default."""
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -651,9 +653,14 @@ class Base(
         # Decoder layers are detected as they are built, after their pre-replace hook
         fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
+        def _materialise(module: nn.Module, prefix: str) -> nn.Module:
+            """Initialise `module` as `__init__` would, so it can be offloaded early."""
+            self.init_parameters(module)
+            self.keep_in_fp32(module, prefix.removeprefix("model."))
+            return module
+
         def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
-            """Build this rank's decoder layers one at a time and offload each as
-            soon as it is built, as `make_layers` does."""
+            """Replace this rank's decoder layers, offloading each as it is built."""
             # Record the layers for Eagle3
             for name, _ in layers.named_children():
                 self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
@@ -670,22 +677,29 @@ class Base(
             )
 
             def build_layers():
-                """Must mimic what `__init__` does to the whole model's parameters,
-                because each layer is offloaded as soon as it is yielded."""
                 for i in range(*self._pp_indices()):
                     layer_prefix = f"{prefix}.{i}"
                     self._pre_decoder_layer_replace(layers[i], layer_prefix)
                     fusers.add(layers[i])
                     _replace_child(layers, str(i), layers[i], prefix)
-                    self.init_parameters(layers[i])
-                    self.keep_in_fp32(layers[i], layer_prefix.removeprefix("model."))
-                    yield layers[i]
+                    yield _materialise(layers[i], layer_prefix)
 
             offloader.wrap_modules(build_layers())
+
+        def _replace_tower(tower: nn.Module, prefix: str):
+            """Replace a tower, offloading it whole once it is built."""
+            for child_name, child_module in tower.named_children():
+                _replace_child(tower, child_name, child_module, prefix)
+            if offloader.supports_tower_offload:
+                towers = (_materialise(t, prefix) for t in [tower])
+                offloader.wrap_modules(towers, prefix=prefix)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             if module is decoder_layers:
                 _replace_decoder_layers(module, prefix)
+                return
+            if prefix in self._tower_model_names:
+                _replace_tower(module, prefix)
                 return
             for child_name, child_module in module.named_children():
                 _replace_child(module, child_name, child_module, prefix)

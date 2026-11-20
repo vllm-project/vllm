@@ -111,6 +111,17 @@ def test_input_item_parsing_leaves_non_assistant_items_alone() -> None:
     assert request.input == [item]
 
 
+def test_input_list_validation_stops_at_first_invalid_item() -> None:
+    valid_item = {"role": "user", "content": "hello"}
+    invalid_item = {"type": "message", "role": "user"}
+    with pytest.raises(ValidationError) as first:
+        ResponsesRequest(input=[valid_item, invalid_item])
+    with pytest.raises(ValidationError) as multiple:
+        ResponsesRequest(input=[valid_item, invalid_item, invalid_item])
+
+    assert multiple.value.error_count() == first.value.error_count()
+
+
 def test_custom_tool_grammar_format_rejected() -> None:
     grammar = {"type": "grammar", "syntax": "lark", "definition": 'start: "pwd"'}
     with pytest.raises(VLLMValidationError) as exc_info:

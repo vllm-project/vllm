@@ -52,6 +52,7 @@ from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
+    FailFast,
     Field,
     PrivateAttr,
     ValidationError,
@@ -265,11 +266,14 @@ class ResponsesRequest(OpenAIBaseModel):
     ) = None
     input: (
         str
-        | list[
-            Annotated[
-                ResponseInputOutputItem,
-                BeforeValidator(_default_input_image_details),
-            ]
+        | Annotated[
+            list[
+                Annotated[
+                    ResponseInputOutputItem,
+                    BeforeValidator(_default_input_image_details),
+                ]
+            ],
+            FailFast(),
         ]
     )
     instructions: str | None = None
