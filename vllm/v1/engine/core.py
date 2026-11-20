@@ -62,6 +62,7 @@ from vllm.v1.core.kv_cache_planning import (
     get_global_kv_cache_groups,
     get_kv_cache_configs,
     get_pipeline_stages,
+    resolve_mamba_block_size,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -290,6 +291,11 @@ class EngineCore:
 
         # Get all kv cache needed by the model
         layer_configs = self.model_executor.get_kv_cache_layer_configs()
+        mamba_block_size = resolve_mamba_block_size(vllm_config, layer_configs)
+        if mamba_block_size is not None:
+            vllm_config.cache_config.mamba_block_size = mamba_block_size
+            self.model_executor.set_mamba_block_size(mamba_block_size)
+            layer_configs = self.model_executor.get_kv_cache_layer_configs()
 
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
@@ -2172,6 +2178,9 @@ class EngineCoreProc(EngineCore):
             ),
             allow_missing_mm_embeddings=(
                 mm_config is not None and mm_config.allow_missing_mm_embeddings
+            ),
+            max_mm_embeds_per_request=getattr(
+                self.scheduler, "max_mm_embeds_per_request", None
             ),
         )
 

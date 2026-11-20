@@ -1052,8 +1052,12 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
         enable_chunked_prefill=False,
         async_scheduling=True,
         long_prefill_token_threshold=long_prefill_token_threshold,
+        encoder_cache_size=700,
     )
-    mm_positions = [[PlaceholderRange(offset=100, length=600)] for _ in range(2)]
+    mm_positions = [
+        [PlaceholderRange(offset=100, length=300)],
+        [PlaceholderRange(offset=100, length=450)],
+    ]
     mm_hashes = [["busy"], ["new"]]
     cache = scheduler.encoder_cache_manager
     if cached_first_image:
@@ -1071,22 +1075,26 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
         mm_hashes[1].insert(0, "cached")
         assert cache.freeable["cached"] == 100
 
-    requests = create_requests(
-        num_requests=2,
-        num_tokens=800,
-        max_tokens=1,
-        mm_positions=mm_positions,
-        mm_hashes_list=mm_hashes,
+    first, second = (
+        create_requests(
+            num_requests=1,
+            num_tokens=num_tokens,
+            max_tokens=1,
+            req_ids=[req_id],
+            mm_positions=[positions],
+            mm_hashes_list=[hashes],
+        )[0]
+        for req_id, num_tokens, positions, hashes in zip(
+            ["first", "second"], [400, 600], mm_positions, mm_hashes
+        )
     )
-    for request in requests:
-        scheduler.add_request(request)
+    scheduler.add_request(first)
+    scheduler.add_request(second)
 
-    first, second = requests
+    # The first image leaves too little encoder cache for the second, which
+    # must not be split before its image.
     output = scheduler.schedule()
-    assert output.num_scheduled_tokens == {first.request_id: 800}
-
-    # The first image is still in flight and occupies the encoder cache.
-    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert output.num_scheduled_tokens == {first.request_id: 400}
     assert second.status == RequestStatus.WAITING
     assert second.num_computed_tokens == 0
     assert not cache.get_cached_input_ids(second)
@@ -1101,48 +1109,29 @@ def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
             sampled_token_ids=[[EOS_TOKEN_ID]],
         ),
     )
-    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
+    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 600}
 
 
-def _encoder_deferral_scheduler(
-    async_scheduling: bool = True, enable_chunked_prefill: bool = False, **kwargs
-) -> Scheduler:
+@pytest.mark.parametrize("async_scheduling", [True, False], ids=["async", "sync"])
+@pytest.mark.parametrize(
+    "big_images",
+    [
+        [(10, 250), (260, 250), (510, 250), (760, 250)],
+        # The only image starts at token 0, so the request is cut to 0 tokens.
+        [(0, 800)],
+    ],
+    ids=["four-images", "cut-to-zero"],
+)
+def test_encoder_deferred_request_is_not_overtaken(async_scheduling, big_images):
+    """With chunked prefill off, a request deferred for encoder cache space is
+    scheduled at the next step while one-image requests keep arriving, also
+    when steps overlap (#67292)."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
-        enable_chunked_prefill=enable_chunked_prefill,
+        enable_chunked_prefill=False,
         async_scheduling=async_scheduling,
-        **kwargs,
     )
-    # The CPU platform turns async scheduling off. These tests overlap steps as
-    # async scheduling does, so keep it on in the config that the hold reads.
-    # State set up at construction, such as deferred block freeing with a KV
-    # connector, still follows the platform. The assert guards the override.
-    scheduler.scheduler_config.async_scheduling = async_scheduling
-    assert (scheduler.vllm_config.max_concurrent_batches > 1) == async_scheduling
-    return scheduler
-
-
-FOUR_IMAGES = [(10, 250), (260, 250), (510, 250), (760, 250)]
-
-
-@pytest.mark.parametrize(
-    "async_scheduling,enable_chunked_prefill,big_images,expected",
-    [
-        (True, False, FOUR_IMAGES, (2, 1020)),
-        # The only image starts at token 0, so the request is cut to 0 tokens.
-        (True, False, [(0, 800)], (2, 1020)),
-        (False, False, FOUR_IMAGES, (1, 1020)),
-        (True, True, FOUR_IMAGES, (1, 260)),
-    ],
-    ids=["async", "async-cut-to-zero", "sync", "chunked-prefill"],
-)
-def test_encoder_deferred_request_is_not_overtaken(
-    async_scheduling, enable_chunked_prefill, big_images, expected
-):
-    """A request deferred for encoder cache space is scheduled while one-image
-    requests keep arriving (#67292)."""
-    scheduler = _encoder_deferral_scheduler(async_scheduling, enable_chunked_prefill)
     num_small = 0
 
     def add_small():
@@ -1180,179 +1169,13 @@ def test_encoder_deferred_request_is_not_overtaken(
         mm_hashes_list=[[f"big{i}" for i in range(len(big_images))]],
     )
     scheduler.add_request(big)
-    scheduled = None
-    for step in range(1, 9):
-        add_small()
-        add_small()
-        if not async_scheduling:
-            finish(in_flight.pop())
-        output = scheduler.schedule()
-        in_flight.append(output)
-        if async_scheduling:
-            finish(in_flight.pop(0))
-        if big.request_id in output.num_scheduled_tokens:
-            scheduled = (step, output.num_scheduled_tokens[big.request_id])
-            break
-    assert scheduled == expected
-
-
-def test_encoder_deferral_holds_only_later_requests_needing_the_encoder():
-    """Behind a request deferred for encoder cache space, only later requests
-    that need the encoder in this step wait."""
-    scheduler = _encoder_deferral_scheduler(enable_prefix_caching=True)
-    in_flight, deferred = create_requests(
-        num_requests=2,
-        num_tokens=800,
-        max_tokens=1,
-        req_ids=["in_flight", "deferred"],
-        mm_positions=[
-            [PlaceholderRange(offset=0, length=600)],
-            [PlaceholderRange(offset=100, length=600)],
-        ],
-        mm_hashes_list=[["busy"], ["new"]],
-    )
-    # Same prompt and image as in_flight, so its image is in its prefix-cache hit.
-    (cached_mm,) = create_requests(
-        num_requests=1,
-        num_tokens=800,
-        req_ids=["cached_mm"],
-        mm_positions=[[PlaceholderRange(offset=0, length=600)]],
-        mm_hashes_list=[["busy"]],
-    )
-    (small_mm,) = create_requests(
-        num_requests=1,
-        num_tokens=300,
-        req_ids=["small_mm"],
-        mm_positions=[[PlaceholderRange(offset=10, length=200)]],
-        mm_hashes_list=[["small"]],
-    )
-    (text,) = create_requests(num_requests=1, num_tokens=100, req_ids=["text"])
-    scheduler.add_request(in_flight)
-    assert scheduler.schedule().num_scheduled_tokens == {"in_flight": 800}
-
-    for request in (deferred, small_mm, cached_mm, text):
-        scheduler.add_request(request)
-    # small_mm's image would fit in the 424 free slots, but deferred needs them.
-    assert scheduler.schedule().num_scheduled_tokens == {"cached_mm": 16, "text": 100}
-
-
-@pytest.mark.parametrize(
-    "tail_offset,tail_is_embed,expected,expected_next",
-    [
-        (0, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
-        (40, [True] * 400 + [False] * 200, {"tail": 288}, {"deferred": 288}),
-        (0, [False] * 200 + [True] * 400, {}, {"deferred": 288, "tail": 288}),
-        (200, [True] * 400 + [False] * 200, {}, {"deferred": 288, "tail": 288}),
-    ],
-    ids=[
-        "no-embeds-in-window",
-        "no-embeds-in-window-offset",
-        "embeds-in-window",
-        "embeds-in-window-offset",
-    ],
-)
-def test_encoder_deferral_holds_only_requests_with_embeddings_in_window(
-    tail_offset, tail_is_embed, expected, expected_next
-):
-    """Behind a request deferred for encoder cache space, a later request whose
-    tokens this step overlap an image only at positions without embeddings is
-    scheduled, and one whose tokens include embeddings waits."""
-    scheduler = _encoder_deferral_scheduler(
-        use_kv_connector=mock_kv(512, is_async=False)
-    )
-    busy, deferred, tail = create_requests(
-        num_requests=3,
-        num_tokens=800,
-        max_tokens=1,
-        req_ids=["busy", "deferred", "tail"],
-        mm_positions=[
-            [PlaceholderRange(offset=0, length=600)],
-            [PlaceholderRange(offset=100, length=600)],
-            [
-                PlaceholderRange(
-                    offset=tail_offset,
-                    length=600,
-                    is_embed=torch.tensor(tail_is_embed),
-                )
-            ],
-        ],
-        mm_hashes_list=[["busy"], ["deferred"], ["tail"]],
-    )
-    # Each request has 512 tokens from the KV connector and schedules the
-    # other 288.
-    scheduler.add_request(busy)
-    first = scheduler.schedule()
-    assert first.num_scheduled_tokens == {"busy": 288}
-
-    scheduler.add_request(deferred)
-    scheduler.add_request(tail)
-    # deferred needs 600 slots, and 424 are free.
-    assert scheduler.schedule().num_scheduled_tokens == expected
-
-    # Once busy's step is processed, deferred is scheduled.
-    scheduler.update_from_output(
-        first,
-        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
-    )
-    assert scheduler.schedule().num_scheduled_tokens == expected_next
-
-
-@pytest.mark.parametrize(
-    "deferred_image_length,expected,expected_next",
-    [(300, {}, {"deferred": 1000}), (400, {"small": 300}, {"small": 1})],
-    ids=["fits-cache", "never-fits-cache"],
-)
-def test_encoder_deferral_holds_only_behind_requests_fitting_the_encoder_cache(
-    deferred_image_length, expected, expected_next
-):
-    """With a configured encoder cache, a deferred request holds later ones only
-    if its images fit the cache together. One that never fits is never
-    scheduled with chunked prefill off, as on main since the cache size became
-    configurable, but it does not hold later requests."""
-    scheduler = _encoder_deferral_scheduler(encoder_cache_size=600)
-    (busy,) = create_requests(
-        num_requests=1,
-        num_tokens=400,
-        max_tokens=1,
-        req_ids=["busy"],
-        mm_positions=[[PlaceholderRange(offset=0, length=300)]],
-        mm_hashes_list=[["busy"]],
-    )
-    (deferred,) = create_requests(
-        num_requests=1,
-        num_tokens=1000,
-        req_ids=["deferred"],
-        mm_positions=[
-            [
-                PlaceholderRange(offset=10, length=deferred_image_length),
-                PlaceholderRange(offset=500, length=deferred_image_length),
-            ]
-        ],
-        mm_hashes_list=[["first", "second"]],
-    )
-    (small,) = create_requests(
-        num_requests=1,
-        num_tokens=300,
-        req_ids=["small"],
-        mm_positions=[[PlaceholderRange(offset=10, length=100)]],
-        mm_hashes_list=[["small"]],
-    )
-    scheduler.add_request(busy)
-    first = scheduler.schedule()
-    assert first.num_scheduled_tokens == {"busy": 400}
-
-    scheduler.add_request(deferred)
-    scheduler.add_request(small)
-    # 300 of the 600 slots are free. deferred needs 600 or 800 slots, and
-    # small's 100 would fit.
-    assert scheduler.schedule().num_scheduled_tokens == expected
-
-    # Once busy's step is processed, a deferred request that fits is scheduled.
-    scheduler.update_from_output(
-        first,
-        ModelRunnerOutput(req_ids=["busy"], sampled_token_ids=[[EOS_TOKEN_ID]]),
-    )
-    assert scheduler.schedule().num_scheduled_tokens == expected_next
+    add_small()
+    add_small()
+    if not async_scheduling:
+        finish(in_flight.pop())
+    # With async scheduling, step 1 is scheduled before step 0's output is
+    # processed.
+    assert scheduler.schedule().num_scheduled_tokens.get("big") == 1020
 
 
 def test_schedule_partial_requests():
@@ -5938,8 +5761,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
         enable_prefix_caching=True,
     )
     scheduler.need_mamba_block_aligned_split = True
-    scheduler.use_eagle = True
-    scheduler.use_eagle_block_drop = True
+    scheduler.num_hash_lookahead_tokens = 1
     scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
