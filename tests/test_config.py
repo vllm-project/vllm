@@ -2271,7 +2271,8 @@ _PEER_GROUP = {
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
         (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),
@@ -2295,7 +2296,7 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
         ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
     ],
 )
-def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
     """Qwen4Exp's tables ignore peer groups, so they would not be split."""
     model = cast(
         ModelConfig,
@@ -2305,7 +2306,8 @@ def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supp
         ),
     )
     config = EngramConfig(**_PEER_GROUP)
-    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+    rejects = pytest.raises(ValueError, match="pool support")
+    with nullcontext() if supported else rejects:
         config.verify_model_config(model)
 
 
