@@ -248,8 +248,8 @@ PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "Surprisingly, the experiments showed that",
     _PC_PREFIX + "The most important conclusion was that",
 ]
-# MTP prefix caching must retain at least two full state blocks: the drafter drops
-# the volatile trailing block before resuming from the preceding boundary.
+# MTP prefix caching uses a longer prefix so a hit still spans at least two full
+# state blocks.
 _PC_MTP_PREFIX = _PC_SENTENCE * 240
 MTP_PREFIX_CACHING_PROMPTS = [
     _PC_MTP_PREFIX + prompt.removeprefix(_PC_PREFIX)
@@ -436,8 +436,7 @@ def _stress_mamba_block_size(worker) -> int:
 def _generate_with_preemption(llm, block_size: int):
     """Preempt active requests, then complete decode across three cache blocks."""
     engine = llm.llm_engine
-    # MTP excludes one trailing block from prefix hits. Keep three reusable
-    # blocks, plus that proof block and a decode margin.
+    # Cross at least three block boundaries during decode, with a margin.
     max_tokens = 4 * block_size + 64
     requests = {
         "short": ("The capital of France is", 256),

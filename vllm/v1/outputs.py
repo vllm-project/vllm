@@ -23,11 +23,13 @@ if TYPE_CHECKING:
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.v1.metrics.stats import SchedulerIterationDetails
 else:
     AuxRequestOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    SchedulerIterationDetails = object
     ECConnectorWorkerMetadata = object
 
 
@@ -225,6 +227,10 @@ class KVConnectorOutput:
     # Receive failures keyed by request identity. This remains unambiguous for
     # hybrid/multi-pool cache layouts where numeric block IDs overlap.
     failed_recving: set[str] = field(default_factory=set)
+    # req_id -> M-RoPE position delta of the prompt, for requests a KV producer
+    # added this step. The scheduler forwards it in kv_transfer_params so a
+    # decode instance without the multimodal inputs can still place its tokens.
+    mrope_position_deltas: dict[str, int] | None = None
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -241,6 +247,7 @@ class KVConnectorOutput:
             and not self.invalid_block_ids
             and not self.failed_recving
             and not self.kv_connector_worker_meta
+            and not self.mrope_position_deltas
         )
 
 
@@ -315,6 +322,9 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # Iterations whose GPU timing has completed; see IterationTimer.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     @staticmethod
     def with_kv_conn_output_only(
