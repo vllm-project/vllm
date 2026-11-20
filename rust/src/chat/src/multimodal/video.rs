@@ -48,7 +48,7 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_videos(
         &self,
-        sources: Vec<Arc<VideoClip>>,
+        clips: Vec<Arc<VideoClip>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
@@ -58,7 +58,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Video)
-            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
+            .prepare_cached(izip!(clips, uuids).collect(), async |misses| {
                 let mut computed = Vec::with_capacity(misses.len());
                 for (clip, uuid) in misses {
                     computed

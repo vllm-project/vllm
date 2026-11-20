@@ -30,7 +30,7 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_audios(
         &self,
-        sources: Vec<Arc<AudioClip>>,
+        clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
@@ -39,7 +39,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Audio)
-            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
+            .prepare_cached(izip!(clips, uuids).collect(), async |misses| {
                 self.preprocess_audio_batch(support, misses).await
             })
             .await?;

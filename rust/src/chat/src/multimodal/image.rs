@@ -35,7 +35,7 @@ impl MultimodalModelInfo {
     )]
     pub(super) async fn prepare_images(
         &self,
-        sources: Vec<Arc<ImageFrame>>,
+        frames: Vec<Arc<ImageFrame>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
@@ -46,7 +46,7 @@ impl MultimodalModelInfo {
 
         let (replacements, items) = self
             .mm_cache_for(Modality::Image)
-            .prepare_cached(izip!(sources, uuids).collect(), async |misses| {
+            .prepare_cached(izip!(frames, uuids).collect(), async |misses| {
                 self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
                     .await
             })
