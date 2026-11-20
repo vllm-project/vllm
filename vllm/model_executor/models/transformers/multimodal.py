@@ -89,15 +89,13 @@ _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
 
-# TODO: Drop `use_audio_in_video` once the minimum Transformers version no
-# longer accepts it
-_AUDIO_IN_VIDEO_KWARGS = ("load_audio_from_video", "use_audio_in_video")
-
 
 def _get_audio_in_video(kwargs: Mapping[str, object]) -> object | None:
     """Fused audio-in-video setting, preferring `load_audio_from_video`."""
-    values = (kwargs.get(name) for name in _AUDIO_IN_VIDEO_KWARGS)
-    return next((value for value in values if value is not None), None)
+    if (value := kwargs.get("load_audio_from_video")) is not None:
+        return value
+    # TODO: Drop once the minimum Transformers version no longer accepts it
+    return kwargs.get("use_audio_in_video")
 
 
 def _get_embed_token_id(
@@ -986,7 +984,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 "overridden per request; pass it in --mm-processor-kwargs instead."
             )
         if use_audio_in_video:
-            hf_kwargs = {**hf_kwargs, **dict.fromkeys(_AUDIO_IN_VIDEO_KWARGS, False)}
+            hf_kwargs = {
+                **hf_kwargs,
+                "load_audio_from_video": False,
+                "use_audio_in_video": False,
+            }
         item_counts = mm_items.get_all_counts()
         num_audios = item_counts.get("audio", 0)
         num_videos = item_counts.get("video", 0)
