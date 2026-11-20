@@ -994,14 +994,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
-    @staticmethod
-    def get_decode_threshold(vllm_config: VllmConfig) -> int:
-        """Requests of at most this many query tokens take the decode path."""
-        speculative_config = vllm_config.speculative_config
-        return 1 + (
-            speculative_config.num_speculative_tokens if speculative_config else 0
-        )
-
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
@@ -1068,7 +1060,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             full_context=self.dcp_world_size == 1,
         )
 
-        next_n = self.get_decode_threshold(self.vllm_config)
+        next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
         self.use_flattening = _use_flattening(self.vllm_config)

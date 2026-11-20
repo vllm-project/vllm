@@ -400,31 +400,20 @@ def test_planner_follows_the_split_decode_tokens():
     """The split's decode tokens (at most 1 + num_speculative_tokens tokens,
     which the indexer scores on its decode path) keep the DCP path; the plan
     covers the rest of the step, a later short request included. Steps that
-    ShardQ does not split keep the DCP path too, counted when they have
-    prefill tokens."""
-    from vllm.v1.attention.backends.mla.indexer import (
-        DeepseekV32IndexerMetadataBuilder,
-    )
+    ShardQ does not split keep the DCP path too."""
     from vllm.v1.attention.ops.dcp_shardq import context as dcp
 
-    num_spec = 3
-    threshold = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
-        SimpleNamespace(
-            speculative_config=SimpleNamespace(num_speculative_tokens=num_spec)
-        )
-    )
-    assert threshold == 1 + num_spec
+    # Decodes of up to 1 + num_speculative_tokens (3) tokens.
+    threshold = 4
     world, rank = 8, 3
     planner = dcp.DcpShardQPlanner(
         _layout("fp8"),
         1 << 12,
         1 << 20,
         1 << 30,
-        threshold,
         world,
         rank,
         torch.device("cuda"),
-        label="layers.0, 1 layers",
     )
     long = [(1000, 300), (0, 200)]
 
@@ -447,16 +436,9 @@ def test_planner_follows_the_split_decode_tokens():
     # A short request after the first prefill request is a prefill request.
     context = plan([*long, (500, threshold)], num_decodes=0)
     assert context is not None and context.num_decodes == 0
-    # Not split: decode tokens alone are not counted, prefill tokens are.
+    # Not split: the DCP path.
     assert plan(decodes) is None
     assert plan([*decodes, *long]) is None
-    assert {path: c[0] for path, c in planner.stats.total.items()} == {
-        dcp.SHARDQ: 2,
-        dcp.NO_SPLIT: 1,
-    }
-    assert planner.stats.report().startswith(
-        "DCP ShardQ prefill [layers.0, 1 layers]: 2/3 steps"
-    )
 
 
 def _flashinfer_impl(cache_dtype: str, kernel: str):
@@ -793,8 +775,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
     KV it writes there) matches the DCP path it replaces, top-k included,
     without compiling any kernel; a mixed step's decode tokens keep the DCP
     path. Steps with too few prefill tokens or beyond the workspace keep the
-    DCP path, the builder counts each path, steps without prefill tokens are not
-    counted, and a replicated query is ignored. Interleave-64 DCP and
+    DCP path, and a replicated query is ignored. Interleave-64 DCP and
     disaggregated decode instances keep DCP ShardQ off.
     """
     from tests.v1.attention.utils import create_vllm_config
@@ -1052,32 +1033,16 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
 
             # Steps that keep the DCP path (each fits the workspace): fewer
             # than sparse_mla_shard_q_min_tokens prefill tokens (after a
-            # decode token), which ShardQ does not split, and decode tokens alone,
-            # which are not counted.
-            for lens, path in (
-                ([(100, 1), (3000, 600), (2900, 300)], dcp.NO_SPLIT),
-                ([(100, 1), (3000, 1)], None),
-            ):
+            # decode token), which ShardQ does not split, and decodes alone.
+            for lens in ([(100, 1), (3000, 600), (2900, 300)], [(100, 1), (3000, 1)]):
                 rep = Replicated(lens, _layout(cache_dtype), fill_random=False)
                 shard = _shard(rep, world, rank, seed=rank, mla_block=LAYER_BLOCK)
-                before = dict(builder.dcp_shardq.stats.total)
                 assert (
                     builder.build(
                         0, _common_metadata(lens, shard.mla_table, (world, rank))
                     ).shardq
                     is None
                 )
-                after = builder.dcp_shardq.stats.total
-                if path is None:
-                    assert after == before
-                else:
-                    assert after[path][0] == before.get(path, [0, 0])[0] + 1
-            assert builder.dcp_shardq is not None
-            assert small.dcp_shardq is not None
-            stats = builder.dcp_shardq.stats
-            assert stats.total[dcp.SHARDQ][0] == len(LAYER_STEPS)
-            assert small.dcp_shardq.stats.total[dcp.WORKSPACE][0] == len(LAYER_STEPS)
-            assert set(stats.total) == {dcp.SHARDQ, dcp.NO_SPLIT}
 
             # The gathered context holds DCP interleave-1 shards only.
             config.parallel_config.cp_kv_cache_interleave_size = 64
@@ -1274,8 +1239,6 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
                 0, _common_metadata(lens, shard.mla_table, (world, rank))
             )
             assert metadata.shardq is None
-            assert builder.dcp_shardq is not None
-            assert set(builder.dcp_shardq.stats.total) == {dcp.WORKSPACE}
             index_metadata = index_builder.build(
                 0, _common_metadata(lens, shard.index_table, (world, rank))
             )

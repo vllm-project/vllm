@@ -34,14 +34,12 @@ Scope: any sparse MLA layer with a DSA-style fp8 indexer cache, under DCP
 with the DCP group equal to the TP group; nothing here is model-specific.
 """
 
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
@@ -55,7 +53,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.cp_common import symm_mem
 from vllm.v1.attention.ops.dcp import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS
@@ -556,67 +553,6 @@ def register_warmup(layout: ContextLayout, world: int, num_topk_tokens: int) -> 
     _GATHERED_CONTEXT_INDEX_REMAP.register_warmup(num_topk_tokens=num_topk_tokens)
 
 
-SHARDQ = "ShardQ"
-# Why a step keeps the DCP path: no token split (too few tokens, requests no
-# longer than the top-k, a padded batch), or the workspace cannot hold it.
-NO_SPLIT = "no split"
-WORKSPACE = "workspace full"
-
-
-class DcpShardQStats:
-    """Steps with prefill requests, and their prefill tokens, by path: ShardQ,
-    or the DCP path and why. Rank 0 logs them at most every
-    VLLM_LOG_STATS_INTERVAL seconds, for the steps since its previous report
-    and in total, labeled with the layers of the metadata builder that plans
-    them. Every step the builder plans counts, the runner's profile and warmup
-    steps included."""
-
-    def __init__(self, log: bool, label: str = "") -> None:
-        self.log = log
-        self.label = label
-        self.interval = envs.VLLM_LOG_STATS_INTERVAL
-        self.last_report = time.monotonic()
-        # Path -> [steps, tokens].
-        self.recent: dict[str, list[int]] = {}
-        self.total: dict[str, list[int]] = {}
-
-    def record(self, path: str, num_tokens: int) -> None:
-        for counts in (self.recent, self.total):
-            entry = counts.setdefault(path, [0, 0])
-            entry[0] += 1
-            entry[1] += num_tokens
-        if self.log:
-            now = time.monotonic()
-            if now - self.last_report >= self.interval:
-                self.last_report = now
-                logger.info("%s", self.report())
-                self.recent.clear()
-
-    @staticmethod
-    def _share(counts: dict[str, list[int]]) -> tuple[int, int, int, int]:
-        steps, tokens = counts.get(SHARDQ, (0, 0))
-        all_steps = sum(c[0] for c in counts.values())
-        all_tokens = sum(c[1] for c in counts.values())
-        return steps, all_steps, tokens, all_tokens
-
-    def report(self) -> str:
-        steps, all_steps, tokens, all_tokens = self._share(self.recent)
-        _, _, total_tokens, total_all = self._share(self.total)
-        fallback = ", ".join(
-            f"{path} {c[0]} steps / {c[1]} tokens"
-            for path, c in sorted(self.recent.items())
-            if path != SHARDQ
-        )
-        return (
-            f"DCP ShardQ prefill{f' [{self.label}]' if self.label else ''}: "
-            f"{steps}/{all_steps} steps, "
-            f"{tokens}/{all_tokens} tokens "
-            f"({100 * tokens / max(all_tokens, 1):.1f}%; "
-            f"{100 * total_tokens / max(total_all, 1):.1f}% since start) on "
-            f"ShardQ; DCP path: {fallback or 'none'}"
-        )
-
-
 class DcpShardQPlanner:
     """Plans the DCP ShardQ steps of one metadata builder (see the module
     docstring); every rank reaches the same decisions from the same batch."""
@@ -627,45 +563,31 @@ class DcpShardQPlanner:
         max_pages: int,
         max_indexer_keys: int,
         max_logits_bytes: int,
-        max_decode_query_len: int,
         world: int,
         rank: int,
         device: torch.device,
-        label: str = "",
     ) -> None:
         self.layout = layout
         self.max_pages = max_pages
         self.max_indexer_keys = max_indexer_keys
         self.max_logits_bytes = max_logits_bytes
-        self.max_decode_query_len = max_decode_query_len
         self.world = world
         self.rank = rank
         self.device = device
-        self.stats = DcpShardQStats(log=rank == 0, label=label)
 
     def plan(
         self, common_attn_metadata: CommonAttentionMetadata, split: ShardQSplit | None
     ) -> DcpShardQContext | None:
         """The context plan of a step that runs as a DCP ShardQ step with the
         token split `split` (vllm.v1.attention.ops.shardq.build_shardq_split),
-        or None for the DCP path. Steps without prefill requests are not
-        counted.
+        or None for the DCP path.
 
-        The split's decode tokens (requests of at most `max_decode_query_len`
-        tokens, which the indexer scores on its decode path) keep the DCP path;
-        the plan covers the rest.
+        The split's decode tokens (which the indexer scores on its decode path)
+        keep the DCP path; the plan covers the rest.
         """
-        num_tokens = common_attn_metadata.num_actual_tokens
-        if common_attn_metadata.num_reqs == 0 or num_tokens == 0:
+        if split is None or common_attn_metadata.num_actual_tokens == 0:
             return None
-        if split is None:
-            _, num_prefills, _, num_prefill_tokens = split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.max_decode_query_len
-            )
-            if num_prefills:
-                self.stats.record(NO_SPLIT, num_prefill_tokens)
-            return None
-        context = build_dcp_shardq_context(
+        return build_dcp_shardq_context(
             common_attn_metadata,
             split,
             self.layout,
@@ -676,8 +598,3 @@ class DcpShardQPlanner:
             self.rank,
             self.device,
         )
-        num_prefill_tokens = int(split.num_tokens_per_rank.sum())
-        self.stats.record(
-            SHARDQ if context is not None else WORKSPACE, num_prefill_tokens
-        )
-        return context

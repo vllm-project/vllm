@@ -464,14 +464,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 "prefill steps keep the DCP path."
             )
             return False
-        from vllm.v1.attention.backends.mla.indexer import (
-            DeepseekV32IndexerMetadataBuilder,
-            get_max_prefill_buffer_size,
-        )
+        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
-        decode_query_len = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
-            vllm_config
-        )
         # DCP spans the TP group, so DCP ranks also index the workspace peers.
         self.dcp_shardq = DcpShardQPlanner(
             layout,
@@ -481,12 +475,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             ),
             get_max_prefill_buffer_size(vllm_config),
             envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            # Requests the indexer scores as decodes keep the DCP path.
-            decode_query_len,
             self.dcp_world_size,
             get_dcp_group().rank_in_group,
             self.device,
-            label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
         )
         register_warmup(layout, self.dcp_world_size, self.topk_tokens)
         return True
