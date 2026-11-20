@@ -117,6 +117,14 @@ impl UnsupportedArgs {
             }
         }
 
+        // `vllm serve` passes frontend args via `--args-json` without populating
+        // env-backed defaults into the JSON payload, so `clap`'s `env` attribute
+        // alone would not catch `VLLM_MAX_TOKENIZE_TOKENS` when launched through
+        // the Python entrypoint. Check the process environment explicitly here.
+        if std::env::var("VLLM_MAX_TOKENIZE_TOKENS").is_ok_and(|v| !v.trim().is_empty()) {
+            unsupported.push("VLLM_MAX_TOKENIZE_TOKENS");
+        }
+
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
             let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
@@ -251,11 +259,6 @@ pub struct EngineUnsupportedArgs {
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
-
-    /// Arguments to be forwarded to the model's processor for multi-modal data,
-    /// e.g., image processor.
-    #[arg(long)]
-    pub mm_processor_kwargs: Option<Unsupported>,
 
     /// Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
     /// `"sha512"` for FIPS-compliant deployments.
@@ -411,6 +414,11 @@ pub struct ServerUnsupportedArgs {
     /// Helps mitigate header abuse. Default: 256.
     #[arg(long)]
     pub h11_max_header_count: Option<Unsupported>,
+
+    /// Maximum number of tokens allowed in /tokenize, /detokenize, and
+    /// /v1/messages/count_tokens requests.
+    #[arg(long)]
+    pub max_tokenize_tokens: Option<Unsupported>,
 
     /// Enable offline FastAPI documentation for air-gapped environments.
     /// Uses vendored static assets bundled with vLLM.

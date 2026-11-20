@@ -149,6 +149,15 @@ quantization:
 vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
 ```
 
+Likewise, for int4 (GPTQ, AWQ, compressed-tensors WNA16) MoE checkpoints on
+RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects the `rdna3_int4_int8` MoE
+backend, which decodes batches of up to 64 tokens with int8 activations;
+larger batches run the Triton WNA16 kernels with 16-bit activations:
+
+```bash
+vllm serve <int4-moe-model> --quantization-config.moe.activation int8_per_group_32
+```
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
@@ -162,9 +171,11 @@ Currently supported combinations are:
 | Checkpoint layer | Online target | Requirements |
 | ---------------- | ------------- | ------------ |
 | Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized ModelOpt NVFP4 linear | any online linear method | Target-specific hardware requirements |
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized FP8 MoE with dynamic activation quantization (`fp8`, compressed-tensors, Quark; per-tensor, per-channel or block weight scales) | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -182,6 +193,20 @@ for example compressed-tensors NVFP4 experts to online MXFP4:
 vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
+
+For ModelOpt NVFP4 checkpoints, `--quantization mxfp4` retains the checkpoint
+loader and, by default, converts eligible linear and MoE layers, including
+attention projections and router gates. Use `targets` to select specific layers
+instead, for example:
+
+```bash
+vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
+  --quantization mxfp4 --quantization-config '{"targets":{"*mlp*":"mxfp4"}}'
+```
+
+Unconverted checkpoint-quantized layers require native support for their
+checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
+per model or consider MXFP8 for dense and attention linears.
 
 !!! info
 
@@ -203,6 +228,13 @@ vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
 ```
 
 adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
+
+Similarly, the Quark MXFP4 checkpoint of Muse Spark Open keeps the routed experts of layers 0 and 61 in BF16. On ROCm, this rounds them to OCP MXFP4 at load, so every MoE layer runs the same AITER W4A4 experts (an opt-in numerics change):
+
+```bash
+vllm serve amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4 \
+  --quantization-config '{"targets":{"*layers.0.feed_forward.experts*":"mxfp4","*layers.61.feed_forward.experts*":"mxfp4"}}'
+```
 
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.

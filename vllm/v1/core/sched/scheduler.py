@@ -22,6 +22,7 @@ from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -59,7 +60,12 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_mamba_prefill_checkpoint_position,
@@ -252,9 +258,14 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
+        # Preemptions since the last make_stats(), for the preemption counter.
+        self._num_preempted_reqs = 0
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
+        # Sessions whose streaming update was dropped for exceeding max_model_len.
+        self.dropped_streaming_updates: list[Request] = []
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -295,6 +306,21 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = manager_cls_obj.create_manager(
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
+        # Without chunked prefill, all of a prompt's multimodal items are
+        # encoded in the step that prefills it, so must fit the cache together.
+        # Reported to frontends, which reject requests exceeding it.
+        self.max_mm_embeds_per_request = (
+            encoder_cache_size
+            if mm_budget
+            and not self.scheduler_config.enable_chunked_prefill
+            and not self.is_encoder_decoder
+            and not self.is_mm_encoder_only
+            else None
+        )
+        if self.ec_connector is not None:
+            self.ec_connector.bind_encoder_cache_query(
+                self.encoder_cache_manager.get_cached_num_encoder_embeds
+            )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.use_eagle_block_drop = False
@@ -529,11 +555,17 @@ class Scheduler(SchedulerInterface):
         # step that samples. This step samples one.
         min_num_output_tokens = request.num_output_tokens + 1
         if request.num_output_placeholders > 0:
-            # Async scheduling: a step that samples is still in flight, and it
-            # adds one more.
-            min_num_output_tokens += 1
+            # Async scheduling: steps that sample are still in flight.
+            min_num_output_tokens += self._min_in_flight_output_tokens(request)
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
+
+    def _min_in_flight_output_tokens(self, request: Request) -> int:
+        """Min output tokens added by in-flight steps, even if all drafts are
+        rejected. At least one, for diffusion (no bonus token per step)."""
+        return max(
+            1, request.num_output_placeholder_steps * self.num_sampled_tokens_per_step
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -773,16 +805,16 @@ class Scheduler(SchedulerInterface):
 
             if (
                 request.num_output_placeholders > 0
-                # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
-                # Since output placeholders are also included in the computed tokens
-                # count, we subtract (num_output_placeholders - 1) to remove any draft
-                # tokens, so that we can be sure no further steps are needed even if
-                # they are all rejected.
-                and request.num_computed_tokens + 2 - request.num_output_placeholders
+                # Placeholders are included in num_computed_tokens; subtract them
+                # and add the tokens in-flight steps are sure to produce, so no
+                # further steps are needed even if all drafts are rejected.
+                and request.num_computed_tokens
+                + (1 + self._min_in_flight_output_tokens(request))
+                - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
-                # the previous step has reached request.max_tokens. We don't schedule
+                # the in-flight steps reach request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
@@ -1855,8 +1887,10 @@ class Scheduler(SchedulerInterface):
         )
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
+        request.num_output_placeholder_steps = 0
         request.num_preemptions += 1
         if self.log_stats:
+            self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
@@ -1890,6 +1924,11 @@ class Scheduler(SchedulerInterface):
             # Drop from the in-flight-prefill set once it's no longer prefilling.
             if not request.is_prefill_chunk:
                 self._inflight_prefills.discard(request)
+            # Safe before the step runs: a freed entry stays in the worker's
+            # cache until a later step evicts it, and the worker runs steps
+            # in order.
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -1899,11 +1938,23 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+        Returns False if the update was dropped for exceeding max_model_len.
         """
+        new_num_tokens = session.num_tokens - 1 + len(update.prompt_token_ids or ())
+        if new_num_tokens + self.num_sampled_tokens_per_step > self.max_model_len:
+            logger.warning(
+                "Dropping streaming update for request %s: session would "
+                "exceed max_model_len=%d.",
+                session.request_id,
+                self.max_model_len,
+            )
+            self.dropped_streaming_updates.append(session)
+            return False
+
         # Keep all output tokens but the final sampled one.
         keep_end = session.num_tokens - 1
         assert keep_end >= session.num_computed_tokens
@@ -1942,6 +1993,17 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+        return True
+
+    def _emit_dropped_streaming_updates(
+        self, outputs: dict[int, list[EngineCoreOutput]]
+    ) -> None:
+        # End the reply to each dropped update with an empty turn.
+        for req in self.dropped_streaming_updates:
+            outputs[req.client_index].append(
+                EngineCoreOutput(req.request_id, [], finish_reason=FinishReason.LENGTH)
+            )
+        self.dropped_streaming_updates.clear()
 
     def _make_cached_request_data(
         self,
@@ -2286,6 +2348,8 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        # Updates dropped on arrival precede outputs of any later update.
+        self._emit_dropped_streaming_updates(outputs)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2303,6 +2367,11 @@ class Scheduler(SchedulerInterface):
                     num_scheduled_tokens,
                 )
             )
+        if kv_connector_output and kv_connector_output.mrope_position_deltas:
+            # Record before the loop below can finish (and free) a request.
+            for req_id, delta in kv_connector_output.mrope_position_deltas.items():
+                if (request := self.requests.get(req_id)) is not None:
+                    request.mrope_position_delta = delta
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -2350,6 +2419,11 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            if (not output_is_stale and request.num_output_placeholder_steps > 0) and (
+                generated_token_ids or scheduled_spec_token_ids
+            ):
+                # Not a prefill chunk, so this step added placeholders.
+                request.num_output_placeholder_steps -= 1
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2387,7 +2461,7 @@ class Scheduler(SchedulerInterface):
                         num_verified_tokens=num_verified,
                     )
 
-            # Free encoder inputs only after the step has actually executed.
+            # Frees inputs held back by pending output placeholders.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
@@ -2660,6 +2734,9 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Updates dropped at turn end follow the turn's final output.
+        self._emit_dropped_streaming_updates(outputs)
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2695,6 +2772,7 @@ class Scheduler(SchedulerInterface):
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
+            stats.iteration_records = model_runner_output.iteration_records
             eco.scheduler_stats = stats
 
         return engine_core_outputs
@@ -2823,17 +2901,18 @@ class Scheduler(SchedulerInterface):
         request.drop_stale_output = True
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
+        request.num_output_placeholder_steps = 0
 
-        if request.streaming_queue:
+        while request.streaming_queue:
             update = request.streaming_queue.popleft()
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
-        else:
-            request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
-            self.num_waiting_for_streaming_input += 1
+            if self._update_request_as_session(request, update):
+                return False
 
+        request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        self.num_waiting_for_streaming_input += 1
         return False
 
     def _update_request_with_output(
@@ -3049,6 +3128,9 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+            if self.ec_connector is not None:
+                self.ec_connector.on_new_request(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -3267,6 +3349,7 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
+            or bool(self.dropped_streaming_updates)
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -3375,10 +3458,12 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
+            num_preempted_reqs=num_preempted_reqs,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
@@ -3487,6 +3572,11 @@ class Scheduler(SchedulerInterface):
             delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
                 request, block_ids
             )
+        if kv_xfer_params is not None and request.mrope_position_delta is not None:
+            kv_xfer_params = {
+                **kv_xfer_params,
+                MROPE_POSITION_DELTA_KEY: request.mrope_position_delta,
+            }
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:

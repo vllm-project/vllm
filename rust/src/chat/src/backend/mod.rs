@@ -109,6 +109,8 @@ pub struct LoadModelBackendsOptions {
     /// Frontend-side (P0 writer) shm multi-modal processor cache shared with
     /// the engine workers, from `--mm-processor-cache-type shm`.
     pub mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
 }
 
 /// Shared backends loaded from a model id.
