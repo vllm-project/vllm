@@ -251,62 +251,20 @@ def test_mla_dcp_source_ranks(
 
 
 def test_push_to_another_dcp_size_is_refused():
-    """A push pairs the two ranks' blocks of a request in order, which is
-    wrong unless both sides share the blocks out alike."""
-    worker = _worker(0, 2, _MLA, dcp_size=2)
+    """A push pairs the two ranks' blocks of a request in order, which is wrong
+    unless both sides share the blocks out alike. It handshakes as if the
+    remote had its DCP size, so a remote too small for that is refused first."""
+    worker = _worker(0, 4, _MLA, dcp_size=4)
     worker._TRANSFER_MODE = "push"
     with pytest.raises(NotImplementedError, match="another DCP size"):
-        _map(worker, remote_tp_size=2, remote_dcp_size=1)
-
-
-def test_push_to_a_remote_too_small_for_our_dcp_size_is_refused():
-    """A push handshakes as if the remote had its DCP size; a remote whose TP
-    size that DCP size does not divide is refused before any rank is picked."""
-    topo = _worker(0, 4, _MLA, dcp_size=4).transfer_topo
+        _map(worker, remote_tp_size=4, remote_dcp_size=1)
     with pytest.raises(NotImplementedError, match="cannot have DCP size 4"):
-        topo.handshake_target_ranks(remote_tp_size=2, remote_dcp_size=4)
+        worker.transfer_topo.handshake_target_ranks(remote_tp_size=2, remote_dcp_size=4)
 
 
-@pytest.mark.parametrize(
-    "tp_size,remote_tp_size,dcp_size,remote_dcp_size",
-    [
-        (4, 2, 4, 2),
-        (4, 4, 4, 4),
-        (4, 1, 4, 1),
-        (4, 4, 1, 4),
-        (2, 4, 2, 4),
-    ],
-)
-def test_dcp_consumer_count_matches_readers(
-    tp_size, remote_tp_size, dcp_size, remote_dcp_size
-):
-    """Each producer waits for exactly the local ranks that read from it."""
-    workers = [
-        _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size) for tp_rank in range(tp_size)
-    ]
-    sources = [_map(w, remote_tp_size, remote_dcp_size) for w in workers]
-
-    for remote_rank in range(remote_tp_size):
-        readers = [w for w, ranks in zip(workers, sources) if remote_rank in ranks]
-        for worker in readers:
-            consumers = worker.transfer_topo.dcp_consumer_count(
-                remote_tp_size, remote_dcp_size
-            )
-            assert consumers == len(readers)
-
-
-# The DCP groups of (4, 2), (8, 2) and (8, 4) are smaller than the TP size.
+# Every (TP size, DCP size); a DCP group may be smaller than the TP size.
 _TP_AND_DCP_SIZES = [
-    (1, 1),
-    (2, 1),
-    (2, 2),
-    (4, 1),
-    (4, 2),
-    (4, 4),
-    (8, 1),
-    (8, 2),
-    (8, 4),
-    (8, 8),
+    (tp, dcp) for tp in (1, 2, 4, 8) for dcp in (1, 2, 4, 8) if tp % dcp == 0
 ]
 
 
@@ -317,22 +275,20 @@ def test_every_remote_rank_hears_from_the_ranks_it_waits_for(
 ):
     """A producer rank frees a request's blocks once every consumer rank
     that handshook with it has notified it: every remote rank must be some
-    local rank's target, and wait for exactly the ranks targeting it."""
+    local rank's target, and wait for exactly the ranks targeting it, which
+    are the ranks reading from it if any does."""
+    sizes = remote_tp_size, remote_dcp_size
     workers = [
         _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size) for tp_rank in range(tp_size)
     ]
-    targets = [
-        w.transfer_topo.handshake_target_ranks(remote_tp_size, remote_dcp_size)
-        for w in workers
-    ]
+    targets = [set(w.transfer_topo.handshake_target_ranks(*sizes)) for w in workers]
+    sources = [set(_map(w, *sizes)) for w in workers]
     assert set().union(*targets) == set(range(remote_tp_size))
-    for worker, ranks in zip(workers, targets):
-        # A rank reads only from ranks it handshook with.
-        assert set(_map(worker, remote_tp_size, remote_dcp_size)) <= set(ranks)
-        for remote_rank in ranks:
-            assert worker.transfer_topo.dcp_consumer_count(
-                remote_tp_size, remote_dcp_size
-            ) == sum(remote_rank in other for other in targets)
+    for worker, ranks, read in zip(workers, targets, sources):
+        consumers = worker.transfer_topo.dcp_consumer_count(*sizes)
+        assert read <= ranks
+        assert all(consumers == sum(r in other for other in targets) for r in ranks)
+        assert all(consumers == sum(r in other for other in sources) for r in read)
 
 
 @pytest.mark.parametrize("tp_size,dcp_size", _TP_AND_DCP_SIZES)
@@ -372,13 +328,14 @@ def test_pull_reads_each_block_once_from_a_rank_holding_it(
                 0,
                 list(local_ids),
                 0,
-                list(range(num_remote_ids)),
+                list(range(100, 100 + num_remote_ids)),
                 # Without DCP the pull counts back from the last token.
                 num_computed_blocks=num_computed_blocks if dcp_active else None,
             )
             positions = [worker.dcp_rank + i * dcp_size for i in local]
             assert positions == [
-                remote_rank % remote_dcp_size + i * remote_dcp_size for i in remote
+                remote_rank % remote_dcp_size + (i - 100) * remote_dcp_size
+                for i in remote
             ]
             read.update(positions)
 
@@ -509,12 +466,18 @@ def test_push_decode_waits_for_the_ranks_writing_it(layers, p_tp, d_tp):
 
 def test_shards_one_remote_rank_holds_together_move_as_one_range():
     """12 KV heads at TP 2 and TP 3 are cut 6 ways. A TP 3 rank holds two of
-    our three shards, next to each other on both sides: one range, not two."""
+    our three shards, next to each other on both sides: one desc, not two."""
     worker = _worker(0, 2, {"model.layers.0.self_attn": 12})
     assert _map(worker, 3) == (0, 1)
-    shard = worker.block_len_per_layer[0] // 3
+    block = worker.block_len_per_layer[0]
+    shard = block // 3
     assert remote_stage(worker, _ENGINE).byte_ranges == [
-        {0: [(0, 0, 2 * shard)], 1: [(2 * shard, 0, shard)]}
+        {0: [(0, 0, shard), (shard, shard, shard)], 1: [(2 * shard, 0, shard)]}
+    ]
+    local, *_ = _prep(worker, 3).lists
+    assert local == [
+        [0x1000, 2 * shard, 0, block, 8],
+        [0x1000 + 2 * shard, shard, 0, block, 8],
     ]
 
 

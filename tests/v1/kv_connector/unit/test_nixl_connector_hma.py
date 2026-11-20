@@ -551,60 +551,16 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
     [
         # local more finely sharded than remote: remote's raw slice has an
         # extra tail block beyond what local's phase-aligned slice covers.
-        pytest.param(
-            [100, 101, 102],
-            [200, 201],
-            1,
-            1,
-            0,
-            2,
-            0,
-            [101],
-            [200],
-            id="remote_tail_padding",
-        ),
+        ([100, 101, 102], [200, 201], 1, 1, 0, 2, 0, [101], [200]),
         # remote more finely sharded than local: local's raw slice has a
         # block beyond what remote's phase-aligned slice covers.
-        pytest.param(
-            [100],
-            [200],
-            0,
-            2,
-            1,
-            1,
-            0,
-            [],
-            [],
-            id="local_tail_padding",
-        ),
+        ([100], [200], 0, 2, 1, 1, 0, [], []),
         # Asymmetric DCP with a partial prefix cache hit: the cached count
         # shifts both the local phase and the remote start position.
-        pytest.param(
-            [100],
-            [200, 201],
-            2,
-            2,
-            0,
-            4,
-            3,
-            [100],
-            [201],
-            id="prefix_phase",
-        ),
+        ([100], [200, 201], 2, 2, 0, 4, 3, [100], [201]),
         # Equal (but active) DCP sizes still need to skip the locally cached
         # prefix from the front of remote's list.
-        pytest.param(
-            [100, 101],
-            [200, 201, 202, 203],
-            1,
-            2,
-            1,
-            2,
-            2,
-            [100, 101],
-            [202, 203],
-            id="equal_dcp_with_prefix",
-        ),
+        ([100, 101], [200, 201, 202, 203], 1, 2, 1, 2, 2, [100, 101], [202, 203]),
     ],
 )
 def test_pair_blocks_matches_global_dcp_positions(

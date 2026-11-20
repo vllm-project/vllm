@@ -346,16 +346,18 @@ class NixlBaseConnectorWorker:
             }
 
             # Bytes: the runs of each pair that are contiguous on both sides,
-            # merged where they touch. A unit both sides hold alike moves
-            # whole, padding included; as on main, recurrent state sharded
+            # in the order of ours. A block the two sides hold with the same
+            # views needs no pairing and moves whole, with the padding that
+            # its views do not cover; as on main, recurrent state sharded
             # across TP leaves its padding behind.
             sharded_state = isinstance(spec, MambaSpec) and not spec.tp_replicated
-            padded_len = block_len if contiguous and not sharded_state else None
+            ours, theirs = map(serialize_layer_meta_tensors, (views, remote_views))
+            whole = contiguous and not sharded_state and ours == theirs
             all_ranges.append(
                 {
-                    rank: coalesce_byte_ranges(
-                        contiguous_byte_ranges(pairs), views, remote_views, padded_len
-                    )
+                    rank: [(0, 0, block_len)]
+                    if whole
+                    else sorted(contiguous_byte_ranges(pairs))
                     for rank, pairs in pairs_by_rank.items()
                 }
             )
@@ -1739,25 +1741,6 @@ class NixlBaseConnectorWorker:
         counts = strided_descs[:, 4]
         return np.cumsum(counts) - counts
 
-    @staticmethod
-    def _continues(
-        byte_range: tuple[int, int, int, int],
-        last: tuple[int, int, int, int],
-        regions: Sequence[tuple[int, int, int, int]],
-        mem_types: Sequence[str],
-    ) -> bool:
-        """Whether `byte_range` starts where `last` ends in every block."""
-        region, offset, _, ratio = byte_range
-        last_region, last_offset, last_num_bytes, last_ratio = last
-        base_addr, _, *blocks = regions[region]
-        last_base_addr, _, *last_blocks = regions[last_region]
-        return (
-            ratio == last_ratio == 1
-            and blocks == last_blocks
-            and mem_types[region] == mem_types[last_region]
-            and base_addr + offset == last_base_addr + last_offset + last_num_bytes
-        )
-
     def _prep_descs(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -1791,54 +1774,51 @@ class NixlBaseConnectorWorker:
         remote_mem_types = (
             nixl_agent_meta.region_mem_types or [self.nixl_memory_type] * num_remote
         )
-        # [remote rank, cache group, local region, local and remote byte range]
-        # of every range moved; the local list holds every rank's.
-        xfers: list[list[Any]] = []
-        last_xfers: dict[tuple[int, int], list[Any]] = {}
+        # Every range moved, as its address in the first block of each side and
+        # then the region and offset it is at there. Ranges are listed with
+        # those they can coalesce with: of a remote rank and cache group, in
+        # blocks that repeat alike.
+        moved: dict[tuple, list[tuple]] = defaultdict(list)
         for remote, local, group, ranges_by_rank in zip(
             pairs.remote, pairs.local, pairs.group, stage.byte_ranges
         ):
             ssm = _is_ssm_spec(self._group_spec_types[group])
-            ratio, split = (1, 1) if ssm else (block_size_ratio, remote_split)
+            units = (1, 1) if ssm else (block_size_ratio, remote_split)
+            addr, _, *blocks = local_regions[local]
+            remote_addr, _, *remote_blocks = remote_regions[remote]
+            mem_types = self.region_mem_types[local], remote_mem_types[remote]
+            # Region-mapped reads take each region's own blocks, and a block
+            # of several units repeats a range in each: those stay apart.
+            alike: tuple = (local, remote)
+            if pairs.groups_match and units == (1, 1):
+                alike = (*blocks, *remote_blocks, *mem_types)
             for rank, ranges in ranges_by_rank.items():
                 for offset, remote_offset, num_bytes in ranges:
-                    local_range = (local, offset, num_bytes, ratio)
-                    remote_range = (remote, remote_offset, num_bytes, split)
-                    last = last_xfers.get((rank, group))
-                    # Region-mapped reads take each region's own blocks.
-                    if (
-                        last is not None
-                        and pairs.groups_match
-                        and self._continues(
-                            local_range, last[3], local_regions, self.region_mem_types
-                        )
-                        and self._continues(
-                            remote_range, last[4], remote_regions, remote_mem_types
-                        )
-                    ):
-                        for i in (3, 4):
-                            region, start, length, _ = last[i]
-                            last[i] = (region, start, length + num_bytes, 1)
-                        continue
-                    last_xfers[rank, group] = xfer = [
-                        rank,
-                        group,
-                        local,
-                        local_range,
-                        remote_range,
-                    ]
-                    xfers.append(xfer)
+                    start = addr + offset, remote_addr + remote_offset
+                    at = (local, offset), (remote, remote_offset)
+                    moved[rank, group, units, alike].append((*start, num_bytes, *at))
+        # Ranges that follow each other on both sides move as one: the shards
+        # a rank holds next to each other, and the pages that the layers of a
+        # cache group hold back to back in a block-outermost block, which
+        # then moves as one desc, not one per layer.
+        # (remote rank, cache group, local region, local and remote byte range)
+        # of every range moved; the local list holds every rank's.
+        xfers = [
+            (rank, group, ours[0], (*ours, n, ratio), (*theirs, n, split))
+            for (rank, group, (ratio, split), _), ranges in moved.items()
+            for _, _, n, ours, theirs in coalesce_byte_ranges(ranges)
+        ]
 
-        key = tuple(xfer[3] for xfer in xfers)
-        if key not in self._local_desc_lists:
+        local_ranges = tuple(xfer[3] for xfer in xfers)
+        if local_ranges not in self._local_desc_lists:
             descs, starts, row_regions = self._byte_range_descs(
-                list(key), local_regions, self.device_id
+                list(local_ranges), local_regions, self.device_id
             )
             if not self._mixed_mem_types:
                 handle = self.nixl_wrapper.prep_xfer_dlist(
                     "NIXL_INIT_AGENT", descs, mem_type=self.region_mem_types[0]
                 )
-                self._local_desc_lists[key] = _LocalDescs(handle, starts)
+                self._local_desc_lists[local_ranges] = _LocalDescs(handle, starts)
             else:
                 # Split by memory type; DRAM descriptors are registered under
                 # CPU device 0.
@@ -1861,10 +1841,10 @@ class NixlBaseConnectorWorker:
                     descs[~row_is_dram],
                     mem_type=self.nixl_memory_type,
                 )
-                self._local_desc_lists[key] = _LocalDescs(
+                self._local_desc_lists[local_ranges] = _LocalDescs(
                     handle, starts, dram_handle, desc_is_dram, desc_pos
                 )
-        stage.local_descs = local_descs = self._local_desc_lists[key]
+        stage.local_descs = local_descs = self._local_desc_lists[local_ranges]
 
         rank_xfers = [xfer for xfer in xfers if xfer[0] == remote_tp_rank]
         descs, remote_starts, _ = self._byte_range_descs(
@@ -2178,8 +2158,10 @@ class NixlBaseConnectorWorker:
                 "Different NIXL cache-group layouts need the same KV regions "
                 "on both sides"
             )
+        # A whole block: all its bytes, at the same offset on both sides.
         if any(
-            ranges != [(0, 0, self.block_len_per_layer[local])]
+            sum(n for offset, remote_offset, n in ranges if offset == remote_offset)
+            != self.block_len_per_layer[local]
             for local, ranges_by_rank in zip(pairs.local, stage.byte_ranges)
             for ranges in ranges_by_rank.values()
         ):

@@ -38,12 +38,8 @@ def _fake_remote_layer_meta_tensors(monkeypatch):
 
     tp_byte_ranges = NixlBaseConnectorWorker._tp_byte_ranges
 
-    def with_remote_shards(
-        self, meta, regions, remote_tp_size, remote_dcp_size, receiving
-    ):
+    def with_remote_views(self, meta, regions, remote_tp_size, *args, **kwargs):
         fake_remote_layer_meta_tensors(self, meta, regions, remote_tp_size)
-        return tp_byte_ranges(
-            self, meta, regions, remote_tp_size, remote_dcp_size, receiving
-        )
+        return tp_byte_ranges(self, meta, regions, remote_tp_size, *args, **kwargs)
 
-    monkeypatch.setattr(NixlBaseConnectorWorker, "_tp_byte_ranges", with_remote_shards)
+    monkeypatch.setattr(NixlBaseConnectorWorker, "_tp_byte_ranges", with_remote_views)

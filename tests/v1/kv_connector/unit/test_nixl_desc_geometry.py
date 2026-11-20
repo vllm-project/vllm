@@ -220,6 +220,12 @@ def _make_packed_mla_view_worker(
     return worker, raw
 
 
+def _stage_descs(worker, engine_id="remote", rank=0):
+    """The local desc list of a remote engine's stage and remote `rank`'s."""
+    stage, dlists = remote_stage(worker, engine_id), worker.nixl_wrapper.dlists
+    return dlists[stage.local_descs.handle], dlists[stage.xfer_side_handles[rank]]
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
@@ -246,12 +252,7 @@ def test_interleaved_mla_layers_of_a_group_move_one_descriptor_per_block(
     assert metadata.block_strides == [stride] * num_layers
     metadata.engine_id = "remote"
     worker.add_remote_agent(metadata)
-    local = worker.nixl_wrapper.dlists[
-        remote_stage(worker, "remote").local_descs.handle
-    ]
-    remote = worker.nixl_wrapper.dlists[
-        remote_stage(worker, "remote").xfer_side_handles[0]
-    ]
+    local, remote = _stage_descs(worker)
     if one_group:
         expected = [[raw.data_ptr() + b * stride, stride, 0] for b in range(4)]
     else:
@@ -289,12 +290,7 @@ def test_peers_placing_layers_differently_in_a_block_pair_by_layer():
     )
     metadata.engine_id = "remote"
     consumer.add_remote_agent(metadata)
-    local = consumer.nixl_wrapper.dlists[
-        remote_stage(consumer, "remote").local_descs.handle
-    ]
-    remote = consumer.nixl_wrapper.dlists[
-        remote_stage(consumer, "remote").xfer_side_handles[0]
-    ]
+    local, remote = _stage_descs(consumer)
     assert local.tolist() == [
         [d_raw.data_ptr() + offset + b * 192, num_bytes, 0]
         for offset, num_bytes in ((64, 128), (0, 64))
@@ -358,23 +354,18 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
             type=NixlAgentMetadata,
         )
         producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
+        stage = remote_stage(producer, consumer.engine_id)
         # L0 is another stage's.
-        assert remote_stage(producer, consumer.engine_id).pairs.remote == [1, 2, 3]
+        assert stage.pairs.remote == [1, 2, 3]
         local_ids, remote_ids = producer._compute_desc_ids(
-            remote_stage(producer, consumer.engine_id),
-            rank,
-            [[1], [2], [3]],
-            [[3], [1], [2]],
+            stage, rank, [[1], [2], [3]], [[3], [1], [2]]
         )
-        local_handle = remote_stage(producer, consumer.engine_id).local_descs.handle
-        local_descs = producer.nixl_wrapper.dlists[local_handle]
+        local_descs, remote_descs = _stage_descs(producer, consumer.engine_id, rank)
         assert local_descs[local_ids].tolist() == [
             [p_raw.data_ptr() + 192, 128, 0],
             [p_raw.data_ptr() + 2 * 192, 64, 0],
             [p_raw.data_ptr() + 128 + 3 * 192, 64, 0],
         ]
-        handle = remote_stage(producer, consumer.engine_id).xfer_side_handles[rank]
-        remote_descs = producer.nixl_wrapper.dlists[handle]
         assert len(remote_descs) == 3 * d_num_blocks
         assert remote_descs[remote_ids].tolist() == [
             [d_raw.data_ptr() + 128 + 3 * 256, 128, 0],

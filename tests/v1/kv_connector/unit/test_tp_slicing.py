@@ -245,135 +245,52 @@ def test_mamba2_replicated_groups_fail_closed():
         pair_shards(_views(tp2), 2, 0, _views(tp1), 1, receiving=True)
 
 
+# Real models' states on one rank: (layer spec, conv dim, temporal state shape,
+# the sizes of the sub-projections the conv state is made of).
+REAL_MODEL_STATES = {
+    # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
+    # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
+    "nemotron_h_8b_tp1": (mamba2_spec, 10240, (128, 64, 128), (8192, 1024, 1024)),
+    "nemotron_h_8b_tp4": (mamba2_spec, 2560, (32, 64, 128), (2048, 256, 256)),
+    # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B (Mamba2)
+    # mamba_num_heads=64, head_dim=64, n_groups=8, ssm_state_size=128
+    "nemotron_nano_30b_tp1": (mamba2_spec, 6144, (64, 64, 128), (4096, 1024, 1024)),
+    # Qwen/Qwen3.5-0.8B (GDN, symmetric: num_v=num_k=16)
+    # key_dim=2048, value_dim=2048, conv_dim=6144
+    "qwen35_08b_tp1": (gdn_spec, 6144, (16, 128, 128), (2048, 2048, 2048)),
+    "qwen35_08b_tp4": (gdn_spec, 1536, (4, 128, 128), (512, 512, 512)),
+    # Qwen/Qwen3.5-4B (GDN, asymmetric: num_v=32, num_k=16, K:V=1:2)
+    # key_dim=2048, value_dim=4096, conv_dim=8192
+    "qwen35_4b_tp1": (gdn_spec, 8192, (32, 128, 128), (2048, 2048, 4096)),
+    # Qwen/Qwen3.5-27B (GDN, asymmetric: num_v=48, num_k=16, K:V=1:3)
+    # key_dim=2048, value_dim=6144, conv_dim=10240
+    "qwen35_27b_tp1": (gdn_spec, 10240, (48, 128, 128), (2048, 2048, 6144)),
+    "qwen35_27b_tp8": (gdn_spec, 1280, (6, 128, 128), (256, 256, 768)),
+    # ai21labs/AI21-Jamba2-Mini (Mamba1)
+    # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
+    # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
+    # Conv state holds only x: a single contiguous sub-projection.
+    "jamba_mini_tp1": (mamba1_spec, 8192, (8192, 16), (8192,)),
+    "jamba_mini_tp4": (mamba1_spec, 2048, (2048, 16), (2048,)),
+    "jamba_mini_tp8": (mamba1_spec, 1024, (1024, 16), (1024,)),
+}
+
+
 @pytest.mark.parametrize(
-    "mamba_type,local_tp,conv_dim_local,conv_rows,temporal_shape,expected_proj_dims",
-    [
-        # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
-        # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            10240,
-            3,
-            (128, 64, 128),
-            (8192, 1024, 1024),
-            id="nemotron_h_8b_tp1",
-        ),
-        pytest.param(
-            "mamba2",
-            4,
-            2560,
-            3,
-            (32, 64, 128),
-            (2048, 256, 256),
-            id="nemotron_h_8b_tp4",
-        ),
-        # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B (Mamba2)
-        # mamba_num_heads=64, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            6144,
-            3,
-            (64, 64, 128),
-            (4096, 1024, 1024),
-            id="nemotron_nano_30b_tp1",
-        ),
-        # Qwen/Qwen3.5-0.8B (GDN, symmetric: num_v=num_k=16)
-        # key_dim=2048, value_dim=2048, conv_dim=6144
-        pytest.param(
-            "gdn_attention",
-            1,
-            6144,
-            3,
-            (16, 128, 128),
-            (2048, 2048, 2048),
-            id="qwen35_08b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            4,
-            1536,
-            3,
-            (4, 128, 128),
-            (512, 512, 512),
-            id="qwen35_08b_tp4",
-        ),
-        # Qwen/Qwen3.5-4B (GDN, asymmetric: num_v=32, num_k=16, K:V=1:2)
-        # key_dim=2048, value_dim=4096, conv_dim=8192
-        pytest.param(
-            "gdn_attention",
-            1,
-            8192,
-            3,
-            (32, 128, 128),
-            (2048, 2048, 4096),
-            id="qwen35_4b_tp1",
-        ),
-        # Qwen/Qwen3.5-27B (GDN, asymmetric: num_v=48, num_k=16, K:V=1:3)
-        # key_dim=2048, value_dim=6144, conv_dim=10240
-        pytest.param(
-            "gdn_attention",
-            1,
-            10240,
-            3,
-            (48, 128, 128),
-            (2048, 2048, 6144),
-            id="qwen35_27b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            8,
-            1280,
-            3,
-            (6, 128, 128),
-            (256, 256, 768),
-            id="qwen35_27b_tp8",
-        ),
-        # ai21labs/AI21-Jamba2-Mini (Mamba1)
-        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
-        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
-        # Conv state holds only x: a single contiguous sub-projection.
-        pytest.param(
-            "mamba1",
-            1,
-            8192,
-            3,
-            (8192, 16),
-            (8192,),
-            id="jamba_mini_tp1",
-        ),
-        pytest.param(
-            "mamba1",
-            4,
-            2048,
-            3,
-            (2048, 16),
-            (2048,),
-            id="jamba_mini_tp4",
-        ),
-        pytest.param(
-            "mamba1",
-            8,
-            1024,
-            3,
-            (1024, 16),
-            (1024,),
-            id="jamba_mini_tp8",
-        ),
-    ],
+    "spec_cls,conv_dim_local,temporal_shape,expected_proj_dims",
+    list(REAL_MODEL_STATES.values()),
+    ids=list(REAL_MODEL_STATES),
 )
 def test_mamba_specs_split_real_model_conv_states(
-    mamba_type, local_tp, conv_dim_local, conv_rows, temporal_shape, expected_proj_dims
+    spec_cls, conv_dim_local, temporal_shape, expected_proj_dims
 ):
-    """Backend specs cut real models' conv states into their sub-projections."""
-    spec_cls = {"mamba1": mamba1_spec, "mamba2": mamba2_spec, "gdn_attention": gdn_spec}
-    spec = spec_cls[mamba_type](
+    """The layers' specs cut real models' conv states into their sub-projections."""
+    spec = spec_cls(
         block_size=64,
-        shapes=((conv_dim_local, conv_rows), temporal_shape),
+        shapes=((conv_dim_local, CONV_ROWS), temporal_shape),
         dtypes=(torch.bfloat16, torch.bfloat16),
     )
     block = torch.empty(1, 1, 1, spec.page_size_bytes, dtype=torch.int8, device="meta")
     views = list(spec.slice_for_tp_transfer(block).values())
-    conv_ranges = [view.numel() // (conv_rows * 2) for view in views[:-1]]
+    conv_ranges = [view.numel() // (CONV_ROWS * 2) for view in views[:-1]]
     assert conv_ranges == list(expected_proj_dims)

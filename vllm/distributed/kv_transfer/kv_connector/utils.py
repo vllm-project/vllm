@@ -680,42 +680,18 @@ def contiguous_byte_ranges(
     return ranges
 
 
-def coalesce_byte_ranges(
-    ranges: Iterable[tuple[int, int, int]],
-    views: dict[str, torch.Tensor],
-    other_views: dict[str, torch.Tensor],
-    block_len: int | None = None,
-) -> list[tuple[int, int, int]]:
-    """Merge the `contiguous_byte_ranges` of a block that follow each other
-    on both sides.
-
-    A block both sides hold alike, i.e. with the same `views`, moves whole:
-    all `block_len` bytes, padding included. Pass no `block_len` for a block
-    whose padding stays behind.
-    """
-
-    def layout(views: dict[str, torch.Tensor]) -> dict[str, tuple]:
-        # A dim of one entry is stored the same at any stride.
-        return {
-            name: (
-                view.storage_offset(),
-                view.shape,
-                view.stride(0),
-                [s for size, s in zip(view.shape[1:], view.stride()[1:]) if size > 1],
-            )
-            for name, view in views.items()
-        }
-
-    if block_len is not None and layout(views) == layout(other_views):
-        return [(0, 0, block_len)]
-    merged: list[tuple[int, int, int]] = []
-    for src, dst, size in sorted(ranges):
+def coalesce_byte_ranges(ranges: Iterable[tuple]) -> list[tuple]:
+    """Merge each `(offset, other_offset, num_bytes, *rest)` range into the
+    one before it when it starts where that one ends on both sides. The
+    merged range keeps the `rest` of its first."""
+    merged: list[tuple] = []
+    for src, dst, size, *rest in ranges:
         if merged:
-            last_src, last_dst, last_size = merged[-1]
+            last_src, last_dst, last_size, *last_rest = merged[-1]
             if (last_src + last_size, last_dst + last_size) == (src, dst):
-                merged[-1] = (last_src, last_dst, last_size + size)
+                merged[-1] = (last_src, last_dst, last_size + size, *last_rest)
                 continue
-        merged.append((src, dst, size))
+        merged.append((src, dst, size, *rest))
     return merged
 
 

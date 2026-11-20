@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from itertools import count
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import torch
@@ -38,10 +38,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    ConvComponentSpec,
-    create_conv_temporal_state_spec,
-)
+from vllm.model_executor.layers.mamba import mamba_utils
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -906,35 +907,24 @@ def rank_kv_heads(tp_rank: int, tp_size: int, total_num_kv_heads: int) -> range:
     return range(head, head + 1)
 
 
-def _declared_mamba_spec(conv_parts):
+def _mamba_layer_spec(layer_cls: Any):
     def build(*, conv_dim: int = 0, **kwargs) -> MambaSpec:
-        spec, dim_first = MambaSpec(**kwargs), conv_dim == 0
-        return create_conv_temporal_state_spec(
-            spec, conv_parts(spec.shapes, dim_first), dim_first
-        )
+        spec, layout = MambaSpec(**kwargs), "SD" if conv_dim else "DS"
+        with (
+            patch.object(MambaBase, "get_kv_cache_spec", return_value=spec),
+            patch.object(mamba_utils, "get_conv_state_layout", return_value=layout),
+        ):
+            return layer_cls.get_kv_cache_spec(MagicMock(spec=layer_cls), None)
 
     return build
 
 
-def _mamba2_conv_parts(shapes, dim_first: bool) -> dict[str, int]:
-    conv, temporal = shapes
-    x = temporal[0] * temporal[1]
-    groups = (conv[0 if dim_first else 1] - x) // 2
-    return {"x": x, "B": groups, "C": groups}
-
-
-def _gdn_conv_parts(shapes, dim_first: bool) -> dict[str, int]:
-    conv, temporal = shapes
-    value = temporal[0] * temporal[1]
-    key = (conv[0 if dim_first else 1] - value) // 2
-    return {"q": key, "k": key, "v": value}
-
-
-# A Mamba1, Mamba2 or GDN layer's spec as the layer builds it, with the conv
-# state's `dim` at `conv_dim`: 0 for (dim, state_len), 1 for (state_len, dim).
-mamba1_spec = _declared_mamba_spec(lambda shapes, _: {"x": shapes[1][0]})
-mamba2_spec = _declared_mamba_spec(_mamba2_conv_parts)
-gdn_spec = _declared_mamba_spec(_gdn_conv_parts)
+# What a Mamba1, Mamba2 or GDN layer's `get_kv_cache_spec` makes of a
+# `MambaSpec(**kwargs)` page, with the conv state's `dim` at `conv_dim`: 0 for
+# (dim, state_len), 1 for (state_len, dim).
+mamba1_spec = _mamba_layer_spec(MambaMixer)
+mamba2_spec = _mamba_layer_spec(MambaMixer2)
+gdn_spec = _mamba_layer_spec(GatedDeltaNetAttention)
 
 
 def remote_layer_spec(
@@ -949,7 +939,7 @@ def remote_layer_spec(
         heads = remote_num_kv_heads or spec.num_kv_heads
         slots = spec.num_head_slots and spec.num_head_slots * heads // spec.num_kv_heads
         return replace(spec, num_kv_heads=heads, num_head_slots=slots)
-    if isinstance(spec, ConvComponentSpec):
+    if isinstance(spec, mamba_utils.ConvComponentSpec):
         parts = ((name, size * tp_size // remote_tp_size) for name, size in spec.parts)
         return replace(spec, parts=tuple(parts))
     if isinstance(spec, MultiComponentSpec) and spec.component_specs:
@@ -976,10 +966,10 @@ def fake_remote_layer_meta_tensors(worker, meta, regions, remote_tp_size: int) -
 
     tp_size = worker.transfer_tp_size
     layout = KVCacheLayout[meta.kv_cache_layout].layer_view_order
-    # Remote tokens per block, as a fraction of ours.
-    num, den = 1, 1
+    # Remote blocks per block of ours.
+    ratio = 1
     if isinstance(worker.transfer_topo, TransferTopology):
-        den = worker.transfer_topo.block_size_ratio(meta.block_size)
+        ratio = worker.transfer_topo.block_size_ratio(meta.block_size)
     heads = getattr(worker, "_fake_remote_kv_heads", {}).get(meta.engine_id, {})
     for local, group, _ in regions:
         name = worker.region_members[local][0]
@@ -991,8 +981,8 @@ def fake_remote_layer_meta_tensors(worker, meta, regions, remote_tp_size: int) -
             worker._layer_views[name] = (own_spec.slice_for_tp_transfer(block), True)
         spec = remote_layer_spec(own_spec, tp_size, remote_tp_size, heads.get(name))
         if not _is_ssm_spec(worker._group_spec_types[group]):
-            spec = replace(spec, block_size=spec.block_size * num // den)
-            block_len = block_len * num // den
+            spec = replace(spec, block_size=spec.block_size // ratio)
+            block_len //= ratio
         block = worker._transfer_block(spec, group, block_len, layout)
         meta.layer_meta_tensors.setdefault(
             name, serialize_layer_meta_tensors(spec.slice_for_tp_transfer(block))
