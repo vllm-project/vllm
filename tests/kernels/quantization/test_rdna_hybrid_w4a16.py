@@ -105,8 +105,16 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, MIN_DENSE_M],
-    ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill", "M=256_dense"],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 8, 9, 64, MIN_DENSE_M],
+    ids=[
+        "M=1_decode",
+        "M=5_decode",
+        "M=6",
+        "M=8",
+        "M=9_prefill",
+        "M=64_prefill",
+        "M=256_dense",
+    ],
 )
 @pytest.mark.parametrize("use_dequant", [False, True])
 def test_rdna_hybrid_w4a16_apply_matches_reference(
@@ -180,7 +188,7 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
+@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1, 9])
 def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
     """Bias is added correctly on both decode and prefill paths."""
     if not torch.cuda.is_available():
@@ -860,6 +868,21 @@ def _hip_skinny_reference(
         (4, 16384, 512, 128),
         (5, 21504, 512, 32),
         (5, 20992, 512, 128),
+        # 6..8 rows (gfx1151 only): LDS-resident (4096 * 8 fills it), then
+        # K-chunked; 2560 and 20992 hit the ragged K tail. N = 502 is not a
+        # multiple of the tile's 4 output rows, so it takes wvSplitK_int4_hf_,
+        # once LDS-resident and once K-chunked (symmetric only).
+        (6, 1024, 2048, 32),
+        (7, 2048, 1024, 64),
+        (8, 2048, 512, 128),
+        (7, 2560, 256, 32),
+        (8, 4096, 256, 128),
+        (6, 8192, 512, 64),
+        (7, 16384, 512, 32),
+        (8, 20480, 512, 128),
+        (8, 20992, 512, 32),
+        (8, 2048, 502, 64),
+        (7, 8192, 502, 64),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
@@ -867,8 +890,12 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
 
+    if M > MAX_SKINNY_BATCH_SIZE and not on_gfx1151():
+        pytest.skip("6..8 rows are gfx1151 only")
     if K * M > LDS_CAPACITY_ELEMENTS and not on_gfx115x():
         pytest.skip("deep-K HIP path is gfx115x only")
+    if has_zp and N % 8:
+        pytest.skip("zero points pack 8 output rows per word")
 
     set_random_seed(0)
 
@@ -1104,7 +1131,7 @@ def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_zp", [False, True])
-@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
+@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1, 9])
 def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
     """Padding the weight rows is a pure layout change.
 
@@ -1197,29 +1224,36 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize(
-    "M,K,gfx115x,expected_path",
+    "M,K,gfx115x,gfx1151,expected_path",
     [
-        (4, 8192, False, "hip"),
-        (4, 9728, False, "hip"),
-        (4, 9856, False, "triton"),
-        (4, 9856, True, "hip"),
-        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, "triton"),
+        (4, 8192, False, False, "hip"),
+        (4, 9728, False, False, "hip"),
+        (4, 9856, False, False, "triton"),
+        (4, 9856, True, False, "hip"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, False, "triton"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, True, True, "hip"),
+        (8, 1024, True, True, "hip"),
+        (9, 1024, True, True, "triton"),
     ],
     ids=[
         "regular_limit",
         "medium_range",
         "above_medium",
         "above_medium_gfx115x",
+        "six_rows_off_gfx1151",
+        "six_rows_gfx1151",
+        "eight_rows_gfx1151",
         "batch_too_large",
     ],
 )
 def test_rdna_hybrid_w4a16_dispatch_boundaries(
-    M, K, gfx115x, expected_path, monkeypatch
+    M, K, gfx115x, gfx1151, expected_path, monkeypatch
 ):
     """Route only supported regular and medium skinny shapes to HIP.
 
     gfx115x drops the K*M bound, so a shape past the medium limit still goes to
-    HIP there; the batch bound holds on every target.
+    HIP there; the batch bound is 5 rows on every target but gfx1151, which
+    takes up to 8.
     """
     import vllm._custom_ops as ops
 
@@ -1240,6 +1274,7 @@ def test_rdna_hybrid_w4a16_dispatch_boundaries(
     monkeypatch.setattr(ops, "wvSplitK_int4_g", fake_hip)
     monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
     monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: gfx115x)
+    monkeypatch.setattr(hybrid_module, "_on_gfx1151", lambda: gfx1151)
 
     output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
         x_mk, w_q, scales, None, None, 40, G

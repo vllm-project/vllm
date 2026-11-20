@@ -1108,7 +1108,8 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
-        assert config.__class__.__name__ == "NewConfig"
+        # `NewConfig` is the remote-code config, `GteConfig` the native one.
+        assert config.__class__.__name__ in ("NewConfig", "GteConfig")
         assert config.hidden_act == "gelu"
 
         config.hidden_act = "geglu"
@@ -1313,27 +1314,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = "align"
-                logger.info(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-        else:
-            if cache_config.mamba_cache_mode != "none":
-                cache_config.mamba_cache_mode = "none"
-                logger.warning(
-                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
-                )
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = model_config.max_model_len
+        elif cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
 
 class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
@@ -1895,6 +1882,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
+    "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
