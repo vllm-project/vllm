@@ -214,6 +214,10 @@ class Executor(ABC):
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")
 
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Publish the Mamba block size resolved for the whole model."""
+        self.collective_rpc("set_mamba_block_size", args=(mamba_block_size,))
+
     def get_supported_kv_cache_layouts(self) -> list[list[str]]:
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
