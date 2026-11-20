@@ -327,11 +327,11 @@ _SYNC: dict[torch.device, torch.Tensor] = {}
 
 
 def buffers(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tensor]:
-    """Per-row workspace for at least rows rows, grown to a power of 2. Growing it
-    drops the cached launches, which hold the old one."""
+    """Per-row workspace for at least rows rows. Growing it drops the cached launches,
+    which hold the old one."""
     key = (device, vocab)
     if key not in _BUFFERS or _BUFFERS[key]["state"].numel() < rows:
-        _BUFFERS[key] = allocate(device, triton.next_power_of_2(rows), vocab)
+        _BUFFERS[key] = allocate(device, rows, vocab)
         _PLANS.clear()
     return _BUFFERS[key]
 
