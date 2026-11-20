@@ -4,7 +4,7 @@
 import bisect
 import mimetypes
 from collections import defaultdict
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
@@ -119,6 +119,22 @@ def encode_video_url(
     return f"data:{mimetype};base64,{video_b64}"
 
 
+def get_load_audio_from_video(kwargs: Mapping[str, object] | None) -> bool | None:
+    """Whether each video's audio track is loaded and fused into the video, or
+    `None` if the processor kwargs don't say.
+
+    `load_audio_from_video` is the name Transformers uses for this processor
+    setting, replacing the deprecated `use_audio_in_video`, which is still read as a
+    fallback until vLLM moves to the new name everywhere.
+    """
+    if not kwargs:
+        return None
+    for name in ("load_audio_from_video", "use_audio_in_video"):
+        if (value := kwargs.get(name)) is not None:
+            return bool(value)
+    return None
+
+
 def get_mm_features_in_window(
     mm_features: list[MultiModalFeatureSpec],
     start: int,
@@ -220,7 +236,7 @@ def strip_covered_mm_data(
     so the workers never consume the payload fields. M-RoPE models keep
     CPU-side metadata fields used to compute positions. SHM address items
     are also kept so workers can balance the sender's reference count. The
-    scheduler-side ``Request`` keeps the full features."""
+    scheduler-side `Request` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
         return mm_features
 
@@ -390,25 +406,67 @@ def fetch_video(
     return media_connector.fetch_video(video_url)
 
 
-def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Tensor":
+def set_mm_embedding_modality(
+    embed: "torch.Tensor",
+    modality: str,
+    placement: tuple[int, int, "torch.Tensor | None"] | None = None,
+) -> "torch.Tensor":
     """Attach modality metadata to a gathered multimodal embedding tensor.
 
     Used by interleaved Omni merge paths that need to group embeddings by
     modality without threading a parallel modalities list through
-    ``embed_input_ids``.
+    `embed_input_ids`.
+
+    `placement` is `(start, end, is_embed)`: the embedding fills the batch
+    positions `[start, end)` selected by the CPU mask `is_embed` (all of them
+    if `None`). It lets models build per-modality position masks without
+    reading `input_ids` on the host.
     """
     embed.modality = modality  # type: ignore[attr-defined]
+    if placement is not None:
+        embed.mm_placement = placement  # type: ignore[attr-defined]
     return embed
 
 
 def copy_mm_embedding_modality(
     src: "torch.Tensor", dst: "torch.Tensor"
 ) -> "torch.Tensor":
-    """Copy ``modality`` from ``src`` onto ``dst`` if present."""
+    """Copy `modality` and `mm_placement` from `src` onto `dst` if present."""
     modality = getattr(src, "modality", None)
     if modality is not None:
         dst.modality = modality  # type: ignore[attr-defined]
+    placement = getattr(src, "mm_placement", None)
+    if placement is not None:
+        dst.mm_placement = placement  # type: ignore[attr-defined]
     return dst
+
+
+def get_mm_embedding_modality_masks(
+    multimodal_embeddings: Sequence["torch.Tensor"],
+    is_multimodal: "torch.Tensor",
+) -> dict[str, "torch.Tensor"] | None:
+    """Build a position mask per modality from each embedding's `mm_placement`.
+
+    Returns `None` if any embedding lacks a modality or placement, in which
+    case callers must derive the masks from `input_ids` instead.
+    """
+    import torch
+
+    masks: dict[str, torch.Tensor] = {}
+    for embed in multimodal_embeddings:
+        modality = getattr(embed, "modality", None)
+        placement = getattr(embed, "mm_placement", None)
+        if modality is None or placement is None:
+            return None
+        start, end, is_embed = placement
+        mask = masks.get(modality)
+        if mask is None:
+            mask = masks[modality] = torch.zeros_like(is_multimodal)
+        if is_embed is None:
+            mask[start:end] = True
+        else:
+            mask[start:end] |= is_embed
+    return masks
 
 
 def get_mm_embedding_modalities(

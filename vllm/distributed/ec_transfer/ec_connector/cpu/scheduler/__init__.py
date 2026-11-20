@@ -350,13 +350,7 @@ class ECCPUScheduler:
         """
         mm_hash = feature.identifier
         self._deferred_since.pop((request.request_id, mm_hash), None)
-        data = feature.data
-        metadata = (
-            self._metadata_resolver.fields_for(feature.modality) if data else set()
-        )
-        if data and any(
-            value.data is not None for key, value in data.items() if key not in metadata
-        ):
+        if self._metadata_resolver.has_encoder_input(feature):
             # Passthrough embeddings bypass the processor cache. SHM address
             # items therefore refer to media that the worker can encode.
             request.ec_transfer_params = dict(request.ec_transfer_params or {})
@@ -500,12 +494,12 @@ class ECCPUScheduler:
         logger.info("EC consumer: producer peer down addr=%s", addr)
 
     def _promote_completed_reads(self) -> None:
-        """Drain the just-completed set built during ``_poll_step``.
+        """Drain the just-completed set built during `_poll_step`.
 
-        Reads are marked ready in ``_process_session_results``, so a deferred
-        request is re-admitted by ``ensure_cache_available`` and loaded through
+        Reads are marked ready in `_process_session_results`, so a deferred
+        request is re-admitted by `ensure_cache_available` and loaded through
         the same local path as a natively cached entry
-        (``update_state_after_alloc`` -> ``_pending_loads``). No explicit
+        (`update_state_after_alloc` -> `_pending_loads`). No explicit
         pin/load bookkeeping is needed here beyond clearing the set.
         """
         self._step_completed.clear()
@@ -600,7 +594,7 @@ class ECCPUScheduler:
         """Keep the engine stepping so this connector's polls keep running.
 
         With NIXL enabled the engine tick is the only driver of
-        ``ProducerSession.poll_step()``, and a producer's work arrives from a
+        `ProducerSession.poll_step()`, and a producer's work arrives from a
         remote consumer, so nothing local would otherwise wake it. Without NIXL
         this only has to outlive dispatched saves and loads, so the engine can
         quiesce once the worker has confirmed them.

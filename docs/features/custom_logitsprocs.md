@@ -8,12 +8,6 @@ A "custom" logits processor is written by a user of vLLM and is loaded into vLLM
 
 This document shows how to write, load and use a custom logits processor.
 
-!!! note
-    This document covers the Model Runner V2 (MRV2) interface. The legacy V1
-    model runner (`VLLM_USE_V2_MODEL_RUNNER=0`) uses a different interface,
-    `vllm.v1.sample.logits_processor.LogitsProcessor`, which is not covered
-    here.
-
 ## Logits Processors Background
 
 A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
@@ -113,7 +107,7 @@ This section details different ways of making your logits processor visible to v
 This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` and `AsyncLLM` Python constructors, or as a CLI argument to `vllm serve` with the following syntax
 
 ``` bash
-vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
+vllm serve ... --logits-processors <logits processor 1> <logits processor 2> ...
 ```
 
 The only requirements on the FQCN are
@@ -148,7 +142,7 @@ See examples below:
 ??? code "Passing custom logits processor FQCN to vLLM server via CLI"
 
     ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:TargetTokenLogitsProcessor
+    vllm serve facebook/opt-125m --logits-processors your.module.path:TargetTokenLogitsProcessor
     ```
 
 ### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points

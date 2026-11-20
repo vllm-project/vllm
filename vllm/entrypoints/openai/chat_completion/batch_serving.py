@@ -10,6 +10,9 @@ from http import HTTPStatus
 from fastapi import Request
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    get_echo_content,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -38,7 +41,7 @@ logger = init_logger(__name__)
 
 
 def _sum_or_none(counts: list[int | None]) -> int | None:
-    """Sum per-prompt counts; ``None`` unless every prompt reported one."""
+    """Sum per-prompt counts; `None` unless every prompt reported one."""
     return None if None in counts else sum(count or 0 for count in counts)
 
 
@@ -69,8 +72,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (single_requests, all_conversations, engine_prompts) on
             success — one entry per conversation — or an ErrorResponse on
-            failure. The renderer adjusts ``single_requests`` in place, so
-            sampling must read them rather than rebuilding from ``request``.
+            failure. The renderer adjusts `single_requests` in place, so
+            sampling must read them rather than rebuilding from `request`.
 
         """
         error_check_ret = await self._check_model(request)
@@ -236,10 +239,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         Fans out N generators (one per conversation in the batch), collects
         the final output for each, and assembles a single
-        ``ChatCompletionResponse`` whose ``choices`` are indexed 0,...,N-1.
+        `ChatCompletionResponse` whose `choices` are indexed 0,...,N-1.
 
         Tool-use and streaming are rejected upstream by the
-        ``check_batch_mode`` validator, so neither needs to be handled here.
+        `check_batch_mode` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
         final_results: dict[int, RequestOutput] = {}
@@ -327,18 +330,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
                 if request.echo:
-                    conversation = all_conversations[prompt_idx]
-                    last_msg_content: str | list[dict[str, str]] = ""
-                    if (
-                        conversation
-                        and "content" in conversation[-1]
-                        and conversation[-1].get("role") == role
-                    ):
-                        last_msg_content = conversation[-1]["content"] or ""
-                    if isinstance(last_msg_content, list):
-                        last_msg_content = "\n".join(
-                            msg["text"] for msg in last_msg_content
-                        )
+                    last_msg_content = get_echo_content(
+                        all_conversations[prompt_idx], role
+                    )
                     message.content = last_msg_content + (message.content or "")
 
                 choice_data = ChatCompletionResponseChoice(
@@ -354,6 +348,16 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     ),
                 )
                 choices.append(choice_data)
+
+                if self.enable_log_outputs and self.request_logger and message.content:
+                    self.request_logger.log_outputs(
+                        request_id=f"{request_id}_{prompt_idx}",
+                        outputs=message.content,
+                        output_token_ids=output.token_ids,
+                        finish_reason=choice_data.finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
 
         mm_total: Counter[str] = Counter()
         for counts in mm_token_counts or ():

@@ -457,7 +457,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/gptq/q_gemm.cu"
     "csrc/pos_encoding_kernels.cu"
-    "csrc/fused_muse_spark_qknorm_rope_kv_insert_kernel.cu"
+    # Fused MUSE-Spark qknorm/rope/kv-insert is instantiated one unit per
+    # head_dim: with the whole op in one unit it is one of the longest compiles
+    # of a 9-arch build. _api keeps the public entry point and forwards on
+    # head_dim.
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_api.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd64.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd128.cu"
+    "csrc/fused_muse_spark_qknorm_rope_kv_insert_hd256.cu"
     "csrc/fused_qknorm_rope_kernel.cu"
     "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
     "csrc/layernorm_kernels.cu"
@@ -466,7 +473,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
     "csrc/attention/merge_attn_states.cu"
     "csrc/sampler.cu"
-    "csrc/topk.cu"
+    "csrc/attention/dsa/topk/top_k_per_row.cu"
+    "csrc/attention/dsa/topk/topk.cu"
     "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
@@ -641,9 +649,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/cooperative_topk.cu")
+        "csrc/attention/dsa/topk/cooperative_topk.cu")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/cooperative_topk.cu"
+        SRCS "csrc/attention/dsa/topk/cooperative_topk.cu"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
     endif()
 
@@ -1171,6 +1179,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
   endif()
 
+  # Inkling2's fused all-reduce uses NVLink multicast and thread-block
+  # clusters. The mixes and norms of its kernels must not contract into FMAs.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "9.0a;10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(INKLING2_KERNEL_ARCHS)
+    set(INKLING2_KERNEL_SRCS
+      "csrc/inkling2/allreduce_conv_mix.cu"
+      "csrc/inkling2/conv_mix.cu"
+      "csrc/inkling2/seq_parallel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${INKLING2_KERNEL_SRCS}"
+      CUDA_ARCHS "${INKLING2_KERNEL_ARCHS}")
+    set_property(SOURCE ${INKLING2_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${INKLING2_KERNEL_SRCS}")
+    message(STATUS
+      "Building Inkling2 kernels for archs: ${INKLING2_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1222,7 +1254,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_MQA_TOPK_ARCHS)
-    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set(FUSED_MQA_TOPK_SRC "csrc/attention/dsa/fused_mqa_topk/fused_mqa_topk.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_MQA_TOPK_SRC}"
       CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
@@ -1317,6 +1349,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(BEAM_KERNEL_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_BEAM_KERNELS=1)
+    endif()
+    if(INKLING2_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_INKLING2_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1609,18 +1645,33 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The skinny GEMM launchers are split per kernel family: the kernels (and the
+  # device code they instantiate) are shared through skinny_gemms.cuh, but each
+  # family gets its own translation unit so ninja compiles them in parallel.
+  set(VLLM_SKINNY_SRC
+    "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_swmmac.cu"
+    "csrc/rocm/skinny_gemms_wvsplitk.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkq.cu")
+
   # The int4 skinny GEMM is instantiated one unit per N_in (a template over
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
   # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
-  # with extern template keeping the device code in the five units.
+  # with extern template keeping the device code in the per-N_in units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"
     "csrc/rocm/skinny_gemms_int4_n2.cu"
     "csrc/rocm/skinny_gemms_int4_n3.cu"
     "csrc/rocm/skinny_gemms_int4_n4.cu"
-    "csrc/rocm/skinny_gemms_int4_n5.cu")
+    "csrc/rocm/skinny_gemms_int4_n5.cu"
+    "csrc/rocm/skinny_gemms_int4_n6.cu"
+    "csrc/rocm/skinny_gemms_int4_n7.cu"
+    "csrc/rocm/skinny_gemms_int4_n8.cu")
+  # Both families are built into _rocm_C_skinny below.
+  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
@@ -1712,8 +1763,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    "csrc/rocm/skinny_gemms.cu"
-    ${VLLM_SKINNY_INT4_SRC}
+    ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
     ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
@@ -1730,15 +1780,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_INT4_SRC})
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    set(VLLM_SKINNY_SRC
-      "csrc/rocm/skinny_gemms.cu"
-      ${VLLM_SKINNY_INT4_SRC})
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
@@ -1772,6 +1818,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     set(VLLM_ROCM_HAS_GFX115X ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/rdna35_gdn_chunked.cu")
+  endif()
+
+  # The W4A8 MoE decode kernel supports every gfx11 GPU (gfx1100-gfx1103,
+  # gfx1150, gfx1151), so it does not need gfx1100 in the target list.
+  set(VLLM_ROCM_HAS_GFX11 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx11[0-9]+")
+    set(VLLM_ROCM_HAS_GFX11 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_w4a8_decode_rdna3.cu")
+  endif()
+
+  # RDNA3.5 attention kernels (gfx1151 only).
+  set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
+  if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
+    set(VLLM_ROCM_HAS_RDNA_ATTN ON)
+    include(cmake/rocm_rdna_attn.cmake)
+    rdna_attn_target(_rocm_C_rdna_attn "gfx1151")
+    list(APPEND VLLM_ROCM_EXT_SRC "csrc/rocm/rdna_registry.cu")
   endif()
 
   define_extension_target(
@@ -1810,6 +1874,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(VLLM_ROCM_HAS_GFX115X)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)
+  endif()
+  if(VLLM_ROCM_HAS_RDNA_ATTN)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
+  endif()
+  if(VLLM_ROCM_HAS_GFX11)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX11)
   endif()
 endif()
 

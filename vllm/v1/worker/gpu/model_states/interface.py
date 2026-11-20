@@ -43,6 +43,11 @@ class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
 
+    positions_depend_on_encoder: bool = False
+    """Whether the positions this state prepares depend on encoder outputs.
+    Only the first PP stage runs the encoder, so later stages take the
+    positions from it."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -121,6 +126,11 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        """M-RoPE position delta of the request at `req_index`, or None if the
+        model does not use M-RoPE."""
+        return None
+
     def remove_request(self, req_id: str) -> None:
         return None
 
@@ -142,15 +152,15 @@ class ModelState(ABC):
         stream: torch.cuda.Stream | None = None,
     ) -> None:
         """Capture the CUDA graphs this state runs inside the model's forward,
-        on ``stream``: the model graphs' capture stream."""
+        on `stream`: the model graphs' capture stream."""
         return None
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside
-        ``init_attn_backend`` (e.g. encoder-only layers).
+        `init_attn_backend` (e.g. encoder-only layers).
 
         Returns the minimum support level and its backend name. The default of
-        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        `ALWAYS` imposes no extra constraint on the runner's cudagraph mode.
         """
         return AttentionCGSupport.ALWAYS, None
 
@@ -162,7 +172,7 @@ class ModelState(ABC):
         num_computed_tokens: torch.Tensor,
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
-        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        are gathered). Used by mamba prefix caching to pre-copy state
         across block boundaries. No-op by default."""
         return None
 
@@ -181,11 +191,17 @@ class ModelState(ABC):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor | None:
-        """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
+        """Prepare the `inputs_embeds` tensor for the current forward pass."""
         raise NotImplementedError
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         return None
 
     def execute_mm_encoder(
@@ -248,8 +264,8 @@ class ModelState(ABC):
         """Wrap or replace the default sampler.
 
         Called after model loading with the already-constructed base
-        ``Sampler``.  Return ``None`` to keep the defaults, or
-        ``(sampler, rejection_sampler | None)`` to override.
+        `Sampler`.  Return `None` to keep the defaults, or
+        `(sampler, rejection_sampler | None)` to override.
         """
         return None
 
@@ -260,7 +276,7 @@ class ModelState(ABC):
     def dummy_sampler_run(self, sampler: Any, hidden_states: torch.Tensor) -> bool:
         """Run a model-specific sampler profiling pass.
 
-        Return ``True`` to skip the default dummy sampler run.
+        Return `True` to skip the default dummy sampler run.
         """
         return False
 

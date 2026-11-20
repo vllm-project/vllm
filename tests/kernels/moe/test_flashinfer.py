@@ -49,6 +49,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import grouped_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
@@ -135,7 +136,7 @@ def check_accuracy(ref_output, actual_output, atol=0.1, rtol=0.85, percent=0.925
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class TestData:
     hidden_states: torch.Tensor
     w13_quantized: torch.Tensor
@@ -562,9 +563,9 @@ def _make_unquantized_flashinfer_test_layer(
     method.moe_kernel = None
     mock_kernel = MagicMock()
     monkeypatch.setattr(
-        method,
+        UnquantizedFusedMoEMethod,
         "_init_moe_kernel",
-        lambda _: setattr(method, "moe_kernel", mock_kernel),
+        lambda self, _: setattr(self, "moe_kernel", mock_kernel),
     )
 
     layer = torch.nn.Module()
@@ -643,7 +644,8 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
         assert torch.equal(kernel_w2, expected_w2)
 
 
-def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
+def _check_flashinfer_ipc_weights(entries, expected, device_index):
+    from vllm.model_executor.model_loader.utils import _register_processed_tensors
     from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheState,
@@ -656,8 +658,10 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
             monkeypatch, 192, is_gated=True, device="meta"
         )
         loader = object.__new__(IpcModelLoader)
-        loader.mode = mode
-        loader._apply_entries(layer, WeightCacheState(entries, {}, {}), device_index)
+        storages, manifest = entries
+        records = [entry.rebuild(device_index) for entry in storages]
+        tensors = loader._rebuild_storages(WeightCacheState(manifest, records, {}, {}))
+        _register_processed_tensors(layer, tensors, manifest, {})
         pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
 
         # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
@@ -679,15 +683,19 @@ def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
 
 
 @pytest.mark.parametrize("cache_ndim", [3, 4])
-@pytest.mark.parametrize("mode", ["copy", "zero_copy"])
 def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
-    monkeypatch, cache_ndim, mode
+    monkeypatch, cache_ndim
 ):
     """A spawned IPC consumer restores views without transient method state."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
-    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
+        TensorEntry,
+    )
+    from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+        build_manifest,
+    )
 
     method, layer = _make_unquantized_flashinfer_test_layer(
         monkeypatch, 192, is_gated=True, device="meta"
@@ -698,16 +706,23 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         torch.randn_like(layer.w2_weight, device="cuda"),
     )
     expected = [weight.cpu() for weight in packed]
-    entries = {}
+    tensors = {}
     for name, weight in zip(("w13_weight", "w2_weight"), packed):
-        cached = weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
-        entries[name] = TensorEntry.from_tensor(cached, kind="param")
+        tensors[name] = (
+            weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
+        )
+    manifest, source_storages = build_manifest(
+        tensors, {name: "param" for name in tensors}
+    )
+    entries = (
+        [TensorEntry.from_storage(storage) for storage in source_storages],
+        manifest,
+    )
     consumer = multiprocessing.get_context("spawn").Process(
         target=_check_flashinfer_ipc_weights,
         args=(
             entries,
             expected,
-            mode,
             torch.accelerator.current_device_index(),
         ),
     )
@@ -718,10 +733,7 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         assert not consumer.is_alive(), "IPC consumer timed out"
         assert consumer.exitcode == 0, "IPC consumer failed; see child traceback"
         for source, reference in zip(packed, expected):
-            expected_source = (
-                torch.ones_like(reference) if mode == "zero_copy" else reference
-            )
-            assert torch.equal(source.cpu(), expected_source)
+            assert torch.equal(source.cpu(), torch.ones_like(reference))
     finally:
         if consumer.is_alive():
             consumer.terminate()
@@ -822,7 +834,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
     m: int, block_shape: list[int], transposed: bool, workspace_init
 ):
     """TRTLLM-Gen block-FP8 and MXFP8 modular experts can leave the top-k
-    finalize to the caller. For fp8-block, ``transposed`` toggles the oracle's
+    finalize to the caller. For fp8-block, `transposed` toggles the oracle's
     is_scale_transposed column-major activation-scale layout."""
     if block_shape != [128, 128] and transposed:
         pytest.skip("column-major scales apply to fp8 [128, 128] block only")
@@ -1177,6 +1189,170 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
         )
 
     torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("block_shape", "routing"),
+    [([128, 128], "softmax"), ([1, 32], "sigmoid_bias"), ([128, 128], "grouped")],
+    ids=["block", "mxfp8", "block-grouped"],
+)
+@pytest.mark.parametrize("m", [4, 64])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_monolithic_routed_skips_padding(
+    m: int, block_shape: list[int], routing: str, workspace_init
+):
+    """With vLLM's top-k, padded rows (expert id -1) reach no expert and real
+    rows match the kernel's own routing. Routes like Qwen (softmax,
+    renormalized), MiniMax (sigmoid with bias, scaled) and DeepSeek-V3 / GLM
+    (grouped sigmoid with bias, scaled)."""
+    is_mxfp8 = block_shape == [1, 32]
+    is_grouped = routing == "grouped"
+    e, topk, n, k = (64, 8, 512, 1024) if is_grouped else (32, 4, 1024, 1024)
+    num_expert_group, topk_group = (8, 4) if is_grouped else (None, None)
+    scale = {"softmax": None, "sigmoid_bias": 2.0, "grouped": 2.5}[routing]
+    num_real = m // 2
+    set_random_seed(7)
+    with set_current_vllm_config(vllm_config):
+        if is_mxfp8:
+            weights = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+            weights = (w1, w2, w1_scale, w2_scale)
+        w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            SimpleNamespace(
+                weight_block_size=block_shape,
+                moe_config=SimpleNamespace(
+                    is_act_and_mul=True, intermediate_size_per_partition=n
+                ),
+                activation=MoEActivation.SILU,
+            ),
+            *weights,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            w1_scale,
+            w2_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method={
+                "softmax": RoutingMethodType.Renormalize,
+                "sigmoid_bias": RoutingMethodType.MiniMax2,
+                "grouped": RoutingMethodType.DeepSeekV3,
+            }[routing],
+            max_num_tokens=next_power_of_2(m),
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=True,
+            ),
+            TrtLlmFp8ExpertsMonolithic(
+                moe_config=moe_config, quant_config=quant_config
+            ),
+        )
+        assert isinstance(kernel.impl, mk.FusedMoEKernelMonolithicImpl)
+        experts = kernel.impl.fused_experts
+        assert experts.supports_precomputed_routing()
+
+        a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
+        bias = (
+            torch.randn(e, device="cuda", dtype=torch.float32) / 10
+            if routing != "softmax"
+            else None
+        )
+        is_padding = torch.arange(m, device="cuda") >= num_real
+        common = dict(w1=w1, w2=w2, activation=MoEActivation.SILU, global_num_experts=e)
+
+        def route() -> tuple[torch.Tensor, torch.Tensor]:
+            if is_grouped:
+                topk_weights, topk_ids = grouped_topk(
+                    a,
+                    logits,
+                    topk,
+                    renormalize=True,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func="sigmoid",
+                    routed_scaling_factor=scale,
+                    e_score_correction_bias=bias,
+                )
+            elif is_mxfp8:
+                topk_weights, topk_ids = fused_topk_bias(
+                    a,
+                    logits,
+                    scoring_func="sigmoid",
+                    e_score_correction_bias=bias,
+                    topk=topk,
+                    renormalize=True,
+                    routed_scaling_factor=scale,
+                )
+            else:
+                topk_weights, topk_ids, _ = fused_topk(
+                    a, logits, topk, renormalize=True
+                )
+            # What vLLM's routers write for padding rows.
+            topk_ids = topk_ids.to(torch.int32).masked_fill(is_padding[:, None], -1)
+            return topk_weights, topk_ids
+
+        topk_weights, topk_ids = route()
+        # Production takes this path only under DP (NaiveDPEP dispatch); here the
+        # experts run on one GPU with the same quantized input as the reference.
+        a1q, a1q_scale, _ = kernel.impl.prepare_finalize.prepare(
+            a,
+            logits,
+            quant_config=quant_config,
+            defer_input_quant=experts.expects_unquantized_inputs,
+        )
+        routed = experts.apply_precomputed_routing(
+            hidden_states=a1q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            a1q_scale=a1q_scale,
+            **common,
+        )
+        reference = kernel.apply_monolithic(
+            hidden_states=a,
+            router_logits=logits,
+            e_score_correction_bias=bias,
+            routed_scaling_factor=scale,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            routing_sink=None,
+            **common,
+        )
+
+    assert isinstance(routed, torch.Tensor)
+    assert isinstance(reference, torch.Tensor)
+    torch.testing.assert_close(
+        routed[:num_real], reference[:num_real], atol=2e-2, rtol=2e-2
+    )
+    assert not routed[num_real:].any()
 
 
 @pytest.mark.parametrize(

@@ -131,7 +131,7 @@ def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
 
 @pytest.fixture
 def mxfp4_oracle_config():
-    """Stub the config the oracle reads (``model_config.quantization_config``)
+    """Stub the config the oracle reads (`model_config.quantization_config`)
     so backend dispatch resolves without a real model / user override."""
     from unittest.mock import patch
 
