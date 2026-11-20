@@ -19,8 +19,8 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
-  - pytest -v -s distributed/test_eplb_utils.py
-  - pytest -v -s distributed/test_eplb_extension_hooks.py
+  - pytest -v -s distributed/test_eplb_utils.py -m 'not cpu_test'
+  - pytest -v -s distributed/test_eplb_extension_hooks.py -m 'not cpu_test and not distributed'
   mirror:
     amd:
       automatic_shard: true
