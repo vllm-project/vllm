@@ -67,21 +67,23 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
-## Local argmax for Qwen4Exp on AMD
+## Local argmax reduction
 
 This option is disabled by default.
-The AMD (ROCm) Qwen4Exp MTP implementation supports greedy draft selection with
-`"use_local_argmax_reduction": true` in `--speculative-config`:
+Greedy draft selection can use `"use_local_argmax_reduction": true` in
+`--speculative-config` with MTP drafts that implement `get_top_tokens`,
+including Qwen4Exp on AMD (ROCm):
 
 ```json
-{"method": "mtp", "num_speculative_tokens": 2, "use_local_argmax_reduction": true}
+{"method": "mtp", "num_speculative_tokens": 3, "use_local_argmax_reduction": true}
 ```
 
 Each tensor-parallel rank selects its local best draft token, then exchanges
 the score and token ID instead of the full vocabulary logits. Target-model
 verification is unchanged. This option requires greedy draft sampling and
-cannot be combined with probabilistic draft sampling or heterogeneous draft
-vocabularies. Benchmark the intended workload before enabling it for serving;
+cannot be combined with probabilistic draft sampling, heterogeneous draft
+vocabularies, or adaptive verification without a confidence head (see
+[Adaptive verification](adaptive_verification.md)). Benchmark the intended workload before enabling it for serving;
 reducing communication volume does not guarantee lower request latency.
 
 ## Notes
