@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 )
 from vllm.models.muse_spark.amd.muse_moe_runner import MuseSparkAiterExperts
 from vllm.models.muse_spark.amd.ops import decode_moe as dmoe
+from vllm.models.muse_spark.amd.ops.compact_moe import MAX_TOKENS as COMPACT_MAX_TOKENS
 from vllm.platforms import current_platform
 
 from .moe.test_muse_spark_rocm_bf16_moe import (
@@ -305,6 +306,65 @@ def test_native_routes_with_repeated_experts_and_nan_rows(
     compared = ~repeats & pooled.isfinite().all(dim=1)
     assert compared[0]
     torch.testing.assert_close(native[compared], per_route[compared])
+
+
+# The compact experts and the FlyDSL stages share the quant rules and the output
+# rounding; only fp32 accumulation order may differ.
+COMPACT_REL_L2 = 1e-3
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@pytest.mark.parametrize("local_experts", [32, 64])
+@pytest.mark.parametrize("num_tokens", [1, 8, 24, 64, 65, 192, COMPACT_MAX_TOKENS])
+@torch.inference_mode()
+def test_compact_experts_match_the_flydsl_stages(
+    rocm_aiter_moe, monkeypatch: pytest.MonkeyPatch, local_experts: int, num_tokens: int
+) -> None:
+    """The compact experts give the FlyDSL stages' per-slot outputs on every
+    local route."""
+    from vllm.models.muse_spark.amd import decode_moe
+    from vllm.models.muse_spark.amd.ops.compact_moe import supports_compact_moe
+
+    torch.manual_seed(num_tokens)
+    device = torch.device("cuda")
+    local, expert_map, expert_mask = determine_expert_map(
+        ep_size=NUM_EXPERTS // local_experts,
+        ep_rank=1,
+        global_num_experts=NUM_EXPERTS,
+        return_expert_mask=True,
+    )
+    assert expert_map is not None and expert_mask is not None
+    expert_map, expert_mask = expert_map.to(device), expert_mask.to(device)
+    w13, w2, quant_config = _mxfp4_weights(
+        torch.randn(local, 2 * HIDDEN, HIDDEN, dtype=torch.bfloat16, device=device)
+        / HIDDEN**0.5,
+        torch.randn(local, HIDDEN, HIDDEN, dtype=torch.bfloat16, device=device)
+        / HIDDEN**0.5,
+    )
+    x = torch.randn(num_tokens, HIDDEN, dtype=torch.bfloat16, device=device)
+    topk_ids = torch.topk(
+        torch.randn(num_tokens, NUM_EXPERTS, device=device), TOP_K, dim=-1
+    ).indices.to(torch.int32)
+    w1_scale, w2_scale = quant_config.w1_scale, quant_config.w2_scale
+    assert supports_compact_moe(
+        num_tokens, TOP_K, HIDDEN, HIDDEN, w13, w2, w1_scale, w2_scale
+    )
+    kernels = decode_moe._stage_kernels(num_tokens, TOP_K, local, HIDDEN, HIDDEN)
+    assert kernels is not None
+
+    def experts() -> torch.Tensor:
+        return decode_moe._native_routes_experts(
+            x, topk_ids, w13, w2, w1_scale, w2_scale, expert_mask, expert_map, kernels
+        )
+
+    compact = experts()
+    monkeypatch.setattr(decode_moe, "supports_compact_moe", lambda *args: False)
+    flydsl = experts()
+    routes = expert_map[topk_ids.long()] >= 0
+    compact, flydsl = compact[routes].float(), flydsl[routes].float()
+    assert torch.isfinite(compact).all()
+    rel = (compact - flydsl).norm() / flydsl.norm().clamp_min(1e-30)
+    assert rel < COMPACT_REL_L2, f"relative L2 {rel:.2e}"
 
 
 LOCAL_EXPERTS = 64

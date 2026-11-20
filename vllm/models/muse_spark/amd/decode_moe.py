@@ -8,8 +8,9 @@ runs the whole layer on the layer's own weights:
 
 * router logits and pooler, then one prep kernel: router split-K reduce, sigmoid
   top-k routing and the pre-expert RMSNorm, one row per token;
-* the experts on the `[T, top_k]` routes: moe_sorting, the stage-1 MXFP4 quant of
-  the T rows into sorted layout (both in one Triton launch up to
+* the experts on the `[T, top_k]` routes: up to `compact_moe.MAX_TOKENS` tokens,
+  the compact MXFP4 expert kernels; above, moe_sorting, the stage-1 MXFP4 quant
+  of the T rows into sorted layout (both in one Triton launch up to
   `SORT_QUANT_MAX_TOKENS` tokens), AITER's FlyDSL stages with a per-slot stage 2;
 * the fused post-expert finalize, masking the routes of other ranks' experts;
 * the layer's reduction (all-reduce, or reduce-scatter on a token-sharded step)
@@ -36,6 +37,7 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 )
 
 from .muse_moe_runner import MuseSparkAiterExperts, MuseSparkQuarkOCPMXFusedMoE
+from .ops.compact_moe import compact_moe_experts, supports_compact_moe
 from .ops.decode_moe import (
     decode_moe_prep,
     sort_quant,
@@ -355,6 +357,9 @@ def _native_routes_experts(
     (`return_per_slot`). Rows of other ranks' routes are left unwritten. Up to
     `SORT_QUANT_MAX_TOKENS` tokens, `sort_quant` does the sorting and that quant
     in one launch.
+
+    Calls that `supports_compact_moe` accepts take `compact_moe_experts`
+    instead, with the same quant rules and output.
     """
     from aiter.fused_moe import _flydsl_stage1_wrapper, moe_sorting
     from aiter.ops.flydsl import moe_kernels as fly
@@ -363,6 +368,13 @@ def _native_routes_experts(
     num_tokens, top_k = topk_ids.shape
     hidden = hidden_states.shape[1]
     inter = w1.shape[1] // 2
+    if supports_compact_moe(
+        num_tokens, top_k, hidden, inter, w1, w2, w1_scale, w2_scale
+    ):
+        logger.info_once("Muse Spark decode MoE: compact MXFP4 experts.")
+        return compact_moe_experts(
+            hidden_states, topk_ids, local_index, w1, w2, w1_scale, w2_scale
+        )
     block_m = kernels.block_m
     e8m0, fp4x2 = torch.float8_e8m0fnu, torch.float4_e2m1fn_x2
     device = hidden_states.device
