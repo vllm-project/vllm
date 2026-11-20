@@ -255,8 +255,6 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
         kv_cache_group_id=0,
         scheduler_block_size=block_size,
     )
-    # MTP/EAGLE moves the checkpoint one block below the last full block.
-    manager.drop_eagle_checkpoint_block = True
     init_none_hash(sha256)
     prompt_tokens = 6 * block_size + 50
     request = Request(
@@ -276,7 +274,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
             request,
             end,
             retention_interval=retention_interval,
-            replay_boundaries=[5 * block_size],
+            replay_boundaries=(5 * block_size,),
         )
         request.num_computed_tokens = end
 
@@ -499,7 +497,6 @@ def test_dflash_window_hit_needs_only_the_window_before_request_end(
         block_pool=block_pool,
         block_size=block_size,
         manager_config=new_dflash_window_layer().manager_config,
-        drop_eagle_block=False,
         alignment_tokens=block_size,
         num_request_tokens=41,
     )
@@ -548,7 +545,6 @@ def test_dflash_window_sparse_retention_caches_only_what_a_replay_reads(
         block_pool=block_pool,
         block_size=4,
         manager_config=layer.manager_config,
-        drop_eagle_block=False,
         alignment_tokens=4,
         num_request_tokens=40,
     )
@@ -807,7 +803,6 @@ def test_chunked_local_attention_possible_cached_prefix():
             block_pool=block_pool,
             block_size=chunked_local_attention_spec.spec.block_size,
             manager_config=chunked_local_attention_spec.manager_config,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -878,7 +873,6 @@ def test_sliding_window_possible_cached_prefix():
             block_pool=block_pool,
             block_size=sliding_window_spec.spec.block_size,
             manager_config=sliding_window_spec.manager_config,
-            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
         assert len(computed_blocks) == expect_length
@@ -944,7 +938,6 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
         block_pool=block_pool,
         block_size=sliding_window_spec.spec.block_size,
         manager_config=sliding_window_spec.manager_config,
-        drop_eagle_block=False,
         alignment_tokens=hash_block_size,
     )
 
