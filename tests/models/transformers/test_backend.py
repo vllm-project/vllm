@@ -25,6 +25,7 @@ from transformers import (
     core_model_loading,
 )
 from transformers.conversion_mapping import WeightConverter, WeightRenaming
+from transformers.utils.generic import is_flash_attention_requested
 
 from vllm import SamplingParams
 from vllm.compilation.counter import compilation_counter
@@ -40,7 +41,10 @@ from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base, SplitWeights
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
-from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
+from vllm.model_executor.models.transformers.fusers.attention import (
+    VLLM_ATTN_IMPL,
+    VLLM_MM_ENCODER_ATTN_IMPL,
+)
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import (
@@ -252,6 +256,13 @@ def test_infer_dynamic_arg_dims():
     dynamic = ("pixel_values", "position_ids", "mask", "embeddings")
     assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
     assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
+
+
+def test_mm_encoder_attn_impl_flash():
+    """Transformers only takes the `cu_seqlens` branch if it thinks flash is used."""
+    assert is_flash_attention_requested(
+        requested_attention_implementation=VLLM_MM_ENCODER_ATTN_IMPL
+    )
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:

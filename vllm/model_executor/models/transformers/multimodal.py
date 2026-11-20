@@ -1371,10 +1371,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
     def _create_attention_instances(self, prefix: str = ""):
         super()._create_attention_instances(prefix)
-        if not self.compilation_config.compile_mm_encoder:
-            return
         # Encoders batching images by `cu_seqlens` split them with `.tolist()` unless
-        # they dispatch to a flash attention implementation, which compile can't trace
+        # they dispatch to a flash attention implementation, which is faster in eager
+        # mode and which compile can trace
         modules: Iterable[Any] = self.model.modules()
         for module in modules:
             if (
