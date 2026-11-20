@@ -1289,24 +1289,44 @@ def test_asm_kv_scale_tables_shared_across_builders():
 
 
 # FlyDSL paged-attention decode -------------------------------------------
-def _enable_flydsl_pa_decode(monkeypatch) -> None:
+def _flydsl_pa_decode_config(block_size: int = 64):
+    from tests.v1.attention.utils import create_vllm_config
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
 
-    monkeypatch.setattr(rocm_aiter_ops, "_FLYDSL_PA_DECODE_ENABLED", True)
-    if not rocm_aiter_ops.is_flydsl_pa_decode_enabled():
-        pytest.skip("FlyDSL NHD pa_decode needs gfx950 and ROCm/aiter#5949")
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        max_model_len=2048,
+        block_size=block_size,
+    )
+    config.cache_config.cache_dtype = "fp8"
+    config.attention_config.rocm_aiter_fa_flydsl_decode = True
+    with set_current_vllm_config(config):
+        if not rocm_aiter_ops.is_flydsl_pa_decode_enabled():
+            pytest.skip("FlyDSL NHD pa_decode needs gfx950 and ROCm/aiter#5949")
+    return config
 
 
-def test_aiter_fa_flydsl_pa_decode_requirements(monkeypatch):
+def test_aiter_fa_flydsl_pa_decode_requirements():
     """Layers the FlyDSL decode kernel cannot serve keep the default path."""
+    from vllm.config import set_current_vllm_config
     from vllm.v1.attention.backends.rocm_aiter_fa import (
         AiterFlashAttentionBackend,
         AiterFlashAttentionImpl,
     )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    _enable_flydsl_pa_decode(monkeypatch)
-    assert 64 in AiterFlashAttentionBackend.get_supported_kernel_block_sizes()
-    assert AiterFlashAttentionBackend.get_preferred_block_size(16) == 64
+    config = _flydsl_pa_decode_config()
+
+    def kernel_block_sizes(head_size: int) -> list:
+        spec = FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=2,
+            head_size=head_size,
+            dtype=current_platform.fp8_dtype(),
+        )
+        return AiterFlashAttentionBackend.get_supported_kernel_block_sizes(spec)
 
     def use_flydsl(**overrides) -> bool:
         kwargs = dict(
@@ -1321,13 +1341,27 @@ def test_aiter_fa_flydsl_pa_decode_requirements(monkeypatch):
         kwargs.update(overrides)
         return AiterFlashAttentionImpl(**kwargs).use_flydsl_pa_decode
 
-    assert use_flydsl()
-    assert not use_flydsl(kv_cache_dtype="auto")
-    assert not use_flydsl(head_size=128)
-    assert not use_flydsl(num_heads=128, num_kv_heads=2)
-    assert not use_flydsl(logits_soft_cap=30.0)
-    assert not use_flydsl(sliding_window=128)
-    assert not use_flydsl(sinks=torch.zeros(16))
+    with set_current_vllm_config(config):
+        assert AiterFlashAttentionBackend.get_preferred_block_size(16) == 64
+        assert 64 in kernel_block_sizes(256)
+        # Other head sizes keep the 16/32-token blocks their kernels need.
+        assert 64 not in kernel_block_sizes(64)
+
+        assert use_flydsl()
+        assert not use_flydsl(kv_cache_dtype="auto")
+        assert not use_flydsl(head_size=128)
+        assert not use_flydsl(num_heads=128, num_kv_heads=2)
+        assert not use_flydsl(logits_soft_cap=30.0)
+        assert not use_flydsl(sliding_window=128)
+        assert not use_flydsl(sinks=torch.zeros(16))
+
+    config.attention_config.rocm_aiter_fa_flydsl_decode = False
+    with set_current_vllm_config(config):
+        assert not use_flydsl()
+        assert AiterFlashAttentionBackend.get_supported_kernel_block_sizes() == [
+            16,
+            32,
+        ]
 
 
 @pytest.mark.parametrize(
@@ -1342,7 +1376,6 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
     from tests.v1.attention.utils import (
         BatchSpec,
         create_common_attn_metadata,
-        create_vllm_config,
     )
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
@@ -1355,10 +1388,10 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     _assert_aiter_supported()
-    _enable_flydsl_pa_decode(monkeypatch)
+    block_size, num_blocks, head_size = 64, 64, 256
+    config = _flydsl_pa_decode_config(block_size)
     set_random_seed(0)
 
-    block_size, num_blocks, head_size = 64, 64, 256
     num_q_heads, num_kv_heads = num_heads
     scale = head_size**-0.5
     k_scale, v_scale = 0.5, 0.25
@@ -1371,13 +1404,6 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         seq_lens=[query_len, 63, 64, 257, 1500], query_lens=[query_len] * 5
     )
 
-    config = create_vllm_config(
-        model_name="Qwen/Qwen3-0.6B",
-        dtype="bfloat16",
-        max_model_len=2048,
-        block_size=block_size,
-    )
-    config.cache_config.cache_dtype = "fp8"
     with set_current_vllm_config(config):
         layer = Attention(
             num_q_heads,
@@ -1418,12 +1444,9 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
             assert plan is not None
             assert decode.flydsl_query_len == query_len
             metadata = builder.build(0, common)
-            # MTP draft passes of the same shape reuse the target's plan.
-            draft_metadata = builder.build_for_drafting(common, draft_index=0)
-        for m in (metadata, draft_metadata):
-            assert m.decode_metadata is not None
-            assert m.decode_metadata.flydsl_plan is plan
-            assert m.decode_metadata.flydsl_query_len == query_len
+        assert metadata.decode_metadata is not None
+        assert metadata.decode_metadata.flydsl_plan is plan
+        assert metadata.decode_metadata.flydsl_query_len == query_len
         assert metadata.num_decodes == batch_spec.batch_size
 
         kv_cache = torch.empty(
@@ -1464,10 +1487,6 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         output = torch.empty_like(query)
         impl.forward(layer, query, None, None, kv_cache, metadata, output)
         assert calls == 1
-        draft_output = torch.empty_like(query)
-        impl.forward(layer, query, None, None, kv_cache, draft_metadata, draft_output)
-        assert calls == 2
-        torch.testing.assert_close(draft_output, output, atol=0, rtol=0)
 
     def dequant(x: torch.Tensor, s: float) -> torch.Tensor:
         return ((x / s).to(cache_dtype).to(x.dtype) * s).reshape(

@@ -2340,8 +2340,6 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
-        VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE: Controls FlyDSL paged-attention
-            decode in the ROCM_AITER_FA backend.
 
     Note:
         The environment variables are assigned when the module is imported,
@@ -2419,7 +2417,6 @@ class rocm_aiter_ops:
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-    _FLYDSL_PA_DECODE_ENABLED = envs.VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2453,7 +2450,6 @@ class rocm_aiter_ops:
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-        cls._FLYDSL_PA_DECODE_ENABLED = envs.VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
 
     @staticmethod
@@ -3237,25 +3233,32 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_flydsl_pa_decode_enabled(cls) -> bool:
-        """FlyDSL NHD paged-attention decode for ROCM_AITER_FA (gfx950 only).
+        """Whether `attention_config.rocm_aiter_fa_flydsl_decode` is set and the
+        FlyDSL NHD paged-attention decode can run here (gfx950 only).
 
         Not gated on VLLM_ROCM_USE_AITER so that it also applies when the
         backend is selected explicitly.
         """
-        if not cls._FLYDSL_PA_DECODE_ENABLED:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is None
+            or not vllm_config.attention_config.rocm_aiter_fa_flydsl_decode
+        ):
             return False
         from vllm.platforms.rocm import on_gfx950
 
         if not on_gfx950():
             logger.warning_once(
-                "VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE is only supported on gfx950; "
-                "ignoring it."
+                "attention_config.rocm_aiter_fa_flydsl_decode is only supported "
+                "on gfx950; ignoring it."
             )
             return False
         if not cls._flydsl_pa_decode_available():
             logger.warning_once(
-                "VLLM_ROCM_USE_AITER_FLYDSL_PA_DECODE is set but the installed "
-                "AITER/FlyDSL has no NHD pa_decode "
+                "attention_config.rocm_aiter_fa_flydsl_decode is set but the "
+                "installed AITER has no FlyDSL NHD pa_decode "
                 "(https://github.com/ROCm/aiter/pull/5949); ignoring it."
             )
             return False

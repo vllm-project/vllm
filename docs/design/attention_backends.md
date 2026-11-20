@@ -205,6 +205,27 @@ blocks. Other layers and
 batches use the AITER kernels. Muse Spark (128 / 16 heads of 64) is one model with
 this shape. The entry point is `vllm/v1/attention/ops/rocm_gqa_verify.py`.
 
+### ROCM_AITER_FA FlyDSL paged-attention decode
+
+On ROCm gfx950 (MI355X), `ROCM_AITER_FA` can run decode with AITER's FlyDSL
+paged-attention decode, which reads the backend's KV cache in 64-token kernel
+blocks. It is off by default; enable it with:
+
+```bash
+vllm serve <model> --attention-backend ROCM_AITER_FA --kv-cache-dtype fp8 \
+    --attention-config.rocm_aiter_fa_flydsl_decode true
+```
+
+It needs an AITER with the FlyDSL NHD decode API
+([ROCm/aiter#5949](https://github.com/ROCm/aiter/pull/5949)) and applies to layers
+with an FP8 KV cache in the default (unshuffled) layout, a head size and GQA ratio
+that AITER supports (head size 256), a KV cache block size that is a multiple of 64,
+and no sliding window, attention sinks, logit soft cap or ALiBi. It takes decode
+batches in which every request has the same number of query tokens: plain decode,
+speculative-decode verify steps up to the query length AITER supports (4 tokens at
+8 query heads per KV head), and the draft model's decode passes. Other layers and
+batches keep the default decode.
+
 ## MiniMax M3 Sparse Attention Backends
 
 Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")
