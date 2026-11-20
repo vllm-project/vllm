@@ -287,8 +287,7 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # MoE activation function
         activation = "silu"
-        architectures = self.config.architectures or self.model_config.architectures
-        wrapped_arch = architectures[0].lower()
+        wrapped_arch = self.config.architectures[0].lower()
         if "gptoss" in wrapped_arch:
             activation = "swigluoai"
 

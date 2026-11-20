@@ -70,6 +70,38 @@ def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
         assert set(config.rope_parameters) == set(per_layer)
 
 
+@pytest.mark.parametrize(
+    ("config_name", "thinker_architecture"),
+    [
+        ("Qwen2_5OmniConfig", "Qwen2_5OmniThinkerForConditionalGeneration"),
+        ("Qwen3OmniMoeConfig", "Qwen3OmniMoeThinkerForConditionalGeneration"),
+    ],
+)
+def test_omni_config_is_its_thinker(tmp_path, config_name, thinker_architecture):
+    """Only the thinker of an omni checkpoint runs a forward pass, so it is the
+    config vLLM serves, keeping the checkpoint-wide quantization and dtype."""
+    import transformers
+
+    config = getattr(transformers, config_name)()
+    config_dict = json.loads(config.to_json_string(use_diff=False))
+    quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 128}
+    config_dict.update(
+        architectures=[config_name.removesuffix("Config") + "ForConditionalGeneration"],
+        quantization_config=quantization_config,
+        torch_dtype="float16",
+    )
+    config_dict.pop("dtype", None)
+    (tmp_path / "config.json").write_text(json.dumps(config_dict))
+
+    _, config = config_module.HFConfigParser().parse(tmp_path, trust_remote_code=False)
+
+    assert config.model_type == config_dict["thinker_config"]["model_type"]
+    assert config.architectures == [thinker_architecture]
+    assert config.quantization_config == quantization_config
+    assert str(config.dtype).removeprefix("torch.") == "float16"
+    assert config.name_or_path == str(tmp_path)
+
+
 def test_patch_legacy_rope_type_preserves_nope_layers():
     """NoPE layers stay disabled while later RoPE layers are normalized."""
     rope_parameters = {

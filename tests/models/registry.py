@@ -1346,6 +1346,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),
+    "Qwen2_5OmniThinkerForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen2.5-Omni-3B"
+    ),
     "Qwen3VLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-VL-4B-Instruct",
         max_model_len=4096,
@@ -1373,6 +1376,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        max_model_len=4096,
+    ),
+    "Qwen3OmniMoeThinkerForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
     ),

@@ -285,7 +285,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             if not (length := self._get_max_audio_length()):
                 length = self._get_max_long_form_audio_length(seq_len)
             return math.ceil(length / self._audio_samples_per_token)
-        config = self.ctx.model_config.transformers_backend_config
+        config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
         audio_config = getattr_iter(config, audio_config_names, default=config)

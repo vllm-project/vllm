@@ -194,6 +194,12 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashNgramForCausalLM": "longcat_flash",
 }
 
+# Composite checkpoints that vLLM serves as their thinker
+_THINKER_ARCHITECTURES: dict[str, str] = {
+    "qwen2_5_omni": "Qwen2_5OmniThinkerForConditionalGeneration",
+    "qwen3_omni_moe": "Qwen3OmniMoeThinkerForConditionalGeneration",
+}
+
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
 # Model types whose checkpoints carry shared RoPE parameters alongside the
@@ -434,6 +440,18 @@ class HFConfigParser(ConfigParserBase):
                 config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
             config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+        elif model_type in _THINKER_ARCHITECTURES:
+            from transformers import CONFIG_MAPPING
+
+            thinker_dict = config_dict["thinker_config"]
+            top_level = ("quantization_config", "torch_dtype", "dtype")
+            thinker_dict |= {
+                k: v for k in top_level if (v := config_dict.get(k)) is not None
+            }
+            thinker_dict["architectures"] = [_THINKER_ARCHITECTURES[model_type]]
+            thinker_cls = CONFIG_MAPPING[thinker_dict["model_type"]]
+            kwargs.setdefault("name_or_path", str(model))
+            config = thinker_cls.from_dict(thinker_dict, **kwargs)
         elif (
             model_type == "moss_transcribe_diarize"
             and config_dict["audio_config"]["model_type"] == "whisper"
@@ -800,30 +818,6 @@ def mrope_num_dims(config: PreTrainedConfig) -> int:
 
     # Custom configs may declare M-RoPE without exposing the sections.
     return 3
-
-
-def get_text_config_parent(config: PreTrainedConfig) -> PreTrainedConfig:
-    text_config = config.get_text_config()
-
-    def find(c: PreTrainedConfig) -> PreTrainedConfig | None:
-        for value in vars(c).values():
-            if value is text_config:
-                return c
-            if isinstance(value, PreTrainedConfig) and (parent := find(value)):
-                return parent
-        return None
-
-    return find(config) or config
-
-
-def get_transformers_backend_config(config: PreTrainedConfig) -> PreTrainedConfig:
-    """Get the config that Transformers can serve, which may be a sub-config."""
-    parent = get_text_config_parent(config)
-    if parent is config or parent.model_type not in MODEL_MAPPING_NAMES:
-        return config
-    architectures = config.architectures or []
-    cls = getattr(transformers, architectures[0], None) if architectures else None
-    return parent if cls is None or cls.forward is torch.nn.Module.forward else config
 
 
 def is_encoder_decoder(config: PreTrainedConfig) -> bool:

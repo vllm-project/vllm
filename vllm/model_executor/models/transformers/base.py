@@ -145,7 +145,7 @@ class Base(
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
-        self.config = vllm_config.model_config.transformers_backend_config
+        self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config

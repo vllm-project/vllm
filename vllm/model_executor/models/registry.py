@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
-from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
 
 from vllm import envs
 from vllm.config import (
@@ -626,7 +625,15 @@ _MULTIMODAL_MODELS = {
         "qwen2_5_omni_thinker",
         "Qwen2_5OmniThinkerForConditionalGeneration",
     ),
+    "Qwen2_5OmniThinkerForConditionalGeneration": (
+        "qwen2_5_omni_thinker",
+        "Qwen2_5OmniThinkerForConditionalGeneration",
+    ),
     "Qwen3OmniMoeForConditionalGeneration": (
+        "qwen3_omni_moe_thinker",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
+    ),
+    "Qwen3OmniMoeThinkerForConditionalGeneration": (
         "qwen3_omni_moe_thinker",
         "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
@@ -1400,9 +1407,6 @@ class _ModelRegistry:
                         warn_on_fail=False,
                     )
 
-        backend_config = model_config.transformers_backend_config
-        if backend_config is not model_config.hf_config:
-            architecture = MODEL_MAPPING_NAMES[backend_config.model_type]
         model_module = getattr(transformers, architecture, None)
 
         if model_module is None:
