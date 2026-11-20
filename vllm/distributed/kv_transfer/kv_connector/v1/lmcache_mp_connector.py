@@ -495,6 +495,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     """
 
     @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: KVTransferConfig
+    ) -> bool:
+        return False
+
+    @classmethod
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
         # Shares the KV cache with the LMCache server via cudaIpcGetMemHandle.
         return KVCacheAccess.LEGACY_IPC
