@@ -25,6 +25,7 @@ from vllm.config import (
     DiffusionConfig,
     ModelConfig,
     SpeculativeConfig,
+    WeightTransferConfig,
     set_current_vllm_config,
 )
 from vllm.platforms import current_platform
@@ -930,7 +931,8 @@ def test_causal_backend_correctness(
 )
 def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
     """FlashAttentionImpl passes FA4 no descale for a per-tensor scale of 1.0,
-    which FA4 reads as exactly 1.0; calibrated scales keep their descale."""
+    which FA4 reads as exactly 1.0; calibrated scales, and any scale once weight
+    updates are on, keep their descale."""
     from vllm.v1.attention.backends.fa_utils import (
         flash_attn_varlen_func,
         is_fa_version_supported,
@@ -961,16 +963,18 @@ def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
         for _ in range(2)
     )
     block_table = torch.randperm(64, dtype=torch.int32, device=device)[:48]
+    cu_seqlens_q = torch.arange(
+        0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
+    )
+    seqused_k = torch.tensor(seq_lens, dtype=torch.int32, device=device)
 
     def run(descale: torch.Tensor | None) -> torch.Tensor:
         return flash_attn_varlen_func(
             q=q.to(fp8),
             k=k_cache,
             v=v_cache,
-            cu_seqlens_q=torch.arange(
-                0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
-            ),
-            seqused_k=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
             max_seqlen_q=q_len,
             max_seqlen_k=max(seq_lens),
             softmax_scale=head_size**-0.5,
@@ -995,6 +999,32 @@ def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
     assert calibrated is not None and torch.equal(calibrated, 0.5 * expanded)
     per_head = torch.tensor([1.0, 0.5, 1.0, 0.25], device=device)
     assert impl._descale(per_head, 1.0, shape) is not None
+
+    # A FULL graph captured at scale 1.0 freezes it (so reloads refuse to change
+    # it) unless weight updates are on; then the graph follows an update to 0.5.
+    frozen_impl = impl
+    default_vllm_config.weight_transfer_config = WeightTransferConfig()
+    impl = FlashAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8",
+    )
+    scale = torch.ones(1, device=device)
+    run(impl._descale(scale, 1.0, shape))  # JIT-compile outside capture
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        assert frozen_impl._descale(scale, 1.0, shape, "k") is None
+        captured = run(impl._descale(scale, 1.0, shape))
+    assert frozen_impl.frozen_kv_scales == "full_graph"
+    assert frozen_impl.frozen_kv_scale_names == {"k"}
+    scale.fill_(0.5)
+    graph.replay()
+    torch.testing.assert_close(captured, run(0.5 * expanded), atol=0, rtol=0)
+    assert impl.frozen_kv_scales is None
 
 
 @pytest.mark.skipif(

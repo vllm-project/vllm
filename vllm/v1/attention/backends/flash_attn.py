@@ -1183,6 +1183,11 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        # With weight updates on, a 1.0 scale may change, so FA4 keeps its descale.
+        vllm_config = get_current_vllm_config_or_none()
+        self._kv_scales_can_change = (
+            vllm_config is not None and vllm_config.weight_transfer_config is not None
+        )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -1270,17 +1275,19 @@ class FlashAttentionImpl(AttentionImpl):
         name: str = "qkv",
     ) -> torch.Tensor | None:
         # FA4 reads a missing descale as 1.0, and it copies every expanded view
-        # into a contiguous tensor: three copy kernels per layer and step. The
-        # scales are fixed once weights are loaded, so a per-tensor scale of 1.0
-        # (FP8 KV cache without calibrated scales) needs none. Per-head scales
-        # keep their tensor: their float mirror holds only the maximum.
+        # into a contiguous tensor: three copy kernels per layer and step.
+        # Without weight updates a per-tensor scale of 1.0 (no calibrated
+        # scales) needs none. Per-head scales keep their tensor: their float
+        # mirror holds only the maximum.
         if (
             self.vllm_flash_attn_version == 4
             and scale.numel() == 1
             and scale_float == 1.0
+            and not self._kv_scales_can_change
         ):
             if torch.cuda.is_current_stream_capturing():
-                # The captured graph keeps the implicit 1.0.
+                # The captured graph keeps the implicit 1.0, so a reload that
+                # changes it is refused.
                 self.frozen_kv_scales = "full_graph"
                 self.frozen_kv_scale_names = (
                     self.frozen_kv_scale_names or frozenset()
