@@ -268,6 +268,18 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
+    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str]:
+        """Online `draft_lm_head_quantization` formats this platform provides.
+
+        Maps a format name to the qualified name of a zero-argument factory
+        returning the online linear method quantizing the drafter's lm_head
+        copy (see `quantized_lm_head_copy`). Factories are resolved lazily,
+        so they may live in a hardware plugin. Platform formats take
+        precedence over core formats with the same name.
+        """
+        return {}
+
+    @classmethod
     def import_ir_kernels(cls) -> None:
         """The default implementation imports `vllm.kernels`, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should

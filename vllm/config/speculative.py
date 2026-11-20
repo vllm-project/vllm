@@ -581,11 +581,13 @@ class SpeculativeConfig:
     also cover the tokens the drafter reads after each block, so engines
     sharing a KV store and external consumers of KV cache events must use the
     same setting."""
-    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
+    draft_lm_head_quantization: str | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
     and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
     activation scales on the platform's FP8 linear kernel; "nvfp4" is
-    weight-only on the platform's W4A16 kernel. The target verifies with its
+    weight-only on the platform's W4A16 kernel. The current platform may
+    provide further formats, which take precedence over these; the format is
+    checked when the copy is built. The target verifies with its
     own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
