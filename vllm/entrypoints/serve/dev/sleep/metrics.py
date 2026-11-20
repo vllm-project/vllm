@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metrics for dispatched sleep-mode frontend operations."""
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Lock
 from time import perf_counter
@@ -33,7 +33,7 @@ class SleepModeOperationMetrics:
         )
 
     @contextmanager
-    def record(self, operation: Operation) -> Iterator[None]:
+    def record(self, operation: Operation) -> Generator[None]:
         active = self.in_flight.labels(operation)
         started = perf_counter()
         active.inc()

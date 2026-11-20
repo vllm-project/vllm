@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 
 class _DeviceBytes:
-    """``__cuda_array_interface__`` of ``nbytes`` bytes at a raw device address, for a
+    """`__cuda_array_interface__` of `nbytes` bytes at a raw device address, for a
     non-owning torch view."""
 
     def __init__(self, ptr: int, nbytes: int):
@@ -27,16 +27,16 @@ class _DeviceBytes:
 
 class PeerBuffer:
     """One uncached buffer per rank, every rank holding every peer's address
-    (``addresses``, int64, indexed by TP rank). What lives where, and why no rank
+    (`addresses`, int64, indexed by TP rank). What lives where, and why no rank
     overwrites a peer's unread data, is the model's layout's to say.
 
-    ``bytes`` is the whole buffer: the kernels tag every pair with the step's
+    `bytes` is the whole buffer: the kernels tag every pair with the step's
     epoch, so it is never zeroed between steps.
 
-    The constructor is collective over ``group`` (the handle exchange, then an
+    The constructor is collective over `group` (the handle exchange, then an
     agreement that every rank mapped every peer): every rank must reach it, so a
-    runner reaches it only after ``tp_agree``. A failed mapping on any rank raises
-    ``RuntimeError`` on all of them.
+    runner reaches it only after `tp_agree`. A failed mapping on any rank raises
+    `RuntimeError` on all of them.
     """
 
     def __init__(
@@ -102,8 +102,8 @@ class PeerBuffer:
 
 
 def tp_agree(ok: bool, group) -> bool:
-    """True when every rank of ``group`` passed ``ok`` true. Every rank must call
-    it at the same point; ``group`` is a CPU (gloo) process group, or None for a
+    """True when every rank of `group` passed `ok` true. Every rank must call
+    it at the same point; `group` is a CPU (gloo) process group, or None for a
     single rank."""
     if group is None:
         return ok

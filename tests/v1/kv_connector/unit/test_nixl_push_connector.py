@@ -5,17 +5,17 @@
 These tests cover the end-to-end mechanics of the push design without
 requiring a real NIXL agent or network:
 
-* Scheduler stages D registrations on ``update_state_after_alloc`` and
-  P finished blocks on ``request_finished``.
-* ``build_connector_meta`` drains them onto
-  ``meta.push_registrations`` / ``meta.push_finished_blocks``.
-* ``has_pending_push_work`` reports True/False over the lifecycle.
-* ``update_connector_output`` clears state on ``finished_sending`` and
-  ``finished_recving``.
+* Scheduler stages D registrations on `update_state_after_alloc` and
+  P finished blocks on `request_finished`.
+* `build_connector_meta` drains them onto
+  `meta.push_registrations` / `meta.push_finished_blocks`.
+* `has_pending_push_work` reports True/False over the lifecycle.
+* `update_connector_output` clears state on `finished_sending` and
+  `finished_recving`.
 * The worker matches D registrations against P finished blocks (both
   scenario directions) and forwards non-PUSH_REG NIXL notifs to the main
-  thread's ``_get_new_notifs``.
-* ``get_transfer_results`` enqueues evictions for the writer.
+  thread's `_get_new_notifs`.
+* `get_transfer_results` enqueues evictions for the writer.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import (
@@ -65,6 +65,7 @@ from .utils import (
     expand_strided_descs,
     make_nixl_push_scheduler,
     region_pairs_by_index,
+    remote_stage,
 )
 
 # ----------------------------------------------------------------- #
@@ -115,7 +116,7 @@ def _make_request(
 
 
 class _BlocksMock:
-    """Minimal stand-in for ``KVCacheBlocks`` used in update_state_after_alloc."""
+    """Minimal stand-in for `KVCacheBlocks` used in update_state_after_alloc."""
 
     def __init__(self, block_ids: tuple[list[int], ...]):
         self._block_ids = block_ids
@@ -125,7 +126,7 @@ class _BlocksMock:
 
 
 def _stub_sw_clipping(scheduler) -> None:
-    """Make ``get_exchange_clipped_blocks`` a passthrough so tests don't
+    """Make `get_exchange_clipped_blocks` a passthrough so tests don't
     need the full sliding-window machinery."""
     scheduler.get_exchange_clipped_blocks = lambda block_ids, clip_ssm=True: block_ids
 
@@ -294,7 +295,7 @@ class TestPushScheduler:
 
     def test_registration_watchdog_expires(self, caplog):
         """Stale D registrations whose deadline has passed are dropped at
-        ``build_connector_meta`` time."""
+        `build_connector_meta` time."""
         # Watchdog logs a WARNING when it drops the stale entry; that's
         # what this test is verifying, so silence it in the test report.
         caplog.set_level(
@@ -332,7 +333,7 @@ class TestPushScheduler:
 
 
 class _StubWriterWorker(NixlPushConnectorWorker):
-    """Construct a worker without invoking ``__init__`` so we can drive
+    """Construct a worker without invoking `__init__` so we can drive
     the matching/notif logic without bringing up NIXL or torch."""
 
     @classmethod
@@ -382,22 +383,22 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._failed_remote_engines = set()
+        w._disconnected_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
         w._packed_member_layouts = {}
-        w.dst_region_num_blocks = {}
-        w.dst_region_group_ids = {}
-        w._dst_pairs = {}
-        w.dst_region_mem_types = {}
+        w._remote_stages = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
-        w._group_spec_types = (FullAttentionSpec,)
+        w._group_spec_types = (AttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
+        w._inflight_pushes = {}
+        w._next_held_lease_check = 0.0
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -442,8 +443,8 @@ def _registration_data(
 
 
 class TestPushWriterRegSend:
-    """``_do_send_reg_notif``: the PUSH_REG goes to every handshaked agent of
-    the P engine, and the agent map is read under ``_handshake_lock`` so the
+    """`_do_send_reg_notif`: the PUSH_REG goes to every handshaked agent of
+    the P engine, and the agent map is read under `_handshake_lock` so the
     send can't race the handshake done-callback's insert or a concurrent
     stale-engine eviction (X1)."""
 
@@ -488,8 +489,8 @@ class TestPushWriterRegSend:
         w.nixl_wrapper.send_notif.assert_not_called()
 
     def test_agent_read_is_serialized_with_handshake_lock(self):
-        """While another thread holds ``_handshake_lock`` (as the handshake
-        done-callback does while writing ``_remote_agents``), the writer's
+        """While another thread holds `_handshake_lock` (as the handshake
+        done-callback does while writing `_remote_agents`), the writer's
         check-then-send must not run ahead of the critical section."""
         w, failures = self._reg_send_worker()
         w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
@@ -556,9 +557,9 @@ class TestPushWriterMatching:
 
     def test_handle_push_reg_matches_after_stripping_random_suffix(self):
         """P and D assign the same logical request the same
-        ``cmpl-<uuid>-<index>`` but different per-engine random suffixes;
+        `cmpl-<uuid>-<index>` but different per-engine random suffixes;
         the writer should still match P's finished blocks via the
-        suffix-stripping fallback in ``_pop_matching_finished_blocks``.
+        suffix-stripping fallback in `_pop_matching_finished_blocks`.
         """
         w = _StubWriterWorker.fresh()
         # Same base id + completion index; differ only in the trailing
@@ -624,7 +625,7 @@ class TestPushWriterStartLoadKv:
         assert "req-C" not in w._pending_d_registrations
 
     def test_start_load_kv_enqueues_to_writer(self):
-        """``start_load_kv`` should hand registrations + finished blocks
+        """`start_load_kv` should hand registrations + finished blocks
         to the writer queues without doing matching itself."""
         w = _StubWriterWorker.fresh()
         # Stub heartbeats to a no-op; tests don't exercise the heartbeat
@@ -675,13 +676,13 @@ class TestPushWriterStartLoadKv:
 # handshake resolves, then re-drives via ``_deferred_push_inbox``. These call
 # the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
 def _real_do_start_push_kv(w, *args):
-    return NixlPushConnectorWorker._do_start_push_kv(w, *args)
+    return NixlPushConnectorWorker._start_push_kv(w, *args)
 
 
 def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     """Full happy-path lifecycle: an in-flight handshake defers the WRITE (no
     NIXL op from the writer or the executor callback); once it resolves the
-    request is re-queued on ``_deferred_push_inbox`` with the wake set; and on
+    request is re-queued on `_deferred_push_inbox` with the wake set; and on
     re-drive with the handshake ready the WRITE is issued with a correct
     ReqMeta."""
     w = _StubWriterWorker.fresh()
@@ -748,8 +749,8 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
 
 
 def test_writer_loop_drains_deferred_push_inbox():
-    """The writer loop drains ``_deferred_push_inbox`` and re-drives
-    ``_do_start_push_kv`` for each entry (event-driven, no polling)."""
+    """The writer loop drains `_deferred_push_inbox` and re-drives
+    `_do_start_push_kv` for each entry (event-driven, no polling)."""
     w = _StubWriterWorker.fresh()
     w.nixl_wrapper = MagicMock()
     w.nixl_wrapper.get_new_notifs.return_value = {}
@@ -781,8 +782,8 @@ def test_writer_loop_drains_deferred_push_inbox():
 
 
 def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
-    """A push worker wired to drive the base ``_ensure_handshake`` eviction
-    path (``_evict_stale_engines`` + ``_cleanup_remote_engine``)."""
+    """A push worker wired to drive the base `_ensure_handshake` eviction
+    path (`_evict_stale_engines` + `_cleanup_remote_engine`)."""
     w = _StubWriterWorker.fresh()
     w._engine_ttl = engine_ttl
     w._engine_last_active = {}
@@ -790,7 +791,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w._handshake_lock = threading.RLock()
     # _cleanup_remote_engine touches these when reaping an engine.
     w.nixl_wrapper = MagicMock()
-    w.dst_xfer_side_handles = {}
+    w._remote_stages = {}
     w.kv_caches_base_addr = {}
     w.dst_num_blocks = {}
     w.tp_mappings = {}
@@ -802,9 +803,9 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
 
 
 def test_active_push_refreshes_engine_last_active():
-    """The base ``_ensure_handshake`` refreshes liveness only on a new
+    """The base `_ensure_handshake` refreshes liveness only on a new
     handshake, so an active push to an already-connected engine must refresh
-    ``_engine_last_active`` itself or it is reaped mid-stream (S1)."""
+    `_engine_last_active` itself or it is reaped mid-stream (S1)."""
     w = _eviction_worker(engine_ttl=3600.0)
     # Already-connected D -> _ensure_handshake returns None, WRITE runs inline.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
@@ -817,25 +818,30 @@ def test_active_push_refreshes_engine_last_active():
     assert w.writes == ["req"]
 
 
-def test_stale_engine_evicted_on_push():
-    """A push drives ``_ensure_handshake`` -> ``_evict_stale_engines``, so a D
+@pytest.mark.parametrize("inflight", [False, True])
+def test_stale_engine_evicted_on_push(inflight):
+    """A push drives `_ensure_handshake` -> `_evict_stale_engines`, so a D
     engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
-    across D scale up/down (S1)."""
+    across D scale up/down (S1) -- unless WRITEs to it are still in flight."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
+    if inflight:
+        w._sending_transfers["req-old"] = [7]
+        w._inflight_pushes["req-old"] = "D-old"
     # The engine being pushed to is already connected.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
 
     _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
 
-    assert "D-old" not in w._remote_agents
-    assert "D-old" not in w._engine_last_active
-    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+    assert w.writes == ["req"]
+    assert ("D-old" in w._remote_agents) is inflight
+    assert ("D-old" in w._engine_last_active) is inflight
+    assert w.nixl_wrapper.remove_remote_agent.call_count == (not inflight)
 
 
 def test_cleanup_remote_engine_pops_under_handshake_lock():
-    """Regression (X1): eviction must not remove ``_remote_agents`` entries
+    """Regression (X1): eviction must not remove `_remote_agents` entries
     while another thread is inside the lock's critical section (e.g. the
     push writer reading the map to send a registration)."""
     w = _eviction_worker(engine_ttl=30.0)
@@ -860,8 +866,8 @@ def test_cleanup_remote_engine_pops_under_handshake_lock():
 
 
 def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorMetadata:
-    """Build metadata with a single ``reqs_to_recv`` entry pointing at
-    ``remote_engine_id`` (the prefill remote D receives a push from)."""
+    """Build metadata with a single `reqs_to_recv` entry pointing at
+    `remote_engine_id` (the prefill remote D receives a push from)."""
     params = {
         "remote_block_ids": ([0],),
         "remote_engine_id": remote_engine_id,
@@ -876,10 +882,10 @@ def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorM
 
 
 def test_start_load_kv_refreshes_engine_last_active_on_d_side():
-    """D receiving a push refreshes ``_engine_last_active`` for the prefill
+    """D receiving a push refreshes `_engine_last_active` for the prefill
     remote, but only once that engine is connected (handshaked into
-    ``_remote_agents`` via heartbeats), mirroring the P-side refresh which runs
-    after ``_ensure_handshake``. Without it the prefill engine is reaped
+    `_remote_agents` via heartbeats), mirroring the P-side refresh which runs
+    after `_ensure_handshake`. Without it the prefill engine is reaped
     mid-stream once it passes its TTL."""
     w = _StubWriterWorker.fresh()
     w._send_heartbeats = lambda metadata: None
@@ -897,10 +903,10 @@ def test_start_load_kv_refreshes_engine_last_active_on_d_side():
 
 
 def test_start_load_kv_skips_liveness_for_unconnected_engine():
-    """If the prefill engine was never handshaked into ``_remote_agents`` (e.g.
+    """If the prefill engine was never handshaked into `_remote_agents` (e.g.
     its heartbeat handshake never succeeded), the D-side refresh must NOT record
-    an ``_engine_last_active`` entry -- otherwise a later eviction pass hits the
-    ``_remote_agents`` invariant in ``_cleanup_remote_engine`` and crashes on
+    an `_engine_last_active` entry -- otherwise a later eviction pass hits the
+    `_remote_agents` invariant in `_cleanup_remote_engine` and crashes on
     the D node."""
     w = _eviction_worker(engine_ttl=30.0)
     w._send_heartbeats = lambda metadata: None
@@ -917,7 +923,7 @@ def test_start_load_kv_skips_liveness_for_unconnected_engine():
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
-        on the engine main thread inside ``_get_new_notifs``."""
+        on the engine main thread inside `_get_new_notifs`."""
         w = _StubWriterWorker.fresh()
         # Pretend the writer thread already forwarded a completion notif
         # for a request whose KV is being received.
@@ -957,7 +963,7 @@ class TestPushWriterNotifs:
     @staticmethod
     def _pollable_worker() -> _StubWriterWorker:
         """Stub worker with the extra base-worker state the real
-        ``get_transfer_results`` needs to poll ``_sending_transfers``."""
+        `get_transfer_results` needs to poll `_sending_transfers`."""
         w = _StubWriterWorker.fresh()
         w.transfer_topo = MagicMock()
         w.nixl_wrapper = MagicMock()
@@ -972,6 +978,7 @@ class TestPushWriterNotifs:
     def _make_sending_req(self, w: _StubWriterWorker) -> str:
         request_id = "req-send-1"
         w._sending_transfers[request_id] = [101, 102]
+        w._inflight_pushes[request_id] = "decode-engine"
         w._reqs_to_send[request_id] = time.perf_counter() + 60
         w._reqs_to_process.add(request_id)
         return request_id
@@ -1054,9 +1061,10 @@ class TestPushWriterNotifs:
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=[0])
         w.dst_num_blocks = {w.engine_id: 8}
-        w.dst_region_num_blocks[w.engine_id] = [8]
-        w.dst_region_group_ids[w.engine_id] = [0]
-        w._dst_pairs[w.engine_id] = region_pairs_by_index(1)
+        w.region_num_blocks = [8]
+        w._remote_stages[w.engine_id] = remote_stage(
+            region_pairs_by_index(1), region_num_blocks=[8]
+        )
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1087,7 +1095,11 @@ class TestPushWriterNotifs:
 
     @pytest.mark.parametrize("first_state", ["ERR", "DONE"])
     def test_push_completion_after_expiry_is_not_reported_twice(self, first_state):
-        """A WRITE finishing after lease expiry must not complete the request again."""
+        """An expired lease waits for in-flight WRITEs, then completes once.
+
+        Releasing the blocks while a WRITE still reads them would let the
+        scheduler reuse memory that is on the wire.
+        """
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = [
@@ -1100,13 +1112,77 @@ class TestPushWriterNotifs:
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
-        assert w.get_transfer_results().finished_sending == {request_id}
+        # The second WRITE is still in flight: the lease does not expire yet.
+        assert w.get_transfer_results().finished_sending == set()
+        assert request_id in w._reqs_to_send
+        assert w._evict_finished_inbox.empty()
+
+        reported = w.get_transfer_results().finished_sending
+        if first_state == "ERR":
+            # A failed WRITE is not success; the expired lease reclaims it.
+            assert reported == set()
+            reported = w.get_transfer_results().finished_sending
+        assert reported == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
 
         assert w.get_transfer_results().finished_sending == set()
+        assert request_id not in w._reqs_to_send
         assert request_id not in w._sending_transfers
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.empty()
+
+    def test_expired_lease_waits_for_submission(self):
+        """A lease expiring while the request's WRITEs are being submitted
+        keeps its blocks until the submission ends."""
+        w = self._pollable_worker()
+        request_id = "req-submit"
+        w._reqs_to_send[request_id] = time.perf_counter() - 1
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        during: list[set[str]] = []
+
+        def submit(*args):
+            during.append(w.get_transfer_results().finished_sending)
+
+        w._start_push_kv = submit
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        assert during == [set()]
+        assert w.get_transfer_results().finished_sending == {request_id}
+
+    def test_released_request_is_not_pushed(self):
+        """A registration arriving after the request's blocks were released
+        must not WRITE from them."""
+        w = self._pollable_worker()
+        request_id = "req-late"
+        w._start_push_kv = MagicMock()
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+
+        w._start_push_kv.assert_not_called()
+        assert not w._inflight_pushes
+
+    def test_push_dst_engine_tracked_until_writes_finish(self):
+        """TTL eviction keeps a D engine while WRITEs to it are in flight."""
+        w = self._pollable_worker()
+        request_id = "req-dst"
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        w.expected_consumer_notifications_by_req = {}
+        w._start_push_kv = lambda rid, *_: w._sending_transfers[rid].append(101)
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, request_id, ([1],), _registration_data(request_id)
+        )
+        assert w._engines_with_inflight_transfers() == {"decode-engine"}
+
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        assert w.get_transfer_results().finished_sending == {request_id}
+        assert w._engines_with_inflight_transfers() == set()
 
 
 # ----------------------------------------------------------------- #
@@ -1270,8 +1346,8 @@ class TestPushWriterNegative:
         assert w.start_push_calls == []
 
     def test_get_transfer_results_enqueues_each_completed_request(self):
-        """``get_transfer_results`` must enqueue every completed request
-        in ``done_sending`` so the writer can drop stale matching state.
+        """`get_transfer_results` must enqueue every completed request
+        in `done_sending` so the writer can drop stale matching state.
         Unlike the happy-path test, this verifies the *cardinality*: N
         completed requests -> N evictions, in order."""
         w = _StubWriterWorker.fresh()
@@ -1295,7 +1371,7 @@ class TestPushWriterNegative:
 
     def test_empty_transfer_results_do_not_enqueue_eviction(self):
         """If there's nothing newly done, no eviction should be enqueued.
-        The wake event IS still set because ``get_finished`` always wakes
+        The wake event IS still set because `get_finished` always wakes
         the writer to drain notifs."""
         w = _StubWriterWorker.fresh()
         with patch.object(
@@ -1366,7 +1442,7 @@ class TestPushWriterNegative:
         assert not w._push_writer_wake.is_set()
 
     def test_get_new_notifs_extends_lease_on_heartbeat(self):
-        """``HB:`` notifs forwarded by the writer thread must extend the
+        """`HB:` notifs forwarded by the writer thread must extend the
         leases of tracked P-side requests on the engine main thread, and
         ignore request IDs that aren't being tracked."""
         w = _StubWriterWorker.fresh()
@@ -1494,7 +1570,7 @@ class TestPushPipelineParallel:
 
 class TestPushWriterMlaReplication:
     """MLA latent KV is replicated across D's TP ranks, so when D_TP > P_TP
-    (``tp_ratio < 0``) the producer must *WRITE* the latent into every D rank
+    (`tp_ratio < 0`) the producer must *WRITE* the latent into every D rank
     it handshook -- not write one and merely notify the rest, which would
     leave the un-written ranks decoding against stale KV."""
 
@@ -1529,9 +1605,11 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_region_group_ids[engine_id] = [0]
-        w._dst_pairs[engine_id] = region_pairs_by_index(1)
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w._remote_stages[engine_id] = remote_stage(
+            region_pairs_by_index(1),
+            region_num_blocks=[100],
+            xfer_side_handles={r: 1000 + r for r in d_ranks},
+        )
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
@@ -1612,9 +1690,12 @@ class TestPushWriterMlaReplication:
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.region_group_ids = [0, 1, 2, 3]
-        w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
-        w._dst_pairs[engine_id] = region_pairs_by_index(4, groups=[0, 1, 2, 3])
-        w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
+        w._remote_stages[engine_id] = remote_stage(
+            region_pairs_by_index(4, groups=[0, 1, 2, 3]),
+            region_num_blocks=[100] * 4,
+            region_group_ids=[0, 1, 2, 3],
+            xfer_side_handles={0: 1000, 1: 1001},
+        )
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
         writes = []
@@ -1653,13 +1734,13 @@ class TestPushPrefixCaching:
     """Partial prefix-cache hit on D: D preallocates only its *uncomputed*
     blocks, so on a partial hit it registers fewer blocks than P's full
     sequence. P must WRITE only the *tail* of its sequence into D's slots --
-    mirroring pull-mode ``_apply_prefix_caching`` (end-trim), never a front-trim
+    mirroring pull-mode `_apply_prefix_caching` (end-trim), never a front-trim
     which would write P's cached prefix into D's uncomputed suffix slots.
 
-    The trim runs inside ``_xfer_blocks``, so these tests drive the real
-    ``_xfer_blocks_for_req`` path and stub only the NIXL WRITE. With one region
-    and 1:1 ratios ``_compute_desc_ids`` is the identity map, so the descs
-    captured from ``make_prepped_xfer`` are exactly the (trimmed) block IDs.
+    The trim runs inside `_xfer_blocks`, so these tests drive the real
+    `_xfer_blocks_for_req` path and stub only the NIXL WRITE. With one region
+    and 1:1 ratios `_compute_desc_ids` is the identity map, so the descs
+    captured from `make_prepped_xfer` are exactly the (trimmed) block IDs.
     """
 
     @staticmethod
@@ -1693,13 +1774,14 @@ class TestPushPrefixCaching:
             )
         }
         w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
-        w.dst_region_num_blocks = {
-            engine_id: [10_000],
-            w.engine_id: [10_000],
+        w.region_num_blocks = [10_000]
+        w._remote_stages = {
+            engine_id: remote_stage(
+                region_pairs_by_index(1),
+                region_num_blocks=[10_000],
+                xfer_side_handles={0: 5000},
+            )
         }
-        w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
-        w._dst_pairs = {engine_id: region_pairs_by_index(1)}
-        w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
@@ -1723,7 +1805,7 @@ class TestPushPrefixCaching:
         w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 
-        NixlPushConnectorWorker._do_start_push_kv(
+        NixlPushConnectorWorker._start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
         )
 
@@ -1737,7 +1819,7 @@ class TestPushPrefixCaching:
         w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-full", local_block_ids=([500, 501, 502],))
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-full", ([10, 11, 12],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-full", ([10, 11, 12],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
@@ -1748,19 +1830,20 @@ class TestPushPrefixCaching:
         """A layer in a pooled remote region still receives its blocks; a layer
         in another cache group on D is refused."""
         w, engine_id = self._worker_driving_xfer()
-        w.dst_region_group_ids[engine_id] = [-1]
-        w._dst_pairs[engine_id].groups_match = groups_match
+        stage = w._remote_stages[engine_id][0]
+        stage.region_group_ids = [-1]
+        stage.pairs.groups_match = groups_match
         reg = _registration_data("req-groups", local_block_ids=([500, 501],))
 
         if not groups_match:
             with pytest.raises(NotImplementedError, match="cache-group layouts"):
-                NixlPushConnectorWorker._do_start_push_kv(
+                NixlPushConnectorWorker._start_push_kv(
                     w, "req-groups", ([10, 11],), reg
                 )
             w.nixl_wrapper.make_prepped_xfer.assert_not_called()
             return
 
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-groups", ([10, 11],), reg)
+        NixlPushConnectorWorker._start_push_kv(w, "req-groups", ([10, 11],), reg)
 
         local, remote = self._written_block_ids(w)
         assert local == [10, 11]

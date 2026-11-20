@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 parser: DSML tool calls with ``function_calls`` wrapper.
+"""DeepSeek V3.2 parser: DSML tool calls with `function_calls` wrapper.
 
 DeepSeek V3.2 output format::
 
@@ -12,8 +12,8 @@ DeepSeek V3.2 output format::
     </｜DSML｜function_calls>
 
 This is identical to DeepSeek V4 except for the outer wrapper
-(``function_calls`` instead of ``tool_calls``) and the absence of
-``<think>``/``</think>`` reasoning tags.
+(`function_calls` instead of `tool_calls`) and the absence of
+`<think>`/`</think>` reasoning tags.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 
 The Qwen3 DSpark block drafter (context-KV precompute, non-causal query block,
 Markov and confidence heads) built from MiniMax-M3 layers: Gemma RMSNorm
-(``x * (1 + w)``) everywhere, partial RoPE, and a dense SwiGLU-OAI MLP. The
+(`x * (1 + w)`) everywhere, partial RoPE, and a dense SwiGLU-OAI MLP. The
 checkpoint ships no token embedding or LM head; both are shared with the target.
 """
 
@@ -68,7 +68,7 @@ def _shared_slot_mapping(
 def _gemma_rms_norm(hidden_size: int, eps: float) -> nn.Module:
     """The target's Gemma RMSNorm (fused FlashInfer kernels on CUDA).
 
-    vLLM's GemmaRMSNorm hands the IR op an fp32 ``1 + w`` weight, which the
+    vLLM's GemmaRMSNorm hands the IR op an fp32 `1 + w` weight, which the
     vllm_c kernel rejects for bf16 inputs, so every call ran the unfused native
     path (about ten kernels).
     """
@@ -92,7 +92,7 @@ def dspark_qknorm_rope_kv_insert(
     q_fp8_out: torch.Tensor | None,
     layer_name: LayerNameType,
 ) -> None:
-    """The fused QK-norm/RoPE on ``qkv``, also storing the draft tokens' k/v.
+    """The fused QK-norm/RoPE on `qkv`, also storing the draft tokens' k/v.
 
     A custom op so the slot mapping is read when it runs: read in the compiled
     forward, it is fixed at trace time, when the draft layers have none.
@@ -324,13 +324,14 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         hidden_size, eps = self.config.hidden_size, self.config.rms_norm_eps
         self.hidden_norm = _gemma_rms_norm(hidden_size, eps=eps)
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
-        # VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1: supported draft steps run the draft
-        # layers as FlyDSL launches (MI355X)
         self._mono_drafter = None
-        if current_platform.is_rocm():
-            from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
+        if current_platform.is_rocm() and vllm_config.kernel_config.monokernel:
+            from vllm.models.minimax_m3.amd.mono.selection import (
+                DRAFTER,
+                enabled_monokernels,
+            )
 
-            if mono_envs.MONO_DRAFTER:
+            if DRAFTER in enabled_monokernels(vllm_config):
                 from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
                     DrafterDecode,
                 )
@@ -352,6 +353,10 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         return torch.stack(
             [layer.self_attn.k_norm(k) for layer, k in zip(self.layers, all_k)]
         )
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        k_norms = [layer.self_attn.k_norm for layer in self.layers]
+        return [*super().context_kv_modules(), *k_norms]
 
     def _context_kv_writer(self) -> DSparkContextKVWriter | None:
         """The fused context K/V writer, or None where the base path runs."""
@@ -412,6 +417,21 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
 
 class MiniMaxM3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     model_cls = MiniMaxM3DSparkModel
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        extra = vllm_config.additional_config
+        if (
+            current_platform.is_cuda()
+            and isinstance(extra, dict)
+            and extra.get("decode_backend") == "latency_specialized"
+        ):
+            # The MiniMax-M3 specialized decode's drafter kernels.
+            from vllm.models.minimax_m3.nvidia.specialized_decode.drafter import (
+                attach_drafter,
+            )
+
+            attach_drafter(self, vllm_config)
 
     @staticmethod
     def _rename_checkpoint_weights(

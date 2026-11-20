@@ -580,9 +580,9 @@ def _strip_claude_code_billing_header(
 ) -> list[ChatCompletionContentPartParam]:
     """Drop Claude Code's attribution header line from system text parts.
 
-    Its ``cch`` value changes on every request, so a prompt that keeps it
+    Its `cch` value changes on every request, so a prompt that keeps it
     misses the prefix cache from the header on. Gateways that translate
-    Anthropic requests to chat completions keep it; ``/v1/messages`` drops
+    Anthropic requests to chat completions keep it; `/v1/messages` drops
     the same block.
     """
     out: list[ChatCompletionContentPartParam] = []
@@ -627,6 +627,18 @@ def parse_chat_message_content(
             interleave_strings=interleave_strings,
             mm_processor_kwargs=mm_processor_kwargs,
         )[0]["content"]
+
+    if role == "assistant":
+        refusal = message.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            if content is not None and not isinstance(content, str):
+                content = list(content)
+            if not content:
+                content = [
+                    ChatCompletionContentPartRefusalParam(
+                        type="refusal", refusal=refusal
+                    )
+                ]
 
     if content is None:
         content = []

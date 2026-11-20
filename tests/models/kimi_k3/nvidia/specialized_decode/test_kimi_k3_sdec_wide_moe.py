@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi K3.1 specialized decode, TP8: the wide MoE layer (``moe.wide.WideMoE``: the
+"""Kimi K3.1 specialized decode, TP8: the wide MoE layer (`moe.wide.WideMoE`: the
 MoE layer of verify steps past the 64-row full step) against the stock
-``KimiMoE.forward`` of the same module, on 8 real ranks.
+`KimiMoE.forward` of the same module, on 8 real ranks.
 
 The module is the production one, built from a K3.1 checkpoint's config
-(compressed-tensors MXFP4 experts, ``process_weights_after_loading``: the
+(compressed-tensors MXFP4 experts, `process_weights_after_loading`: the
 trtllm-gen layout) on random weights. Both paths route exactly on FP32 router logits
 and differ only in accumulation order: the wide engine's sharded front, experts and
-``Finalize`` (80, 320 rows) or the stock TRTLLM-Gen experts (352 rows, ``ENGINES``),
+`Finalize` (80, 320 rows) or the stock TRTLLM-Gen experts (352 rows, `ENGINES`),
 and the column-parallel tail. The sharded front computes its own FP32 router logits,
 so a row may route differently at a near tie (asserted).
 
-Launch: 8 ranks across two GB300 nodes with ``srun -n8`` (one pytest per rank),
-``KIMI_K3_SD_TP8_INIT`` a shared rendezvous file and ``KIMI_K31_CONFIG`` a K3.1
+Launch: 8 ranks across two GB300 nodes with `srun -n8` (one pytest per rank),
+`KIMI_K3_SD_TP8_INIT` a shared rendezvous file and `KIMI_K31_CONFIG` a K3.1
 checkpoint directory (its config is read; no weights are loaded).
 """
 
@@ -196,7 +196,7 @@ def check(config, device):
 
 def check_listed(module, weights, device, beta, linear_beta):
     """The spec engine's fronts over several consecutive calls (both routing-list
-    parities and the count clearing): "listed" (``WideRoute`` appends the routing
+    parities and the count clearing): "listed" (`WideRoute` appends the routing
     lists and writes the plan; the experts build their windows from them) is
     bit-identical to "grouped" (routing, plan and unit-table kernels): pair order
     inside a unit does not change any token's FC1/FC2 column. "sharded" (one FP32-out
@@ -268,7 +268,7 @@ def run_worker(rank, world, local_rank, init_method):
     "(KIMI_K31_CONFIG)",
 )
 def test_wide_moe_matches_kimi_moe_tp8_launched():
-    """One rank of an ``srun -n8`` launch (TP8: 2 nodes x 4 GPUs)."""
+    """One rank of an `srun -n8` launch (TP8: 2 nodes x 4 GPUs)."""
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
     assert world == TP, world
     local = int(os.environ["SLURM_LOCALID"])

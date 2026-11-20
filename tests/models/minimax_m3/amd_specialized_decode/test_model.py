@@ -8,7 +8,7 @@ path runs; every rank then overwrites them in place at sensible scales,
 distinct per layer and per TP shard, the experts generated in the checkpoint's
 MXFP4 format and converted by that same path.
 
-- layer: each sparse ``MiniMaxM3DecoderLayer``'s FFN half (seam all-reduce and
+- layer: each sparse `MiniMaxM3DecoderLayer`'s FFN half (seam all-reduce and
   residual, post-attention norm, MoE) on captured decode-step inputs, native
   vs the fused launch;
 - model: teacher-forced decode (trace replay) with full-vocabulary logprobs,
@@ -203,7 +203,7 @@ def _requests():
 
 def _decode(llm, capture=False):
     """Full-vocabulary logprobs of every decode step (the first output token
-    comes from prefill, which runs stock), every token forced; ``capture``:
+    comes from prefill, which runs stock), every token forced; `capture`:
     also each sparse layer's inputs at the first decode step of each batch."""
     from vllm import SamplingParams
 

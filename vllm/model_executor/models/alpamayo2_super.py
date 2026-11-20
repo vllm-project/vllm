@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Alpamayo 2 Super: the Qwen3-VL reasoning model of NVIDIA's driving policy.
 
-The checkpoint stores a Qwen3-VL model under ``vlm.`` and a flow-matching
-trajectory expert under ``expert.``. vLLM serves the Qwen3-VL part, which
+The checkpoint stores a Qwen3-VL model under `vlm.` and a flow-matching
+trajectory expert under `expert.`. vLLM serves the Qwen3-VL part, which
 produces every text output of the model: visual question answering,
 grounding, chain-of-causation reasoning with meta-actions, and auto-labeling.
 The trajectory itself needs the expert and is not produced here.

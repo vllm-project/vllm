@@ -19,9 +19,9 @@ class Gemma4EngineToolParser(Gemma4ParserToolAdapter):  # type: ignore[valid-typ
     ) -> ChatCompletionRequest | ResponsesRequest:
         """Skip structured-output JSON for required/named tool choice.
 
-        Gemma4 emits its native ``<|tool_call>call:...`` syntax, which the
-        parser extracts directly. The base ``ToolParser.adjust_request`` would
-        set ``structured_outputs`` for required/named and force JSON via guided
+        Gemma4 emits its native `<|tool_call>call:...` syntax, which the
+        parser extracts directly. The base `ToolParser.adjust_request` would
+        set `structured_outputs` for required/named and force JSON via guided
         decoding, conflicting with that native syntax (it leaks as content and
         crashes EngineCore under speculative decoding). Skip it so the model
         emits its native format (mirrors the GLM4 parser).

@@ -2,15 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_mamba_hybrid_kv_cache_config,
+)
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    mamba_layer,
+)
+from tests.v1.kv_connector.unit.test_mooncake_store_worker import (
+    _make_store_sending_thread,
+    _run_store_req,
+)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     LoadSpec,
     MooncakeLookupResult,
@@ -19,21 +38,31 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     RequestTracker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.output import KVConnectorBlockState
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
 )
+from vllm.v1.core.sched.output import (
+    KVConnectorBlockState,
+    NewRequestData,
+    SchedulerOutput,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+)
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request, RequestStatus
 
 
 def _make_bare_scheduler(
@@ -72,18 +101,18 @@ def _make_bare_scheduler(
     scheduler._boundary_state_group_ids = frozenset({1})
     scheduler._store_coord = MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["attention"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=max(16, hash_block_size),
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                mamba_layer(
                     block_size=max(16, hash_block_size),
                     shapes=((1,),),
                     dtypes=(torch.float32,),
@@ -150,6 +179,7 @@ def _make_decode_scheduler_output(
 def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
     request = SimpleNamespace(
         req_id="req-0",
+        kv_transfer_params=None,
         num_computed_tokens=0,
         prompt_token_ids=list(range(32)),
         num_prompt_tokens=32,
@@ -231,6 +261,11 @@ def _make_preemption_scheduler_output():
     )
 
 
+def _preempt(scheduler: MooncakeStoreScheduler):
+    scheduler._unfinished_requests["req-0"][0].status = RequestStatus.PREEMPTED
+    return scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+
 def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
     return SimpleNamespace(
         kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
@@ -269,6 +304,7 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
     request = SimpleNamespace(
         request_id="req-0",
         block_hashes=[b"h0", b"h1", b"h2"],
+        kv_transfer_params=None,
     )
     blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
     scheduler.load_specs["req-0"] = LoadSpec(
@@ -291,15 +327,15 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
 
 
 def _make_qsa_hybrid_cache_config():
-    full = FullAttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
-    circular = CircularBufferSpec(
+    full = AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
+    circular = circular_buffer_layer(
         block_size=8,
         num_kv_heads=1,
         head_size=64,
         head_size_v=0,
         dtype=torch.float16,
     )
-    mamba = MambaSpec(
+    mamba = mamba_layer(
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -309,9 +345,9 @@ def _make_qsa_hybrid_cache_config():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["qsa"], circular),
-            KVCacheGroupSpec(["mamba"], mamba),
+            make_kv_cache_group(["full"], full),
+            make_kv_cache_group(["qsa"], circular),
+            make_kv_cache_group(["mamba"], mamba),
         ],
     )
 
@@ -331,7 +367,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
@@ -366,7 +402,7 @@ def test_update_state_excludes_nontransfer_groups():
     """Store metadata must match the worker's registered cache groups."""
     scheduler = _make_bare_scheduler()
     scheduler._store_group_ids = (0,)
-    request = SimpleNamespace(request_id="req-1")
+    request = SimpleNamespace(request_id="req-1", kv_transfer_params=None)
     blocks = KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2)], [KVCacheBlock(9)]))
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
@@ -539,7 +575,7 @@ def test_preemption_removes_tracker():
     )
     scheduler._request_trackers["req-0"].has_pending_offload = True
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
 
     assert "req-0" not in scheduler._request_trackers
 
@@ -558,7 +594,7 @@ def test_preemption_clears_stale_load_state():
         can_load=True,
     )
 
-    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    meta = _preempt(scheduler)
 
     assert meta.requests == []
     assert "req-0" not in scheduler.load_specs
@@ -638,6 +674,7 @@ def _make_resumed_unfinished_request(
     num_computed_tokens: int,
 ) -> None:
     request = SimpleNamespace(
+        kv_transfer_params=None,
         all_token_ids=token_ids,
         num_prompt_tokens=32,
         block_hashes=block_hashes,
@@ -1319,9 +1356,9 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     scheduler.client = SimpleNamespace(discard=lambda *_: None)
     scheduler._num_workers = num_workers
     groups = list(scheduler._store_coord.kv_cache_groups)
-    groups[0] = KVCacheGroupSpec(
+    groups[0] = make_kv_cache_group(
         ["attention"],
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=attention_block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1419,15 +1456,15 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
     only the Mamba group carries the eagle flag."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1471,16 +1508,16 @@ def test_partial_tail_follows_lookahead_checkpoint(
 ):
     """Lookahead hashes move the prompt checkpoint and drop the proof margin."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=True,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1512,35 +1549,41 @@ def test_partial_tail_follows_lookahead_checkpoint(
     )
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "completed, mamba_tails, publish, expected",
+    "completed, mamba_tails, publish, max_offload_tokens, expected",
     [
         # The chunk ending at the junction (40) hands off its Mamba state. Its
         # attention KV comes from the normal saves, so nothing is added here.
-        (40, [40], False, []),
+        (40, [40], False, None, []),
         # The prompt-completing save: blocks from the LCM floor 64 up to the
         # checkpoint 68 plus the EAGLE proof unit, whether or not the junction
         # hand-off is in the same save.
-        (75, [68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
-        (75, [40, 68], True, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        (75, [68], True, None, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        (75, [40, 68], True, None, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
+        # The checkpoint fits at 68, but its attention proof ends at 72.
+        (75, [68], True, 0, []),
+        (75, [68], True, 68, []),
+        (75, [68], True, 71, []),
+        (75, [68], True, 72, [BoundaryPut(0, 17, 68), BoundaryPut(0, 18, 72)]),
     ],
 )
 def test_shared_prefix_junction_handoff_adds_no_attention_tail(
-    completed, mamba_tails, publish, expected
+    completed, mamba_tails, publish, max_offload_tokens, expected
 ):
-    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
+    """`--enable-mamba-shared-prefix-checkpoint` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=True,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1561,6 +1604,7 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
         completed_token_len=completed,
         boundary_puts=[BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
         publish_partial_tail=publish,
+        max_offload_tokens=max_offload_tokens,
     )
 
     assert _partial_tail_non_mamba_puts(coord, req_meta, [4, 16]) == expected
@@ -1795,7 +1839,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     first_job_id = first.requests[0].store_job_id
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     assert first_job_id in scheduler._pinned_saves
 
@@ -1965,3 +2009,282 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+@pytest.fixture
+def store_scheduler() -> MooncakeStoreScheduler:
+    config = VllmConfig(
+        device_config=DeviceConfig("cpu"),
+        cache_config=CacheConfig(block_size=16, prefix_match_unit=4),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"save_decode_cache": True},
+        ),
+    )
+    cache = _make_mamba_hybrid_kv_cache_config()
+    cache.cache_hit_alignment_tokens = 4
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
+        "scheduler.LookupKeyClient",
+        return_value=_StubLookupClient(hit_tokens=16),
+    ):
+        scheduler = MooncakeStoreScheduler(config, cache)
+    scheduler.bind_gpu_block_pool(
+        BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=4)
+    )
+    return scheduler
+
+
+def _make_offload_policy_request(
+    max_offload_tokens: int | None, num_tokens: int = 30
+) -> Request:
+    init_none_hash(sha256)
+    return Request(
+        request_id="req-0",
+        prompt_token_ids=list(range(num_tokens)),
+        sampling_params=SamplingParams(
+            max_tokens=32,
+            extra_args={
+                "kv_transfer_params": {"max_offload_tokens": max_offload_tokens}
+            },
+        ),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("max_offload_tokens", "expect_stores"), [(None, True), (0, False), (False, True)]
+)
+def test_zero_offload_policy_suppresses_prefill_decode_and_finish_stores(
+    store_scheduler: MooncakeStoreScheduler,
+    max_offload_tokens: int | None,
+    expect_stores: bool,
+) -> None:
+    scheduler = store_scheduler
+    request = _make_offload_policy_request(max_offload_tokens)
+    block_ids = ([1, 2, 6], [0, 3, 4])
+    scheduler.update_state_after_alloc(request, KVCacheBlocks(()), 0)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, list(range(30)))
+    ]
+    output.num_scheduled_tokens = {request.request_id: 30}
+    output.kv_connector_block_state = _make_connector_block_state(
+        block_ids, [(1, 5, 28)]
+    )
+    prefill = scheduler.build_connector_meta(output)
+
+    request.num_computed_tokens = 30
+    request.append_output_token_ids(list(range(18)))
+    output = SchedulerOutput.make_empty()
+    output.scheduled_cached_reqs.req_ids = [request.request_id]
+    output.scheduled_cached_reqs.new_block_ids = [()]
+    output.scheduled_cached_reqs.num_computed_tokens = [30]
+    output.num_scheduled_tokens = {request.request_id: 18}
+    output.kv_connector_block_state = _make_connector_block_state(
+        block_ids, [(1, 4, 48)]
+    )
+    decode = scheduler.build_connector_meta(output)
+    request.num_computed_tokens = 48
+    scheduler.register_finished_partial_tail(request, block_ids, [(1, 5, 28)])
+
+    if not expect_stores:
+        assert prefill.requests == []
+        assert decode.requests == []
+        assert scheduler._pinned_saves == {}
+        assert scheduler._finished_partial_tail_metas == {}
+        assert not scheduler.has_pending_push_work()
+    else:
+        assert any(meta.can_save for meta in prefill.requests)
+        assert any(meta.can_save for meta in decode.requests)
+        assert scheduler._finished_partial_tail_metas
+
+    output = SchedulerOutput.make_empty()
+    output.finished_req_ids = {request.request_id}
+    scheduler.build_connector_meta(output)
+    # Reusing the request ID must not inherit the previous write policy.
+    request = _make_offload_policy_request(None)
+    scheduler.update_state_after_alloc(request, KVCacheBlocks(()), 0)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, list(range(30)))
+    ]
+    output.num_scheduled_tokens = {request.request_id: 30}
+    output.kv_connector_block_state = _make_connector_block_state(block_ids)
+    assert any(
+        meta.can_save for meta in scheduler.build_connector_meta(output).requests
+    )
+
+
+@pytest.mark.cpu_test
+def test_zero_offload_policy_preserves_loads(
+    store_scheduler: MooncakeStoreScheduler,
+) -> None:
+    scheduler = store_scheduler
+    request = _make_offload_policy_request(0)
+    matched, asynchronous = scheduler.get_num_new_matched_tokens(request, 0)
+    assert (matched, asynchronous) == (16, True)
+    blocks = KVCacheBlocks(([KVCacheBlock(1)], [KVCacheBlock(2)]))
+    scheduler.update_state_after_alloc(request, blocks, 16)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [
+        NewRequestData.from_request(request, ([1, 3], [2, 4]), list(range(30)))
+    ]
+    output.num_scheduled_tokens = {request.request_id: 14}
+    meta = scheduler.build_connector_meta(output)
+    [load] = meta.requests
+    assert not load.can_save
+    assert load.load_spec is not None and load.load_spec.can_load
+    assert load.load_spec.kvpool_cached_tokens == 16
+    assert scheduler._pinned_saves == {}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("max_offload_tokens", [0, 15, 16, 100, 131, 132, None])
+def test_request_offload_limit_bounds_regular_and_checkpoint_stores(
+    store_scheduler: MooncakeStoreScheduler, max_offload_tokens: int | None
+) -> None:
+    scheduler = store_scheduler
+    request = _make_offload_policy_request(max_offload_tokens, num_tokens=134)
+    block_ids = (list(range(1, 10)), [0] * 8 + [20])
+    scheduler.update_state_after_alloc(request, KVCacheBlocks(()), 0)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [
+        NewRequestData.from_request(request, block_ids, list(range(134)))
+    ]
+    output.num_scheduled_tokens = {request.request_id: 134}
+    output.kv_connector_block_state = _make_connector_block_state(
+        block_ids, [(1, 30, 96), (1, 31, 112), (1, 32, 132)]
+    )
+    meta = scheduler.build_connector_meta(output)
+    limit = 134 if max_offload_tokens is None else max_offload_tokens
+    expected_regular_tokens = min(limit, 134) // 16 * 16
+    assert (
+        max((item.token_len_chunk for item in meta.requests), default=0)
+        == expected_regular_tokens
+    )
+    assert {
+        put.num_tokens
+        for item in meta.requests
+        for put in item.boundary_puts or []
+        if put.group_id == 1
+    } == {boundary for boundary in (96, 112, 132) if boundary <= limit}
+    assert all(
+        put.num_tokens <= limit
+        for item in meta.requests
+        for put in item.boundary_puts or []
+    )
+
+    request.num_computed_tokens = 134
+    scheduler.register_finished_partial_tail(request, block_ids, [(1, 32, 132)])
+    assert bool(scheduler._finished_partial_tail_metas) == (limit >= 132)
+
+    request.append_output_token_ids(list(range(26)))
+    output = SchedulerOutput.make_empty()
+    output.scheduled_cached_reqs.req_ids = [request.request_id]
+    output.scheduled_cached_reqs.new_block_ids = [()]
+    output.scheduled_cached_reqs.num_computed_tokens = [134]
+    output.num_scheduled_tokens = {request.request_id: 26}
+    output.kv_connector_block_state = _make_connector_block_state(
+        block_ids, [(1, 33, 160)]
+    )
+    decode = scheduler.build_connector_meta(output)
+    if max_offload_tokens is not None:
+        assert all(item.token_len_chunk <= limit for item in decode.requests)
+        assert all(
+            put.num_tokens <= limit
+            for item in decode.requests
+            for put in item.boundary_puts or []
+        )
+    else:
+        assert any(item.token_len_chunk == 160 for item in decode.requests)
+
+
+def _scheduled_save_case() -> tuple[
+    MooncakeStoreScheduler,
+    BlockPool,
+    list[KVCacheBlock],
+    MooncakeStoreConnectorMetadata,
+]:
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+        ),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            make_kv_cache_group(
+                ["layer"],
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(config, kv_config)
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=16)
+    scheduler.bind_gpu_block_pool(pool)
+    tokens = list(range(32))
+    request = Request(
+        "admission",
+        tokens,
+        SamplingParams(max_tokens=1),
+        None,
+        block_hashes=[BlockHash(b"a0"), BlockHash(b"a1")],
+    )
+    blocks = pool.get_new_blocks(2)
+    ids = ([b.block_id for b in blocks],)
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
+    output = SchedulerOutput.make_empty()
+    output.scheduled_new_reqs = [NewRequestData.from_request(request, ids, tokens)]
+    output.num_scheduled_tokens = {request.request_id: 32}
+    output.total_num_scheduled_tokens = 32
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids={request.request_id},
+        resolve_block_ids=lambda _: ids,
+        boundary_state_offloads={},
+    )
+    return scheduler, pool, blocks, scheduler.build_connector_meta(output)
+
+
+def test_failed_save_releases_hbm_only_after_every_worker_finishes():
+    scheduler, pool, blocks, meta = _scheduled_save_case()
+    request = meta.requests[0]
+    pool.free_blocks(blocks)
+    assert [block.ref_cnt for block in blocks] == [1, 1]
+    for rank in range(2):
+        store = MagicMock()
+        store.batch_is_exist.return_value = [0, 0]
+        store.batch_put_from_multi_buffers.return_value = [-900, -900]
+        sender = _make_store_sending_thread(
+            store,
+            coord=scheduler._store_coord,
+            tp_rank=rank,
+        )
+        _run_store_req(sender, request)
+        scheduler.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                    completed_saves=sender.take_completed_saves(),
+                ),
+            )
+        )
+        assert sender.request_queue.unfinished_tasks == 0
+        assert [block.ref_cnt for block in blocks] == [1 - rank, 1 - rank]
+        assert store.batch_put_from_multi_buffers.call_count == 1
+        assert sender._saved_offset.get(request.req_id, 0) == 0
+    assert not scheduler.has_pending_push_work()
