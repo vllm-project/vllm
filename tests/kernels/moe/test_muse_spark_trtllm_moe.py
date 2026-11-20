@@ -42,6 +42,7 @@ from vllm.models.muse_spark.nvidia.muse_moe_runner import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.import_utils import has_deep_gemm
 
 if not (
     current_platform.has_device_capability(100) and has_flashinfer_trtllm_fused_moe()
@@ -198,7 +199,8 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
 ):
     """Alternating formats must preserve BF16 results, also in CUDA graphs and
     after a weight reload into the captured storage."""
-    pytest.importorskip("deep_gemm")
+    if not has_deep_gemm():  # also the vendored copy
+        pytest.skip("Requires DeepGEMM")
     config = VllmConfig(parallel_config=ParallelConfig())
     monkeypatch.setattr(
         "vllm.models.muse_spark.nvidia.mega_moe.get_ep_group", get_tp_group
@@ -282,7 +284,7 @@ def test_megamoe_bf16_nvfp4_shared_buffer(
         # A reload writes into the same storage and refills the derived gamma.
         w1, w2 = w1.roll(1, 0), w2.roll(1, 0) * 2
         norm.weight.copy_(norm.weight.flip(0))
-        bf16.load_weights([("w13_weight", w1), ("w2_weight", w2)])
+        list(bf16.load_weights([("w13_weight", w1), ("w2_weight", w2)]))
         bf16.finalize_weights()
         graph.replay()
         expected = reference(w1, w2)
@@ -459,13 +461,21 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
 
 
 @torch.inference_mode()
-def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
-    """Shared TRT storage must preserve native MegaMoE outputs and graph replay."""
+def test_megamoe_trtllm_weight_layout_matches_native(
+    dist_init, workspace_init, monkeypatch
+):
+    """Shared TRT storage must preserve native MegaMoE outputs and graph replay,
+    also after direct weight reloads into the captured storage."""
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
     from vllm.models.muse_spark.nvidia.mega_moe import _get_deep_gemm
     from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
         prepare_megamoe_nvfp4_inputs,
     )
 
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     torch.manual_seed(137)
     ckpt = _nvfp4_checkpoint()
     norm = MuseSparkRMSNormWithInputScale(
@@ -502,6 +512,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
             ).cuda()
             assert layer.weight_layout == layout
             assert set(layer.load_weights(ckpt.items())) == set(ckpt)
+            record_checkpoint_layout(layer)
             layer.finalize_weights()
             layers.append(layer)
     native, shared = layers
@@ -513,7 +524,6 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
     ):
         assert view.data_ptr() == parameter.data_ptr()
         assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
-    shared.finalize_weights()  # Must not shuffle the already finalized weights again.
 
     dg = _get_deep_gemm()
     buffer = dg.SymmBuffer(
@@ -555,6 +565,23 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
                 expected = native.forward_prepared(x, buffer)
                 graph.replay()
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        def reload(state: dict[str, torch.Tensor]) -> torch.Tensor:
+            for layer in layers:
+                begin_direct_reload(layer)
+                list(layer.load_weights(state.items()))
+                layer.finalize_weights()
+            stage()
+            graph.replay()
+            expected = native.forward_prepared(x, buffer)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            return expected.clone()
+
+        # B must change the outputs; A again must restore cold A bitwise.
+        stage()
+        cold = native.forward_prepared(x, buffer).clone()
+        assert not torch.equal(reload(_nvfp4_checkpoint(seed=1)), cold)
+        torch.testing.assert_close(reload(ckpt), cold, rtol=0, atol=0)
     finally:
         buffer.destroy()
 
