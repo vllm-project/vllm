@@ -34,6 +34,7 @@ _DEFAULT_SPLITK_CONFIG = (6, 4)
 
 # ll_bf16 router shapes covered by warmup/tuning:
 # (4096, 256)  # DSV4-Flash
+# (5120, 384)  # DSV4.1-Flash
 # (6144, 256)  # GLM5.2
 # (7168, 256)  # DSV3.2
 # (7168, 384)  # DSV4-Pro
@@ -57,6 +58,7 @@ _SM100F_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] 
 # SM90-specific tuned configs
 _SM90_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
     (4096, 256): {M: 256 for M in (1, 3)},
+    (5120, 384): {1: 256, 4: 64},
     (7168, 384): {M: 256 for M in (1, 2)},
 }
 _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
@@ -66,6 +68,7 @@ _SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = 
         **{M: (8, 2) for M in (13, 16)},
         **{M: (8, 5) for M in (14, 15)},
     },
+    (5120, 384): {M: (5, 5) for M in range(5, 17)},
     (7168, 256): {8: (6, 5)},
     (6144, 256): {M: (8, 2) for M in (9, 11)},
     (7168, 384): {
