@@ -95,9 +95,13 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
-    # Cross-DP prefill hold; replaces `throttle_prefills` when set. A class
-    # default, so schedulers built without `__init__` (as tests do) have it.
+    # Prefill hold; replaces `throttle_prefills` when set. Class defaults, so
+    # schedulers built without `__init__` (as tests do) have them.
     prefill_hold: PrefillHold | None = None
+    # Whether the scheduler updates the hold itself, as no DP state sync does.
+    _hold_local = False
+    # Whether every request has left since the hold's last update.
+    _hold_idle = False
 
     def __init__(
         self,
@@ -442,6 +446,9 @@ class Scheduler(SchedulerInterface):
                 lag_steps=self.vllm_config.max_concurrent_batches - 1,
                 log_stats=self.parallel_config.data_parallel_rank == 0,
             )
+            # Only DP ranks of a MoE model step in lockstep and sync rows; the
+            # ranks of a dense model run independently, each with DP size 1.
+            self._hold_local = self.parallel_config.data_parallel_size == 1
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -744,6 +751,8 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        if self._hold_local:
+            self._update_local_hold()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -3217,8 +3226,21 @@ class Scheduler(SchedulerInterface):
             self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
         )
 
+    def _update_local_hold(self) -> None:
+        """Updates the hold from this rank's row alone, before each step, as a
+        DP state sync would between steps."""
+        hold = self.prefill_hold
+        assert hold is not None
+        if self._hold_idle:
+            # Do not time a step across the idle gap, as at a DP wave's end.
+            self._hold_idle = False
+            hold.reset()
+        hold.update([hold.local_row()])
+
     def dp_row(self) -> Sequence[float] | None:
-        return None if self.prefill_hold is None else self.prefill_hold.local_row()
+        if self.prefill_hold is None or self._hold_local:
+            return None
+        return self.prefill_hold.local_row()
 
     def update_from_dp_rows(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
         assert self.prefill_hold is not None
@@ -3334,6 +3356,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+        if self._hold_local and not self.requests:
+            self._hold_idle = True
 
     @property
     def pause_state(self) -> PauseState:

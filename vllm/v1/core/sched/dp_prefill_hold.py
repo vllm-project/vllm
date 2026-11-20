@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cost-based cross-DP prefill hold for MoE models with DP attention + EP.
+"""Cost-based prefill hold, across data parallel ranks where they step together.
 
-Because all DP ranks step in lockstep, a prefill on any rank slows the step
-for every rank's running decodes. Each rank reports a compact `_RankRow`
-piggybacked on the DP state sync all-reduce; every rank runs the same
-deterministic `PrefillHold.update` so all ranks hold or release prefills
-together without extra RPCs.
+Each step, every rank reports a compact `_RankRow` (`PrefillHold.local_row`)
+and runs the deterministic `PrefillHold.update` on all ranks' rows. With DP
+attention + EP, all ranks step in lockstep, so a prefill on any rank slows the
+step for every rank's running decodes: `_RankRow` is piggybacked on the DP
+state sync all-reduce so all ranks hold or release together without extra RPCs.
+Without DP (and on independent dense DP ranks, which run with DP size 1), the
+scheduler feeds its own row to `PrefillHold.update` before each step.
 
 The hold fits an online non-negative 3-parameter mixed-step overhead model
 `extra_ms(M, S) = F + a * M + b * S` (fixed overhead, slowest-rank tokens `M`,
-total tokens `S`), then applies Online Ski-Rental against the amortizable waste
-`(F, a)` while bounding each request's hold time by the TTFT target `T`.
+total tokens `S`; reducing to 2D `F + a * M` on a single rank), then applies
+Online Ski-Rental against the amortizable waste `(F, a)` while bounding each
+request's hold time by the TTFT target `T`.
 """
 
 import math
@@ -111,10 +114,19 @@ class _Cost3D:
         self.b = 0.0
         self.sig: float | None = None
         self.s_minus_m_sq = 0.0
+        self.has_2d = False
         self.has_3d = False
 
     def predict_ms(self, m_ktok: float, s_ktok: float) -> float:
         return self.f + self.a * m_ktok + self.b * s_ktok
+
+    def _rescale(self, m_bar: float, s_bar: float) -> None:
+        pred_bar = self.predict_ms(m_bar, s_bar)
+        if pred_bar > 1e-6 and self.mean_y > 0.0:
+            scale = self.mean_y / pred_bar
+            self.f *= scale
+            self.a *= scale
+            self.b *= scale
 
     def update(self, m_ktok: float, s_ktok: float, y_ms: float) -> None:
         y_ms = max(0.0, y_ms)
@@ -153,18 +165,16 @@ class _Cost3D:
         if self.has_3d:
             # Steady-state collinearity (e.g. repeated full batches): preserve
             # the learned (F, a, b) ratios and rescale gently to mean_y.
-            pred_bar = self.predict_ms(m_bar, s_bar)
-            if pred_bar > 1e-6 and self.mean_y > 0.0:
-                scale = self.mean_y / pred_bar
-                self.f *= scale
-                self.a *= scale
-                self.b *= scale
+            self._rescale(m_bar, s_bar)
             return
 
-        # Cold-start fallback before multi-rank variation: 2D (F + a * M) -> 1D (F).
+        # 2D fallback (single rank or before multi-rank variation): F + a * M.
         var_m = self.a_mat[1][1] / self.w - m_bar * m_bar
         if self.w < 2.0 or var_m <= 1e-4:
-            self.f, self.a, self.b = max(0.0, self.mean_y), 0.0, 0.0
+            if self.has_2d:
+                self._rescale(m_bar, s_bar)
+            else:
+                self.f, self.a, self.b = max(0.0, self.mean_y), 0.0, 0.0
             return
         cov_my = self.b_vec[1] / self.w - m_bar * self.mean_y
         a = max(0.0, cov_my / var_m)
@@ -173,6 +183,7 @@ class _Cost3D:
             f = 0.0
             a = max(0.0, self.b_vec[1] / max(self.a_mat[1][1], 1e-12))
         self.f, self.a, self.b = f, a, 0.0
+        self.has_2d = True
 
     def _nnls_active_set(self) -> tuple[float, float, float]:
         """Exact non-negative least squares over 1- and 2-variable subsets."""
@@ -237,11 +248,12 @@ class PrefillQueueState(NamedTuple):
 
 
 class PrefillHold:
-    """Decides, once per step and identically on every DP rank, whether all
-    ranks hold their prefills on the next step.
+    """Decides, once per step, whether to hold prefills on the next step.
 
-    The DP engine core feeds every rank's `local_row` to `update` each step
-    through the scheduler; without that, it never holds.
+    With MoE DP, the DP engine core all-gathers every rank's `local_row` and
+    feeds them to `update`, so all ranks decide identically. Without DP (or on
+    independent dense DP ranks), the scheduler calls `update([local_row()])`
+    before each step.
 
     Args:
         queue_state: Returns a read-only view of the scheduler's queues.
@@ -621,7 +633,7 @@ class PrefillHold:
         self._logged_at = self._clock
         c = self._cost
         logger.info(
-            "DP prefill hold: %s | t_dec=%.1fms F=%.1fms a=%.1fms/ktok "
+            "Prefill hold: %s | t_dec=%.1fms F=%.1fms a=%.1fms/ktok "
             "b=%.1fms/ktok w=%.0f",
             " ".join(f"{k}={v}" for k, v in sorted(self._reasons.items())),
             (self._t_dec or 0.0) * 1e3,

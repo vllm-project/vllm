@@ -245,25 +245,27 @@ class SchedulerConfig:
     steps to finish prefilling."""
 
     prefill_hold_ttft_target: float | None = Field(default=None, gt=0)
-    """Hold prefills across data parallel MoE ranks, with this TTFT target in
-    seconds (5 is a reasonable start). None (the default) disables it.
+    """Hold prefills while running decodes, with this TTFT target in seconds
+    (5 is a reasonable start). None (the default) disables it.
 
-    With DP attention + EP all ranks step in lockstep, so a prefill on any rank
-    slows the step for all of them. With this set, all ranks hold or release
-    prefills together each step using an online non-negative 3-parameter step
-    cost model (`F + a * M + b * S`) and Online Ski-Rental against the
-    amortizable waste. A request is held only while it can still meet the
-    target given the releases it needs; a waiting request that has already
-    missed the target is held at most this long at a time.
+    Every step that prefills slows the decodes running in it. With this set,
+    prefills are held using an online non-negative step-cost model
+    (`F + a * M + b * S`, reducing to `F + a * M` on a single engine) and
+    Online Ski-Rental against the amortizable waste. With DP attention + EP all
+    ranks step in lockstep, so a prefill on any rank slows the step for all of
+    them; there, all ranks hold or release together. A request is held only
+    while it can still meet the target given the releases it needs; a waiting
+    request that has already missed the target is held at most this long at a
+    time.
 
     Every request weighs the same: with the "priority" `policy`, a
-    high-priority request is held as long as any other. Enabling this performs
-    a per-step DP CPU all-reduce (overriding `dp_sync_interval`), which may
-    add latency on high-latency multi-node networks with very short decode
-    steps. The step cost model is calibrated for text prefills; multimodal
-    vision encoder time is not modeled separately. Requires data parallelism on
-    a MoE model, and cannot be combined with `prefill_schedule_interval`. Has
-    no effect on the prefill-only and decode-only instances of disaggregated
+    high-priority request is held as long as any other. With MoE data
+    parallelism, enabling this performs a per-step DP CPU all-reduce
+    (overriding `dp_sync_interval`), which may add latency on high-latency
+    multi-node networks with very short decode steps. The step cost model is
+    calibrated for text prefills; multimodal vision encoder time is not modeled
+    separately. Cannot be combined with `prefill_schedule_interval`. Has no
+    effect on the prefill-only and decode-only instances of disaggregated
     serving."""
 
     prefill_hold_ttft_weight: float = Field(default=1.0, gt=0)

@@ -24,12 +24,6 @@ RANKS = 8
 TRUTH = (15.0, 12.0, 3.0)
 
 
-@pytest.fixture(autouse=True)
-def _moe_model(monkeypatch):
-    """The hold needs DP on a MoE model; the dense test model stands in."""
-    monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: True))
-
-
 def _row(
     *,
     done: float = 0.0,
@@ -285,12 +279,112 @@ def _hold_scheduler(ttft_target: float = T, **kwargs):
     return scheduler, hold
 
 
-@pytest.mark.parametrize(("dp_size", "is_moe"), [(1, True), (2, False)])
-def test_requires_dp_on_a_moe_model(monkeypatch, dp_size: int, is_moe: bool):
-    """Only the DP engine core of a MoE model feeds the hold."""
+@pytest.mark.parametrize("is_moe", [True, False])
+def test_scheduler_updates_the_hold_without_dp(monkeypatch, is_moe: bool):
+    """Without DP no state sync feeds the hold, so the scheduler updates it
+    from its own row before each step and applies the decision in that step.
+    The first step after every request has left starts with a reset, so the
+    idle gap is not timed as a step."""
     monkeypatch.setattr(ModelConfig, "is_moe", property(lambda self: is_moe))
-    with pytest.raises(ValueError, match="requires data parallelism"):
-        create_scheduler(prefill_hold_ttft_target=T, data_parallel_size=dp_size)
+    scheduler = create_scheduler(prefill_hold_ttft_target=T)
+    hold = scheduler.prefill_hold
+    assert hold is not None and scheduler.dp_row() is None
+    reasons = iter(["nothing", "wait", "cost", "nothing"])
+    ranks: list[int] = []
+
+    def decide(rows: list[_RankRow]) -> str:
+        ranks.append(len(rows))
+        return next(reasons)
+
+    monkeypatch.setattr(hold, "_decide", decide)
+    resets: list[bool] = []
+    monkeypatch.setattr(hold, "reset", lambda: resets.append(True))
+
+    dec, new = create_requests(num_requests=2, num_tokens=8, req_ids=["d", "n"])
+    scheduler.add_request(dec)
+    _finish_step(scheduler, scheduler.schedule())
+    scheduler.add_request(new)
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {"d"}
+    _finish_step(scheduler, output)
+    assert "n" in scheduler.schedule().num_scheduled_tokens
+    assert ranks == [1, 1, 1] and not resets
+
+    scheduler.finish_requests(["d", "n"], RequestStatus.FINISHED_ABORTED)
+    (again,) = create_requests(num_requests=1, num_tokens=8, req_ids=["a"])
+    scheduler.add_request(again)
+    scheduler.schedule()
+    assert resets == [True] and ranks == [1, 1, 1, 1]
+
+
+def test_single_rank_2d_fit_ski_rental_and_collinear_rescale():
+    """On a single engine (M == S), the cost model learns 2D (F + a * M),
+    Online Ski-Rental holds small prefills to amortize F while releasing full
+    batches immediately, and repeated identical full batches preserve (F, a)
+    ratios instead of dumping a * M into F."""
+    hold = PrefillHold(Mock(), T, 1.0, 8192)
+    for _ in range(4):
+        hold.update([_row(done=1, period=T_DEC, decodes=16)])
+    rng = random.Random(0)
+    f_true, a_true = 20.0, 15.0
+    for _ in range(100):
+        tok = rng.randint(256, 8192)
+        extra_ms = (f_true + a_true * tok / 1e3) * rng.uniform(0.99, 1.01)
+        hold.update(
+            [_row(done=1, period=T_DEC + extra_ms / 1e3, done_tokens=tok, decodes=16)]
+        )
+    assert hold._cost.has_2d and not hold._cost.has_3d
+    assert hold._cost.f == pytest.approx(f_true, rel=0.1)
+    assert hold._cost.a == pytest.approx(a_true, rel=0.1)
+    assert hold._cost.b == 0.0
+
+    # Small prefill holds via Ski-Rental, then releases via "cost".
+    small = [_row(period=T_DEC, decodes=16, work=1, x=1024, queued=1)]
+    assert hold.update(small) == "wait"
+    reason = ""
+    for _ in range(200):
+        reason = hold.update(small)
+        if reason != "wait":
+            break
+    assert reason == "cost"
+
+    # Full budget has zero F waste and releases immediately.
+    budget = hold._prefill_budget(16)
+    full_queued = [_row(period=T_DEC, decodes=16, work=1, x=budget, queued=1)]
+    assert hold.update(full_queued) == "cost"
+
+    # Repeated identical full batches decay var(M) -> 0: preserve (F, a) ratios.
+    f0, a0 = hold._cost.f, hold._cost.a
+    full_extra = f_true + a_true * 8.192
+    for _ in range(2500):
+        hold.update(
+            [
+                _row(
+                    done=1,
+                    period=T_DEC + full_extra / 1e3,
+                    done_tokens=8192,
+                    decodes=16,
+                )
+            ]
+        )
+    assert hold._cost.f > 0 and hold._cost.a > 0 and hold._cost.b == 0.0
+    assert hold._cost.a / hold._cost.f == pytest.approx(a0 / f0, rel=0.15)
+    # A 2x step-time shift in collinear steady state rescales uniformly.
+    for _ in range(500):
+        hold.update(
+            [
+                _row(
+                    done=1,
+                    period=T_DEC + 2.0 * full_extra / 1e3,
+                    done_tokens=8192,
+                    decodes=16,
+                )
+            ]
+        )
+    assert hold._cost.a / hold._cost.f == pytest.approx(a0 / f0, rel=0.15)
+    assert hold._cost.predict_ms(8.192, 8.192) == pytest.approx(
+        2.0 * full_extra, rel=0.1
+    )
 
 
 def test_pp_gt_1_logs_warning(caplog):

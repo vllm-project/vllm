@@ -157,8 +157,8 @@ Use `--prefill-hold-ttft-weight` (default `1.0`) to tune the TTFT vs. ITL trade-
 
 Notes and limitations:
 
-- Requires `--data-parallel-size > 1` on a MoE model and cannot be combined with `--prefill-schedule-interval > 1`.
-- Performs a per-step DP CPU all-reduce (overriding `--dp-sync-interval`), which may add overhead on high-latency multi-node networks with very short decode steps.
+- Also works without data parallelism and on independent dense DP ranks (each engine updates the hold locally without a DP all-reduce). Cannot be combined with `--prefill-schedule-interval > 1`.
+- With MoE DP, performs a per-step DP CPU all-reduce (overriding `--dp-sync-interval`), which may add overhead on high-latency multi-node networks with very short decode steps.
 - With `--pipeline-parallel-size > 1`, overlapped pipeline stages add noise to the online step-cost fit (a startup warning is logged).
 - The step-cost model is calibrated for text prefills; multimodal vision encoder time is not modeled separately.
 - Has no effect on prefill-only or decode-only instances of disaggregated serving.

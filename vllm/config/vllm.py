@@ -1432,16 +1432,8 @@ class VllmConfig:
             return
 
     def _verify_prefill_hold(self) -> None:
-        # Only the DP engine core feeds the hold; anywhere else it never holds.
         if self.scheduler_config.prefill_hold_ttft_target is None:
             return
-        if self.parallel_config.data_parallel_size == 1 or (
-            self.model_config is not None and not self.model_config.is_moe
-        ):
-            raise ValueError(
-                "prefill_hold_ttft_target requires data parallelism "
-                "(data_parallel_size > 1) on a MoE model."
-            )
         if self.parallel_config.pipeline_parallel_size > 1:
             logger.warning(
                 "prefill_hold_ttft_target with pipeline_parallel_size > 1 "
