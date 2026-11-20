@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
+    AiterW4A4ExpertsMonolithic,
     aiter_triton_kernel_w4a4_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -652,6 +653,13 @@ class MuseSparkAiterW4A4Experts(MuseSparkAiterExperts):
         if quant_config.gemm1_clamp_limit is None:
             quant_config = replace(quant_config, gemm1_clamp_limit=0.0)
         self._kernel_quant_config = quant_config
+        # Set by process_weights_after_loading once the weights are shuffled.
+        self.preshuffle_weights = False
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Same WMMA 16x16 preshuffle as AiterW4A4ExpertsMonolithic
+        self.preshuffle_weights = True
+        AiterW4A4ExpertsMonolithic.process_weights_after_loading(self, layer)
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -735,6 +743,7 @@ class MuseSparkAiterW4A4Experts(MuseSparkAiterExperts):
             quant_config=self._kernel_quant_config,
             apply_router_weight_on_input=False,
             global_num_experts=global_num_experts,
+            preshuffle_weights=self.preshuffle_weights,
             unpadded_N_w1=moe_config.intermediate_size_per_partition_unpadded * 2,
             unpadded_K_w1=moe_config.hidden_dim_unpadded,
             unpadded_N_w2=moe_config.hidden_dim_unpadded,

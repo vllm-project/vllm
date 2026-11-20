@@ -163,11 +163,8 @@ def _aiter_w4a4_gemms(
 
     gammas = routing_data.gate_scal if routing_data else None
 
-    swiglu_limit = (
-        quant_config.gemm1_clamp_limit
-        if quant_config.gemm1_clamp_limit is not None
-        else 7.0
-    )
+    clamp = quant_config.gemm1_clamp_limit
+    swiglu_limit = 7.0 if clamp is None else (None if clamp <= 0 else clamp)
     # Every supported activation runs the swiglu fused into the GEMM1
     # epilogue, which reads gate/up interleaved along N (see the oracle's
     # weight prep). SILU is the same epilogue with alpha 1 and no residual:
