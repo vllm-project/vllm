@@ -1,9 +1,10 @@
 # vLLM IR: Functional Intermediate Representation
 
 !!! warning "Deprecated"
-    vLLM IR is deprecated and is being removed. `--ir-op-priority`
-    (`KernelConfig.ir_op_priority`) still works but logs a warning, and it will be
-    removed in v0.34.0. Do not port new ops to vLLM IR.
+    vLLM IR is deprecated and is being removed. The top-level `--ir-op-priority`
+    option has been removed. `KernelConfig.ir_op_priority` still works but
+    logs a warning, and it will be removed together with vLLM IR. Do not port new
+    ops to vLLM IR.
 
 ## Motivation
 
@@ -124,21 +125,21 @@ the dynamic arg support check (`supports_args=...`).
 
 #### Command Line Configuration
 
-Use `--ir-op-priority.<op_name>=<provider1>,<provider2>,...`:
+Use `--kernel-config.ir_op_priority.<op_name>=<provider1>,<provider2>,...`:
 
 ```bash
 # CUDA: Use vllm_c implementation for rms_norm
 vllm serve meta-llama/Llama-3.2-1B \
-  --ir-op-priority.rms_norm=vllm_c
+  --kernel-config.ir_op_priority.rms_norm=vllm_c
 
 # ROCm: Try aiter first, fall back to vllm_c, then native
 vllm serve meta-llama/Llama-3.2-1B \
-  --ir-op-priority.rms_norm=aiter,vllm_c,native
+  --kernel-config.ir_op_priority.rms_norm=aiter,vllm_c,native
 
 # Configure multiple operations
 vllm serve meta-llama/Llama-3.2-1B \
-  --ir-op-priority.rms_norm=vllm_c \
-  --ir-op-priority.fused_add_rms_norm=vllm_c
+  --kernel-config.ir_op_priority.rms_norm=vllm_c \
+  --kernel-config.ir_op_priority.fused_add_rms_norm=vllm_c
 ```
 
 #### Python Configuration
@@ -570,7 +571,11 @@ class MyPlatform(Platform):
     return IrOpPriorityConfig(rms_norm=['my_platform', 'native'])
 
 # Users can still override priority in the same way
-llm = LLM(ir_op_priority=IrOpPriorityConfig(rms_norm=['custom_oot_kernel']))
+llm = LLM(
+    kernel_config=KernelConfig(
+        ir_op_priority=IrOpPriorityConfig(rms_norm=['custom_oot_kernel'])
+    )
+)
 ```
 
 ### Debugging and Observability
@@ -607,7 +612,7 @@ vLLM IR is designed to coexist with and gradually replace `CustomOp`:
 1. **Op declaration**: Convert `CustomOp` class `PluggableLayer` and move `forward_native` to `@register_op` function
 2. **Implementation registration**: Use `@ir.ops.op_name.register_impl` instead of overriding methods
 3. **Layer usage**: Replace `self.op(...)` with `ir.ops.op_name(...)`
-4. **Configuration**: Migrate `--compilation-config.custom-ops` to `--ir-op-priority`
+4. **Configuration**: Migrate `--compilation-config.custom-ops` to `--kernel-config.ir_op_priority`
 
 The migration can be done incrementally, one operation at a time.
 
