@@ -220,13 +220,13 @@ def test_cached_sources_follow_the_published_memory(server, monkeypatch, moved):
         n = base[:64].view(torch.bfloat16).view(8, 4)
         assert torch.equal(_bytes(a), _bytes(n[2:6, 1:3]))
         assert torch.equal(_bytes(b), base[64:])
-        cached.append(s._sources[0][0])
+        cached.append(s._sources[0].get(0))
         s.free()
-        # at release only the kept storages stay imported
+        # released once packed: only the kept storages stay imported
         assert (s._published[0].tensors is None) == (not keep)
         assert (0 in s._sources[0]) == bool(keep)  # cached views hold it too
         assert list(s._published[0].bases) == list(keep)
-    assert (cached[0] is cached[1]) != moved
+    assert (cached[0] is not None and cached[0] is cached[1]) != moved
 
 
 def test_a_pull_waits_for_its_unit(server):
@@ -364,22 +364,21 @@ def test_publish_checks_the_metadata(server):
 
 
 def test_a_unit_waits_for_every_live_consumer(server):
-    """A consumer left out of the sync, or pulling a bucket twice (a shared
-    id), is refused, not left waiting."""
+    """A unit is released once every live consumer's buckets of it are
+    packed. A consumer left out of the sync, or pulling a bucket twice (a
+    shared id), is refused, not left waiting."""
     s = server()
     for c in (0, 1, 2):
         s.register_consumer(c, [WHOLE_N])
     s.begin_sync([0, 1], 0)
     _publish(s, _weights(), 0)
     s.bucket(0, 0, 0)
+    assert 0 in s._resident
     s.bucket(1, 0, 0)
+    assert 0 not in s._resident, "nothing reads the unit after its packs"
     with pytest.raises(ValueError, match="twice"):
         s.bucket(1, 0, 0)
-    future = _call(s.end_sync)
-    s.free(1)
-    assert 0 in s._resident and not future.done()
-    s.free()
-    assert future.result(timeout=5) == [0]
+    assert s.end_sync() == [0]
     with pytest.raises(ValueError, match="twice"):  # after the unit's release
         _call(s.bucket, 0, 0, 0).result(timeout=5)
     with pytest.raises(ValueError, match="not in sync"):
@@ -438,10 +437,11 @@ def test_a_dead_consumer_trips_the_watchdog(server, monkeypatch):
     """A pull ahead of its sync is not a stall."""
     monkeypatch.setattr(trainer_mod, "_STALL_POLL_S", 0.05)
     s = server(stall_timeout_s=0.2)
-    s.register_consumer(0, [WHOLE_N])
-    s.begin_sync([0], 0)
+    for c in (0, 1):
+        s.register_consumer(c, [WHOLE_N])
+    s.begin_sync([0, 1], 0)
     _publish(s, _weights(), 0)
-    s.bucket(0, 0, 0)  # never freed: the consumer died
+    s.bucket(0, 0, 0)  # consumer 1 died and never pulls
     with pytest.raises(RuntimeError, match="stall"):
         s.end_sync()
     error = s._error
@@ -465,7 +465,7 @@ def test_a_bucket_is_freed_when_ray_drops_it(server):
     ray_store = s.bucket(0, 0, 0)
     block = weakref.ref(ray_store[0])
     gc.collect()
-    assert s._blocks and s._freed_pending == []
+    assert s._blocks
     del ray_store
     assert block() is None, "the producer kept a reference"
     assert s.wait_freed() == [0] and s._blocks == {}

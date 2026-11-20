@@ -297,7 +297,7 @@ class _RDTProducerServer:
         # per sync
         self._sync_idx = -1
         self._live: frozenset[int] = frozenset()
-        self._freed: dict[int, Counter[int]] = {}
+        self._packed: dict[int, Counter[int]] = {}  # per share key, by unit
         self._pulled: set[tuple[int, int]] = set()  # (consumer, seq) served
         self._resident: list[int] = []  # published, not released
         self._freed_pending: list[int] = []  # released, not yet collected
@@ -307,6 +307,7 @@ class _RDTProducerServer:
         self._holds: dict[int, _Block] = {}  # by offset
         self._shared: dict[tuple[int, int], _Block] = {}  # this sync's, by key
         self._serve_wait, self._served_count, self._packed_count = 0.0, 0, 0
+        self._reused_count = 0  # publishes whose cached sources still fit
         # this sync's imports by export, so each export is rebuilt once
         self._base_cache: dict[tuple, torch.Tensor] = {}
         # per unit its last publish; per consumer and seq, the bucket's
@@ -392,9 +393,10 @@ class _RDTProducerServer:
                 self._error = None
             self._sync_idx = int(sync_idx)
             self._live = frozenset(int(c) for c in live_consumer_ids)
-            self._freed = {c: Counter() for c in self._live}
+            self._packed = {}
             self._pulled = set()
             self._serve_wait, self._served_count, self._packed_count = 0.0, 0, 0
+            self._reused_count = 0
             self._shared = {}
             for block in list(self._holds.values()):  # left by an earlier sync
                 self._maybe_free(block)
@@ -465,6 +467,7 @@ class _RDTProducerServer:
         last = self._published.get(unit)
         if last is not None and signature is not None and last.signature == signature:
             gen = last.gen  # the same memory as last sync: its sources still fit
+            self._reused_count += 1
         else:
             for name, t in tensors.items():
                 if self._served.get(name) != (t.dtype, tuple(t.shape)):
@@ -502,11 +505,14 @@ class _RDTProducerServer:
             self._base_cache.clear()
             logger.info(
                 "Sharded RDT producer sync %d: served %d buckets (%d packed), "
-                "which waited %.2f s in total for their unit or arena room",
+                "which waited %.2f s in total for their unit or arena room; "
+                "%d of %d units reused their cached sources",
                 self._sync_idx,
                 self._served_count,
                 self._packed_count,
                 self._serve_wait,
+                self._reused_count,
+                len(self._published),
             )
             return freed
 
@@ -615,6 +621,7 @@ class _RDTProducerServer:
                         self._sync_idx == sync_idx
                         and consumer_id in self._live
                         and spec.unit not in self._resident
+                        and share not in self._shared
                     )
                 ),
                 f"unit {spec.unit} of sync {sync_idx}",
@@ -627,7 +634,7 @@ class _RDTProducerServer:
                     )
                 self._check_first_pull(consumer_id, seq, sync_idx)
                 self._pulled.add((consumer_id, seq))
-            # the unit stays resident until this bucket is served and freed
+            # the unit stays resident until every bucket reading it is packed
 
             def blocked() -> bool:
                 if self._sync_idx != sync_idx:
@@ -644,13 +651,11 @@ class _RDTProducerServer:
                 sync_idx,
             )
             published = self._published.get(spec.unit)
-            if (
-                self._sync_idx != sync_idx
-                or published is None
-                or published.tensors is None
+            block = self._shared.get(share)
+            if self._sync_idx != sync_idx or (
+                block is None and (published is None or published.tensors is None)
             ):
                 raise ValueError(f"pull for sync {sync_idx}, now {self._sync_idx}")
-            block = self._shared.get(share)
             if block is None:
                 offset = self._carve(spec.nbytes)
                 sharers = sum(self._share_key(c) == share[0] for c in self._live)
@@ -662,7 +667,9 @@ class _RDTProducerServer:
             flat = block.flat
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            tensors, gen = published.tensors, published.gen
+            tensors, gen = (
+                (published.tensors, published.gen) if flat is None else ({}, 0)
+            )
             ready = self._ready.get(spec.unit)
             self._last_progress = time.monotonic()
         if flat is None:
@@ -681,9 +688,12 @@ class _RDTProducerServer:
             with self._lock:
                 block.flat = flat
                 self._room.notify_all()
+                if sync_idx == self._sync_idx:
+                    self._packed.setdefault(share[0], Counter())[spec.unit] += 1
+                    self._release_if_done(spec.unit)
         del published, tensors
         served = flat.view(flat.shape)  # its own object, for its own free
-        self._track_free(served, consumer_id, spec.unit, sync_idx, block.offset)
+        self._track_free(served, block.offset)
         return [served]
 
     def _share_key(self, consumer_id: int) -> int:
@@ -772,34 +782,30 @@ class _RDTProducerServer:
             torch.cuda.current_stream(flat.device).synchronize()
         return flat
 
-    def _track_free(self, flat: torch.Tensor, *key: int) -> None:
-        """Account the bucket once Ray drops its last reference to `flat`
-        (the consumer's read is done); keep no reference to `flat`."""
-        weakref.finalize(flat, self._freed_bucket, *key)
+    def _track_free(self, flat: torch.Tensor, offset: int) -> None:
+        """Release this copy of the block at `offset` once Ray drops its last
+        reference to `flat` (the consumer's read is done)."""
+        weakref.finalize(flat, self._freed_bucket, offset)
 
-    def _freed_bucket(
-        self, consumer_id: int, unit: int, sync_idx: int, offset: int
-    ) -> None:
-        """Ray freed a served bucket in the block at `offset`: the bucket no
-        longer holds its unit, nor this copy the block."""
+    def _freed_bucket(self, offset: int) -> None:
+        """Ray freed a served copy of the block at `offset`."""
         with self._lock:
             block = self._holds.get(offset)
             if block is not None:
                 block.out -= 1
                 self._maybe_free(block)
-            if sync_idx == self._sync_idx and consumer_id in self._freed:
-                self._freed[consumer_id][unit] += 1
-                self._release_if_done(unit)
             self._last_progress = time.monotonic()
 
     def _release_if_done(self, unit: int) -> None:
-        """Release `unit` once every live consumer registered and freed all
-        its buckets of it. Caller holds `_lock`."""
+        """Release `unit` once every live consumer registered and all its
+        buckets of it are packed: nothing reads the unit after that. Caller
+        holds `_lock`."""
         if unit not in self._resident:
             return
         for c in self._live:
             needs = self._needs.get(c)
-            if needs is None or self._freed[c][unit] < needs[unit]:
+            packed = self._packed.get(self._share_key(c), Counter())
+            if needs is None or packed[unit] < needs[unit]:
                 return
         self._resident.remove(unit)
         self._drop_import(unit)
