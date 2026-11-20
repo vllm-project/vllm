@@ -26,7 +26,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LocalizedResources:
     """Shared resources with aligned context, stream, pool, and SM-count lists.
 

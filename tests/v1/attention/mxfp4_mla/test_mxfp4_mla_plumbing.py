@@ -36,7 +36,7 @@ def _layer_spec(block_size: int = 64, latent: int = LATENT):
         cache_config=types.SimpleNamespace(block_size=block_size),
         model_config=types.SimpleNamespace(dtype=torch.bfloat16),
     )
-    return MLAAttention.get_kv_cache_spec(layer, config)
+    return MLAAttention.get_kv_cache_config(layer, config).spec
 
 
 def test_row_is_272_bytes_for_a_512_wide_latent():
@@ -89,7 +89,7 @@ def test_hybrid_block_size_matches_the_layer_page(monkeypatch):
         block_size=64,
         mamba_block_size=None,
         user_specified_mamba_block_size=False,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         kv_cache_dtype_skip_layers=None,
     )

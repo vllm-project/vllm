@@ -220,25 +220,14 @@ class DFlash2Speculator(DFlashSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        last_hidden_states = self._run_model(
+        model_output = self._run_model(
             num_tokens_padded,
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        num_sample = num_reqs * self.num_speculative_steps
-        hidden_states = last_hidden_states[self.sample_indices[:num_sample]].view(
-            num_reqs, self.num_speculative_steps, -1
-        )
-        candidate_ids, unary_logits = self.model.compute_candidates(
-            hidden_states.flatten(0, 1)
-        )
-        candidate_ids = candidate_ids.view(
-            num_reqs, self.num_speculative_steps, self.top_k
-        )
-        unary_logits = unary_logits.view_as(candidate_ids)
-        scores = self._score_candidates(candidate_ids, unary_logits, hidden_states)
+        candidate_ids, scores = self._prepare_candidates(model_output, num_reqs)
         self.candidate_sampler.sample(
             candidate_ids,
             scores,
@@ -252,11 +241,28 @@ class DFlash2Speculator(DFlashSpeculator):
             self.use_fp64_gumbel,
         )
         if self.enable_adaptive_verification:
+            num_sample = num_reqs * self.num_speculative_steps
             self._maybe_predict_acceptance(
                 self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
             )
+
+    def _prepare_candidates(self, model_output, num_reqs):
+        num_sample = num_reqs * self.num_speculative_steps
+        hidden_states = model_output[self.sample_indices[:num_sample]].view(
+            num_reqs, self.num_speculative_steps, -1
+        )
+        candidate_ids, unary_logits = self.model.compute_candidates(
+            hidden_states.flatten(0, 1)
+        )
+        candidate_ids = candidate_ids.view(
+            num_reqs, self.num_speculative_steps, self.top_k
+        )
+        scores = self._score_candidates(
+            candidate_ids, unary_logits.view_as(candidate_ids), hidden_states
+        )
+        return candidate_ids, scores
 
     def _score_candidates(
         self,

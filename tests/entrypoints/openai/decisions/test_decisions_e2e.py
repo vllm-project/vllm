@@ -99,3 +99,29 @@ def test_openai_decisions_rejects_images(server):
     )
     assert response.status_code == 400
     assert "text input only" in response.json()["error"]["message"]
+
+
+def test_openai_decisions_predicate_matches_systemone_noul(server):
+    text = "The package arrived with a broken screen."
+    question = "Is the screen broken?"
+    decision = requests.post(
+        server.url_for("v1/decisions"),
+        json={
+            "model": MODEL_NAME,
+            "input": text,
+            "questions": [{"type": "predicate", "instructions": question}],
+        },
+    )
+    noul = requests.post(
+        server.url_for("v1/systemone"),
+        json={
+            "model": MODEL_NAME,
+            "state": text,
+            "questions": {"0": {"type": "noul", "instructions": question}},
+        },
+    )
+    assert decision.status_code == 200, decision.text
+    assert noul.status_code == 200, noul.text
+    assert decision.json()["answers"][0]["probability"] == pytest.approx(
+        noul.json()["answers"]["0"]["noul"], abs=1e-3
+    )

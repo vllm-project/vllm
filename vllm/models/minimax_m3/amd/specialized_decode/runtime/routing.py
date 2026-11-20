@@ -14,7 +14,7 @@ from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetada
 from .spec import DecodeConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepDecision:
     use_mono: bool
     reason: str = ""
@@ -28,8 +28,7 @@ def decide_step(
 ) -> StepDecision:
     if rows not in spec.widths:
         return StepDecision(False, f"unsupported physical row count {rows}")
-    # A FULL capture runs the forward with mode NONE inside the capture, and its
-    # replays never plan; PIECEWISE is keyed by token count alone and replays
+    # PIECEWISE is keyed by token count alone and replays
     # mixed steps, so it stays stock.
     if graph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
         return StepDecision(False, f"{graph_mode.name} graph step")
