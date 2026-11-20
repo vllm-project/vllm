@@ -460,9 +460,10 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
 
 
+@pytest.mark.parametrize("nvfp4", [True, False])
 @torch.inference_mode()
 def test_megamoe_trtllm_weight_layout_matches_native(
-    dist_init, workspace_init, monkeypatch
+    nvfp4, dist_init, workspace_init, monkeypatch
 ):
     """Shared TRT storage must preserve native MegaMoE outputs and graph replay,
     also after direct weight reloads into the captured storage."""
@@ -470,14 +471,19 @@ def test_megamoe_trtllm_weight_layout_matches_native(
         begin_direct_reload,
         record_checkpoint_layout,
     )
+    from vllm.model_executor.utils import weights_already_processed
     from vllm.models.muse_spark.nvidia.mega_moe import _get_deep_gemm
+    from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_bf16 import (
+        prepare_megamoe_bf16_inputs,
+    )
     from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
         prepare_megamoe_nvfp4_inputs,
     )
 
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     torch.manual_seed(137)
-    ckpt = _nvfp4_checkpoint()
+    checkpoint = _nvfp4_checkpoint if nvfp4 else _bf16_checkpoint
+    ckpt = checkpoint()
     norm = MuseSparkRMSNormWithInputScale(
         hidden_size=K,
         eps=1e-8,
@@ -490,7 +496,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(
     for layout, tp_size in (("native", 1), ("trtllm", 4)):
         config = VllmConfig(
             kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
-            quant_config=nvfp4_quant_config(),
+            quant_config=nvfp4_quant_config() if nvfp4 else None,
             parallel_config=ParallelConfig(
                 tensor_parallel_size=tp_size,
                 enable_expert_parallel=True,
@@ -508,6 +514,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(
                 intermediate_size=N,
                 post_expert_norm=norm,
                 num_max_tokens_per_rank=128,
+                is_nvfp4=nvfp4,
                 prefix=f"shared_layout.{layout}",
             ).cuda()
             assert layer.weight_layout == layout
@@ -516,18 +523,30 @@ def test_megamoe_trtllm_weight_layout_matches_native(
             layer.finalize_weights()
             layers.append(layer)
     native, shared = layers
-    for view, parameter in (
-        (shared._transformed_l1[0], shared.w13_weight),
-        (shared._transformed_l1[1], shared.w13_weight_scale),
-        (shared._transformed_l2[0], shared.w2_weight),
-        (shared._transformed_l2[1], shared.w2_weight_scale),
-    ):
+    names = ["w13_weight", "w2_weight"]
+    if nvfp4:
+        names = ["w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"]
+    l1, l2 = shared.kernel_weights()
+    for view, name in zip([*l1, *l2] if nvfp4 else [l1, l2], names):
+        parameter = getattr(shared, name)
         assert view.data_ptr() == parameter.data_ptr()
         assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
+    # Kernel-format weights must not be repacked again.
+    with weights_already_processed():
+        for layer in layers:
+            before = [p.clone() for p in layer.parameters()]
+            layer.finalize_weights()
+            assert all(map(torch.equal, before, layer.parameters()))
 
     dg = _get_deep_gemm()
     buffer = dg.SymmBuffer(
-        torch.distributed.group.WORLD, E, 128, TOPK, K, N, mma_type="fp4xfp4"
+        torch.distributed.group.WORLD,
+        E,
+        128,
+        TOPK,
+        K,
+        N,
+        mma_type="fp4xfp4" if nvfp4 else "bf16xbf16",
     )
     try:
         for tokens in (1, 8, 32, 64):
@@ -540,6 +559,16 @@ def test_megamoe_trtllm_weight_layout_matches_native(
             buffer.topk_weights.zero_()
 
             def stage(x=x, weights=weights, ids=ids, tokens=tokens):
+                if not nvfp4:
+                    prepare_megamoe_bf16_inputs(
+                        x,
+                        weights,
+                        ids,
+                        buffer.x[:tokens],
+                        buffer.topk_idx[:tokens],
+                        buffer.topk_weights[:tokens],
+                    )
+                    return
                 prepare_megamoe_nvfp4_inputs(
                     x,
                     weights,
@@ -580,7 +609,7 @@ def test_megamoe_trtllm_weight_layout_matches_native(
         # B must change the outputs; A again must restore cold A bitwise.
         stage()
         cold = native.forward_prepared(x, buffer).clone()
-        assert not torch.equal(reload(_nvfp4_checkpoint(seed=1)), cold)
+        assert not torch.equal(reload(checkpoint(seed=1)), cold)
         torch.testing.assert_close(reload(ckpt), cold, rtol=0, atol=0)
     finally:
         buffer.destroy()
