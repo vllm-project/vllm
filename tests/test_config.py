@@ -1044,8 +1044,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     try:
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
-        assert "DeepseekV32MTPModel" not in breakable_architectures
-        assert "GlmMoeDsaForCausalLM" not in breakable_architectures
+        assert "DeepseekV32MTPModel" in breakable_architectures
+        assert "GlmMoeDsaForCausalLM" in breakable_architectures
         # V4.1 cannot torch.compile and the ROCm sparse SWA backend only
         # supports uniform-batch CUDA graphs, so it must opt in or the
         # default FULL_AND_PIECEWISE serve path cannot start.
@@ -1114,9 +1114,9 @@ def test_dsa_models_default_to_breakable_cudagraph(
         ("DeepseekV32ForCausalLM", False, True),
         ("DeepseekV32ForCausalLM", True, False),
         ("DeepseekV32MTPModel", False, True),
-        ("DeepseekV32MTPModel", True, False),
+        ("DeepseekV32MTPModel", True, True),
         ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, False),
+        ("GlmMoeDsaForCausalLM", True, True),
         ("Qwen4ExpForCausalLM", False, True),
         ("Qwen4ExpForCausalLM", True, False),
         ("Qwen4ExpForConditionalGeneration", False, True),
