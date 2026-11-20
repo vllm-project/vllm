@@ -160,8 +160,13 @@ class ECSharedRegion:
             logger.debug("cudaHostRegister %.2f MB", self._blocks_nbytes / 1e6)
             self._is_pinned = True
 
-    def cleanup(self) -> None:
-        """Tear down the region. Lifecycle method; no concurrent access."""
+    def cleanup(self, keep_mapping: bool = False) -> None:
+        """Tear down the region. Lifecycle method; no concurrent access.
+
+        With `keep_mapping`, only the file name is removed: a transfer that
+        could not be cancelled may still write into the memory, so it stays
+        mapped until the process exits.
+        """
         logger.info("Starting ECSharedRegion cleanup...")
         if self._is_creator:
             try:
@@ -172,6 +177,13 @@ class ECSharedRegion:
                     "Failed to unlink path %s", self._mmap_path, exc_info=True
                 )
             self._is_creator = False
+        if keep_mapping:
+            logger.warning(
+                "Keeping EC region %s mapped until exit: a transfer into it "
+                "may still be in flight",
+                self._mmap_path,
+            )
+            return
         if self._is_pinned:
             result = torch.cuda.cudart().cudaHostUnregister(self._blocks_ptr)
             if result.value != 0:

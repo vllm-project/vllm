@@ -43,6 +43,10 @@ except ImportError:
 _MAX_REGION_BYTES = 1 << 30
 # How long deregister() lets released, still in-flight READs finish.
 _SHUTDOWN_SETTLE_MS = 2000
+# Transports whose READs did not settle in deregister(). MoRI-IO holds their
+# statuses and sessions by raw pointer and the NIC may still write into their
+# region, so they, and through them the region, live until the process exits.
+_UNSETTLED: list["MoRIIODataTransport"] = []
 
 
 class _PeerMetadata(msgspec.Struct):
@@ -115,6 +119,9 @@ class MoRIIODataTransport(DataTransport):
                 f"{_MAX_REGION_BYTES} bytes; got {region.nbytes}"
             )
         self._block_size = block_size_bytes
+        # The memory READs write into. Held so that it outlives the scheduler
+        # when a READ cannot be settled (see _UNSETTLED).
+        self._region = region
         self._peers: dict[str, _Peer] = {}
         self._parked: list[_MoriXfer] = []
         self._local_mem: Any = None
@@ -288,9 +295,10 @@ class MoRIIODataTransport(DataTransport):
 
         MoRI-IO cannot abort a READ and deregister_memory() does not wait for
         one, so the region is only deregistered once no released transfer still
-        targets it. Anything still in flight after the settle period keeps the
-        registration (and its parked handle) until the process exits, which is
-        harmless; deregistering under an active DMA is not.
+        targets it. If a READ is still in flight after the settle period, the
+        transport keeps the registration and moves itself, with its parked
+        handles, engine and region, into _UNSETTLED until the process exits,
+        and region_in_use() tells the owner not to unmap the region.
         """
         for peer in self._peers.values():
             peer.notify.close(linger=0)
@@ -304,16 +312,21 @@ class MoRIIODataTransport(DataTransport):
                 self._local_mem = None
             else:
                 logger.warning(
-                    "EC: %d MoRI-IO READ(s) still in flight after %d ms; leaving "
-                    "the region registered",
+                    "EC: %d MoRI-IO READ(s) still in flight after %d ms; keeping "
+                    "the region registered and mapped until the process exits",
                     len(self._parked),
                     _SHUTDOWN_SETTLE_MS,
                 )
+                _UNSETTLED.append(self)
         if self._pull is not None:
             self._pull.close(linger=0)
             self._pull = None
         if not self._ctx.closed:
             self._ctx.term()
+
+    def region_in_use(self) -> bool:
+        self._reap_parked()
+        return bool(self._parked)
 
     def _settle_parked(self) -> bool:
         """Wait up to the settle budget for parked READs; True if none remain."""
