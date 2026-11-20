@@ -120,7 +120,7 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
         kv_cache_groups=[
             new_kv_cache_group(["mla"], mla_spec),
             new_kv_cache_group(
-                ["mamba"], mamba_spec, MambaManager.config(mamba_cache_mode="align")
+                ["mamba"], mamba_spec, MambaManager.config(enable_prefix_caching=True)
             ),
         ],
     )

@@ -94,8 +94,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     every trainer rank before contacting the workers. The check stays until
     re-init, even if planning failed and the workers fell back to
     `load_weights`. The inference server
-    must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
-    refuse otherwise at init."""
+    must reload directly (the default with weight updates) and run without
+    EPLB; the workers refuse otherwise at init."""
 
 
 @dataclass
