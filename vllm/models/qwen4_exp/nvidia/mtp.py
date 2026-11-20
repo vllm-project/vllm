@@ -23,6 +23,7 @@ from transformers import Qwen4ExpTextConfig
 from vllm import envs
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.kernels.triton.fused_pre_fc_norms import fused_pre_fc_norms_split
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -317,19 +318,24 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             assert input_ids is not None
             inputs_embeds = self.embed_input_ids(input_ids)
+        # Both pre-FC norms in one launch; the hidden norm is independent of
+        # fc_embedding, so it can be hoisted above it.
+        num_tokens = hidden_states.shape[0]
+        inputs_embeds, hidden_states = fused_pre_fc_norms_split(
+            inputs_embeds,
+            hidden_states.view(num_tokens, hc_count * hidden_size),
+            self.pre_fc_norm_embedding.weight,
+            self.pre_fc_norm_hidden.weight,
+            self.pre_fc_norm_embedding.variance_epsilon,
+        )
         # Embedding branch: pre-norm -> fc_embedding -> [T, H].
-        inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
         inputs_embeds = self.fc_embedding(inputs_embeds)
 
         # Backbone hidden is multi-stream [T, hc_count*H] (scheme A:
         # the main model truly emits the pre-final-mixer multi stream
         # on the first step; subsequent steps reuse the prior draft
         # step's multi stream).
-        num_tokens = hidden_states.shape[0]
         hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
-        hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(
-            num_tokens, hc_count, hidden_size
-        )
         hidden_states = self.fc_hidden(hidden_states)
         hidden_states = hidden_states.flatten(-2)
         prev_block_output = inputs_embeds

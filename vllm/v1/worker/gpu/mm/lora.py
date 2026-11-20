@@ -38,13 +38,20 @@ def _collect_mm_items(
         lora_id = int(lora_state.lora_ids[req_idx])
         lora_request = lora_state.lora_requests.get(req_id) if lora_id > 0 else None
         mm_features = encoder_cache.mm_features[req_id]
-        # "prompt_embeds" is a passthrough modality: the tensor is already in
-        # the model's embedding space, so no encoder runs and there is no
-        # tower or connector output to apply LoRA to.
+        # Map exactly the items EncoderRunner.prepare_mm_inputs will encode,
+        # or the tower/connector mapping covers more tokens than the encoder
+        # produces and the LoRA kernels read and write past their buffers.
+        # Skipped: "prompt_embeds" (a passthrough modality - the tensor is
+        # already in the model's embedding space, so no encoder runs), items
+        # with no data, and items whose output is already cached (the
+        # scheduler can evict and re-allocate an item in the same step while
+        # the worker keeps its tensor, so it is scheduled but not re-encoded).
         mm_items.extend(
             (lora_id, lora_request, mm_features[i])
             for i in encoder_input_ids
             if mm_features[i].modality != "prompt_embeds"
+            and mm_features[i].data is not None
+            and mm_features[i].identifier not in encoder_cache.encoder_outputs
         )
     return mm_items
 

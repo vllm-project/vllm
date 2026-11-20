@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.model_loader.utils import log_layer_backends
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -78,6 +79,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
@@ -418,6 +420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
+            log_layer_backends(self.model, self.vllm_config.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
@@ -434,6 +437,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 with self.draft_context(), self.jit_warmup_registry.activate():
                     self.speculator.load_model(self.model)
                     assert self.speculative_config is not None
+                    log_layer_backends(
+                        self.speculator.model,
+                        self.speculative_config.draft_model_config,
+                    )
                     # The drafter never runs its MoE layers in this mode.
                     if not self.speculative_config.prefill_context_kv_only:
                         eplb_models_added = self.eplb.maybe_register_speculator(
@@ -454,6 +461,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+        if self.pp_handler is not None:
+            self.pp_handler.relay_positions = (
+                self.model_state.positions_depend_on_encoder
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -493,8 +504,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank and not self.is_pooling_model:
             # Speculative verification uses native top-k/top-p masking even
             # when target-only sampling can use FlashInfer's fused sampler.
-            if current_platform.is_rocm() or (
-                current_platform.is_cuda() and self.speculative_config is not None
+            # CPU has no fused sampler, so it always masks with the kernel.
+            if (
+                current_platform.is_rocm()
+                or current_platform.is_cpu()
+                or (current_platform.is_cuda() and self.speculative_config is not None)
             ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
@@ -577,6 +591,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
+            assert self.pp_handler is not None
+            self.pp_handler.add_positions_buffer(
+                self.intermediate_tensors,
+                self.max_num_tokens,
+                self.model_config.mrope_num_dims,
+            )
 
         get_offloader().post_init()
 
@@ -616,6 +636,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if draft_model is not None:
             with set_current_vllm_config(self.vllm_config):
                 refresh_quantized_lm_heads(draft_model)
+                # Drafts that precompute weights from the target's (e.g. a
+                # folded LM head) re-derive them in place.
+                refresh = getattr(draft_model, "refresh_derived_weights", None)
+                if refresh is not None:
+                    refresh()
 
     def reload_weights(
         self,
@@ -707,8 +732,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
+        no_attn_metadata_layer_names: set[str] = set()
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
+            if self.speculator.speculative_config.prefill_context_kv_only:
+                no_attn_metadata_layer_names = draft_attn_layer_names
         # Metadata builders select attention kernels that need JIT warmup.
         with self.jit_warmup_registry.activate():
             (
@@ -720,6 +748,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
+                no_attn_metadata_layer_names=no_attn_metadata_layer_names,
             )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
@@ -812,6 +841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.block_tables,
                 self.input_buffers,
                 self.attn_groups,
+                self.kernel_block_sizes,
             )
         if self.speculator is not None:
             # After set_attn, so the speculator can size its cudagraph mode
@@ -905,15 +935,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
             assert self.speculative_config is not None
-            num_reqs = min(
-                num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
-            )
-            # Keep room for each request's draft slots.
-            num_tokens = min(
-                num_tokens,
-                self.max_num_tokens
-                - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
-            )
+            draft_slots = self.speculative_config.max_num_new_slots_for_drafting
+            # Every request needs its query tokens plus its draft slots.
+            tokens_per_req = self.speculator.num_query_per_req + draft_slots
+            num_reqs = min(num_reqs, self.max_num_tokens // tokens_per_req)
+            num_tokens = min(num_tokens, self.max_num_tokens - num_reqs * draft_slots)
+        # The block tables only fit max_model_len tokens per request, but
+        # max_num_batched_tokens can exceed num_reqs * max_model_len (e.g.
+        # after auto-fit lowers max_model_len).
+        num_tokens = min(num_tokens, num_reqs * self.max_model_len)
 
         assert num_tokens <= self.max_num_tokens, (
             f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
@@ -1106,6 +1136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
+        self.ec_connector.reset()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         if self.pooling_runner is not None:
@@ -1297,7 +1328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
             if self.speculator is not None:
-                self.speculator.add_request(req_index)
+                self.speculator.add_request(req_index, new_req_data)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
@@ -1312,6 +1343,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
+            mrope_position_delta = self.model_state.get_mrope_position_delta(req_index)
+            if mrope_position_delta is not None:
+                self.kv_connector.record_mrope_position_delta(
+                    req_id, mrope_position_delta
+                )
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
@@ -1941,7 +1977,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
-            dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # DP padding can exceed max_model_len; split so each dummy request
+            # fits a block-table row (bounded by max_num_reqs).
+            needed_num_reqs = max(
+                batch_desc.num_reqs or num_reqs,
+                cdiv(batch_desc.num_tokens, self.max_model_len),
+            )
+            dummy_num_reqs = min(needed_num_reqs, self.max_num_reqs)
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
@@ -2098,16 +2140,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
-                assert self.pp_handler is not None
-                self.pp_handler.check_received_tensors(
-                    intermediate_tensors.tensors, self.intermediate_tensors.tensors
-                )
                 num_tokens = input_batch.num_tokens
                 received = intermediate_tensors.tensors
                 for k, v in self.intermediate_tensors.tensors.items():
                     # Some PP transports receive into the persistent tensors.
                     if received[k].data_ptr() != v.data_ptr():
                         v[:num_tokens].copy_(received[k][:num_tokens])
+                assert self.pp_handler is not None
+                self.pp_handler.receive_positions(
+                    intermediate_tensors, model_inputs["positions"], num_tokens
+                )
             n = input_batch.num_tokens_after_padding
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
@@ -2221,8 +2263,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # the unpadded tokens; the next stage pads for its own CUDA graphs.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
+            return self.pp_handler.send_positions(
+                output_intermediate_tensors, model_inputs["positions"]
             )[: input_batch.num_tokens]
         return None
 
@@ -2322,6 +2367,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
 
+        num_drafted_tokens_per_req, num_verified_tokens_per_req = (
+            self._get_num_drafted_and_verified(input_batch)
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -2331,6 +2379,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            num_drafted_tokens_per_req=num_drafted_tokens_per_req,
+            num_verified_tokens_per_req=num_verified_tokens_per_req,
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
@@ -2425,6 +2475,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return async_output
 
+    def _get_num_drafted_and_verified(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Drafted and verified draft tokens per request.
+
+        Must run before the drafter overwrites the draft tokens being verified.
+        """
+        if self.speculator is None or input_batch.num_draft_tokens_per_req is None:
+            return None, None
+        draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+        # -1 marks a draft slot without a draft token.
+        num_drafted = (draft_tokens != -1).sum(dim=-1)
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        num_in_forward = input_batch.cu_num_logits.diff() - num_bonus_tokens
+        num_verified = torch.minimum(num_in_forward, num_drafted)
+        return num_drafted, num_verified
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
 
@@ -2515,9 +2582,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # time LLMEngine's finalizer runs, the top-level model may be gone.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
-            if draft_model := getattr(speculator, "model", None):
-                clear_layer_kv_caches(draft_model.modules())
-                remove_bytecode_hooks(draft_model)
+            speculator.shutdown()
             self.speculator = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())

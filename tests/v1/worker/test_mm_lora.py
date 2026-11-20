@@ -47,11 +47,16 @@ class _FakeLoRAManager:
         self.set_active_adapters_calls.append((requests, mapping))
 
 
-def _mm_feature(modality: str, identifier: str, num_embeds: int):
+def _mm_feature(
+    modality: str,
+    identifier: str,
+    num_embeds: int,
+    data: object | None = "kwargs",
+):
     return SimpleNamespace(
         modality=modality,
         identifier=identifier,
-        data=None,
+        data=data,
         mm_position=SimpleNamespace(get_num_embeds=lambda: num_embeds),
     )
 
@@ -88,7 +93,8 @@ def test_activate_mm_loras_skips_prompt_embeds_passthrough():
                     _mm_feature("prompt_embeds", "h_embeds", num_embeds=32),
                     _mm_feature("image", "h_img", num_embeds=4),
                 ]
-            }
+            },
+            encoder_outputs={},
         )
     )
     lora_state = SimpleNamespace(
@@ -120,7 +126,10 @@ def test_activate_mm_loras_rejects_unmatched_encoder_batch():
     req_id = "req-0"
     lora_manager = _FakeLoRAManager()
     runner = _FakeEncoderRunner(
-        SimpleNamespace(mm_features={req_id: [_mm_feature("image", "h_img", 4)]})
+        SimpleNamespace(
+            mm_features={req_id: [_mm_feature("image", "h_img", 4)]},
+            encoder_outputs={},
+        )
     )
     lora_state = SimpleNamespace(
         lora_ids=np.array([7], dtype=np.int32),
@@ -139,6 +148,82 @@ def test_activate_mm_loras_rejects_unmatched_encoder_batch():
         pytest.raises(AssertionError, match="h_unknown"),
     ):
         runner.callback(["h_unknown"])
+    assert lora_manager.set_active_adapters_calls == []
+
+
+def _collect_with_one_batch(features, encoder_outputs, batch_mm_hashes):
+    """Runs activate_mm_loras for one request (LoRA id 7) scheduling every
+    feature in `features`, encodes `batch_mm_hashes` as a single batch, and
+    returns (model, lora_manager)."""
+    req_id = "req-0"
+    model = _FakeModel()
+    lora_manager = _FakeLoRAManager()
+    runner = _FakeEncoderRunner(
+        SimpleNamespace(mm_features={req_id: features}, encoder_outputs=encoder_outputs)
+    )
+    lora_state = SimpleNamespace(
+        lora_ids=np.array([7], dtype=np.int32),
+        lora_requests={req_id: object()},
+    )
+    with activate_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_runner=runner,
+        req_id_to_index={req_id: 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={req_id: list(range(len(features)))},
+    ):
+        if batch_mm_hashes:
+            runner.callback(batch_mm_hashes)
+    return model, lora_manager
+
+
+def test_activate_mm_loras_skips_items_already_encoded():
+    """The scheduler can evict an encoder-cache entry and re-allocate it in
+    the same step, keeping the worker-side tensor: the item is scheduled but
+    EncoderRunner.prepare_mm_inputs doesn't re-encode it, so it must not be
+    mapped, and an encoder batch never asks for it."""
+    model, lora_manager = _collect_with_one_batch(
+        [
+            _mm_feature("image", "cached-image", num_embeds=8),
+            _mm_feature("image", "fresh-image", num_embeds=4),
+        ],
+        encoder_outputs={"cached-image": object()},
+        batch_mm_hashes=["fresh-image"],
+    )
+
+    assert model.calls == ["image"]
+    assert len(lora_manager.set_active_adapters_calls) == 1
+    _, mapping = lora_manager.set_active_adapters_calls[0]
+    assert mapping.index_mapping == (7, 7, 7, 7)
+
+
+def test_activate_mm_loras_skips_items_without_data():
+    """prepare_mm_inputs doesn't encode an item whose data is None, so it must
+    not be mapped either."""
+    model, lora_manager = _collect_with_one_batch(
+        [
+            _mm_feature("image", "no-data", num_embeds=8, data=None),
+            _mm_feature("image", "h_img", num_embeds=4),
+        ],
+        encoder_outputs={},
+        batch_mm_hashes=["h_img"],
+    )
+
+    assert model.calls == ["image"]
+    _, mapping = lora_manager.set_active_adapters_calls[0]
+    assert mapping.index_mapping == (7, 7, 7, 7)
+
+
+def test_activate_mm_loras_noop_when_every_item_is_cached():
+    """When nothing will be encoded this step, no tower mapping is set."""
+    model, lora_manager = _collect_with_one_batch(
+        [_mm_feature("image", "cached-image", num_embeds=4)],
+        encoder_outputs={"cached-image": object()},
+        batch_mm_hashes=[],
+    )
+
+    assert model.calls == []
     assert lora_manager.set_active_adapters_calls == []
 
 

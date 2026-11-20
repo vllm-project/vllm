@@ -9,8 +9,9 @@ sees the layout direct mode actually restored (the NCCL engine does it at its
 first target update), and reduces each traced `copy_` to a box of the
 checkpoint tensor and a strided region of the target's storage
 (`geometry.py`). A name is
-direct only if every byte it writes is a copy of one incoming byte; anything
-else is a fallback, which the engine sends in full through `load_weights`.
+direct only if every element it writes is a copy of one incoming element,
+as bytes or through the loader's own `copy_` cast; anything else is a
+fallback, which the engine sends in full through `load_weights`.
 The plan holds for every later update of the same model.
 
 `load_planned` loads full checkpoint tensors through `get_dest`; the NCCL
@@ -32,7 +33,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, Targets, Traced, trace_loads
-from .direct import direct_reload_active, direct_reload_enabled
+from .direct import direct_reload_active, mark_loaded, reloads_directly
 from .geometry import (
     Box,
     Fallback,
@@ -40,6 +41,7 @@ from .geometry import (
     Write,
     box_and_region,
     byte_runs,
+    byte_span,
     merge_writes,
 )
 
@@ -53,7 +55,7 @@ __all__ = ["Box", "LoadPlan", "check_plannable", "load_planned", "plan_loads"]
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entry:
     name: str
     shape: tuple[int, ...]  # from the metadata
@@ -63,7 +65,7 @@ class Entry:
     reason: str | None = None  # why it is a fallback
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoadPlan:
     entries: dict[str, Entry]  # per declared name, in metadata order
     dests: dict[str, Dest]  # live tensors built at plan_loads; not data
@@ -81,7 +83,8 @@ class LoadPlan:
         its tensor's shape, into that tensor is exactly what the loader would
         have written. `None`: fallback, send the full tensor through
         `load_weights`. Write only between `start_reload` and
-        `finish_reload`; never read.
+        `finish_reload`; never read. A tensor may be in another dtype than
+        the checkpoint tensor, so write it with `copy_`, not as raw bytes.
 
         `load_planned` copies full tensors through it; an engine that sends
         only `get_boxes` copies its slices the same way."""
@@ -125,7 +128,13 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
 
     t0 = time.perf_counter()
     targets = Targets(model)
-    traced = trace_loads(model, metas, targets)
+    # the trace loads nothing: keep it out of the update's completeness record
+    loaded = model.__dict__.pop("_loaded_params", None)
+    try:
+        traced = trace_loads(model, metas, targets)
+    finally:
+        if loaded is not None:
+            model._loaded_params = loaded
     if traced.lonely:
         lonely = traced.lonely
         raise RuntimeError(
@@ -154,22 +163,60 @@ def load_planned(
     """Load full checkpoint tensors as `plan` says: copy each direct name's
     boxes into its destinations, skip names this rank needs nothing of, and
     pass fallbacks to `model.load_weights`. Call between `start_reload`
-    and `finish_reload`."""
+    and `finish_reload`.
+
+    Copies are batched, so each tensor `weights` yields must stay unchanged
+    until this call returns: do not reuse one buffer across items."""
     fallbacks = []
+    # (name, k) -> (dst, src); a name sent again replaces its copies.
+    batch: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
+    held = 0
     for name, full in weights:
         dest = plan.get_dest(name)
         if dest is None:
             fallbacks.append((name, full))
-        for box, tensor in dest or ():
+            continue
+        for k, (box, tensor) in enumerate(dest):
             part = full[tuple(slice(start, stop) for start, stop in box)]
-            tensor.copy_(part.reshape(tensor.shape))
+            batch[name, k] = (tensor, part.reshape(tensor.shape))
+        if dest:
+            held += full.nbytes
+        for w in plan.entries[name].writes or ():  # loaded without load_weights
+            mark_loaded(model, f"{w.module}.{w.tensor}" if w.module else w.tensor)
+        # Bounds how many source tensors a streaming caller keeps alive.
+        if held > _FLUSH_BYTES:
+            _copy_all(batch)
+            batch.clear()
+            held = 0
+    if batch:
+        _copy_all(batch)
     if fallbacks:
         model.load_weights(fallbacks)
 
 
+_FLUSH_BYTES = 2 << 30
+
+
+def _copy_all(batch: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]]) -> None:
+    """One `_foreach_copy_` over the batch; on failure, copy pair by pair to
+    finish it or name the checkpoint tensor that failed."""
+    try:
+        torch._foreach_copy_(*map(list, zip(*batch.values())))
+    except Exception as batched:
+        logger.debug("load_planned: _foreach_copy_ failed (%s); copying each", batched)
+        for (name, _), (dst, src) in batch.items():
+            try:
+                dst.copy_(src)
+            except Exception as e:
+                raise RuntimeError(
+                    f"load_planned: copying {name!r} into its destination failed: {e}"
+                ) from e
+
+
 def check_plannable(model: torch.nn.Module) -> None:
     """Refuse a configuration no load plan supports: a reload mode other than
-    direct, and EPLB. Reads only configuration, so an engine can call it
+    direct, EPLB, and online quantization (its loaders quantize what they
+    load). Reads only configuration, so an engine can call it
     before `start_reload` changes the model. Direct reload's own refusals
     run in `begin_direct_reload`.
 
@@ -177,13 +224,18 @@ def check_plannable(model: torch.nn.Module) -> None:
         RuntimeError: the configuration cannot be planned.
 
     """
-    if not direct_reload_enabled():
-        raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
+    if not reloads_directly(model):
+        raise RuntimeError(
+            "load plan: requires direct reload; this rank reloads layerwise "
+            "(see its startup log)"
+        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)
         if getattr(parallel, "enable_eplb", False):
             raise RuntimeError(f"load plan: EPLB is not supported ({name})")
+        if getattr(module, "quantizes_on_load", False):
+            raise RuntimeError(f"load plan: online quantization ({name})")
 
 
 def _entry(meta: "ParamMeta", traced: Traced, targets: Targets) -> Entry:
@@ -210,21 +262,27 @@ def _write(
     """`copy` as a box and region; `None` if it copies nothing.
 
     Raises:
-        Fallback: it is not a plain copy of checkpoint bytes.
+        Fallback: it is not a copy of checkpoint elements.
 
     """
     src = copy.src
     if src._geom is None:
         raise Fallback(src._lost or "not a view of the checkpoint tensor")
-    if src.dtype != copy.dtype:
+    # A cast is replayed from the checkpoint dtype, so a cast of a view in
+    # another dtype cannot be.
+    if src.dtype == copy.dtype or _same_bits(src.dtype, copy.dtype):
+        cast = None
+    elif src.dtype == dtype:
+        cast = copy.dtype
+    else:
         raise Fallback(
-            f"casts {src.dtype} to {copy.dtype} at copy_ "
-            f"(send it as {copy.dtype} to make it direct)"
+            f"casts {src.dtype} (a view of the {dtype} checkpoint tensor) "
+            f"to {copy.dtype} at copy_"
         )
     target = targets.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
-    size = dtype.itemsize
+    size = (cast or dtype).itemsize
     rel = copy.byte_offset - target.byte_offset
     if rel % size or target.byte_offset % size:
         raise Fallback("copies into a destination viewed with another element size")
@@ -241,12 +299,24 @@ def _write(
     dims = list(zip(copy.shape, geom.stride(), copy.stride))
     box, dst_shape, dst_stride = box_and_region(shape, geom.storage_offset(), dims)
     return Write(
-        box, target.module, target.tensor, Region(rel // size, dst_shape, dst_stride)
+        box,
+        target.module,
+        target.tensor,
+        Region(rel // size, dst_shape, dst_stride),
+        cast,
+    )
+
+
+def _same_bits(a: torch.dtype, b: torch.dtype) -> bool:
+    """Integer casts between equal widths keep every bit."""
+    return a.itemsize == b.itemsize and not any(
+        d.is_floating_point or d.is_complex or d == torch.bool for d in (a, b)
     )
 
 
 def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
-    """The live tensor of `write`, in the checkpoint dtype."""
+    """The live tensor of `write`, in `write.dtype` or else `dtype`."""
+    dtype = write.dtype or dtype
     target = targets.by_name[(write.module, write.tensor)]
     r = write.dst
     offset = target.byte_offset // dtype.itemsize + r.offset
@@ -257,24 +327,53 @@ def _dest(targets: Targets, write: Write, dtype: torch.dtype) -> torch.Tensor:
 def _overlaps(traced: Traced, targets: Targets) -> dict[str, str]:
     """Names whose writes share a byte with another write: direct writes land
     in any order, so these go through `load_weights` in arrival order."""
-    runs: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
+    # Sweep byte spans; expand into runs only copies whose spans intersect.
+    spans: dict[int, list[tuple[int, int, int, str, Copy]]] = defaultdict(list)
     for name, copies in traced.copies.items():
         for c in copies:
             if c.storage in targets.by_storage and 0 not in c.shape:
-                spans = byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize)
-                runs[c.storage] += [(a, b, name) for a, b in spans]
+                start, stop = byte_span(
+                    c.byte_offset, c.shape, c.stride, c.dtype.itemsize
+                )
+                spans[c.storage].append((start, stop, len(spans[c.storage]), name, c))
     reasons: dict[str, str] = {}
-    for named in runs.values():
-        named.sort()
-        active: list[tuple[int, str]] = []  # heap of (stop, name)
-        for start, stop, name in named:
+    for items in spans.values():
+        items.sort()
+        runs: dict[int, list[tuple[int, int]]] = {}  # sorted runs, by item id
+        active: list[tuple[int, int, str, Copy]] = []  # heap of (stop, id, name, copy)
+        for start, stop, i, name, c in items:
             while active and active[0][0] <= start:
-                heapq.heappop(active)
-            for _, other in active:
-                reasons.setdefault(name, f"writes overlap with {other!r}")
-                reasons.setdefault(other, f"writes overlap with {name!r}")
-            heapq.heappush(active, (stop, name))
+                runs.pop(heapq.heappop(active)[1], None)
+            for _, j, other, oc in active:
+                if (name not in reasons or other not in reasons) and _runs_intersect(
+                    _sorted_runs(runs, i, c), _sorted_runs(runs, j, oc)
+                ):
+                    reasons.setdefault(name, f"writes overlap with {other!r}")
+                    reasons.setdefault(other, f"writes overlap with {name!r}")
+            heapq.heappush(active, (stop, i, name, c))
     return reasons
+
+
+def _sorted_runs(
+    cache: dict[int, list[tuple[int, int]]], i: int, c: Copy
+) -> list[tuple[int, int]]:
+    """The sorted byte runs of copy `c` (item `i`), computed once."""
+    if i not in cache:
+        cache[i] = sorted(byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize))
+    return cache[i]
+
+
+def _runs_intersect(ra: list[tuple[int, int]], rb: list[tuple[int, int]]) -> bool:
+    """Whether two sorted lists of [start, stop) runs share a byte."""
+    i = j = 0
+    while i < len(ra) and j < len(rb):
+        if ra[i][0] < rb[j][1] and rb[j][0] < ra[i][1]:
+            return True
+        if ra[i][1] <= rb[j][1]:
+            i += 1
+        else:
+            j += 1
+    return False
 
 
 def _nbytes(entry: Entry) -> int:

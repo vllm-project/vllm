@@ -13,7 +13,11 @@ from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
@@ -99,9 +103,12 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
-def _mock_backend(supported: list, *, exact: bool = False):
+def _mock_backend(
+    supported: list, *, exact: bool = False, preferred: int | None = None
+):
     """Backend accepting multiples of `supported`, or only those exact sizes
-    when `exact` (as CPU_MLA does)."""
+    when `exact` (as CPU_MLA does). `preferred` overrides the size the
+    backend asks for."""
     from vllm.v1.attention.backend import AttentionBackend
 
     class _MockBackendCls(AttentionBackend):
@@ -121,6 +128,12 @@ def _mock_backend(supported: list, *, exact: bool = False):
             def supports_block_size(cls, block_size: int | None) -> bool:
                 return block_size is None or block_size in supported
 
+        if preferred is not None:
+
+            @classmethod
+            def get_preferred_block_size(cls, default_block_size: int) -> int:
+                return preferred
+
     return _MockBackendCls
 
 
@@ -137,11 +150,43 @@ def _mock_backend(supported: list, *, exact: bool = False):
         ([[32, 64]], 32),
         # Neither divides the other, so only the LCM satisfies both.
         ([[32], [48]], 96),
+        # Both accept the default 16 and prefer 64, so the shared preference
+        # wins over 16.
+        ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
+        # A backend that rejects 16 stays on the LCM path. Preferring 256
+        # must not replace lcm(64, 32).
+        ([[64], ([MultipleOf(32)], 256)], 64),
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
-    classes = [_mock_backend(s) for s in backends]
+    classes = []
+    for spec in backends:
+        if isinstance(spec, tuple):
+            supported, preferred = spec
+            classes.append(_mock_backend(supported, preferred=preferred))
+        else:
+            classes.append(_mock_backend(spec))
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # ROCm: both backends prefer 16 while the default is 64.
+        ([([MultipleOf(16)], 16), ([MultipleOf(16)], 16)], 16),
+        # HPU: full attention and its chunked-local subclass both prefer 128.
+        ([([16, 128], 128), ([16, 128], 128)], 128),
+        # DeepSeek-V4.1 on SM90: SWA prefers 256, the indexer stays at 64.
+        # 256 is legal for both, and must not replace the default.
+        ([([64], 64), ([MultipleOf(32)], 256)], 64),
+    ],
+)
+def test_preferred_block_size_requires_a_unanimous_preference(backends, expected):
+    classes = [
+        _mock_backend(supported, preferred=preferred)
+        for supported, preferred in backends
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 64, None) == expected
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
@@ -204,7 +249,7 @@ def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
+    cache_config.enable_prefix_caching = True
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
         forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
@@ -257,6 +302,39 @@ def test_mamba_blocks_divide_resized_attention_blocks(
     assert layer_configs["mamba.0"].spec.block_size == mamba_block_size
 
 
+@pytest.mark.parametrize("draft_kv_heads", [2, 16])
+def test_mamba_page_covers_a_drafter_with_more_kv_per_token(draft_kv_heads):
+    """An EAGLE drafter with more KV per token than the target sets the largest
+    attention page. Sized for the target alone, the block makes that page several
+    Mamba pages, and the planner pads every Mamba page up to it."""
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    draft = SimpleNamespace(
+        use_mla=False,
+        get_num_kv_heads=lambda parallel_config: draft_kv_heads,
+        get_head_size=lambda: 128,
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        draft_model_config=draft, draft_parallel_config=None, num_speculative_tokens=3
+    )
+    cache_config = vllm_config.cache_config
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+
+    model_config = vllm_config.model_config
+    target_page = (
+        cache_config.block_size
+        * AttentionSpec(
+            block_size=1,
+            num_kv_heads=model_config.get_num_kv_heads(vllm_config.parallel_config),
+            head_size=model_config.get_head_size(),
+            dtype=model_config.dtype,
+        ).page_size_bytes
+    )
+    draft_page = cache_config.block_size * 2 * draft_kv_heads * 128 * 2
+    assert cache_config.mamba_page_size_padded == max(target_page, draft_page)
+
+
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     # XPU's GDN rounding runs after super()'s check, so it must check again.
     try:
@@ -280,7 +358,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     cache_config = SimpleNamespace(
         block_size=16,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         user_specified_block_size=True,
         kv_cache_dtype_skip_layers=None,
@@ -341,13 +419,13 @@ def test_activate_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -355,7 +433,7 @@ def test_activate_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -415,7 +493,7 @@ def test_activate_mm_loras_maps_each_encoder_batch_separately():
     for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
         encoder_cache.mm_features[req_id] = [
             MultiModalFeatureSpec(
-                data=None,
+                data=MultiModalKwargsItem.dummy(),
                 modality=modality,
                 identifier=f"{req_id}-0",
                 mm_position=PlaceholderRange(offset=0, length=length),

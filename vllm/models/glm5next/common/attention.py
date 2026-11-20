@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,13 +20,19 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.dequant_linear import bf16_linear
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    fuse_indexer_wk_weights_proj,
+    init_indexer_wk_weights_proj,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -193,6 +202,28 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         return KpoolTailBackend
 
 
+class Glm5NextIndexerWkWeightsLinear(MergedColumnParallelLinear):
+    """Fused `wk`/`weights_proj`: returns `k` and the FP32 head gate.
+
+    BF16 error in the gate can change near-tie pool rankings on long-context
+    tasks, so it is recomputed in FP32 from a copy built after loading.
+    """
+
+    _gate_weight_fp32: torch.Tensor | None = None
+
+    def process_weights_after_loading(self) -> None:
+        """Build the FP32 gate weight from the loaded weights; reloads refill it
+        in place."""
+        head_dim = self.output_sizes[0]
+        gate = self.weight.data[head_dim:, :].t().contiguous().float()
+        refill_derived(self, "_gate_weight_fp32", gate)
+
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        head_dim = self.output_sizes[0]
+        kw, _ = super().forward(input_)
+        return kw[:, :head_dim], torch.mm(input_.float(), self._gate_weight_fp32)
+
+
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -242,15 +273,14 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
+        # wk + weights_proj run as one BF16 GEMM (wk_weights_proj); unlike the
+        # rest of the indexer, wk may be block-FP8 in the checkpoint
+        init_indexer_wk_weights_proj(
+            self,
             hidden_size,
-            [self.head_dim, self.n_head],
-            bias=False,
-            quant_config=None,
-            disable_tp=True,
-            prefix=f"{prefix}.wk_weights_proj",
+            vllm_config.quant_config,
+            prefix,
+            fused_linear_cls=Glm5NextIndexerWkWeightsLinear,
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
@@ -261,7 +291,6 @@ class Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
-        self._wp_fp32: torch.Tensor | None = None
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
@@ -304,15 +333,9 @@ class Indexer(nn.Module):
         )
 
     def process_weights_after_loading(self) -> None:
-        """Build the fp32 head-gate projection from the loaded weights; reloads
-        refill it in place."""
-        wp = (
-            self.wk_weights_proj.weight.data[self.head_dim :, :]
-            .t()
-            .contiguous()
-            .float()
-        )
-        refill_derived(self, "_wp_fp32", wp)
+        """Refresh the fused projection and FP32 gate after loading."""
+        fuse_indexer_wk_weights_proj(self)
+        self.wk_weights_proj.process_weights_after_loading()
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -320,11 +343,7 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Built after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        weights = torch.mm(hidden_states.float(), self._wp_fp32)
+        k, weights = self.wk_weights_proj(hidden_states)
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
@@ -438,30 +457,43 @@ class Glm5NextMLAAttention(nn.Module):
         # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
         proj_input_size = input_size if input_size is not None else self.hidden_size
 
+        def proj(build: Callable[..., LinearBase]) -> LinearBase:
+            # Without a quant_config, the model runs these projections in
+            # BF16; a quantized checkpoint may store them in FP8.
+            if quant_config is not None:
+                return build(quant_config=quant_config)
+            return bf16_linear(build, vllm_config.quant_config)
+
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
-                proj_input_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
+            self.fused_qkv_a_proj = proj(
+                partial(
+                    DeepSeekV2FusedQkvAProjLinear,
+                    proj_input_size,
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                )
             )
         else:
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                proj_input_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            self.kv_a_proj_with_mqa = proj(
+                partial(
+                    ReplicatedLinear,
+                    proj_input_size,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.kv_a_proj_with_mqa",
+                )
             )
 
         if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj",
+            self.q_b_proj = proj(
+                partial(
+                    ColumnParallelLinear,
+                    self.q_lora_rank,
+                    self.num_heads * self.qk_head_dim,
+                    bias=False,
+                    prefix=f"{prefix}.q_b_proj",
+                )
             )
         else:
             self.q_proj = ColumnParallelLinear(
@@ -479,12 +511,14 @@ class Glm5NextMLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
+        self.o_proj = proj(
+            partial(
+                RowParallelLinear,
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                prefix=f"{prefix}.o_proj",
+            )
         )
 
         # `Glm5NextTextConfig` is NoPE-only and so declares no `rope_parameters`;
