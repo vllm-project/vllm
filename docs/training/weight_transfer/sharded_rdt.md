@@ -44,12 +44,12 @@ for unit in its units:                  update_weights:
 bucket(i): wait for the unit,                   one fused copy into get_dest,
     pack the boxes, one fused copy,             load_weights for fallbacks
     into an arena block                         drop the ref -> block freed
-release a unit once every live worker   finish_weight_update: finish_reload
-    has freed every bucket reading it
+release a unit once every bucket       finish_weight_update: finish_reload
+    reading it is packed
 end_sync
 ```
 
-A trainer rank runs at most `gather_lookahead` units ahead of the units its workers are still reading. Workers pull in unit order within each group of co-owning trainer ranks, and pull from independent groups (pipeline stages) side by side, so no rank waits on a unit its workers will pull later.
+A trainer rank runs at most `gather_lookahead` units ahead of the units it is still packing; a packed bucket no longer needs its unit, only its arena block until Ray frees it. Workers pull in unit order within each group of co-owning trainer ranks, and pull from independent groups (pipeline stages) side by side, so no rank waits on a unit its workers will pull later.
 
 Each trainer rank serves out of one arena it registers with NIXL at startup, sized for `num_buffers` buckets for every worker of one deployment that may pull from it, plus one bucket of slack. Worker *j* of every deployment pulls the same buckets, so they share one block per bucket: the first pull packs it, the others read it, and the block is freed once each has. To serve a pull, the rank packs the bucket's boxes, with one fused copy, into one byte tensor carved from the arena, so Ray only describes it. A rank admits a pull only while a block for it fits next to the buckets it has served and Ray has not yet freed, so a full arena slows pulls down rather than failing them.
 
