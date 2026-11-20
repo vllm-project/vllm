@@ -609,6 +609,19 @@ class XPUPlatform(Platform):
         return device_name.count("data center gpu") > 0
 
     @classmethod
+    def support_fp8_query(cls) -> bool:
+        """Whether XPU attention takes an FP8 query.
+
+        VLLM_XPU_SUPPORT_FP8_QUERY overrides; if unset, on for Xe3p only.
+        """
+        if envs.VLLM_XPU_SUPPORT_FP8_QUERY is not None:
+            return envs.VLLM_XPU_SUPPORT_FP8_QUERY
+        try:
+            return bool(torch.ops._xpu_C.is_xe3p_arch())
+        except (AttributeError, RuntimeError):
+            return False
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         if not torch.distributed.is_xccl_available():
             # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
