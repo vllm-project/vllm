@@ -69,7 +69,7 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         UnloadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
-        UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
+        UnloadLoraError::NotFound { .. } => ApiError::not_found(message),
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
