@@ -2833,7 +2833,6 @@ def test_onednn_backends_reject_int2(monkeypatch, backend) -> None:
         _dispatch(make_layer_config(bits=2))
 
 
-
 @pytest.mark.parametrize("group_size", [48, -1, 0])
 def test_w4a8_rejects_unaligned_group_size(monkeypatch, group_size) -> None:
     """The kernel needs a group size that is a positive multiple of 32."""

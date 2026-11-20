@@ -202,12 +202,10 @@ class INCARKW4A8MoEMethod(INCARKWNA16MoEMethod):
         self.w2_moe_w4a8: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self.w13_moe_w4a16: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self.w2_moe_w4a16: tuple[torch.Tensor, torch.Tensor, int] | None = None
-        self.w13_moe_w4a8_prepacked: tuple[
-            torch.Tensor, torch.Tensor, int
-        ] | None = None
-        self.w2_moe_w4a8_prepacked: tuple[
-            torch.Tensor, torch.Tensor, int
-        ] | None = None
+        self.w13_moe_w4a8_prepacked: tuple[torch.Tensor, torch.Tensor, int] | None = (
+            None
+        )
+        self.w2_moe_w4a8_prepacked: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self._use_w4a8_for_current_apply = False
 
     def _has_ark_moe_kernel(self, is_available, ark, xpu_lib) -> bool:
@@ -271,15 +269,12 @@ class INCARKW4A8MoEMethod(INCARKWNA16MoEMethod):
             type(self)._eager_prepack_layer_count += 1
             layer_count = type(self)._eager_prepack_layer_count
             logger.info(
-                "ARK W4A8 MoE eager prepack started for layer %d: "
-                "w13=%s, w2=%s",
+                "ARK W4A8 MoE eager prepack started for layer %d: w13=%s, w2=%s",
                 layer_count,
                 tuple(w13_packed[0].shape),
                 tuple(w2_packed[0].shape),
             )
-            self.w13_moe_w4a8_prepacked = self._prepack_w4a8_moe_weight(
-                w13_packed
-            )
+            self.w13_moe_w4a8_prepacked = self._prepack_w4a8_moe_weight(w13_packed)
             self.w2_moe_w4a8_prepacked = self._prepack_w4a8_moe_weight(w2_packed)
             logger.info(
                 "ARK W4A8 MoE eager prepack finished for layer %d",
@@ -420,8 +415,7 @@ class INCARKW4A8MoEMethod(INCARKWNA16MoEMethod):
         split = _prefill_decode_split(x.shape[0])
         if split is None:
             use_w4a8_prefill = (
-                x.shape[0] * topk_ids.shape[1]
-                > _moe_auto_decode_max_total_tokens()
+                x.shape[0] * topk_ids.shape[1] > _moe_auto_decode_max_total_tokens()
             )
             return self._apply_with_prefill_kernel(
                 use_w4a8_prefill,
