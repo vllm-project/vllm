@@ -1598,7 +1598,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         action="store_true",
         help="Trust remote code from huggingface",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for dataset sampling and shuffling.",
+    )
     parser.add_argument(
         "--num-prompts",
         type=int,
