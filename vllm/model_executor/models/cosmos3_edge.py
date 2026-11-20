@@ -19,6 +19,7 @@ from transformers.models.cosmos3_edge.image_processing_cosmos3_edge import (
 )
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -62,6 +63,7 @@ from .qwen3_vl import (
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     maybe_prefix,
 )
@@ -498,12 +500,15 @@ class Cosmos3EdgeForCausalLM(nn.Module):
                 "-": NemotronHMLPDecoderLayer,
             },
         )
-        self.lm_head = ParallelLMHead(
-            text_config.vocab_size,
-            text_config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                text_config.vocab_size,
+                text_config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(text_config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
