@@ -460,7 +460,6 @@ class VoxtralForConditionalGeneration(
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
-            model=model_config.model,
             audio=audio.to_base64(audio.format),
             language=language,
         )

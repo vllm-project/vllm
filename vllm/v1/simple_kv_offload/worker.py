@@ -67,6 +67,7 @@ class SimpleCPUOffloadWorker:
         self.store_stream: torch.cuda.Stream | None = None
 
         self._backend: DmaCopyBackend | DiskBackend | None = None
+        self._pinned_host_ranges: list[torch.Tensor] = []
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
         self._load_events: list[tuple[int, torch.Event]] = []
@@ -289,7 +290,25 @@ class SimpleCPUOffloadWorker:
                 for tensor in reversed(registered):
                     unpin_tensor(tensor)
                 raise
+            self._pinned_host_ranges = registered
         return cpu_kv_caches
+
+    def shutdown(self) -> None:
+        """Stop the copy thread and unregister the pinned CPU caches.
+
+        An in-process engine frees the host mapping without exiting, so a
+        later registration can land on the same addresses. Never raises: it
+        runs on the worker teardown path.
+        """
+        if self._backend is not None:
+            self._backend.shutdown()
+        self._flush_and_sync_all()
+        for tensor in reversed(self._pinned_host_ranges):
+            try:
+                unpin_tensor(tensor)
+            except RuntimeError as e:
+                logger.warning("Failed to unpin a CPU KV cache range: %s", e)
+        self._pinned_host_ranges = []
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

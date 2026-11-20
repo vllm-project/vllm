@@ -83,7 +83,11 @@ class ModelArchConfigConvertorBase:
         return getattr(self.hf_text_config, "num_attention_heads", 0)
 
     def get_vocab_size(self) -> int:
-        return getattr(self.hf_text_config, "vocab_size", 0)
+        # Some configs (e.g. Inkling) give the padded embedding size as `vocab_size`
+        text_config = self.hf_text_config
+        if unpadded := getattr(text_config, "unpadded_vocab_size", None):
+            return unpadded
+        return getattr(text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
@@ -321,7 +325,9 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
             "hy_v4",
+            "hy_v4_flash",
             "hy_v4_mtp",
+            "hy_v4_dfly",
         ):
             # check is deepseek_v4 model
             if get_compress_ratios(self.hf_text_config):
@@ -363,6 +369,7 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
+            "shieldgemma2",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -640,6 +647,8 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
                 hf_config.joint_head_config = get_hf_file_to_dict(
                     "joint_head_config.json", model_path, revision
                 )
+            elif getattr(hf_config, "modeling_overrides", None) is not None:
+                hf_config.architectures = ["Qwen3_5ForSlotDecision"]
         elif getattr(hf_config, "architectures", None) == ["Qwen3_5Model"]:
             # Decision 3.0 checkpoints are a bare backbone plus a code readout
             # described by decision_config.json.
@@ -871,8 +880,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,

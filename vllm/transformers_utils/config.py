@@ -130,12 +130,14 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
-    deepseek_v32="DeepseekV3Config",
     dory="DoryConfig",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     hy_v4="HYV4Config",
+    hy_v4_vl="HYV4VLConfig",
+    hy_v4_flash="HYV4FlashConfig",
+    hy_v4_flash_vl="HYV4FlashVLConfig",
     hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
@@ -151,9 +153,9 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_k31="KimiK3Config",
     lfm3="Lfm3Config",
     lfm3_audio="Lfm3AudioConfig",
+    lfm3_omni="Lfm3OmniConfig",
     lfm3_vl="Lfm3VlConfig",
-    RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
-    RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    nemotron_labs_diffusion="NemotronLabsDiffusionConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -175,8 +177,8 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
-    inkling_mm_model="InklingMMConfig",
-    inkling_model="InklingModelConfig",
+    inkling2="Inkling2MMConfig",
+    inkling2_model="Inkling2ModelConfig",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
@@ -427,6 +429,20 @@ class HFConfigParser(ConfigParserBase):
                 config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
             config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+        elif model_type == "inkling_mm_model" and (
+            "dense_intermediate_size"
+            in (text_config := config_dict.get("text_config", {}))
+        ):
+            from transformers import InklingConfig
+
+            # Transformers < 5.20: original checkpoints lose their MoE width
+            # (huggingface/transformers#49416)
+            # TODO: Delete once Transformers 5.20.0 is the minimum supported version
+            dense_width = text_config.pop("dense_intermediate_size")
+            text_config["moe_intermediate_size"] = text_config["intermediate_size"]
+            text_config["intermediate_size"] = dense_width
+            kwargs.setdefault("name_or_path", str(model))
+            config = InklingConfig.from_dict(config_dict, **kwargs)
         elif (
             model_type == "moss_transcribe_diarize"
             and config_dict["audio_config"]["model_type"] == "whisper"
