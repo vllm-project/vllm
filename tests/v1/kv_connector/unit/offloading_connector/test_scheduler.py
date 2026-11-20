@@ -1331,8 +1331,8 @@ def test_sync_load_budget_is_shared_per_step():
     """Sync loads share one per-step byte budget: a hit that does not fit
     stays async."""
     scheduler = _make_partial_tail_scheduler()
-    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
-    assert hit_bytes > 0
+    attention, mamba = _make_mamba_hybrid_kv_cache_config().kv_cache_groups
+    hit_bytes = 2 * attention.page_size_bytes + mamba.page_size_bytes
     scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
     first = _make_partial_tail_request(scheduler, request_id="a")
     second = _make_partial_tail_request(scheduler, request_id="b")
@@ -7139,14 +7139,16 @@ def test_dcp_partial_tail_store_is_independent_of_handoff_batching(split_handoff
     assert scheduler.manager.lookup(earlier_attention_key, context) is LookupResult.MISS
 
 
-def _make_lookahead_hybrid_engine(lookahead=1):
+def _make_lookahead_hybrid_engine(lookahead=1, *, extra_config=None):
     from tests.v1.kv_connector.unit.utils import make_kv_cache_config
 
     config = create_vllm_config(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
         num_speculative_tokens=lookahead,
-        kv_connector_extra_config={
+        kv_connector_extra_config=extra_config
+        if extra_config is not None
+        else {
             "spec_name": "MockOffloadingSpec",
             "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",
         },
@@ -7170,6 +7172,48 @@ def _make_lookahead_hybrid_engine(lookahead=1):
     )
     init_none_hash(sha256)
     return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fits_budget", [False, True])
+def test_partial_tail_sync_load_budget_counts_full_pages(fits_budget):
+    """A partial hit copies three whole attention pages and one state page."""
+    load_bytes = 3 * 8192 + 64
+    engine = _make_lookahead_hybrid_engine(
+        extra_config={
+            "cpu_bytes_to_use": 1 << 20,
+            "sync_load_budget_bytes": load_bytes if fits_budget else load_bytes - 1,
+        },
+    )
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    manager = connector.scheduler.manager
+    assert isinstance(manager, CPUOffloadingManager)
+    request = Request(
+        "resend",
+        list(range(43)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 1),
+    )
+    # Two complete attention blocks, then a partial checkpoint at 40 tokens.
+    h16, h32, h40 = (request.block_hashes[i] for i in (3, 7, 9))
+    keys = [make_offload_key(h, 0) for h in (h16, h32, h40)]
+    keys.append(make_offload_key(h40, 1))
+    context = ReqContext("seed")
+    store = manager.prepare_store(keys, context, trigger=StoreTrigger.ON_COMPUTE)
+    assert store is not None
+    manager.complete_store(
+        store.keys_to_store, context, trigger=StoreTrigger.ON_COMPUTE
+    )
+
+    engine.add_request(request)
+    metadata = engine.schedule().kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    [job] = metadata.load_jobs.values()
+    assert isinstance(job.dst_spec, GPULoadStoreSpec)
+    assert job.dst_spec.group_sizes == [3, 1]
+    assert job.sync is fits_budget
 
 
 @pytest.mark.parametrize("lookahead", [1, 5])
