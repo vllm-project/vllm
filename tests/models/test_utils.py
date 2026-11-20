@@ -15,6 +15,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    replicate_if_indivisible,
 )
 from vllm.platforms import current_platform
 
@@ -379,3 +380,36 @@ def test_cache_scale_rules_run_before_stacked_rules(quant_config, name, expected
     assert mapper.map_name("h.0.self_attn.k_proj.weight") == (
         "h.0.self_attn.qkv_proj.weight"
     )
+
+
+@pytest.mark.parametrize(
+    ("size", "tp_size", "expected"),
+    [
+        # Divisible sizes keep the layer sharded.
+        (20, 1, (False, 1)),
+        (20, 2, (False, 2)),
+        (20, 4, (False, 4)),
+        (20, 5, (False, 5)),
+        (16, 8, (False, 8)),
+        (32, 8, (False, 8)),
+        (5120, 8, (False, 8)),  # GLM-ASR encoder FFN at TP=8
+        (15360, 3, (False, 3)),  # GLM-4V vision FFN at TP=3
+        # Encoder dimensions that common TP sizes do not divide.
+        (20, 3, (True, 1)),
+        (20, 8, (True, 1)),  # GLM-ASR audio attention at TP=8
+        (16, 3, (True, 1)),  # GLM-4V / Moondream3 vision attention at TP=3
+        (16, 7, (True, 1)),
+        (4304, 3, (True, 1)),  # Moondream3 vision FFN at TP=3
+    ],
+)
+def test_replicate_if_indivisible(size, tp_size, expected):
+    assert replicate_if_indivisible(size, tp_size) == expected
+
+
+def test_replicate_if_indivisible_reads_tp_size(monkeypatch):
+    """The TP size defaults to the current tensor-parallel group."""
+    import vllm.model_executor.models.utils as model_utils
+
+    monkeypatch.setattr(model_utils, "get_tensor_model_parallel_world_size", lambda: 8)
+    assert replicate_if_indivisible(20) == (True, 1)
+    assert replicate_if_indivisible(16) == (False, 8)

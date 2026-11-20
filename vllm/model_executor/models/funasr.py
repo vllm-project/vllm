@@ -69,6 +69,7 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
+    replicate_if_indivisible,
 )
 
 logger = init_logger(__name__)
@@ -417,15 +418,18 @@ class SenseVoiceEncoderSmall(nn.Module):
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, idim: int, hidden_units: int):
         super().__init__()
+        mlp_disable_tp, _ = replicate_if_indivisible(hidden_units)
         self.w_1 = ColumnParallelLinear(
             input_size=idim,
             output_size=hidden_units,
             bias=True,
+            disable_tp=mlp_disable_tp,
         )
         self.w_2 = RowParallelLinear(
             input_size=hidden_units,
             output_size=idim,
             bias=True,
+            disable_tp=mlp_disable_tp,
         )
         self.activation = _ACTIVATION_REGISTRY["relu"]
 
@@ -472,7 +476,8 @@ class FunASRAudioAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = self.embed_dim // self.num_heads
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_local_heads = self.num_heads // tp_size
+        attn_disable_tp, attn_tp = replicate_if_indivisible(self.num_heads, tp_size)
+        self.num_local_heads = self.num_heads // attn_tp
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -488,6 +493,7 @@ class FunASRAudioAttention(nn.Module):
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_heads,
             bias=True,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.qkv",
         )
 
@@ -495,6 +501,7 @@ class FunASRAudioAttention(nn.Module):
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             bias=True,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.out_proj",
         )
 

@@ -81,6 +81,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    replicate_if_indivisible,
 )
 
 logger = init_logger(__name__)
@@ -146,11 +147,13 @@ class Moondream3VisionMLP(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        mlp_disable_tp, _ = replicate_if_indivisible(intermediate_size)
         self.fc1 = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc1",
         )
         self.act = get_act_fn("gelu_pytorch_tanh")
@@ -159,6 +162,7 @@ class Moondream3VisionMLP(nn.Module):
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc2",
         )
 
@@ -184,12 +188,17 @@ class Moondream3VisionAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
 
+        # 16 heads is not divisible by TP=3/5/6/7, so replicate instead.
+        attn_disable_tp, attn_tp = replicate_if_indivisible(num_heads)
+        self.num_heads_per_partition = num_heads // attn_tp
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=self.head_dim,
             total_num_heads=num_heads,
             bias=True,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.qkv_proj",
         )
         self.out_proj = RowParallelLinear(
@@ -197,11 +206,9 @@ class Moondream3VisionAttention(nn.Module):
             output_size=hidden_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.out_proj",
         )
-
-        tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = num_heads // tp_size
 
         self.attn = MMEncoderAttention(
             num_heads=self.num_heads_per_partition,

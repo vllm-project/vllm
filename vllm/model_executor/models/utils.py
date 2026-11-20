@@ -1354,6 +1354,34 @@ direct_register_custom_op(
 )
 
 
+def replicate_if_indivisible(
+    size: int,
+    tp_size: int | None = None,
+) -> tuple[bool, int]:
+    """Decide whether a TP-sharded layer can actually be sharded.
+
+    Multimodal encoders sometimes shard a dimension that common TP sizes do not
+    divide, for example a 20-head audio attention at TP=8. `QKVParallelLinear`
+    raises during construction in that case, so the layer has to be replicated
+    on every rank instead.
+
+    Args:
+        size: The dimension the layer shards on: the number of attention heads
+            for an attention layer, the intermediate size for an MLP.
+        tp_size: Tensor-parallel size; read from the TP group when omitted.
+
+    Returns:
+        `(disable_tp, effective_tp)`, where `effective_tp` is 1 when the layer is
+        replicated.
+
+    """
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+    if size % tp_size != 0:
+        return True, 1
+    return False, tp_size
+
+
 def process_eagle_weight(
     model: nn.Module,
     name: str,

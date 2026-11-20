@@ -129,6 +129,7 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
+    replicate_if_indivisible,
 )
 from .vision import get_vit_attn_backend
 
@@ -223,8 +224,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         # Audio encoder uses 20 heads. Shard across TP when divisible
         # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        disable_tp = self.num_heads % tp_size != 0
-        effective_tp = 1 if disable_tp else tp_size
+        disable_tp, effective_tp = replicate_if_indivisible(self.num_heads, tp_size)
         self.num_local_heads = self.num_heads // effective_tp
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
@@ -302,7 +302,11 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
         tp_size = get_tensor_model_parallel_world_size()
-        disable_tp = config.encoder_attention_heads % tp_size != 0
+        # Follow the attention's decision so the encoder is either fully sharded
+        # or fully replicated.
+        disable_tp, _ = replicate_if_indivisible(
+            config.encoder_attention_heads, tp_size
+        )
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.encoder_ffn_dim,

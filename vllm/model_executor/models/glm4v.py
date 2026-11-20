@@ -61,7 +61,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import WeightsMapper
+from .utils import WeightsMapper, replicate_if_indivisible
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -117,7 +117,11 @@ class EVA2CLIPAttention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_rank = config.num_heads // self.tp_size
+        # 16 heads is not divisible by TP=3/5/6/7, so replicate instead.
+        attn_disable_tp, attn_tp = replicate_if_indivisible(
+            config.num_heads, self.tp_size
+        )
+        self.num_heads_per_rank = config.num_heads // attn_tp
         self.head_dim = config.hidden_size // config.num_heads
         self.scale = self.head_dim**-0.5
 
@@ -126,12 +130,14 @@ class EVA2CLIPAttention(nn.Module):
             self.head_dim,
             config.num_heads,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.dense",
         )
 
@@ -163,16 +169,19 @@ class EVA2CLIPMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
+        mlp_disable_tp, _ = replicate_if_indivisible(config.intermediate_size)
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc2",
         )
 

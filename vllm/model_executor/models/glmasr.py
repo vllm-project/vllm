@@ -71,6 +71,7 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    replicate_if_indivisible,
 )
 from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
@@ -157,8 +158,12 @@ class GlmAsrEncoderAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
 
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_rank = self.num_heads // self.tp_size
-        self.num_kv_heads_per_rank = max(1, self.num_kv_heads // self.tp_size)
+        # 20 heads is not divisible by TP=8, so replicate the encoder instead.
+        attn_disable_tp, attn_tp = replicate_if_indivisible(
+            self.num_heads, self.tp_size
+        )
+        self.num_heads_per_rank = self.num_heads // attn_tp
+        self.num_kv_heads_per_rank = max(1, self.num_kv_heads // attn_tp)
 
         # Use QKVParallelLinear for fused QKV projection
         # Note: GLM-ASR uses bias on Q and V, but not K
@@ -170,6 +175,7 @@ class GlmAsrEncoderAttention(nn.Module):
             self.num_kv_heads,
             bias=True,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -178,6 +184,7 @@ class GlmAsrEncoderAttention(nn.Module):
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=attn_disable_tp,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -269,11 +276,13 @@ class GlmAsrEncoderMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
 
+        mlp_disable_tp, _ = replicate_if_indivisible(self.intermediate_size)
         self.fc1 = ColumnParallelLinear(
             self.hidden_size,
             self.intermediate_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc1",
         )
 
@@ -284,6 +293,7 @@ class GlmAsrEncoderMLP(nn.Module):
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            disable_tp=mlp_disable_tp,
             prefix=f"{prefix}.fc2",
         )
 
