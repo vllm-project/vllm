@@ -478,6 +478,11 @@ class AttentionSpec(KVCacheSpec):
     """Tokens covered by one stored state. Ints > 1 compress multiple tokens
     into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
     token (Whisper block pooling: `Fraction(1, block_pool_size)`)."""
+    cache_role: SparseCacheRole | None = None
+    """Role in a sparse-attention index group; None for dense attention."""
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
+    is_index_group_leader: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -520,13 +525,9 @@ class AttentionSpec(KVCacheSpec):
 class MLAAttentionSpec(AttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
-    topk_buffer_width: int | None = None
-    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
-    cache_role: SparseCacheRole = SparseCacheRole.SPARSE
-    is_index_group_leader: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
 
@@ -841,12 +842,15 @@ def prefix_lookup_groups(
 
 @dataclass(frozen=True, slots=True)
 class KVCacheStage:
-    """The KV cache layers of one pipeline stage."""
+    """The KV cache of one pipeline stage."""
 
     kv_cache_groups: tuple[KVCacheGroup, ...]
     """The global KV cache groups projected onto the stage, by group ID, each
     holding the stage's layers of the group in model order. A group holding
     no layer of the stage is kept with no layers."""
+    bytes_per_block: int
+    """Bytes one block takes in the device KV cache of each worker of the
+    stage."""
 
 
 @dataclass
@@ -885,10 +889,10 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
-    pipeline_stages: tuple[KVCacheStage, ...] = field(default=(), compare=False)
-    """The KV cache layers of every pipeline stage, by PP rank, resolved by the
-    engine core so that both halves of a KV connector see every stage. Empty
-    when the stages are unknown."""
+    pipeline_stages: tuple[KVCacheStage, ...] = ()
+    """The KV cache of every pipeline stage, by PP rank, resolved by the engine
+    core so that both halves of a KV connector see every stage. Empty when the
+    stages are unknown."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
@@ -941,19 +945,6 @@ class KVCacheConfig:
             layer_name: group_index
             for group_index, group in enumerate(self.transfer_groups)
             for layer_name in group.layer_names
-        }
-
-    def pipeline_layer_specs(self, group_id: int) -> dict[str, KVCacheSpec]:
-        """The specs of a group's layers on every pipeline stage, in model
-        order, or of this worker's layers when the stages are unknown."""
-        if not self.pipeline_stages:
-            return dict(self.kv_cache_groups[group_id].kv_cache_specs)
-        return {
-            layer_name: spec
-            for stage in self.pipeline_stages
-            for layer_name, spec in stage.kv_cache_groups[
-                group_id
-            ].kv_cache_specs.items()
         }
 
     def select_transfer_block_ids(

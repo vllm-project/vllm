@@ -481,9 +481,22 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+    # Size groups without draft-only sliding-window buckets (e.g. a tail-only
+    # DFlash/DSpark drafter): a small one would shrink the group size and pad
+    # the target's full-attention layers, costing KV memory on every token,
+    # while padding it costs only its window. Other draft-only buckets (e.g.
+    # MQA drafters) are unbounded, so they still count.
+    def _is_windowed_draft_bucket(layers: list[str]) -> bool:
+        return all(layer_configs[n].is_draft for n in layers) and issubclass(
+            layer_configs[layers[0]].manager_cls, SlidingWindowManager
+        )
+
+    sizing_buckets = [
+        layers for layers in layer_buckets if not _is_windowed_draft_bucket(layers)
+    ] or layer_buckets
+    min_num_layers = min(len(layers) for layers in sizing_buckets)
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
+    max_num_layers = max(len(layers) for layers in sizing_buckets)
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
@@ -547,6 +560,45 @@ def _get_kv_cache_bytes_per_block(
     return round_up(bytes_per_block, math.lcm(*alignments))
 
 
+def _group_layers_by_spec(group: KVCacheGroup) -> dict[KVCacheSpec, list[str]]:
+    """The group's layers by spec, in the order its spec regions are placed.
+
+    Layers with the same spec are placed together, in order of first appearance.
+    `get_kv_cache_config_from_groups` places the regions in this order, and
+    `_overlaid_layers_match` checks the overlaid layers in it.
+    """
+    layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+    for layer_name, spec in group.kv_cache_specs.items():
+        layers_by_spec[spec].append(layer_name)
+    return layers_by_spec
+
+
+def _overlaid_layers_match(kv_cache_groups: list[KVCacheGroup]) -> bool:
+    """Whether the groups can overlay each other in a layer-compact layout.
+
+    In a layer-compact layout, each layer of a group gets a region of its own.
+    The regions of every group start at byte 0 and follow one another. So the
+    i-th layer of a group shares its region with the i-th layer of every other
+    group. A block belongs to one group at a time, so this is safe if the layers
+    that share a region have the same block stride.
+
+    For example, with block strides P and p:
+
+        [P, P, p, p] and [P, P]      match
+        [P, P, p, p] and [P, P, P]   do not match: the third region is p or P
+    """
+    strides_per_group = [
+        [
+            _get_layer_block_stride(spec)
+            for spec, layer_names in _group_layers_by_spec(group).items()
+            for _ in layer_names
+        ]
+        for group in kv_cache_groups
+    ]
+    longest = max(strides_per_group, key=len, default=[])
+    return all(strides == longest[: len(strides)] for strides in strides_per_group)
+
+
 def validate_kv_cache_layout(
     layout: KVCacheLayout,
     kv_cache_groups: list[KVCacheGroup],
@@ -567,11 +619,11 @@ def validate_kv_cache_layout(
         # A rectangular layer dim exists; every layout can express it.
         return
 
-    # Mixed page sizes pack pages side by side within a block, which needs each page
-    # to be one contiguous chunk inside its block (a block-compact layout) and, with
-    # multiple KV cache groups, the layer dim inside the block dim.
+    # Mixed page sizes need each page to be one contiguous chunk inside its block
+    # (a block-compact layout). A layer-compact layout also overlays the groups,
+    # so the layers that it overlays must have the same block stride.
     if not layout.is_block_compact or (
-        len(kv_cache_groups) > 1 and layout.is_layer_compact
+        layout.is_layer_compact and not _overlaid_layers_match(kv_cache_groups)
     ):
         raise ValueError(
             f"KV cache layout {layout.name} cannot express this model's "
@@ -631,18 +683,14 @@ def get_kv_cache_config_from_groups(
     # group 1: | blk 0 [  C  |    D   ] | blk 1 [  C  |    D   ] | ...
     #          |<--- bytes_per_block -->|
     #
-    # layer-outer (only supported for uniform page sizes or single-group models):
+    # layer-outer (overlaid layers must have equal block strides):
     # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
     kv_cache_tensors = []
     for group in kv_cache_groups:
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        for layer_name, spec in group.kv_cache_specs.items():
-            layers_by_spec[spec].append(layer_name)
-
         byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
+        for spec, layer_names in _group_layers_by_spec(group).items():
             block_stride = interleaved_block_stride
             padded_page = _get_layer_block_stride(spec)
             if block_stride is None and padded_page != spec.page_size_bytes:
@@ -1437,7 +1485,7 @@ def get_pipeline_stages(
     kv_cache_configs: list[KVCacheConfig],
     pipeline_parallel_size: int,
 ) -> tuple[KVCacheStage, ...]:
-    """The KV cache layers of every pipeline stage.
+    """The KV cache of every pipeline stage.
 
     Workers are ordered by PP rank, then by PCP and TP rank, and every worker
     of a stage holds the same layers, so the first worker of each stage
@@ -1458,21 +1506,25 @@ def get_pipeline_stages(
     workers_per_stage = num_workers // pipeline_parallel_size
     stages: list[KVCacheStage] = []
     for first in range(0, num_workers, workers_per_stage):
-        groups = kv_cache_configs[first].kv_cache_groups
+        config = kv_cache_configs[first]
         assert all(
             [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
-            == [g.layer_names for g in groups]
+            == [g.layer_names for g in config.kv_cache_groups]
             for worker in range(first, first + workers_per_stage)
         ), "Workers of one pipeline stage must hold the same KV cache layers."
-        # A model runner adds KV-sharing layers to the groups of its own copy
-        # of the config in place; the stage keeps groups of its own, so every
-        # worker and the scheduler see the same stages.
+        # Every device tensor spans the one device allocation.
+        device_bytes = next(
+            (t.size for t in config.kv_cache_tensors if not t.host_resident), 0
+        )
         stages.append(
             KVCacheStage(
+                # Copies, as a model runner adds KV-sharing layers to the groups
+                # of its own config in place.
                 kv_cache_groups=tuple(
                     replace(group, kv_cache_specs=dict(group.kv_cache_specs))
-                    for group in groups
-                )
+                    for group in config.kv_cache_groups
+                ),
+                bytes_per_block=device_bytes // config.num_blocks,
             )
         )
     return tuple(stages)

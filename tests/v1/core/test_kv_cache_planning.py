@@ -28,6 +28,7 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -94,6 +95,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -190,6 +192,112 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert scheduler_block_size == hash_block_size == gpu_block_size
 
 
+def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    source_names = {"model.layers.0.self_attn", "model.layers.1.self_attn"}
+    indexer_names = {f"{name}.indexer" for name in source_names}
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        # Dense attention has no sparse cache role, so it stays on the device.
+        "dense": full_layer(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+            )
+        )
+    }
+    for name in sorted(source_names):
+        layer_configs[name] = full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=32,
+                dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
+                topk_buffer_width=35,
+                is_index_group_leader=True,
+            )
+        )
+        layer_configs[f"{name}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        # QSA has no MLA-only index_topk field.
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(),
+            max_model_len=128,
+            get_total_num_kv_heads=lambda: 2,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            mamba_cache_mode="none",
+            kv_cache_layout=KVCacheLayout.BLNHC.name,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        max_in_flight_tokens=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1 / 1024},
+        ),
+    )
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda _: [16])
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend)
+        for name in source_names | indexer_names
+    }
+    layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, get_kv_cache_groups(config, layer_configs), available_memory=2**20
+    )
+
+    # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x
+    # 32 dimensions x 2 bytes = 8192 B. A 1 MiB logical budget holds 128
+    # blocks, with half the payload on each TP rank.
+    assert cache_config.hisparse_host_num_blocks == 128
+    assert cache_config.hisparse_host_block_stride == 4096
+    (host_group,) = [g for g in cache_config.kv_cache_groups if g.host_resident]
+    assert set(host_group.layer_names) == source_names
+    hot_groups = [
+        group
+        for group in cache_config.kv_cache_groups
+        if group.manager_cls is HiSparseHotManager
+    ]
+    assert {tuple(group.layer_names) for group in hot_groups} == {
+        (f"{name}.hisparse_hot",) for name in source_names
+    }
+    # One decode query plus one selection's LRU slack: 70 rows occupy five
+    # 16-token blocks, without reducing the 35 selected token slots.
+    assert all(
+        group.manager_config == HiSparseHotManager.config(blocks_per_request=5)
+        for group in hot_groups
+    )
+
+
 @pytest.mark.parametrize(
     "max_model_len,num_gpu_blocks,ok",
     [
@@ -225,6 +333,7 @@ def test_hisparse_pool_must_fit_max_model_len(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         )
@@ -686,11 +795,15 @@ def test_project_kv_cache_groups_to_worker():
 
 
 def test_pipeline_stages_describe_every_stage():
-    """Every worker learns each PP stage's group projections, which stay fixed
-    when a worker later edits its own groups."""
+    """Every worker learns each PP stage's group projections and block size in
+    bytes; the groups stay fixed when a worker later edits its own."""
     layer = new_kv_cache_layer()
     stage0 = {"layer0": layer, "layer1": layer}
-    stage1 = {"layer2": layer, "draft.layer0": replace(layer, is_draft=True)}
+    stage1 = {
+        "layer2": layer,
+        "layer3": layer,
+        "draft.layer0": replace(layer, is_draft=True),
+    }
     # Two TP ranks per stage.
     layer_configs = [stage0, stage0, stage1, stage1]
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
@@ -703,47 +816,13 @@ def test_pipeline_stages_describe_every_stage():
         [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
         for worker in (0, 2)
     ]
-    assert stages[1].kv_cache_groups[0].layer_names == ["layer2", "draft.layer0"]
+    page = kv_cache_planning._get_layer_block_stride(layer.spec)
+    assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
+    draft_stage_layers = ["layer2", "layer3", "draft.layer0"]
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
     kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
-    assert stages[1].kv_cache_groups[0].layer_names == ["layer2", "draft.layer0"]
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
     assert get_pipeline_stages(kv_cache_configs[:3], 2) == ()
-
-
-def _pipeline_layer_specs(partition: list[int]) -> list[list[str]]:
-    """Each group's layers on every stage of a hybrid model that `partition`
-    splits across pipeline stages, as one worker's config lists them."""
-    full = new_kv_cache_layer()
-    swa = new_sliding_window_layer(sliding_window=32)
-    # Two sliding-window layers per full attention layer
-    layers = {f"layer{i}": full if i % 3 == 2 else swa for i in range(6)}
-    names = list(layers)
-    bounds = [sum(partition[:i]) for i in range(len(partition) + 1)]
-    layer_configs = [
-        {name: layers[name] for name in names[start:end]}
-        for start, end in zip(bounds, bounds[1:])
-    ]
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    kv_cache_configs = get_kv_cache_configs(
-        vllm_config, layer_configs, [2**30] * len(layer_configs)
-    )
-    kv_cache_config = kv_cache_configs[-1]
-    kv_cache_config.pipeline_stages = get_pipeline_stages(
-        kv_cache_configs, len(partition)
-    )
-    return [
-        list(kv_cache_config.pipeline_layer_specs(group_id))
-        for group_id in range(len(kv_cache_config.kv_cache_groups))
-    ]
-
-
-@pytest.mark.parametrize("partition", [[2, 4], [4, 2], [3, 3], [1, 2, 3]])
-def test_pipeline_layer_specs_do_not_depend_on_pipeline_partition(partition):
-    """Joined across the pipeline stages, every group lists the same layers in
-    the same order under any PP size and layer partition."""
-    single_stage = _pipeline_layer_specs([6])
-    assert len(single_stage) > 1
-    assert _pipeline_layer_specs(partition) == single_stage
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
@@ -829,6 +908,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
                 state_content_bytes=656,
                 block_stride_alignment=656,
                 cache_dtype_str="fp8_ds_mla",
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -1605,6 +1685,60 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
         FullAttentionManager,
         SlidingWindowManager,
     }
+
+
+def test_draft_only_bucket_does_not_set_the_group_size():
+    """Muse Spark shape: 46 sliding-window + 16 full-attention target layers and a
+    5-layer DSpark drafter whose tail-only manager gets its own bucket. Groups are
+    sized from the target's buckets (16), so the full-attention layers fill one
+    unpadded group; sizing from the draft bucket (5) would pad them to 20."""
+    spec = new_kv_cache_spec()
+    specs = {}
+    for i in range(62):
+        specs[f"target.{i}.attn"] = (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+    for i in range(5):
+        specs[f"draft.{i}.attn"] = replace(
+            DFlashSlidingWindowManager.layer_config(
+                spec,
+                sliding_window=128,
+                num_speculative_tokens=3,
+                num_lookahead_tokens=3,
+            ),
+            is_draft=True,
+        )
+    assert sum(lc.manager_cls is FullAttentionManager for lc in specs.values()) == 16
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    full_groups = [g for g in groups if g.manager_cls is FullAttentionManager]
+    assert [len(g.layer_names) for g in full_groups] == [16]
+    sw_groups = [g for g in groups if g.manager_cls is SlidingWindowManager]
+    assert sorted(len(g.layer_names) for g in sw_groups) == [15, 15, 16]
+    draft_groups = [g for g in groups if g.manager_cls is DFlashSlidingWindowManager]
+    assert [len(g.layer_names) for g in draft_groups] == [5]
+    assert len(groups) == 5
+
+
+def test_full_attention_draft_only_bucket_still_sets_the_group_size():
+    """A draft-only full-attention bucket (here split off by its DCP layout) is
+    unbounded, so it still sizes the groups instead of being padded per token."""
+    spec = new_kv_cache_spec()
+    specs = {
+        f"target.{i}.attn": (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+        for i in range(62)
+    }
+    specs["draft.0.attn"] = replace(
+        full_layer(replace(spec, dcp_sharded=False)), is_draft=True
+    )
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert {len(g.layer_names) for g in groups} == {1}
+    assert len(groups) == 63
 
 
 @pytest.mark.parametrize("draft_dcp_sharded", [True, False])
