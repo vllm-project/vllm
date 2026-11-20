@@ -58,8 +58,9 @@ HB_NOTIF_PREFIX = "HB:"
 #      region_members and the cache group of each layer
 #  17: Export remote_blocks_expiry_time for P blocks too, plus
 #      remote_lease_extension; the consumer gates every remote read on it
+#  18: Add conv_rows to NixlAgentMetadata; peers must agree on it
 #
-NIXL_CONNECTOR_VERSION: int = 17
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass(slots=True)
@@ -84,6 +85,8 @@ class NixlAgentMetadata:
     pcp_size: int = 1
     # Page length of the PLE short-conv state (None when the model has none).
     ple_block_len: int | None = None
+    # Rows of the Mamba conv state (0 when the model has none).
+    conv_rows: int = 0
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Cache group of each layer in region_members.

@@ -94,7 +94,10 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `tensor-parallel-size` (heterogeneous TP, subject to model restrictions above)
 - `block-size` (heterogeneous block size, subject to restrictions above)
 - Number of KV cache blocks (determined by available memory on each instance)
-- `num_speculative_tokens` (prefill and decode may use different draft depths)
+- `num_speculative_tokens` (prefill and decode may use different draft depths),
+  except for Mamba2, GDN and KDA hybrid models: their conv state holds
+  `conv_kernel - 1 + num_speculative_tokens` rows, and the handshake refuses a
+  peer with a different row count
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
