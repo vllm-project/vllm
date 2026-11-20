@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -56,6 +57,18 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class WNA16WeightFormat:
+    """Symmetric group-quantized weights in the canonical N-first layout, for
+    checkpoint formats without a quantization config of their own here: each
+    value as `uint{num_bits}` offset by `2**(num_bits - 1)`, packed into int32
+    along K, with `[E, N, K // group_size]` scales, and no zero points or
+    activation reordering."""
+
+    num_bits: int
+    group_size: int
+
+
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
@@ -67,6 +80,8 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def backend_to_kernel_cls(
@@ -153,7 +168,7 @@ _ZEN_CPU_NUM_BITS = (4, 8)
 
 
 def _zen_cpu_num_bits(
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
 ) -> int | None:
     """Weight bit width for the Zen CPU path, or None for a checkpoint format
     it cannot read one from; AWQ and GPTQ call it weight_bits."""
@@ -170,7 +185,7 @@ def _zen_cpu_num_bits(
 def _backend_incompatibility_reason(
     backend: WNA16MoEBackend,
     moe_config: FusedMoEConfig,
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     may_have_zp: bool,
     may_have_bias: bool,
     allow_tile_padding: bool,
@@ -240,7 +255,10 @@ def _backend_incompatibility_reason(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        if isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs)):
+        if isinstance(
+            quant_config,
+            (AutoAWQConfig, AutoGPTQConfig, QuantizationArgs, WNA16WeightFormat),
+        ):
             # QuantizationArgs leaves group_size unset for per-channel
             # strategies; -1 is the in-tree encoding for that.
             group_size = (
@@ -286,6 +304,7 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
     """WNA16 MoE backend selection for one deployment configuration."""
 
     name = "WNA16"
+    placeholder_backend = WNA16MoEBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: WNA16MoEBackend
@@ -296,7 +315,7 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
-    quant_config: QuantizationConfig | QuantizationArgs,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     may_have_zp: bool,
     may_have_bias: bool,
     allow_tile_padding: bool = False,
@@ -317,6 +336,11 @@ def select_wna16_moe_backend(
         A tuple of (`WNA16MoEBackend`, experts class or `None`).
 
     """
+    # TODO: migrate to oracle base method.
+    source = WNA16MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     # WNA16 MoE always runs BF16 activations.
     oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
@@ -353,7 +377,7 @@ def select_wna16_moe_backend(
             continue
         kernel_cls, _ = oracle.try_backend(backend)
         if kernel_cls is not None:
-            logger.info_once(oracle.make_log_backend(backend))
+            logger.debug_once(oracle.make_log_backend(backend))
             return backend, kernel_cls
 
     raise NotImplementedError(
@@ -847,7 +871,7 @@ def _process_weights_rdna3(
 
 
 def _process_weights_cpu(
-    quant_config: QuantizationConfig | QuantizationArgs | None,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -1014,7 +1038,7 @@ def _process_weights_zen_cpu(
 
 def _process_weights_xpu(
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -1039,13 +1063,20 @@ def _process_weights_xpu(
     with the lower nibble = lower input-K index.  xpu_fused_moe(is_int4=True)
     expects this convention; big-endian hosts are unsupported.
     """
-    del layer, quant_config  # unused — kept for parity with the marlin helper
+    del layer  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
             "_process_weights_xpu requires a little-endian host: the "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        from vllm_xpu_kernels.quantization._quantize_convert import AWQUtils
+
+        w13_qweight = AWQUtils.moe_repack(w13_qweight)
+        w2_qweight = AWQUtils.moe_repack(w2_qweight)
 
     w13_xpu = w13_qweight.contiguous().view(torch.uint8)
     w2_xpu = w2_qweight.contiguous().view(torch.uint8)
@@ -1127,6 +1158,31 @@ def _convert_moe_wna16_humming_tensors(
             .contiguous()
         )
     return output
+
+
+class _WNA16FormatHummingWeightSchema:
+    """`WNA16WeightFormat`'s packed weights and scales are Humming's layout."""
+
+    def __init__(self, weight_format: WNA16WeightFormat) -> None:
+        self.weight_format = weight_format
+
+    def convert_humming(
+        self,
+        tensors: dict[str, torch.Tensor],
+        shape_n_stacks: list[int],
+        shape_k_stacks: list[int],
+        param_dtype: torch.dtype,
+        num_experts: int | None = None,
+    ) -> tuple[Any, dict[str, torch.Tensor]]:
+        del shape_n_stacks, shape_k_stacks, num_experts
+        from vllm.utils.humming import HummingWeightSchema, dtypes
+
+        schema = HummingWeightSchema(
+            b_dtype=dtypes.DataType.from_str(f"uint{self.weight_format.num_bits}"),
+            weight_scale_group_size=self.weight_format.group_size,
+        )
+        weight_scale = tensors["weight_scale"].to(param_dtype)
+        return schema, {"weight": tensors["weight"], "weight_scale": weight_scale}
 
 
 class _MoeWNA16HummingWeightSchema:
@@ -1397,7 +1453,7 @@ def _process_weights_emulation_awq(
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig | QuantizationArgs | None,
+    quant_config: QuantizationConfig | QuantizationArgs | WNA16WeightFormat | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -1461,6 +1517,14 @@ def convert_to_wna16_moe_kernel_format(
                 ),
                 input_schema=HummingInputSchema(),
             )
+        elif isinstance(quant_config, WNA16WeightFormat):
+            # With no input schema, Humming takes it from
+            # VLLM_HUMMING_INPUT_QUANT_CONFIG; the format has no input scheme.
+            convert_to_humming_moe_kernel_format(
+                layer,
+                quant_config={},
+                weight_schema=_WNA16FormatHummingWeightSchema(quant_config),
+            )
         else:
             convert_to_humming_moe_kernel_format(
                 layer, quant_config=_humming_wna16_weight_schema(quant_config)
@@ -1486,7 +1550,7 @@ def convert_to_wna16_moe_kernel_format(
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
-        elif isinstance(quant_config, QuantizationArgs):
+        elif isinstance(quant_config, QuantizationArgs | WNA16WeightFormat):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
             group_size = (
@@ -1494,8 +1558,9 @@ def convert_to_wna16_moe_kernel_format(
             )
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig or "
-                f"QuantizationArgs, got {type(quant_config).__name__}."
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig, "
+                "QuantizationArgs or WNA16WeightFormat, got "
+                f"{type(quant_config).__name__}."
             )
 
         if isinstance(quant_config, AutoAWQConfig):

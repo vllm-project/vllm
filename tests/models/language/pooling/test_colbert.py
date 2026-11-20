@@ -27,7 +27,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "BertModel",
         },
     },
@@ -43,7 +42,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "AutoModel",
         },
     },
@@ -55,6 +53,7 @@ COLBERT_MODELS = {
             "hf_overrides": {
                 "architectures": ["ColBERTJinaRobertaModel"],
             },
+            "trust_remote_code": True,
         },
         "hf_comparison": {
             "weights_file": "model.safetensors",
@@ -75,7 +74,6 @@ COLBERT_MODELS = {
         "hf_comparison": {
             "weights_file": "1_Dense/model.safetensors",
             "weights_key": "linear.weight",
-            "trust_remote_code": False,
             "model_cls": "AutoModel",
         },
     },
