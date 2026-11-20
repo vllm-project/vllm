@@ -42,6 +42,7 @@ from vllm.v1.hisparse.types import (
     SparseKVRowMirror,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -99,16 +100,53 @@ class HiSparseConnectorScheduler:
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
         import_step_tokens: int = 0,
+        spec_step_tokens: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
+        self.kv_cache_manager: KVCacheManager | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.import_step_tokens = import_step_tokens
+        self.spec_step_tokens = spec_step_tokens
         self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
+
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        assert self.coordinator is not None
+        self.kv_cache_manager = kv_cache_manager
+        self.coordinator.bind_reserved_blocks(self._inflight_prefill_reserved_blocks)
+
+    def _inflight_prefill_reserved_blocks(self) -> int:
+        """Blocks admitted prefills and parked loads still need to finish.
+
+        Mirrors the scheduler's `_inflight_prefill_reserved_blocks`, which
+        admission keeps free for them.
+        """
+        return sum(
+            self._remaining_blocks(request)
+            for request in self.requests.values()
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            or (request.status == RequestStatus.RUNNING and request.is_prefill_chunk)
+        )
+
+    def _remaining_blocks(self, request: Request) -> int:
+        assert self.kv_cache_manager is not None
+        max_model_len = self.kv_cache_manager.max_model_len
+        full_num_tokens = min(request.num_tokens, max_model_len)
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=full_num_tokens + self.spec_step_tokens,
+            new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+            num_encoder_tokens=0,
+            total_computed_tokens=request.num_computed_tokens,
+            num_local_computed_tokens=request.num_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+            apply_admission_cap=True,
+            prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
+        )
 
     def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
         if self.coordinator is None:
@@ -255,6 +293,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     if vllm_config.num_speculative_tokens
                     else 0
                 ),
+                spec_step_tokens=(
+                    1
+                    + vllm_config.num_scheduled_spec_tokens
+                    + vllm_config.num_lookahead_tokens
+                    if vllm_config.num_scheduled_spec_tokens
+                    else 0
+                ),
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(
@@ -281,6 +326,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 import_step_tokens=self.connector_scheduler.import_step_tokens,
             )
         )
+        self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     @property
     def requires_kv_delivery(self) -> bool:
