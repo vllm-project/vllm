@@ -673,9 +673,11 @@ class _RDTProducerServer:
             flat = block.flat
             self._serve_wait += time.perf_counter() - t0
             self._served_count += 1
-            tensors, gen = (
-                (published.tensors, published.gen) if flat is None else ({}, 0)
-            )
+            tensors: dict[str, torch.Tensor] = {}
+            gen = 0
+            if flat is None:  # this pull packs: the unit is published (checked)
+                assert published is not None and published.tensors is not None
+                tensors, gen = published.tensors, published.gen
             ready = self._ready.get(spec.unit)
             self._last_progress = time.monotonic()
         if flat is None:
