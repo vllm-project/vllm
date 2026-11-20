@@ -3,6 +3,7 @@
 
 import uuid
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
@@ -32,6 +33,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 
+@cache
 def _generate_shm_name() -> str:
     # Fit macOS's 30-character limit without truncating the UUID.
     encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
