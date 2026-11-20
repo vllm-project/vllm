@@ -540,21 +540,18 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "SarvamMoEForCausalLM": _HfExamplesInfo(
         "sarvamai/sarvam-30b",
-        trust_remote_code=True,
         max_model_len=4096,
-        is_available_online=True,
+        min_transformers_version="5.24.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/51023"
+        },
     ),
     "SarvamMLAForCausalLM": _HfExamplesInfo(
         "sarvamai/sarvam-105b",
-        trust_remote_code=True,
         max_model_len=4096,
-        is_available_online=True,
-        max_transformers_version="5.3",
+        min_transformers_version="5.24.0",
         transformers_version_reason={
-            "hf": (
-                "Transformers v5.4 removed the ignore_keys param from "
-                "validate_rope(); vLLM patches validate_rope() and is unaffected"
-            )
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/44569"
         },
     ),
     "SeedOssForCausalLM": _HfExamplesInfo("ByteDance-Seed/Seed-OSS-36B-Instruct"),

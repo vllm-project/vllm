@@ -20,7 +20,9 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     PreTrainedConfig,
+    core_model_loading,
 )
+from transformers.conversion_mapping import WeightConverter, WeightRenaming
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (
@@ -33,12 +35,12 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import Base, SplitWeights
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
-from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.model_executor.models.utils import StageMissingLayer, WeightsMapper
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1021,3 +1023,38 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
     assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
     assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
     assert module.int8.dtype == torch.int8 and not module.int8.requires_grad
+
+
+@pytest.mark.skipif(
+    not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
+)
+def test_split_weights_splits_fused_gqa_qkv():
+    """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
+    into each projection's size, matched before and named after the renamings."""
+    with torch.device("meta"):
+        model = nn.Module()
+        model.config = PreTrainedConfig()
+        model.self_attn = nn.Module()
+        model.self_attn.q_proj = nn.Linear(8, 8, bias=False)
+        model.self_attn.k_proj = nn.Linear(8, 2, bias=False)
+        model.self_attn.v_proj = nn.Linear(8, 2, bias=False)
+    converter = WeightConverter(
+        source_patterns="query_key_value",
+        target_patterns=["q_proj", "k_proj", "v_proj"],
+        operations=[core_model_loading.Split(dim=0)],
+    )
+    mapper = WeightsMapper(
+        orig_to_new_renaming=[WeightRenaming(r"^attention\.", "self_attn.")]
+    )
+    fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+
+    weights = SplitWeights([converter], mapper, model)
+    pieces = dict(weights([("attention.query_key_value.weight", fused)]))
+
+    assert list(pieces) == [
+        "attention.q_proj.weight",
+        "attention.k_proj.weight",
+        "attention.v_proj.weight",
+    ]
+    torch.testing.assert_close(torch.cat(list(pieces.values())), fused)
+    assert [p.shape[0] for p in pieces.values()] == [8, 2, 2]

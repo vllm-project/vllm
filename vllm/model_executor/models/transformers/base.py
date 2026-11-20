@@ -29,8 +29,9 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel, PreTrainedConfig
+from transformers import AutoModel, PreTrainedConfig, core_model_loading
 from transformers.conversion_mapping import (
+    WeightConverter,
     WeightRenaming,
     WeightTransform,
     get_checkpoint_conversion_mapping,
@@ -99,6 +100,68 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_SPLIT_OPS = tuple(
+    op for name in ("Chunk", "Split") if (op := getattr(core_model_loading, name, None))
+)
+"""Conversion ops that split a tensor (`Split` needs Transformers 5.22)."""
+
+
+def _only_splits(converter: WeightConverter) -> bool:
+    ops = converter.operations
+    single_source = len(converter.source_patterns) == 1
+    return single_source and all(isinstance(op, _SPLIT_OPS) for op in ops)
+
+
+class SplitWeights:
+    """Apply Transformers conversions that only split a checkpoint tensor (e.g. a
+    fused `query_key_value` into `q_proj`, `k_proj` and `v_proj`) to the weights.
+
+    `Split` sizes each piece like its target parameter, which vLLM may replace (e.g.
+    by fusing the projections), so the shapes are recorded on construction."""
+
+    def __init__(
+        self,
+        converters: list[WeightConverter],
+        mapper: WeightsMapper,
+        model: nn.Module,
+    ):
+        self.converters = converters
+        self.mapper = mapper
+        self.config = model.config
+        self.shapes = {name: p.shape for name, p in model.named_parameters()}
+
+    def get_parameter(self, name: str) -> torch.Tensor:
+        """Stand in for the model whose parameters `Split` reads the sizes of."""
+        return torch.empty(self.shapes[name], device="meta")
+
+    def __call__(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, tensor in weights:
+            converter = next(
+                (c for c in self.converters if re.search(c.source_patterns[0], name)),
+                None,
+            )
+            if converter is None:
+                yield name, tensor
+                continue
+            sources, targets = converter.source_patterns, converter.target_patterns
+            # The name of the first target, as `Split` looks it up in the model
+            first = self.mapper.map_name(re.sub(sources[0], targets[0], name))
+            pieces = {sources[0]: tensor}
+            for op in converter.operations:
+                pieces = op.convert(
+                    pieces,
+                    sources,
+                    targets,
+                    full_layer_name=first,
+                    model=self,
+                    config=self.config,
+                )
+            for target, piece in pieces.items():
+                yield re.sub(sources[0], target, name), piece
+
 
 VLLM_ATTN_ATTR = "attn"
 """Attribute in which to store the vLLM `Attention` instance that serves a Transformers
@@ -384,12 +447,16 @@ class Base(
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
+        splits: list[WeightConverter] = []
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
-            # TODO: Handle WeightConverter to enable layer merging
+            # Handle weights which Transformers splits into several
+            elif isinstance(mapping, WeightConverter) and _only_splits(mapping):
+                splits.append(mapping)
+            # TODO: Handle other WeightConverters to enable layer merging
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -423,6 +490,9 @@ class Base(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
+        if splits:
+            split_weights = SplitWeights(splits, self.hf_to_vllm_mapper, self)
+            self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=[split_weights])
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
