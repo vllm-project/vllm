@@ -3,6 +3,7 @@
 """Tests for NVFP4 linear kernel selection order (CPU-only)."""
 
 import pytest
+import torch
 
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
@@ -15,6 +16,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.nvfp4 import flashinfer as fi_nvfp4
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability, PlatformEnum
+from vllm.utils import flashinfer as fi_utils
 
 # W4A4 kernels that run on SM120/121, where the head of the list is gated to
 # sm_10x and selection falls through to whatever follows.
@@ -62,3 +64,31 @@ def test_cutedsl_w4a4_supported_on_sm10x_and_sm120(
     )
     supported, _ = FlashInferCuteDslNvFp4LinearKernel.is_supported()
     assert supported is expected
+
+
+@pytest.mark.parametrize(
+    "n,k,expected",
+    [
+        (512, 1024, True),
+        (248320, 5120, True),
+        (160, 1024, False),
+        (512, 96, False),
+        (262144, 8192, False),
+    ],
+)
+def test_sm120_cutedsl_shape_support(n, k, expected):
+    assert fi_nvfp4._sm120_cutedsl_supports_shape(n, k) is expected
+
+
+@pytest.mark.parametrize(
+    "cuda_version,expected", [("13.0", True), ("12.9", False), (None, False)]
+)
+def test_sm12x_cutedsl_runner_requires_cuda13(monkeypatch, cuda_version, expected):
+    monkeypatch.setattr(torch.version, "cuda", cuda_version)
+    monkeypatch.setattr(fi_utils, "has_flashinfer_cutedsl", lambda: True)
+    monkeypatch.setattr(fi_utils.importlib.util, "find_spec", lambda name: object())
+    fi_utils.has_flashinfer_sm12x_cutedsl_fp4_gemm.cache_clear()
+    try:
+        assert fi_utils.has_flashinfer_sm12x_cutedsl_fp4_gemm() is expected
+    finally:
+        fi_utils.has_flashinfer_sm12x_cutedsl_fp4_gemm.cache_clear()

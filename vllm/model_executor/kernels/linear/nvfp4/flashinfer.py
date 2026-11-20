@@ -40,6 +40,15 @@ def _use_sm120_cutedsl(num_tokens: int, out_dtype: torch.dtype) -> bool:
     return out_dtype == torch.bfloat16 and num_tokens <= SM120_CUTEDSL_MAX_TOKENS
 
 
+def _sm120_cutedsl_supports_shape(n: int, k: int) -> bool:
+    """Whether FlashInfer's SM12x runner accepts a padded (N, K) weight.
+
+    It needs N and K to be multiples of 64 and element offsets below 2**31,
+    while the weight is only padded to 32. Other layers use CUTLASS.
+    """
+    return n % 64 == 0 and k % 64 == 0 and n * k < 2**31
+
+
 def _sm120_cutedsl_nvfp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -193,6 +202,12 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        # Read once here: querying the device in apply_weights breaks
+        # torch.compile fullgraph capture.
+        self.is_sm120 = current_platform.is_device_capability(120)
+
     def input_quant_key(self) -> QuantKey | None:
         return kNvfp4Dynamic
 
@@ -224,8 +239,11 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
-        if current_platform.is_device_capability(120):
-            _compile_sm120_cutedsl(layer)
+        if self.is_sm120:
+            n, k = padded_weight.shape[0], padded_weight.shape[1] * 2
+            layer.sm120_use_cutedsl = _sm120_cutedsl_supports_shape(n, k)
+            if layer.sm120_use_cutedsl:
+                _compile_sm120_cutedsl(layer)
 
     def apply_weights(
         self,
@@ -236,7 +254,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         qa = self.prepare_input(layer, x)
 
-        if current_platform.is_device_capability(120):
+        if self.is_sm120 and layer.sm120_use_cutedsl:
             out = sm120_cutedsl_nvfp4_mm(
                 qa.data,
                 layer.weight,
@@ -253,7 +271,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
                 layer.weight_scale,
                 layer.alpha,
                 qa.orig_dtype,
-                backend="cute-dsl",
+                backend="cutlass" if self.is_sm120 else "cute-dsl",
             )
 
         out = slice_nvfp4_output(out, output_size)
