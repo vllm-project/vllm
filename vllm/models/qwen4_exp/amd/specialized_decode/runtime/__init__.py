@@ -115,11 +115,8 @@ def unsupported(vllm_config) -> list[str]:
         (vllm_config.speculative_config is not None, "speculative decoding"),
         # the GDN phase reads and writes one state slot a request in place
         (
-            cc.mamba_cache_mode != "none",
-            (
-                f"GDN prefix caching (mamba_cache_mode {cc.mamba_cache_mode!r}; "
-                "pass --no-enable-prefix-caching)"
-            ),
+            cc.enable_prefix_caching,
+            "GDN prefix caching (pass --no-enable-prefix-caching)",
         ),
         (
             MambaStateDtypeCalculator.gated_delta_net_state_dtype(
